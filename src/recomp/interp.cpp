@@ -36,6 +36,9 @@
 namespace recomp {
 u32 copyDispCount();  // hle_gx.cpp
 std::string guestSymbolize(u32 addr);  // runtime.cpp
+namespace vi {
+double fieldSeconds();  // hle_vi.cpp: seconds per retrace at the current VI rate
+}
 }
 
 namespace recomp::interp {
@@ -80,7 +83,9 @@ namespace {
 
 using detail::mix;
 using Clock = std::chrono::steady_clock;
-constexpr double kRetrace = 1001.0 / 60000.0;  // seconds per VI field (NTSC)
+// Seconds per VI field: tapes are stamped with the retrace count (hle_vi.cpp frameStamp), so the
+// stamp unit is the current VI rate's field (NTSC 1001/60000 s; 1/50 s for a 50 Hz European game).
+double kRetrace() { return vi::fieldSeconds(); }
 constexpr u32 kCaptureSize = 64u << 20;        // one guest frame's commands
 constexpr u32 kKinds = u32(Kind::Count);
 
@@ -5471,13 +5476,13 @@ const bool sPhaseLock = [] {
 double tapeTime(const Tape& t) {
     for (auto it = sPacer.times.rbegin(); it != sPacer.times.rend(); ++it)
         if (it->first == t.seq) return it->second;
-    return double(t.retrace) * kRetrace;
+    return double(t.retrace) * kRetrace();
 }
 void timeTapes(const std::vector<std::shared_ptr<const Tape>>& q) {
     Pacer& p = sPacer;
     for (const auto& t : q) {
         if (t->seq <= p.lastTimed) continue;
-        const double raw = double(t->retrace) * kRetrace;
+        const double raw = double(t->retrace) * kRetrace();
         double time = raw;
         if (p.lastTimed != 0 && t->seq == p.lastTimed + 1 && !p.times.empty()) {
             const u32 step = t->retrace - p.lastStamp;
@@ -5485,10 +5490,10 @@ void timeTapes(const std::vector<std::shared_ptr<const Tape>>& q) {
             if (p.steps.size() > 15) p.steps.pop_front();
             std::vector<u32> st(p.steps.begin(), p.steps.end());
             std::nth_element(st.begin(), st.begin() + st.size() / 2, st.end());
-            const double nominal = double(std::clamp<u32>(st[st.size() / 2], 1, 6)) * kRetrace;
+            const double nominal = double(std::clamp<u32>(st[st.size() / 2], 1, 6)) * kRetrace();
             const double pred = p.times.back().second + nominal;
             const double err = raw - pred;
-            time = std::fabs(err) > 1.5 * kRetrace ? raw : pred + err * 0.1;
+            time = std::fabs(err) > 1.5 * kRetrace() ? raw : pred + err * 0.1;
         } else {
             p.steps.clear();
         }
@@ -5554,7 +5559,7 @@ int pace(const std::vector<std::shared_ptr<const Tape>>& q, Clock::time_point no
     if (sPhaseLock && p.steps.size() >= 4 && p.period > 0) {
         std::vector<u32> st(p.steps.begin(), p.steps.end());
         std::nth_element(st.begin(), st.begin() + st.size() / 2, st.end());
-        const double step = double(st[st.size() / 2]) * kRetrace;
+        const double step = double(st[st.size() / 2]) * kRetrace();
         const double n = step / p.period, nr = std::round(n);
         if (nr >= 2 && nr <= 16 && std::fabs(n - nr) < 0.08) {
             if (p.lockD <= 0) p.lockD = p.d;
@@ -5600,7 +5605,7 @@ int pace(const std::vector<std::shared_ptr<const Tape>>& q, Clock::time_point no
         if (p.g > tb && i + 1 < q.size()) continue;
         if (tb <= ta) return int(i);
         // A step longer than 6 fields (a load hitch): hold a, then move over the last 2 fields.
-        const double start = tb - ta > 6 * kRetrace ? tb - 2 * kRetrace : ta;
+        const double start = tb - ta > 6 * kRetrace() ? tb - 2 * kRetrace() : ta;
         alpha = float(std::clamp((p.g - start) / (tb - start), 0.0, 1.0));
         return int(i);
     }
@@ -5626,7 +5631,7 @@ bool replay(bool final) {
         // One game frame behind: blend from a (alpha 0) to b (alpha 1) over the time
         // between the two game frames, starting when b was finished.
         if (a && !final) {
-            const double interval = std::clamp((b->retrace - a->retrace) * kRetrace, 0.008, 0.1);
+            const double interval = std::clamp((b->retrace - a->retrace) * kRetrace(), 0.008, 0.1);
             const double since = std::chrono::duration<double>(Clock::now() - b->done).count();
             alpha = float(std::clamp(since / interval, 0.0, 1.0));
         }

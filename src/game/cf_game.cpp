@@ -3,6 +3,11 @@
 #include "recomp/game.h"
 
 #include <atomic>
+#include <cmath>
+
+namespace recomp::vi {
+double fieldSeconds();  // hle_vi.cpp
+}
 
 namespace recomp::game {
 namespace {
@@ -19,6 +24,9 @@ bool padHeld() { return false; }
 double retraceSpeed() { return 1.0; }
 float audioGain() { return 1.0f; }
 bool audioMirrored() { return false; }
+// One GXCopyDisp per retrace in every scene measured (title, Rover's intro, bus, keyboards,
+// town, town map; docs/WII.md "Frame rate"): 60 fps, 50 for a European game at 50 Hz.
+int nativeFps() { return int(std::lround(1.0 / vi::fieldSeconds())); }
 bool unadjustedPass() { return false; }
 bool splitScreen() { return false; }
 bool textBoxShown() { return false; }
@@ -46,7 +54,7 @@ namespace gx {
 bool g_discardDraws = false;  // gx_bridge.h: the frame being drawn is not shown (fast-forward)
 }
 namespace interp {
-u32 viewMatrixSource() { return 0; }  // interp.h: no camera matrix in guest memory known yet
+// viewMatrixSource: cf_tags.cpp (the current g3d camera).
 namespace detail {
 bool trackPoints(float out[9]) {
     (void)out;

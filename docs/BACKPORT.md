@@ -26,6 +26,10 @@ can take. Status: pending = not in LM/SMS yet.
 | 19 | GX HLE: GXGetProjectionv, GXGetTexObjAll/Fmt/MipMap/UserData, GXLoadTexObjPreLoaded, GXGetViewportv, GXGetScissor, GXGetVtxDescv/AttrFmt(v), draw-done callback, GXDrawSphere (Aurora's), stubs | src/recomp/hle_gx.cpp | not linked in LM | pending, optional |
 | 20 | Aurora 0320 `aurora::pad::control_value(port, control)`: read game-defined controls bound with set_action_bindings (controls.cpp binds Wii Remote/Nunchuk inputs on `cf.wpad.*` controls) | patches/aurora/0320-pad-control-value.patch | LM/SMS: only if they bind more than PAD inputs (e.g. hotkeys per port) | pending, optional |
 
+| 21 | Interpolation: indexed XF matrix loads (GXLoadPosMtxIndx, GXLoadNrmMtxIndx3x3, raw 0x20/0x28/0x30 in the write-gather stream) sent as immediate loads of the current memory while a tape is captured (a replay read the game's matrix buffers a frame late), and noted for blending; raw XF matrix loads parsed and noted | src/recomp/hle_gx.cpp (indexedAsImmediate, RawXf, RawIndx) | LM: J3D's indexed loads would have the same late read if any reach the FIFO unconverted; SMS likewise | pending |
+| 22 | `game::nativeFps()`: the game's own frame rate is the frame-rate floor / Original and the interpolation threshold (was the constant 30); interpolation stamps in VI fields of the current rate (vi::fieldSeconds) | src/recomp/game.h, frame.cpp, menu.cpp, interp.cpp, hle_vi.cpp | LM/SMS: nativeFps() = 30; their European frame stamp stays theirs | pending, optional |
+| 23 | GXSetZScaleOffset applied through the viewport depth range (depth x scale + offset) | src/recomp/hle_gx.cpp zRange | GC SDK has no such call | n/a |
+
 ## Aurora patch series
 Same files as LM (patches/aurora, LM's 0001-0250 at Aurora 50e5be3), plus City Folk's 0300+
 (generic). Note: upstream Aurora has moved on (WPAD/KPAD implementations); we stay on LM's commit.
@@ -35,4 +39,5 @@ Same files as LM (patches/aurora, LM's 0001-0250 at Aurora 50e5be3), plus City F
 | 0300-guest-physical-memory-ranges | Physical address windows (`GXSetAuroraPhysicalMemoryRange`, up to 4; `GXSetAuroraPhysicalMemory(base, mask)` = SMS's call): raw CP array bases, TX_SETIMAGE3 (24-bit), TLUT loads/refs, and `GX_CMD_CALL_DL` processed in place (nested calls ignored) | superset of SMS 0101 (SMS can replace 0101 with it; LM: not needed) |
 | 0301-display-aspect | `VISetDisplayAspect`: the fit viewport policy fits to a display aspect instead of the frame buffer's ratio | optional |
 | 0302-call-host-display-list | `GX_AURORA_CALL_HOST_DL` (u64 pointer, u32 size) command | optional (with BACKPORT 18) |
+| 0303-draw-sweep-and-unhandled-register-reports | `AURORA_DRAW_SKIP_SWEEP=1` (frame first+k of the draw-log range drops draw k: one run maps every draw to its pixels); BP/XF registers without a decoder reported once each in release builds too, unimplemented indexed XF loads once | LM/SMS: test aids, drop-in |
 | 0320-pad-control-value | `aurora::pad::control_value(port, control)` for game-defined bound controls (Wii Remote/Nunchuk inputs) | optional (BACKPORT 20) |

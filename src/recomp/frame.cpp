@@ -67,7 +67,7 @@ bool interpolationWanted() {
         const char* v = std::getenv("CF_VIEWER_INTERP");
         return v && *v == '1';
     }();
-    return targetFps() > port::kMinFps && sPresents.load() >= kDecoupleAfter && (sViewerInterp || !game::viewerOpen());
+    return targetFps() > std::max(port::kMinFps, game::nativeFps()) && sPresents.load() >= kDecoupleAfter && (sViewerInterp || !game::viewerOpen());
 }
 
 }  // namespace
@@ -161,7 +161,7 @@ int targetFps() {
         const float hz = displayRefreshHz();
         fps = hz > 0 ? int(std::lround(hz)) : 60;
     }
-    return std::clamp(fps, port::kMinFps, port::kMaxFps);
+    return std::clamp(fps, std::max(port::kMinFps, game::nativeFps()), port::kMaxFps);
 }
 
 bool interpolating() { return sHostDecoupled; }

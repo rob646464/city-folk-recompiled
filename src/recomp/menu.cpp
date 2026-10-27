@@ -886,7 +886,7 @@ void renderingTab() {
         "GameCube's GPU reads it, instead of when the renderer thread gets to it. Without it,\n"
         "a draw can pick up data the game already rewrote for a later draw: Luigi's mouth or\n"
         "the Poltergust hose flicker now and then. Off: saves the copies (about 0.2-0.3 ms CPU per frame).\n"
-        "Above 30 fps (interpolation) vertex data is always snapshotted.");
+        "Above the game's own frame rate (interpolation) vertex data is always snapshotted.");
     {
         const bool avail = recomp::pacing::keepWarmAvailable();
         bool shown = avail && r.gpuKeepWarm;
@@ -1246,12 +1246,15 @@ void frameRateControls(port::VideoSettings& v) {
     const float hz = recomp::frame::displayRefreshHz();
     const int target = recomp::frame::targetFps();
     char label[64];
+    // The floor is the game's own rate (City Folk 60): "Original", drawn directly.
+    const int nativeFps = std::max(port::kMinFps, recomp::game::nativeFps());
+    if (v.targetFps < nativeFps) v.targetFps = nativeFps;
     if (v.matchDisplay) std::snprintf(label, sizeof(label), "%d fps (display)", target);
-    else if (v.targetFps <= port::kMinFps) std::snprintf(label, sizeof(label), "Original");
+    else if (v.targetFps <= nativeFps) std::snprintf(label, sizeof(label), "Original (%d)", nativeFps);
     else std::snprintf(label, sizeof(label), "%d fps", v.targetFps);
     if (v.unlimitedFps) std::snprintf(label, sizeof(label), "Unlimited");
     ImGui::BeginDisabled(v.matchDisplay || v.unlimitedFps);
-    sDirty |= recomp::menu::SliderInt("Frame rate", &v.targetFps, port::kMinFps, port::kMaxFps, label, ImGuiSliderFlags_AlwaysClamp);
+    sDirty |= recomp::menu::SliderInt("Frame rate", &v.targetFps, nativeFps, port::kMaxFps, label, ImGuiSliderFlags_AlwaysClamp);
     ImGui::EndDisabled();
     const bool sliderHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
     ImGui::BeginDisabled(v.unlimitedFps);
@@ -1260,7 +1263,7 @@ void frameRateControls(port::VideoSettings& v) {
     const bool checkHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
     sDirty |= recomp::menu::Checkbox("Unlimited frame rate", &v.unlimitedFps);
     ImGui::SetItemTooltip("Interpolated frames as fast as the PC can draw them: no frame-rate target, no frame\n"
-                          "pacing and no cap below the display's refresh rate (the game itself still runs at 30).\n"
+                          "pacing and no cap below the display's refresh rate (the game itself still runs at its own rate).\n"
                           "With VSync on, the display's refresh rate still limits it (with G-SYNC the frame\n"
                           "rate can then sit right at the refresh rate); turn VSync off for a truly unlimited\n"
                           "rate. Uneven frame times can look less smooth than a paced target.");
@@ -1300,13 +1303,14 @@ void frameRateControls(port::VideoSettings& v) {
                           "divides the refresh rate, set the display to a matching refresh rate, or turn\n"
                           "VSync off (next launch).",
                           hz, target, fit);
-        ImGui::SetTooltip("30 fps is the game's own rate, drawn exactly as the console does.\n"
-                          "Above 30, frames in between are interpolated (the game still runs at 30):\n"
+        const int native = std::max(port::kMinFps, recomp::game::nativeFps());
+        ImGui::SetTooltip("Original (%d fps) is the game's own rate, drawn exactly as the console does.\n"
+                          "Above it, frames in between are interpolated (the game still runs at %d):\n"
                           "movement, the camera, lights and effects are blended between game frames,\n"
-                          "shown one game frame (33 ms) behind. Cuts and teleports are not blended.\n"
+                          "shown one game frame (%.0f ms) behind. Cuts and teleports are not blended.\n"
                           "Match display refresh rate: the refresh rate of the monitor the window is on\n"
                           "(currently %.0f Hz).%s",
-                          hz, vs);
+                          native, native, 1000.0 / native, hz, vs);
     }
     static const char* kVrr[] = {"Auto (detect)", "On", "Off"};
     sDirty |= combo("Variable refresh rate", v.vrr, kVrr, 3);
@@ -1483,10 +1487,10 @@ void visualsTab() {
     sDirty |= combo("Aspect ratio", v.aspect, kAspects, 6);
     ImGui::SetItemTooltip("Shape of the 3D view. Original 4:3: as on the console, with black bars in a wider\n"
                           "window. Match window: fills the window. The fixed ratios add black bars as needed.");
-    sDirty |= recomp::menu::Checkbox("Keep HUD at 4:3", &v.hudKeep4x3);
-    ImGui::SetItemTooltip("On: the HUD stays where it is on a 4:3 screen, centred. Off: in widescreen the health\n"
-                          "counter moves to the left edge and the Game Boy Horror to the right edge.");
-    if (!v.hudKeep4x3) pending("in-game HUD moves to the screen edges");
+    sDirty |= recomp::menu::Checkbox("Keep HUD at 16:9###hudKeep", &v.hudKeep4x3);
+    ImGui::SetItemTooltip("On: in a window wider than 16:9 the HUD stays where it is on a 16:9 TV, centred.\n"
+                          "Off: the clock moves to the left edge and the memo / camera buttons to the right\n"
+                          "edge (src/game/cf_hud.cpp); the toolbar, dialogue and menus stay centred.");
     sDirty |= recomp::menu::SliderFloat("Field of view", &v.fovScale, 0.75f, 1.5f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
     ImGui::SetItemTooltip("Scales the camera's field of view (1 = original). Higher shows more of the room.");
 
