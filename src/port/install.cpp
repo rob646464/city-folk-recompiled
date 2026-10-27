@@ -38,6 +38,7 @@ const char* gameId(GameVersion v) {
     switch (v) {
     case GameVersion::PAL: return "RUUP01";
     case GameVersion::JPN: return "RUUJ01";
+    case GameVersion::KOR: return "RUUK01";
     default: return "RUUE01";
     }
 }
@@ -45,6 +46,7 @@ const char* versionName(GameVersion v) {
     switch (v) {
     case GameVersion::PAL: return "PAL";
     case GameVersion::JPN: return "JPN";
+    case GameVersion::KOR: return "KOR";
     default: return "USA";
     }
 }
@@ -52,9 +54,12 @@ const char* regionName(GameVersion v) {
     switch (v) {
     case GameVersion::PAL: return "Europe";
     case GameVersion::JPN: return "Japan";
+    case GameVersion::KOR: return "Korea";
     default: return "USA";
     }
 }
+int supportedRevision(GameVersion) { return 1; }
+int partitionRevision(GameVersion v) { return v == GameVersion::KOR ? 0 : 1; }
 bool versionFromId(const char* id, GameVersion& v) {
     if (!id) return false;
     for (GameVersion x : kVersions)
@@ -757,12 +762,14 @@ void findMovedDisc(std::string& disc, const std::string& rel) {
 
 }  // namespace
 
-// install.ini: "<usa|pal|jpn>_disc=<path>" (+ "_disc_rel" in portable mode), "base=USA|PAL|JPN".
+// install.ini: "<usa|pal|jpn|kor>_disc=<path>" (+ "_disc_rel" in portable mode),
+// "base=USA|PAL|JPN|KOR".
 namespace {
 const char* iniKey(GameVersion v) {
     switch (v) {
     case GameVersion::PAL: return "pal";
     case GameVersion::JPN: return "jpn";
+    case GameVersion::KOR: return "kor";
     default: return "usa";
     }
 }

@@ -12,7 +12,7 @@ port (LM `docs/SETUP.md`); this file describes the City Folk version.
 `cmake --install build/<preset> --prefix <dir>` produces:
 
 ```
-CityFolkRecomp.exe        runtime + recompiler + setup UI (+ the function tables of all three releases)
+CityFolkRecomp.exe        runtime + recompiler + setup UI (+ the function tables of all four releases)
 *.dll                     SDL3, Dawn (+ dxcompiler/dxil), nod, libpng, zlib
 llvm/bin/clang.exe        bundled compiler (from CF_LLVM_DIR, default: the LLVM that built the exe)
 llvm/bin/lld-link.exe     bundled linker
@@ -26,8 +26,8 @@ then `PATH`.
 
 ## Discs
 
-Supported: **revision 1** of the USA (`RUUE01`), European (`RUUP01`) and Japanese (`RUUJ01`)
-disc. One disc of any region is a complete install (every disc carries every region's content,
+Supported: **revision 1** of the USA (`RUUE01`), European (`RUUP01`), Japanese (`RUUJ01`) and
+Korean (`RUUK01`, the only Korean release) disc. One disc of any region is a complete install (every disc carries every region's content,
 docs/REGION_CONTENT.md); several can be installed side by side and the player picks the one to
 play.
 
@@ -44,11 +44,17 @@ both read only the **game partition**, the update partition is ignored):
 | A file inside the partition's `sys/` (e.g. `main.dol`, what a file dialog can pick) | its partition folder |
 
 Identification, at every pick and every start (`Disc::open`):
-1. the game partition's header (`boot.bin`): Wii magic, game ID (`RUUE01`/`RUUP01`/`RUUJ01`;
-   other IDs: "not City Folk" / "a release this port does not support", e.g. Korea `RUUK01`),
-   **revision 1** (`boot.bin` byte 7; another revision: "This is revision N ... only revision 1 is
-   supported");
-2. the SHA-1 of `main.dol` (`port::dol::identify`);
+1. the game partition's header (`sys/boot.bin`): Wii magic, game ID (`RUUE01`/`RUUP01`/`RUUJ01`/
+   `RUUK01`; other IDs: "not City Folk" / "a release this port does not support");
+2. the SHA-1 of `main.dol` (`port::dol::identify`). A disc is known by its hashes; the revision
+   only names an unknown one: when main.dol is not a known build and the revision is not 1, "This
+   is revision N of <id>; this port knows only revision 1 of it" (a later Korean or other revision
+   needs its hashes added: `dol.cpp`, `config/<id>/modules.txt`). The revision is byte 7 of the
+   **outer disc header** (the image's header via nod, or `disc/header.bin` of an extracted partition
+   folder; `sys/boot.bin` only when there is none): the Korean rev 1 disc's game partition header
+   says 0 (its outer header and Redump/GameTDB say 1; the other three have 1 in both). The game sees
+   the partition header at 0x80000000, so `OSInit` writes 0 there for Korea
+   (`port::partitionRevision`);
 3. the SHA-1 of **every REL** in `files/rels` against the version's `config/<id>/modules.txt`
    (embedded in the program): a missing or changed REL refuses the disc ("N REL modules differ ...
    modified or a bad dump").
@@ -67,7 +73,7 @@ a file, which the game retried forever (a stream read at the title).
 ## Setup flow
 
 1. **Pick discs.** The setup screen (Dear ImGui on the Aurora window) has one row per region
-   (USA, Europe, Japan) with *Disc image...* (`SDL_ShowOpenFileDialog`) and *Extracted folder...*
+   (USA, Europe, Japan, Korea) with *Disc image...* (`SDL_ShowOpenFileDialog`) and *Extracted folder...*
    (`SDL_ShowOpenFolderDialog`); Linux also has a path field. A pick is identified at once; a
    disc of another region than its row moves to its own row ("moved here from the USA row").
    With more than one disc a *Version to play* choice appears (default: the first one installed).
@@ -98,9 +104,9 @@ folder>/portable`, same layout.
 
 | Path | Contents |
 |------|----------|
-| `install.ini` | `usa_disc=`, `pal_disc=`, `jpn_disc=` (paths as picked; `*_disc_rel` in portable mode), `base=USA\|PAL\|JPN` |
+| `install.ini` | `usa_disc=`, `pal_disc=`, `jpn_disc=`, `kor_disc=` (paths as picked; `*_disc_rel` in portable mode), `base=USA\|PAL\|JPN\|KOR` |
 | `settings.ini` | F1 menu settings |
-| `game/RUUE01/module.dll`, `game/RUUP01/...`, `game/RUUJ01/...` | game modules |
+| `game/RUUE01/module.dll`, `game/RUUP01/...`, `game/RUUJ01/...`, `game/RUUK01/...` | game modules |
 | `game/<id>/module.key` | cache key (below) |
 | `game/<id>/recompiler.log` | recompiler summary |
 | `pipeline_cache.db`, `dawn_cache.db` | GPU caches (Aurora) |
@@ -125,7 +131,7 @@ program and in `portable/` (images and extracted folders).
 
 ### Command line (testing)
 
-`--usa-disc` / `--pal-disc` / `--jpn-disc <path>` prefill a row, `--disc <path>` puts a disc of
+`--usa-disc` / `--pal-disc` / `--jpn-disc` / `--kor-disc <path>` prefill a row, `--disc <path>` puts a disc of
 any region in its row and makes it the version to play, `--setup-auto` starts installing without a
 click, `--setup` forces the screen, `--check-disc <path>` identifies and exits. Point `APPDATA` at
 an empty folder for a fresh install, `CF_CACHE_DIR`/`CF_NAND_DIR`/`CF_CARD_DIR` at scratch folders.
@@ -169,7 +175,7 @@ encrypted ISO with DolphinTool (`convert`; `verify` found only the expected bad 
 and CISO written by the same script. Every form, plus the extracted folder, its parent folder and
 `sys/main.dol`, was identified by setup and booted the game to the title screen with no DVD
 errors (the WIA image reached the title a few hundred frames later: LZMA). Refusals checked with
-patched copies: revision 0, game ID RUUK01, one changed main.dol byte, one changed REL byte, a
+patched copies: revision 0, another game ID, one changed main.dol byte, one changed REL byte, a
 non-disc file, the update partition folder, a GameCube game folder.
 
 ## PAL and Japan
@@ -197,4 +203,20 @@ What is still USA- or LM-shaped (not fixed here, none of it stops the boot):
   watchdog's queue dump (`sched.cpp`), `CF_IND_PATTERN` (`hle_gx.cpp`). Wrong addresses on every
   City Folk version, harmless.
 - `tools/recomp/hooks.txt` has no City Folk entries yet; a REL hook written against USA offsets
-  needs a `pal`/`jp` line with the offsets from `config/<id>/rels_us_map.txt`.
+  needs a `pal`/`jp`/`kr` line with the offsets from `config/<id>/rels_us_map.txt`. The surround
+  patch 30 (USA address) has no PAL/Japan/Korea line yet.
+
+## Korea
+
+The Korean disc (`RUUK01` rev 1, "Tauneuro Nolleogayo: Dongmurui Sup", 2010) is the fourth row.
+Its tables are `config/RUUK01` (docs/DISCOVERY.md "Korea (RUUK01) against Japan and USA"; DOL
+24251 functions, the same 187 RELs). Checked 2026-10-27 from a fresh APPDATA with the user's RVZ
+(`--setup-auto --disc <rvz>`), and `--check-disc` with the RVZ, the extracted `KOREA DATA/DATA`
+and its parent folder: module built, Korean wrist-strap screen, Korean title (타운으로 놀러가요
+동물의 숲, (c)2008-2010), and with scripted A presses Rover's bus dialogue in Korean up to the
+"처음부터 시작! / DS에서 이사!" (start fresh / move from DS) choice, no DVD, HLE or REL errors
+(game frame ~7000, 60 fps). Console: SYSCONF country 136 (South Korea), language Korean (the
+only console language offered), setting.txt `AREA=KOR`, `MODEL=RVL-001(KOR)`, `CODE=LKM`,
+`GAME=KR`, NTSC; title id 00010000-5255554B (`RUUK`, NAND `/title/00010000/5255554b`). The game's
+region getter returns 3 and its language index is always 9 (Korean) on this disc. Korea also
+uses IOS 48 (the other three IOS 38; the TMD's IOS is not emulated, nothing depends on it).

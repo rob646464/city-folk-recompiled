@@ -41,8 +41,8 @@ const char* formatName(NodFormat f) {
 constexpr std::uint8_t kWiiMagic[4] = {0x5D, 0x1C, 0x9E, 0xA3};
 constexpr std::uint8_t kGcMagic[4] = {0xC2, 0x33, 0x9F, 0x3D};
 
-const char* kSupported = "Supported: Animal Crossing: City Folk revision 1 of the USA (RUUE01), European (RUUP01) or "
-                         "Japanese (RUUJ01) disc.";
+const char* kSupported = "Supported: Animal Crossing: City Folk revision 1 of the USA (RUUE01), European (RUUP01), "
+                         "Japanese (RUUJ01) or Korean (RUUK01) disc.";
 
 }  // namespace
 
@@ -57,7 +57,8 @@ std::string hex(const std::uint8_t* data, size_t n) {
 }
 
 std::string describe(port::GameVersion v) {
-    return std::string("Animal Crossing: City Folk (") + port::regionName(v) + ", " + port::gameId(v) + " rev 1)";
+    return std::string("Animal Crossing: City Folk (") + port::regionName(v) + ", " + port::gameId(v) + " rev " +
+           std::to_string(port::supportedRevision(v)) + ")";
 }
 
 Disc::~Disc() {
@@ -68,6 +69,11 @@ Disc::~Disc() {
 bool Disc::open(const std::string& utf8Path, std::string& error) {
     const auto t0 = std::chrono::steady_clock::now();
     std::vector<std::uint8_t> boot;
+    // The revision comes from the outer disc header (the image's, or disc/header.bin of an extracted
+    // partition), not the game partition's sys/boot.bin: the Korean rev 1 disc's partition header
+    // says 0 (docs/SETUP.md "Discs"). -1 = no outer header: sys/boot.bin's byte is used.
+    int outerRev = -1;
+    std::string outerId;
     if (const std::string root = port::discfolder::resolve(utf8Path); !root.empty()) {  // extracted folder
         folder_ = u8path(root);
         runPath_ = root;
@@ -77,6 +83,10 @@ bool Disc::open(const std::string& utf8Path, std::string& error) {
             return false;
         }
         readAll(folder_ / "sys" / "boot.bin", boot);
+        if (std::vector<std::uint8_t> hdr; readAll(folder_ / "disc" / "header.bin", hdr) && hdr.size() >= 8) {
+            outerId.assign(reinterpret_cast<const char*>(hdr.data()), 6);
+            outerRev = hdr[7];
+        }
     } else {
         std::error_code ec;
         if (std::filesystem::is_directory(u8path(utf8Path), ec)) {
@@ -101,6 +111,8 @@ bool Disc::open(const std::string& utf8Path, std::string& error) {
                 return false;
             }
             if (std::memcmp(dh.wii_magic, kWiiMagic, 4) == 0 && dh.no_partition_encryption) kind_ += ", decrypted";
+            outerId.assign(dh.game_id, 6);
+            outerRev = dh.disc_version;
         }
         if (nod_disc_open_partition_kind(disc_, NOD_PARTITION_KIND_DATA, nullptr, &part_) != NOD_RESULT_OK) {
             const char* msg = nod_error_message();
@@ -116,13 +128,13 @@ bool Disc::open(const std::string& utf8Path, std::string& error) {
         if (meta.raw_boot.data) boot.assign(meta.raw_boot.data, meta.raw_boot.data + meta.raw_boot.size);
     }
 
-    // 1. Game ID and revision (the game partition's header), 2. main.dol, 3. every REL.
+    // 1. Game ID (the game partition's header) and revision (the outer header), 2. main.dol, 3. every REL.
     if (boot.size() < 0x20) {
         error = "The disc has no readable header (sys/boot.bin).";
         return false;
     }
     const std::string id(reinterpret_cast<const char*>(boot.data()), 6);
-    const unsigned rev = boot[7];
+    const unsigned rev = outerRev >= 0 && outerId == id ? unsigned(outerRev) : boot[7];
     if (std::memcmp(&boot[0x18], kWiiMagic, 4) != 0) {
         error = std::memcmp(&boot[0x1C], kGcMagic, 4) == 0
                     ? "This is a GameCube disc (" + id + "), not Animal Crossing: City Folk (Wii)."
@@ -136,14 +148,20 @@ bool Disc::open(const std::string& utf8Path, std::string& error) {
             error = "This is not Animal Crossing: City Folk (game ID " + id + "). " + kSupported;
         return false;
     }
-    if (rev != 1) {
-        error = "This is revision " + std::to_string(rev) + " of " + id + "; only revision 1 is supported (Dolphin shows "
-                "the revision in the game's Properties > Info). " + kSupported;
+    // A disc is identified by its main.dol and REL hashes; the revision only says which build an
+    // unknown one is (another revision gets this message until its hashes are added).
+    const unsigned wantRev = unsigned(port::supportedRevision(version_));
+    const std::string revText = " rev " + std::to_string(wantRev);
+    const auto dv = port::dol::identify(dol_.data(), dol_.size());
+    const bool dolKnown = std::strcmp(port::dol::versionId(dv), id.c_str()) == 0;
+    if (!dolKnown && rev != wantRev) {
+        error = "This is revision " + std::to_string(rev) + " of " + id + "; this port knows only revision " +
+                std::to_string(wantRev) + " of it (Dolphin shows the revision in the game's Properties > Info). " +
+                kSupported;
         return false;
     }
-    const auto dv = port::dol::identify(dol_.data(), dol_.size());
-    if (std::strcmp(port::dol::versionId(dv), id.c_str()) != 0) {
-        error = "main.dol does not match the retail " + id + " rev 1 (SHA-1 " + dolSha1() +
+    if (!dolKnown) {
+        error = "main.dol does not match the retail " + id + revText + " (SHA-1 " + dolSha1() +
                 "): the disc is modified or a bad dump. Dump the disc again or use an unmodified copy.";
         return false;
     }
@@ -167,7 +185,7 @@ bool Disc::open(const std::string& utf8Path, std::string& error) {
     }
     if (badCount) {
         error = std::to_string(badCount) + " REL module" + (badCount > 1 ? "s differ" : " differs") + " from the retail " +
-                id + " rev 1 (" + bad + (badCount > 3 ? ", ..." : "") +
+                id + revText + " (" + bad + (badCount > 3 ? ", ..." : "") +
                 "): the disc is modified or a bad dump. Dump the disc again or use an unmodified copy.";
         return false;
     }

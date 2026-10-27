@@ -771,7 +771,7 @@ void gameTab() {
             port::saveSettings();
             port::relaunch(true);
         }
-        ImGui::SetItemTooltip("Restarts into the setup screen to add a USA, European or Japanese disc or replace one\n"
+        ImGui::SetItemTooltip("Restarts into the setup screen to add a USA, European, Japanese or Korean disc or replace one\n"
                               "(unsaved game progress is lost).");
     }
     // The Wii's own settings as the game reads them (SYSCONF; src/recomp/sysconf.cpp, docs/NAND.md).
