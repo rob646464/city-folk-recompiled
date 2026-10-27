@@ -24,7 +24,7 @@
 ## Test runs (same rules as LM)
 - Muted (audio to WAV only), window off screen (`CF_OFFSCREEN=1`) and background (`CF_BACKGROUND=1`), one instance per agent at a time, kill only processes whose executable path is inside your own worktree.
 - PowerShell wrappers: never name a parameter `$Input` (automatic pipeline variable: `--input` silently gets nothing). Wii Remote script tokens and `@x/y` pointer items: docs/CONTROLS.md "Test aids".
-- The scratchpad folder is shared by every agent: keep all your scripts and run outputs in your own subfolder named after your branch (e.g. `scratchpadender-2`), never write or delete shared names like `run.sh` or `runs/r1` at its top level.
+- The scratchpad folder is shared by every agent: keep all your scripts and run outputs in your own subfolder named after your branch (e.g. `scratchpad/render-2/`), never write or delete shared names like `run.sh` or `runs/r1` at its top level.
 - The user plays with a controller: every run sets `SDL_JOYSTICK_HIDAPI=0 SDL_JOYSTICK_RAWINPUT=0 SDL_JOYSTICK_WGI=0 SDL_XINPUT_ENABLED=0 SDL_JOYSTICK_DIRECTINPUT=0 SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=0`. No rumble tests unless asked.
 
 - **Rendering bugs are checked against Dolphin** before they are called bugs (user rule): Dolphin at `C:\Users\rmelv\Desktop\games\Dolphin-x64\Dolphin.exe`, always with its own scratch user folder (`-u <scratch dir>`, never the user's %APPDATA%\Dolphin Emulator config) and `-b -e <disc or US DATA/DATA/sys/main.dol>`, muted, window out of the way, only your own PID closed; compare the same scene. Used only as a visual reference (no GPL code copied). Without a Dolphin comparison, call a difference unverified.
