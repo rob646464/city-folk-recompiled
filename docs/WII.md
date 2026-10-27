@@ -63,22 +63,26 @@ items done as they land.
 
 ## IOS (Starlet)
 
-The game reaches every device through IPC to IOS (`IOS_Open/Ioctl(v)/Read/Write`). HLE at the SDK
-level (by function name), not at IPC, wherever a library sits above it; IPC HLE only for what the
-game calls directly.
+The game reaches every device through IPC to IOS (`IOS_Open/Ioctl(v)/Read/Write`). Decision
+(branch nand-sys, docs/NAND.md): the **IPC client is HLE'd and IOS's devices are host code**;
+every library above IPC (ISFS, NAND, SC, ES, VF, RFL, NWC24, KBD) runs as recompiled game code,
+so its own logic, error handling and request order stay exact. Requests are performed when issued
+and answered after a modelled IOS latency (async: callback interrupt; sync: the thread waits with
+the CPU given up).
 
-| Device / library | City Folk uses it for | Port |
+| Device / library | City Folk uses it for | Port (docs/NAND.md) |
 |---|---|---|
-| DI (DVD) | disc reads | DVD HLE as LM (modelled latency), nod reads Wii partitions (decrypted) or an extracted folder |
-| FS / ISFS / NAND | the save file, banner, settings | NAND HLE → `%APPDATA%\...\nand\title\00010000\<id>\data\` (latency modelled) |
-| ES | title ID, data paths, ticket views | constant replies |
-| SC (`/shared2/sys/SYSCONF`) | language, aspect, progressive, sensor bar, sound mode, EULA flags | HLE, values from F1 settings |
-| STM | Home/Reset/Power buttons, shutdown | HLE: Power = quit |
+| DI (DVD) | disc reads | DVD HLE as LM (modelled latency), nod reads Wii partitions (decrypted) or an extracted folder; `/dev/di` accepted |
+| FS / ISFS / NAND / VF | the save file, banner, settings, Mii database | **done**: `/dev/fs` + NAND files on a host folder `%APPDATA%\...\nand\` with the Wii's paths (`/title/00010000/52555545/data/`, `/shared2/...`, `/tmp` emptied at start), IOS result codes, path rules, owners/permissions, usage/quotas for NANDCheck, latency |
+| ES | title ID, data paths, ticket views | **done**: title id, data dir, device id, title list, ticket views, consumption; a title launch (Wii Menu) ends the program |
+| SC (`/shared2/sys/SYSCONF`, setting.txt) | language, aspect, progressive, sensor bar, sound mode, product area | **done**: both files generated from F1 > Game > Console + video/audio settings (SC library reads them unchanged); setting.txt also at 0x80003800 |
+| STM | Home/Reset/Power buttons, shutdown | **done**: power/reset events call the game's callbacks (`ios::stmEvent`); shutdown / hot reset / standby and OSShutdownSystem / OSRestart / OSReturnToMenu end the program like "Quit game" |
 | Bluetooth (WUD/WPAD/KPAD) | Wii Remote, Nunchuk, Classic Controller | HLE at KPAD/WPAD level (below) |
-| USB | Wii Speak (online voice chat) | reported absent |
-| SD (`/dev/sdio`) | photos, design/letter backup | HLE → `...\sd\` folder |
-| Network (NCD/SO/SSL/NWC24/DWC) | Nintendo WFC online play, WiiConnect24 letters/events | host sockets + TLS under the IOS network HLE, revival servers (docs/ONLINE.md); real-time weather lookups are host-side |
-| RTC / OS time | everything (the game runs on the real clock) | host clock + an F1 time offset (time travel) |
+| USB (`/dev/usb/kbd`, `oh0`) | USB keyboard (letters), Wii Speak | absent (no keyboard; USB host with no devices) |
+| SD (`/dev/sdio`) | photos, design/letter backup | slot with no card for now; plan: SD host over a FAT image (docs/NAND.md "Not done") |
+| Network (NCD/SO/SSL/NWC24/DWC/KD) | Nintendo WFC online play, WiiConnect24 letters/events | offline: `/dev/net/*` not running (opens fail); later host sockets + TLS, revival servers (docs/ONLINE.md); real-time weather lookups are host-side |
+| Miis (RFL) | Mii masks | the game's own parts (`Face/RFLRes01.arc`); no `RFL_DB.dat` = RFL's empty-database fallback; a player's own database can be copied in |
+| RTC / OS time | everything (the game runs on the real clock) | **done**: host local time + F1 clock offset (time travel), applied at start |
 
 ## Input: Wii Remote
 
@@ -135,15 +139,22 @@ game calls directly.
    `hle_ios.cpp`). 28 RELs link and run up to the new-game bus scene.
 4. NAND/ES/SC/DVD HLE → title screen; GX frames on screen. **Title screen reached** (2026-10-27):
    wrist-strap screen, loading screen, "Press A" title, then the new-game bus with Rover's
-   dialogue. Stand-ins, not the final HLE: IOS at IPC level (NAND files from a host folder,
-   `/dev/fs` ioctls, ES title id, STM event hook never answered, other devices ENOENT), no
-   SYSCONF (SC reads fail: defaults), DSP task stand-in (AX command lists "finished" at once, no
+   dialogue. Stand-ins, not the final HLE: IOS at IPC level (replaced by the nand-sys IOS
+   devices, step 5), DSP task stand-in (AX command lists "finished" at once, no
    mixing), Wii Remote stand-in (`hle_wpad.cpp`: channel 0 buttons from the host pad, no pointer/
    Nunchuk, so the game shows "Communications with the Wii Remote have been interrupted").
    Open: the bus interior's 3D does not show (black behind the dialogue), a blue band under the
    456-line EFB copy (VIConfigure is a no-op: VI/XFB size not taken from the render mode), exit
-   hangs in shutdown (killed after the test).
-5. KPAD/WPAD HLE with mouse pointer → into the game; NAND save/load.
+   hangs in shutdown (killed after the test; the main thread waits in `vi::stopTimer`'s join,
+   seen 2026-10-27 with CF_HANG_DUMP). With Aurora's FIFO thread the title intro often ends in
+   `FIFO processing range ... is outside buffered range` (AURORA_FIFO_INLINE=1 avoids it), and the
+   title does not react to scripted A/START (also on main).
+5. KPAD/WPAD HLE with mouse pointer → into the game; NAND save/load. **System side done** (branch
+   nand-sys, docs/NAND.md): IOS file system on a host NAND folder, SYSCONF/setting.txt from F1
+   settings (language, 16:9, ... verified in the game: French text, 16:9 title), ES, STM, clock
+   offset, devices absent cleanly (SD empty, no USB keyboard, offline). The game's NAND library
+   passes a save-like self-test (CF_NAND_SELFTEST) incl. persistence across a restart; the game's
+   own first save is still to be seen (no input past the title yet).
 6. AX microcode stand-in → sound.
 7. Enhancements (interpolation, widescreen, F1 menu) and game features (docs/ROADMAP.md).
 8. PAL and Japan bases (function matching), then setup flow + packaging.

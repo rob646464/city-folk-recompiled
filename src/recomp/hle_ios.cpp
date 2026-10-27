@@ -1,322 +1,242 @@
-// HLE: IPC to IOS (the Wii's I/O processor; docs/WII.md "IOS"). The SDK's IPC client
-// (ipc/ipcclt.c: IOS_Open/Close/Read/Write/Seek/Ioctl/Ioctlv and their async forms) is replaced
-// here; the libraries above it (ISFS/NAND, SC, ES, STM, WPAD, ...) run as recompiled game code
-// and talk to these device stand-ins:
-//   - NAND files (paths starting with '/'): a host folder (CF_NAND_DIR, default
-//     <dataDir>/nand), opened read/write; /dev/fs answers the file-system ioctls;
-//   - /dev/es: the running title's id and plausible defaults;
-//   - /dev/stm/immediate, /dev/stm/eventhook: accepted, ioctls succeed (the event hook never
-//     fires: no Power/Reset button events);
-//   - /dev/di: accepted (disc reads go through the DVD HLE);
-//   - everything else (Bluetooth, USB, network, SD): "no such device" (IPC_ENOENT).
-// Every open, and every ioctl a device does not handle, is logged once (CF_IOS_LOG=1: all).
+// HLE: IPC to IOS (the Wii's I/O processor; docs/WII.md "IOS", docs/NAND.md). The SDK's IPC
+// client (ipc/ipcclt.c: IOS_Open/Close/Read/Write/Seek/Ioctl/Ioctlv and their async forms) is
+// replaced here; the libraries above it (ISFS/NAND, SC, ES, STM, VF, RFL, NWC24, KBD, ...) run as
+// recompiled game code and talk to host devices (ios.h):
+//   - NAND files and /dev/fs: ios_fs.cpp (a host folder mirroring the Wii's NAND);
+//   - /dev/es, /dev/stm/*, /dev/di, /dev/sdio/*, /dev/usb/*, /dev/net/*: ios_devices.cpp.
+// Requests are performed when the game issues them (so their order is the program's), and the
+// reply comes after a modelled IOS latency: async callbacks as an interrupt, synchronous callers
+// wait with the CPU given up (other guest threads and interrupts run meanwhile, as on the console
+// where the thread blocks on the IPC reply). Requests to one resource manager are answered in
+// order. CF_IOS_LOG=1: opens and unhandled requests; 2: every request and its result.
+// CF_IOS_LATENCY=<scale> (default 1; 0 = replies at once).
 // Written from the public IOS interface documentation, not from another emulator's code.
-#include "port/install.h"
+#include "recomp/ios.h"
+
 #include "recomp/hle.h"
 #include "recomp/runtime.h"
 #include "recomp/sched.h"
 
+#include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
 #include <map>
 #include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
-namespace recomp {
+namespace recomp::ios {
 namespace {
 
-namespace fs = std::filesystem;
+using Clock = std::chrono::steady_clock;
 
-constexpr s32 IPC_OK = 0, IPC_EACCES = -1, IPC_EINVAL = -4, IPC_ENOENT = -6;
-constexpr s32 FS_EINVAL = -101, FS_EACCES = -102, FS_EEXIST = -105, FS_ENOENT = -106;
-
-enum class Dev { File, Fs, Es, Stm, Di, Other };
-struct Fd {
-    Dev dev = Dev::Other;
-    std::string path;
-    fs::path host;
-    u32 pos = 0;
-    u32 mode = 0;
-};
-std::mutex sM;
-std::map<s32, Fd> sFds;
-s32 sNextFd = 3;
-
-// CF_IOS_LOG=1: every open and unhandled request (not only the first); 2: every request.
 int logLevel() {
     static const int level = std::getenv("CF_IOS_LOG") ? std::atoi(std::getenv("CF_IOS_LOG")) : 0;
     return level;
 }
-bool logAll() { return logLevel() > 0; }
-// A request IOS answers only later (if ever): no reply now, no async callback.
-constexpr s32 kPending = 0x40000000;
+
+constexpr s32 kMaxFds = 32;  // IOS's descriptor table size
+std::mutex sM;
+std::unique_ptr<Handle> sFds[kMaxFds];
+Clock::time_point sBusyUntil[size_t(Queue::Count)];
+
+// Synchronous callers waiting for a pending request (STM event hook issued synchronously).
+std::mutex sWaitM;
+std::condition_variable sWaitCv;
+std::map<u64, s32> sAnswered;
+u64 sNextToken = 1;
+
+const char* queueName(Queue q) {
+    switch (q) {
+    case Queue::Fs: return "fs";
+    case Queue::Es: return "es";
+    case Queue::Stm: return "stm";
+    default: return "other";
+    }
+}
+
+}  // namespace
+
+double latencyScale() {
+    static const double scale = [] {
+        const char* v = std::getenv("CF_IOS_LATENCY");
+        return v ? std::max(0.0, std::atof(v)) : 1.0;
+    }();
+    return scale;
+}
+
+bool logEnabled(int level) { return logLevel() >= level; }
+
 void logOnce(const std::string& what) {
     static std::set<std::string> seen;
     static std::mutex m;
     std::lock_guard lk(m);
-    if (logAll() || seen.insert(what).second) log("[ios] %s", what.c_str());
+    if (logLevel() > 0 || seen.insert(what).second) recomp::log("[ios] %s", what.c_str());
 }
 
-fs::path nandRoot() {
-    static const fs::path root = [] {
-        fs::path p = std::getenv("CF_NAND_DIR") ? port::envPath("CF_NAND_DIR") : port::dataDir() / "nand";
-        std::error_code ec;
-        fs::create_directories(p, ec);
-        // What the system menu leaves for an installed disc title: its data folder.
-        for (const char* t : {"title/00010000/52555545/data", "title/00010000/52555550/data", "shared2/sys", "tmp"})
-            fs::create_directories(p / t, ec);
-        return p;
-    }();
-    return root;
+s32 Handle::ioctl(u32 cmd, u32, u32, u32, u32, const Reply&) {
+    logOnce(path + " ioctl " + std::to_string(cmd) + " not handled (invalid)");
+    return IPC_EINVAL;
 }
-fs::path hostPath(const std::string& nand) {
-    std::string rel = nand;
-    while (!rel.empty() && rel[0] == '/') rel.erase(0, 1);
-    return nandRoot() / fs::path(std::u8string(rel.begin(), rel.end()));
+s32 Handle::ioctlv(u32 cmd, u32 nin, u32 nout, const Vec*, const Reply&) {
+    logOnce(path + " ioctlv " + std::to_string(cmd) + " (" + std::to_string(nin) + " in, " + std::to_string(nout) +
+            " out) not handled (invalid)");
+    return IPC_EINVAL;
 }
 
-u64 titleId() { return 0x0001000052555545ull | (port::install().running == port::GameVersion::PAL ? 0x0000000000000A00ull : 0); }
-
-s32 openPath(const std::string& path, u32 mode) {
-    Fd f;
-    f.path = path;
-    f.mode = mode;
-    if (path == "/dev/fs") f.dev = Dev::Fs;
-    else if (path == "/dev/es") f.dev = Dev::Es;
-    else if (path.rfind("/dev/stm/", 0) == 0) f.dev = Dev::Stm;
-    else if (path == "/dev/di") f.dev = Dev::Di;
-    else if (path.rfind("/dev/", 0) == 0) {
-        logOnce("open " + path + ": no such device");
-        return IPC_ENOENT;
-    } else {
-        f.dev = Dev::File;
-        f.host = hostPath(path);
-        std::error_code ec;
-        if (!fs::is_regular_file(f.host, ec)) {
-            logOnce("open " + path + ": no such NAND file (" + f.host.string() + ")");
-            return FS_ENOENT;
-        }
+void answer(const Reply& reply, s32 result) {
+    if (reply.cb) {
+        const u32 cb = reply.cb, arg = reply.arg;
+        sched::postIrq([cb, arg, result](Ctx& ic) { guestCall(ic, cb, u32(result), arg); });
+        return;
     }
-    std::lock_guard lk(sM);
-    const s32 fd = sNextFd++;
-    sFds[fd] = f;
-    logOnce("open " + path + " -> fd " + std::to_string(fd));
-    return fd;
-}
-
-Fd* fdOf(s32 fd) {
-    std::lock_guard lk(sM);
-    auto it = sFds.find(fd);
-    return it == sFds.end() ? nullptr : &it->second;
-}
-
-s32 doClose(s32 fd) {
-    std::lock_guard lk(sM);
-    return sFds.erase(fd) ? IPC_OK : IPC_EINVAL;
-}
-
-s32 doRead(s32 fd, u32 buf, u32 len) {
-    Fd* f = fdOf(fd);
-    if (!f) return IPC_EINVAL;
-    if (f->dev != Dev::File) return 0;
-    std::ifstream in(f->host, std::ios::binary);
-    in.seekg(f->pos);
-    in.read(reinterpret_cast<char*>(hostp(buf)), len);
-    const u32 n = u32(in.gcount());
-    f->pos += n;
-    return s32(n);
-}
-
-s32 doWrite(s32 fd, u32 buf, u32 len) {
-    Fd* f = fdOf(fd);
-    if (!f) return IPC_EINVAL;
-    if (f->dev != Dev::File) return s32(len);
-    std::fstream out(f->host, std::ios::binary | std::ios::in | std::ios::out);
-    if (!out) return FS_EACCES;
-    out.seekp(f->pos);
-    out.write(reinterpret_cast<const char*>(hostp(buf)), len);
-    f->pos += len;
-    return s32(len);
-}
-
-s32 doSeek(s32 fd, s32 off, s32 whence) {
-    Fd* f = fdOf(fd);
-    if (!f) return IPC_EINVAL;
-    if (f->dev != Dev::File) return 0;
-    std::error_code ec;
-    const s64 size = s64(fs::file_size(f->host, ec));
-    s64 p = whence == 0 ? off : whence == 1 ? s64(f->pos) + off : size + off;
-    if (p < 0 || p > size) return FS_EINVAL;
-    f->pos = u32(p);
-    return s32(p);
-}
-
-std::string fsPath(u32 a) {
-    std::string s;
-    for (u32 i = 0; i < 64; i++) {
-        const char ch = char(rd8(a + i));
-        if (!ch) break;
-        s += ch;
+    {
+        std::lock_guard lk(sWaitM);
+        sAnswered[reply.token] = result;
     }
-    return s;
+    sWaitCv.notify_all();
 }
 
-// /dev/fs ioctls (in = request block).
-s32 fsIoctl(u32 cmd, u32 in, u32 inLen, u32 out, u32 outLen) {
-    std::error_code ec;
-    switch (cmd) {
-    case 0x03: {  // CreateDir (attributes block: owner, group, path at +6)
-        const fs::path p = hostPath(fsPath(in + 6));
-        if (fs::exists(p, ec)) return FS_EEXIST;
-        fs::create_directories(p, ec);
-        return ec ? FS_EACCES : IPC_OK;
-    }
-    case 0x09: {  // CreateFile
-        const fs::path p = hostPath(fsPath(in + 6));
-        if (fs::exists(p, ec)) return FS_EEXIST;
-        if (!fs::is_directory(p.parent_path(), ec)) return FS_ENOENT;
-        std::ofstream(p, std::ios::binary);
-        return IPC_OK;
-    }
-    case 0x07: {  // Delete
-        const fs::path p = hostPath(fsPath(in));
-        if (!fs::exists(p, ec)) return FS_ENOENT;
-        fs::remove_all(p, ec);
-        return IPC_OK;
-    }
-    case 0x08: {  // Rename (old path, new path at +64)
-        const fs::path a = hostPath(fsPath(in)), b = hostPath(fsPath(in + 64));
-        if (!fs::exists(a, ec)) return FS_ENOENT;
-        fs::rename(a, b, ec);
-        return ec ? FS_EACCES : IPC_OK;
-    }
-    case 0x06: {  // GetAttr (path) -> owner id, group, path, permissions, attribute
-        const fs::path p = hostPath(fsPath(in));
-        if (!fs::exists(p, ec)) return FS_ENOENT;
-        if (out && outLen >= 0x4C) {
-            std::memset(hostp(out), 0, 0x4C);
-            wr32(out, 0x1000);
-            wr16(out + 4, 0x3031);
-            std::strncpy(reinterpret_cast<char*>(hostp(out + 6)), fsPath(in).c_str(), 63);
-            wr8(out + 0x46, 3);  // owner rw
-            wr8(out + 0x47, 3);
-            wr8(out + 0x48, 3);
+namespace {
+
+// When a request issued now on queue `q` taking `cost` seconds is answered.
+Clock::time_point schedule(Queue q, double cost) {
+    static std::mutex m;
+    std::lock_guard lk(m);
+    const auto now = Clock::now();
+    auto& busy = sBusyUntil[size_t(q)];
+    const auto start = std::max(now, busy);
+    busy = start + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(cost * latencyScale()));
+    return busy;
+}
+
+// Delivers a result: async = callback interrupt at `at`; sync = the caller waits until `at`.
+// Returns what the IOS_* function itself returns.
+s32 deliver(s32 result, Clock::time_point at, const Reply& reply, bool async) {
+    if (async) {
+        if (result != kPending) {
+            const double delay = std::max(0.0, std::chrono::duration<double>(at - Clock::now()).count());
+            const u32 cb = reply.cb, arg = reply.arg;
+            if (cb) sched::postIrqAfter(delay, [cb, arg, result](Ctx& ic) { guestCall(ic, cb, u32(result), arg); });
         }
         return IPC_OK;
     }
-    case 0x05: {  // SetAttr
-        return fs::exists(hostPath(fsPath(in + 6)), ec) ? IPC_OK : FS_ENOENT;
+    if (result == kPending) {
+        // A synchronous request the device answers later: block until it does.
+        s32 r = 0;
+        sched::withCpuReleased([&] {
+            std::unique_lock lk(sWaitM);
+            sWaitCv.wait(lk, [&] { return sAnswered.count(reply.token) != 0; });
+            r = sAnswered[reply.token];
+            sAnswered.erase(reply.token);
+        });
+        return r;
     }
-    case 0x02: return IPC_OK;  // GetStats: zeros
-    case 0x01: return IPC_OK;  // Format
-    default: break;
-    }
-    logOnce("/dev/fs ioctl " + std::to_string(cmd) + " not handled (returns 0)");
-    (void)inLen;
-    return IPC_OK;
+    if (at > Clock::now() && !sched::inIrq()) sched::withCpuReleased([&] { std::this_thread::sleep_until(at); });
+    return result;
 }
 
-// File fd ioctl 11: GetFileStats (length, position).
-s32 fileIoctl(Fd& f, u32 cmd, u32 out) {
-    if (cmd == 11 && out) {
-        std::error_code ec;
-        wr32(out, u32(fs::file_size(f.host, ec)));
-        wr32(out + 4, f.pos);
-        return IPC_OK;
-    }
-    logOnce("file ioctl " + std::to_string(cmd) + " on " + f.path + " not handled");
-    return IPC_OK;
+Reply makeReply(u32 cb, u32 arg) {
+    Reply r;
+    r.cb = cb;
+    r.arg = arg;
+    std::lock_guard lk(sWaitM);
+    r.token = sNextToken++;
+    return r;
 }
 
-s32 doIoctl(s32 fd, u32 cmd, u32 in, u32 inLen, u32 out, u32 outLen) {
-    Fd* f = fdOf(fd);
-    if (!f) return IPC_EINVAL;
-    if (logLevel() >= 2) log("[ios] ioctl %s cmd %u in %08X+%X out %08X+%X", f->path.c_str(), cmd, in, inLen, out, outLen);
-    switch (f->dev) {
-    case Dev::Fs: return fsIoctl(cmd, in, inLen, out, outLen);
-    case Dev::File: return fileIoctl(*f, cmd, out);
-    case Dev::Stm:
-        if (cmd == 0x1000) return kPending;  // event hook: answered only when a button event happens (never here)
-        logOnce("stm ioctl " + std::to_string(cmd) + " (ok)");
-        return IPC_OK;
-    default: break;
-    }
-    logOnce(f->path + " ioctl " + std::to_string(cmd) + " not handled (returns 0)");
-    return IPC_OK;
+void logResult(const char* op, s32 fd, const std::string& path, s32 result, const char* extra = "") {
+    if (logLevel() >= 2) recomp::log("[ios] %s fd %d %s%s -> %d", op, fd, path.c_str(), extra, result);
 }
 
-// Ioctlv: vec = in-count + out-count {u32 addr, u32 length} pairs.
-s32 doIoctlv(s32 fd, u32 cmd, u32 nin, u32 nout, u32 vec) {
-    Fd* f = fdOf(fd);
-    if (!f) return IPC_EINVAL;
-    auto vaddr = [&](u32 i) { return rd32(vec + 8 * i); };
-    auto vlen = [&](u32 i) { return rd32(vec + 8 * i + 4); };
-    if (logLevel() >= 2) log("[ios] ioctlv %s cmd %u (%u in, %u out)", f->path.c_str(), cmd, nin, nout);
-    if (f->dev == Dev::Es) {
-        switch (cmd) {
-        case 0x20:  // GetTitleID -> u64
-            if (nout >= 1 && vlen(nin) >= 8) {
-                wr32(vaddr(nin), u32(titleId() >> 32));
-                wr32(vaddr(nin) + 4, u32(titleId()));
+s32 doOpen(u32 pathAddr, u32 mode, u32 cb, u32 arg, bool async) {
+    const std::string path = gstr(pathAddr);
+    s32 err = IPC_OK;
+    double cost = 0.0002;
+    std::unique_ptr<Handle> h = (path.rfind("/dev/", 0) == 0 && path != "/dev/fs") ? openDevice(path, mode, err, cost)
+                                                                                    : openFs(path, mode, err, cost);
+    s32 result = err;
+    Queue q = path.rfind("/dev/", 0) == 0 && path != "/dev/fs" ? Queue::Other : Queue::Fs;
+    if (h) {
+        q = h->queue();
+        h->path = path;
+        std::lock_guard lk(sM);
+        result = IPC_EMAX;
+        for (s32 fd = 0; fd < kMaxFds; fd++)
+            if (!sFds[fd]) {
+                sFds[fd] = std::move(h);
+                result = fd;
+                break;
             }
-            return IPC_OK;
-        case 0x1D:  // GetDataDir(title id) -> "/title/00010000/xxxxxxxx/data"
-            if (nout >= 1 && vlen(nin) >= 30) {
-                char buf[32];
-                std::snprintf(buf, sizeof(buf), "/title/%08x/%08x/data", u32(titleId() >> 32), u32(titleId()));
-                std::memcpy(hostp(vaddr(nin)), buf, std::strlen(buf) + 1);
-            }
-            return IPC_OK;
-        default: break;
-        }
-    } else if (f->dev == Dev::Fs) {
-        if (cmd == 0x04) {  // ReadDir(path[, max]) -> count [, names]
-            std::error_code ec;
-            const fs::path p = hostPath(fsPath(vaddr(0)));
-            if (!fs::is_directory(p, ec)) return FS_ENOENT;
-            std::vector<std::string> names;
-            for (const auto& e : fs::directory_iterator(p, ec)) names.push_back(e.path().filename().string());
-            if (nin == 1 && nout == 1) {
-                wr32(vaddr(1), u32(names.size()));
-            } else if (nin >= 2 && nout >= 2) {
-                const u32 max = rd32(vaddr(1));
-                u32 at = vaddr(2), n = 0;
-                for (const auto& nm : names) {
-                    if (n >= max) break;
-                    std::memcpy(hostp(at), nm.c_str(), nm.size() + 1);
-                    at += u32(nm.size() + 1);
-                    n++;
-                }
-                wr32(vaddr(3), n);
-            }
-            return IPC_OK;
-        }
-        if (cmd == 0x0C) {  // GetUsage(path) -> blocks, inodes
-            if (nout >= 2) {
-                wr32(vaddr(nin), 0);
-                wr32(vaddr(nin + 1), 0);
-            }
-            return IPC_OK;
-        }
     }
-    logOnce(f->path + " ioctlv " + std::to_string(cmd) + " (" + std::to_string(nin) + " in, " + std::to_string(nout) +
-            " out) not handled (returns 0)");
-    return IPC_OK;
+    if (result >= 0) logOnce("open " + path + " (mode " + std::to_string(mode) + ") -> fd " + std::to_string(result));
+    else if (logLevel() >= 2) recomp::log("[ios] open %s (mode %u) -> %d", path.c_str(), mode, result);
+    const auto at = schedule(q, cost);
+    return deliver(result, at, makeReply(cb, arg), async);
 }
 
-// IOS replies arrive later on the console; async completions come as interrupts after a short
-// delay (game code may rely on the callback not running inside the call).
-void complete(s32 result, u32 cb, u32 arg) {
-    if (!cb || result == kPending) return;
-    sched::postIrqAfter(0.0002, [result, cb, arg](Ctx& ic) { guestCall(ic, cb, u32(result), arg); });
+// Runs `op` on fd's handle with the table locked; unknown fd = IPC_EINVAL.
+template <class F>
+s32 onFd(s32 fd, u32 cb, u32 arg, bool async, const char* opName, F&& op) {
+    const Reply reply = makeReply(cb, arg);
+    s32 result;
+    double cost = 0.0001;
+    Queue q = Queue::Other;
+    std::string path;
+    {
+        std::lock_guard lk(sM);
+        Handle* h = fd >= 0 && fd < kMaxFds ? sFds[fd].get() : nullptr;
+        if (!h) {
+            result = IPC_EINVAL;
+        } else {
+            result = op(*h, reply);
+            cost = h->cost();
+            q = h->queue();
+            path = h->path;
+        }
+    }
+    logResult(opName, fd, path, result);
+    const auto at = schedule(q, cost);
+    return deliver(result, at, reply, async);
+}
+
+s32 doClose(s32 fd, u32 cb, u32 arg, bool async) {
+    const Reply reply = makeReply(cb, arg);
+    s32 result = IPC_EINVAL;
+    double cost = 0.0001;
+    Queue q = Queue::Other;
+    std::string path;
+    {
+        std::lock_guard lk(sM);
+        if (fd >= 0 && fd < kMaxFds && sFds[fd]) {
+            result = sFds[fd]->close();
+            cost = sFds[fd]->cost();
+            q = sFds[fd]->queue();
+            path = sFds[fd]->path;
+            sFds[fd].reset();
+        }
+    }
+    logResult("close", fd, path, result);
+    const auto at = schedule(q, cost);
+    return deliver(result, at, reply, async);
+}
+
+std::vector<Vec> vecs(u32 vec, u32 n) {
+    std::vector<Vec> v(n);
+    for (u32 i = 0; i < n; i++) v[i] = {rd32(vec + 8 * i), rd32(vec + 8 * i + 4)};
+    return v;
 }
 
 }  // namespace
+}  // namespace recomp::ios
+
+namespace recomp {
+using namespace ios;
 
 // The IPC buffer (ipcMain.c): the MEM2 range IOS request structures and the libraries' IOS heaps
 // (iosCreateHeap) are carved from; set by OSInit (low memory 0x80003130/34).
@@ -348,50 +268,65 @@ HLE(IPCReInit) {}
 HLE(IPCReadReg) { c.r[3] = 0; }
 HLE(IPCWriteReg) {}
 HLE(IPCInterruptHandler) {}
-HLE(IOS_Open) { c.r[3] = u32(openPath(gstr(c.r[3]), c.r[4])); }
-HLE(IOS_OpenAsync) {
-    const s32 r = openPath(gstr(c.r[3]), c.r[4]);
-    complete(r, c.r[5], c.r[6]);
-    c.r[3] = 0;
+
+HLE(IOS_Open) { c.r[3] = u32(doOpen(c.r[3], c.r[4], 0, 0, false)); }
+HLE(IOS_OpenAsync) { c.r[3] = u32(doOpen(c.r[3], c.r[4], c.r[5], c.r[6], true)); }
+HLE(IOS_Close) { c.r[3] = u32(doClose(s32(c.r[3]), 0, 0, false)); }
+HLE(IOS_CloseAsync) { c.r[3] = u32(doClose(s32(c.r[3]), c.r[4], c.r[5], true)); }
+
+HLE(IOS_Read) {
+    const u32 buf = c.r[4], len = c.r[5];
+    c.r[3] = u32(onFd(s32(c.r[3]), 0, 0, false, "read", [&](Handle& h, const Reply&) { return h.read(buf, len); }));
 }
-HLE(IOS_Close) { c.r[3] = u32(doClose(s32(c.r[3]))); }
-HLE(IOS_CloseAsync) {
-    complete(doClose(s32(c.r[3])), c.r[4], c.r[5]);
-    c.r[3] = 0;
-}
-HLE(IOS_Read) { c.r[3] = u32(doRead(s32(c.r[3]), c.r[4], c.r[5])); }
 HLE(IOS_ReadAsync) {
-    complete(doRead(s32(c.r[3]), c.r[4], c.r[5]), c.r[6], c.r[7]);
-    c.r[3] = 0;
+    const u32 buf = c.r[4], len = c.r[5];
+    c.r[3] = u32(onFd(s32(c.r[3]), c.r[6], c.r[7], true, "read", [&](Handle& h, const Reply&) { return h.read(buf, len); }));
 }
-HLE(IOS_Write) { c.r[3] = u32(doWrite(s32(c.r[3]), c.r[4], c.r[5])); }
+HLE(IOS_Write) {
+    const u32 buf = c.r[4], len = c.r[5];
+    c.r[3] = u32(onFd(s32(c.r[3]), 0, 0, false, "write", [&](Handle& h, const Reply&) { return h.write(buf, len); }));
+}
 HLE(IOS_WriteAsync) {
-    complete(doWrite(s32(c.r[3]), c.r[4], c.r[5]), c.r[6], c.r[7]);
-    c.r[3] = 0;
+    const u32 buf = c.r[4], len = c.r[5];
+    c.r[3] = u32(onFd(s32(c.r[3]), c.r[6], c.r[7], true, "write", [&](Handle& h, const Reply&) { return h.write(buf, len); }));
 }
-HLE(IOS_Seek) { c.r[3] = u32(doSeek(s32(c.r[3]), s32(c.r[4]), s32(c.r[5]))); }
+HLE(IOS_Seek) {
+    const s32 off = s32(c.r[4]), wh = s32(c.r[5]);
+    c.r[3] = u32(onFd(s32(c.r[3]), 0, 0, false, "seek", [&](Handle& h, const Reply&) { return h.seek(off, wh); }));
+}
 HLE(IOS_SeekAsync) {
-    complete(doSeek(s32(c.r[3]), s32(c.r[4]), s32(c.r[5])), c.r[6], c.r[7]);
-    c.r[3] = 0;
+    const s32 off = s32(c.r[4]), wh = s32(c.r[5]);
+    c.r[3] = u32(onFd(s32(c.r[3]), c.r[6], c.r[7], true, "seek", [&](Handle& h, const Reply&) { return h.seek(off, wh); }));
 }
 HLE(IOS_Ioctl) {
-    const s32 r = doIoctl(s32(c.r[3]), c.r[4], c.r[5], c.r[6], c.r[7], c.r[8]);
-    if (r == kPending) fatal("IOS_Ioctl on %s cmd %u would never return (a request IOS answers only on an event)",
-                             fdOf(s32(c.r[3]))->path.c_str(), c.r[4]);
-    c.r[3] = u32(r);
+    const u32 cmd = c.r[4], in = c.r[5], inLen = c.r[6], out = c.r[7], outLen = c.r[8];
+    c.r[3] = u32(onFd(s32(c.r[3]), 0, 0, false, "ioctl",
+                      [&](Handle& h, const Reply& r) { return h.ioctl(cmd, in, inLen, out, outLen, r); }));
 }
 HLE(IOS_IoctlAsync) {
-    complete(doIoctl(s32(c.r[3]), c.r[4], c.r[5], c.r[6], c.r[7], c.r[8]), c.r[9], c.r[10]);
-    c.r[3] = 0;
+    const u32 cmd = c.r[4], in = c.r[5], inLen = c.r[6], out = c.r[7], outLen = c.r[8];
+    c.r[3] = u32(onFd(s32(c.r[3]), c.r[9], c.r[10], true, "ioctl",
+                      [&](Handle& h, const Reply& r) { return h.ioctl(cmd, in, inLen, out, outLen, r); }));
 }
-HLE(IOS_Ioctlv) { c.r[3] = u32(doIoctlv(s32(c.r[3]), c.r[4], c.r[5], c.r[6], c.r[7])); }
+HLE(IOS_Ioctlv) {
+    const u32 cmd = c.r[4], nin = c.r[5], nout = c.r[6];
+    const std::vector<Vec> v = vecs(c.r[7], nin + nout);
+    c.r[3] = u32(onFd(s32(c.r[3]), 0, 0, false, "ioctlv",
+                      [&](Handle& h, const Reply& r) { return h.ioctlv(cmd, nin, nout, v.data(), r); }));
+}
 HLE(IOS_IoctlvAsync) {
-    complete(doIoctlv(s32(c.r[3]), c.r[4], c.r[5], c.r[6], c.r[7]), c.r[8], c.r[9]);
-    c.r[3] = 0;
+    const u32 cmd = c.r[4], nin = c.r[5], nout = c.r[6];
+    const std::vector<Vec> v = vecs(c.r[7], nin + nout);
+    c.r[3] = u32(onFd(s32(c.r[3]), c.r[8], c.r[9], true, "ioctlv",
+                      [&](Handle& h, const Reply& r) { return h.ioctlv(cmd, nin, nout, v.data(), r); }));
 }
+// IOS_IoctlvReboot: an ioctlv after which IOS reboots (ES_LaunchTitle). The ES device ends the
+// program for title launches (ios_devices.cpp).
 HLE(IOS_IoctlvReboot) {
-    log("[ios] IOS_IoctlvReboot (fd %d cmd %u): ignored", s32(c.r[3]), c.r[4]);
-    c.r[3] = 0;
+    const u32 cmd = c.r[4], nin = c.r[5], nout = c.r[6];
+    const std::vector<Vec> v = vecs(c.r[7], nin + nout);
+    c.r[3] = u32(onFd(s32(c.r[3]), 0, 0, false, "ioctlv (reboot)",
+                      [&](Handle& h, const Reply& r) { return h.ioctlv(cmd, nin, nout, v.data(), r); }));
 }
 HLE(IPCiProfInit) {}
 HLE(IPCiProfQueueReq) {}

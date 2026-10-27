@@ -7,6 +7,9 @@
 #include "recomp/runtime.h"
 #include "recomp/sched.h"
 #include "recomp/game.h"
+#include "recomp/system.h"
+#include "recomp/ios.h"
+#include "recomp/menu.h"
 
 #include <cmath>
 #include <algorithm>
@@ -113,6 +116,9 @@ HLE(OSInit) {
     guestCall(c, guestSymbol("OSSetMEM1ArenaHi"), arenaHi);
     guestCall(c, guestSymbol("OSSetMEM2ArenaLo"), kMem2ArenaLo);
     guestCall(c, guestSymbol("OSSetMEM2ArenaHi"), kMem2ArenaHi);
+    // The encrypted setting.txt the System Menu leaves for the SC library (product area, region).
+    sys::writeSettingTxtToLowMemory();
+    ios::startTestAids();
     log("[os] OSInit: MEM1 arena %08X-%08X, MEM2 arena %08X-%08X", (initialStack() + 8 + 31) & ~31u, arenaHi,
         kMem2ArenaLo, kMem2ArenaHi);
 }
@@ -253,7 +259,9 @@ u32 sResetCallback = 0, sPowerCallback = 0;
 }  // namespace
 HLE(OSDisableScheduler) { c.r[3] = u32(sSchedulerLock++); }
 HLE(OSEnableScheduler) { c.r[3] = u32(sSchedulerLock > 0 ? sSchedulerLock-- : 0); }
-// Reset / Power button callbacks (STM): stored; the buttons do not exist here.
+// Reset / Power button callbacks (os/OSStateTM.c). The OS's STM event hook is host-side: a console
+// button event (ios::stmEvent: F1 / test aid) calls the game's callback as the OS's event handler
+// does, with interrupts disabled. No callback registered = the OS default, which does nothing.
 HLE(OSSetResetCallback) {
     const u32 old = sResetCallback;
     sResetCallback = c.r[3];
@@ -264,6 +272,7 @@ HLE(OSSetPowerCallback) {
     sPowerCallback = c.r[3];
     c.r[3] = old;
 }
+HLE(__OSInitSTM) { c.r[3] = 1; }
 // RVL SDK: each library registers its version string (shown by the system's debug tools).
 HLE(OSRegisterVersion) {
     static const bool sLog = std::getenv("CF_OS_LOG") != nullptr;
@@ -486,10 +495,28 @@ HLE(OSReport) { std::fputs(gstr(c.r[3]), stdout); }
 
 // --- reset / settings ---------------------------------------------------------------
 
-HLE(OSResetSystem) {
-    log("[os] OSResetSystem(%u, %08X, %u)", c.r[3], c.r[4], c.r[5]);
-    std::exit(0);
+// Leaving the game (os/OSReset.c): back to the Wii Menu, a restart, power off. The program ends
+// the way "Quit game" does (settings and caches written); the calling thread never returns, as
+// on the console.
+[[noreturn]] static void leaveGame(const char* what) {
+    log("[os] %s: the game leaves; the program ends", what);
+    menu::requestQuit();
+    for (;;) sched::sleepOn(0xFFFFFFE0u);  // (a queue nothing wakes; shutdown ends the thread)
 }
+HLE(OSResetSystem) {
+    char what[64];
+    std::snprintf(what, sizeof(what), "OSResetSystem(%u, %08X, %u)", c.r[3], c.r[4], c.r[5]);
+    leaveGame(what);
+}
+HLE(OSShutdownSystem) { leaveGame("OSShutdownSystem (power off)"); }
+HLE(OSRestart) { leaveGame("OSRestart"); }
+HLE(OSReturnToMenu) { leaveGame("OSReturnToMenu (Wii Menu)"); }
+HLE(OSReturnToDataManager) { leaveGame("OSReturnToDataManager (Wii Menu data management)"); }
+HLE(OSReturnToSetting) { leaveGame("OSReturnToSetting (Wii Settings)"); }
+HLE(__OSReturnToMenuForError) { leaveGame("__OSReturnToMenuForError"); }
+HLE(__OSHotResetForError) { leaveGame("__OSHotResetForError"); }
+HLE(__OSShutdownToSBY) { leaveGame("__OSShutdownToSBY (standby)"); }
+HLE(__OSHotReset) { leaveGame("__OSHotReset"); }
 HLE(OSGetResetSwitchState) { c.r[3] = 0; }
 HLE(OSGetResetCode) { c.r[3] = 0; }
 HLE(OSGetProgressiveMode) { c.r[3] = sProgressiveMode; }
@@ -529,5 +556,20 @@ HLE(PPCMfhid2) { c.r[3] = c.mfspr(920); }
 HLE(PPCMthid2) { c.mtspr(920, c.r[3]); }
 HLE(PPCSync) {}
 HLE(PPCHalt) { fatal("PPCHalt"); }
+
+// A console button (ios.h stmEvent): the OS state-event handler's work. Reset calls the reset
+// callback (once, like the OS, which then puts the default back); power calls the power callback.
+void osStateEvent(u32 event) {
+    const bool reset = event == ios::kStmEventReset;
+    const u32 cb = reset ? sResetCallback : sPowerCallback;
+    if (reset) sResetCallback = 0;
+    else sPowerCallback = 0;
+    if (!cb) {
+        log("[os] %s button: no callback registered (nothing happens, as on the console)", reset ? "Reset" : "Power");
+        return;
+    }
+    log("[os] %s button: calling the game's callback %08X", reset ? "Reset" : "Power", cb);
+    sched::postIrq([cb](Ctx& ic) { guestCall(ic, cb); });
+}
 
 }  // namespace recomp
