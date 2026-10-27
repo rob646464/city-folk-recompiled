@@ -1,0 +1,20 @@
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index 9dfbdac..dfdd817 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1248,6 +1248,15 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+       vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f({}, 1.0);", i, nbt_slice_local(NbtSlice::B));
+     } else if (tcg.src == GX_TG_TANGENT) {
+       vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f({}, 1.0);", i, nbt_slice_local(NbtSlice::T));
++    } else if (tcg.src == GX_MAX_TEXGENSRC) {
++      // A TEV stage samples a texcoord that has no texgen (beyond numTexGens). Hardware yields
++      // undefined coordinates rather than failing; use (0, 0) and warn once.
++      static bool sWarned = false;
++      if (!sWarned) {
++        sWarned = true;
++        Log.warn("TEV samples texcoord {} without a texgen; using (0, 0)", i);
++      }
++      vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f(0.0, 0.0, 1.0, 1.0);", i);
+     } else
+       UNLIKELY FATAL("unhandled tcg src {}", underlying(tcg.src));
+     if (tcg.type == GX_TG_MTX2x4 || tcg.type == GX_TG_MTX3x4) {

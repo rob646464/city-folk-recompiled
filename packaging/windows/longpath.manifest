@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- Merged into the Windows executables (CMakeLists.txt, lm_runtime_target). longPathAware lets
+     file calls take paths past MAX_PATH, but only when the system policy LongPathsEnabled is on;
+     the code uses \\?\ paths where it matters either way (docs/SETUP.md "Long paths"). -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings xmlns:ws2="http://schemas.microsoft.com/SMI/2016/WindowsSettings">
+      <ws2:longPathAware>true</ws2:longPathAware>
+    </windowsSettings>
+  </application>
+</assembly>

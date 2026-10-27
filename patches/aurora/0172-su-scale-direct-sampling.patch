@@ -1,0 +1,21 @@
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index 6914fca..0e3f22c 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -2410,8 +2410,14 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+     CHECK(stage.texMapId != GX_TEXMAP_NULL, "unmapped texture for stage {}", i);
+     CHECK(stage.texCoordId != GX_TEXCOORD_NULL, "unmapped texcoord for stage {}", i);
+     if (uvIn.empty()) {
+-      // No indirect texturing
+-      uvIn = fmt::format("tex{0}_uv", underlying(stage.texCoordId));
++      // No indirect texturing. The setup unit scales each texture coordinate to texels with its
++      // own size registers (BP 0x30-0x3F, normally the size of the texture the TEV order binds it
++      // to); the texture unit then addresses the map in texels. When a coordinate's scale and the
++      // sampled map's size differ (a coordinate shared by maps of different sizes, a texture
++      // swapped under a display list that set the scale, GXSetTexCoordScaleManually), the map is
++      // sampled at uv * scale / size. Identical to plain uv when they match.
++      uvIn = fmt::format("(tex{0}_uv * (ubuf.texcoord_scale[{0}].xy / ubuf.tex{1}_size_bias.xy))",
++                         underlying(stage.texCoordId), underlying(stage.texMapId));
+     }
+     fragmentFnPre +=
+         fmt::format("\n    var sampled{0} = textureSampleBias(tex{1}, tex{1}_samp, {2}, ubuf.tex{1}_size_bias.z);", i,

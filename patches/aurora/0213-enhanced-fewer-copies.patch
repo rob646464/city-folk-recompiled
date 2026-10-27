@@ -1,0 +1,67 @@
+0213: enhanced lighting, fewer copies and loads (same picture)
+
+- Scene end: the bloom bright pass samples the EFB's single-sample color (its copy source) directly
+  instead of a full-resolution copy of it, which was also made with bloom off.
+- Receivers: an extra light's reach is tested before its flags are loaded (most lights miss a
+  pixel).
+
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -1249,7 +1249,7 @@
+   wgpu::RenderPipeline composite;
+   wgpu::TextureFormat compositeFormat = wgpu::TextureFormat::Undefined;
+   uint32_t compositeSamples = 0;
+-  Tex scene, depth;
++  Tex depth;
+   std::array<Tex, MaxBloomLevels> bloom;
+   Tex volTex, aoTex, aoBlur;
+   Tex glow, glowDepth, glowSrcDepth;
+@@ -2086,16 +2086,10 @@
+     return;
+   }
+   const auto rt = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
+-  ensure_tex(g_gpu.scene, t.width, t.height, t.colorFormat,
+-             wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::TextureBinding, "Enhanced scene color");
+   ensure_tex(g_gpu.depth, t.width, t.height, wgpu::TextureFormat::R32Float, rt, "Enhanced scene depth");
+-  {
+-    const wgpu::TexelCopyTextureInfo src{.texture = t.colorSource};
+-    const wgpu::TexelCopyTextureInfo dst{.texture = g_gpu.scene.texture};
+-    const wgpu::Extent3D size{t.width, t.height, 1};
+-    const webgpu::gpu_prof::Zone zone{cmd, "Enhanced scene copy"};
+-    cmd.CopyTextureToTexture(&src, &dst, &size);
+-  }
++  // 0213: the bloom bright pass samples the single-sample scene color (the EFB's copy source,
++  // sampleable) directly; it ran on a full-resolution copy of it, made even with bloom off.
++  const wgpu::TextureView sceneView = (job.mask & 1u) != 0 ? t.colorSource.CreateView() : wgpu::TextureView{};
+   tex_copy_conv::snapshot_depth(cmd, t.depthSource, t.msaa, g_gpu.depth.view);
+ 
+   // Bloom chain.
+@@ -2108,7 +2102,7 @@
+       h = std::max(h / 2, 1u);
+     }
+     run_pass(cmd, "Bloom bright", g_gpu.bloom[0].view, g_gpu.bright,
+-             bind(job.passes[0], g_gpu.scene.view, job.glowValid ? g_gpu.glow.view : wgpu::TextureView{}, {},
++             bind(job.passes[0], sceneView, job.glowValid ? g_gpu.glow.view : wgpu::TextureView{}, {},
+                   g_gpu.depth.view),
+              false);
+     for (uint32_t i = 1; i < job.bloomLevels; ++i) {
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1037,12 +1037,13 @@
+   let v = normalize(-p);
+   for (var i = 0u; i < cnt; i++) {
+     let b = ubuf.enh_light_base + i * 24u;
+-    let flags = abuf[b + 8u];
+-    if (ghost && (flags & 2u) == 0u) { continue; }
++    // 0213: the reach test first (most lights miss a given pixel), then the flags.
+     let d = vec3f(enh_ld(b), enh_ld(b + 1u), enh_ld(b + 2u)) - p;
+     let radius = max(enh_ld(b + 3u), 1.0);
+     let dist2 = dot(d, d);
+     if (dist2 >= radius * radius) { continue; }
++    let flags = abuf[b + 8u];
++    if (ghost && (flags & 2u) == 0u) { continue; }
+     let l = d * inverseSqrt(max(dist2, 1e-6));
+     let x2 = dist2 / (radius * radius);
+     let w = (1.0 - x2) * (1.0 - x2);

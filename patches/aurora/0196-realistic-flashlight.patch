@@ -1,0 +1,1339 @@
+diff --git a/include/aurora/enhanced.h b/include/aurora/enhanced.h
+index c94b7db..efb1bda 100644
+--- a/include/aurora/enhanced.h
++++ b/include/aurora/enhanced.h
+@@ -90,8 +90,23 @@ typedef struct {
+   bool ssao;
+   float ssaoIntensity;
+   float ssaoRadius; // world units
++
++  // 0196: realistic flashlight (replaces the volumetric beam above while on): light scattering
++  // ray-marched through the cone against the flashlight's own shadow map (shadow shafts), a
++  // physically shaped footprint (hot centre, reflector rings, soft edge, inverse-square falloff),
++  // dust motes lit only inside the beam, a flare when the light flashes; the game's cone mesh is
++  // hidden while it is on. 0 off, 1 medium, 2 high, 3 ultra (steps / resolution / filtering).
++  uint32_t realisticFlashlight;
++  float beamDensity; // 0..3: how hazy the air is (brightness and extinction of the shafts)
++  float beamDust;    // 0..2: dust motes drifting in the beam (0 = none)
+ } AuroraEnhancedConfig;
+ 
++// 0196: an ExtraLight with this flag is no light: three of them (ids BeamAnchorId + 0..2) carry
++// the view-space positions of a world point and of two points 256 units along world +X and +Y, so
++// effects can anchor detail (dust, haze) in the world; frame interpolation blends them like lights.
++#define AURORA_EXTRA_LIGHT_ANCHOR 0x40000000u
++#define AURORA_BEAM_ANCHOR_ID 0xBEA0A000u
++
+ // Replaces the configuration (any thread; takes effect at the next draw / scene end).
+ void aurora_enhanced_set_config(const AuroraEnhancedConfig* config);
+ 
+@@ -106,6 +121,10 @@ void GXSetMaterialHintAurora(uint8_t hint);
+ // enhanced mode or all of its screen-space parts are off, or inside an offscreen pass.
+ void GXSceneEndAurora(void);
+ 
++// 0196: the realistic flashlight flares (brighter, whiter beam and pool) by `strength` (0..1),
++// decaying over ~0.4 s; e.g. when the light stuns a ghost. Any thread.
++void aurora_enhanced_beam_flare(float strength);
++
+ // Statistics for the overlay / tests: number of extra lights in the last frame, GPU-side
+ // scene-end passes recorded in the last frame.
+ uint32_t aurora_enhanced_last_light_count(void);
+diff --git a/lib/gfx/beam_profile.hpp b/lib/gfx/beam_profile.hpp
+new file mode 100644
+index 0000000..404cc7e
+--- /dev/null
++++ b/lib/gfx/beam_profile.hpp
+@@ -0,0 +1,39 @@
++#pragma once
++// 0196: realistic flashlight (include/aurora/enhanced.h `realisticFlashlight`). The angular
++// profile of a reflector flashlight, shared by the surface lighting (lib/gx/shader.cpp, spot
++// color channels) and the light-scattering pass (lib/gfx/enhanced.cpp), so the shafts in the air
++// and the pool on the walls have exactly the same shape.
++#include <string_view>
++
++namespace aurora::gfx {
++inline constexpr std::string_view BeamProfileWgsl = R"""(
++// Cosine at which the GX spot polynomial a0 + a1 c + a2 c^2 reaches 0 (the cone's edge), or -2
++// when it has no such edge (not a spot cone).
++fn enh_beam_cut(ca: vec3f) -> f32 {
++  if (abs(ca.z) < 1e-6) {
++    if (abs(ca.y) < 1e-6) { return -2.0; }
++    let r = -ca.x / ca.y;
++    return select(-2.0, r, r > -1.0 && r < 0.9999);
++  }
++  let disc = ca.y * ca.y - 4.0 * ca.z * ca.x;
++  if (disc < 0.0) { return -2.0; }
++  let s = sqrt(disc);
++  let r1 = (-ca.y + s) / (2.0 * ca.z);
++  let r2 = (-ca.y - s) / (2.0 * ca.z);
++  return max(select(-2.0, r1, r1 > -1.0 && r1 < 0.9999), select(-2.0, r2, r2 > -1.0 && r2 < 0.9999));
++}
++// Intensity across the beam, x = angle from the axis / the cone's half angle (1 = the game's cone
++// edge): a hot centre from the bulb's image, a slightly darker ring around it, the reflector's
++// even corona with faint concentric rings (`rings` 0..1) and a soft edge, and a dim spill just
++// outside the cone. 1.65 on the axis, ~0.75 across the corona, ~0.1 at the edge.
++fn enh_beam_profile(x: f32, rings: f32) -> f32 {
++  if (x >= 1.45) { return 0.0; }
++  let hot = exp(-x * x * 9.0);
++  let corona = 1.0 - smoothstep(0.62, 1.02, x);
++  let dip = 1.0 - 0.2 * exp(-(x - 0.48) * (x - 0.48) * 90.0);
++  let ripple = 1.0 + rings * 0.06 * sin(x * 26.0) * corona;
++  let spill = (1.0 - smoothstep(0.9, 1.45, x)) * 0.07;
++  return (hot * 0.9 + corona * 0.75 * dip) * ripple + spill;
++}
++)""";
++} // namespace aurora::gfx
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+index df1142f..f0e14a6 100644
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -2,6 +2,7 @@
+ // screen-space effects (bloom, volumetric flashlight beam, ambient occlusion).
+ // See include/aurora/enhanced.h and include/aurora/lights.h.
+ #include "enhanced.hpp"
++#include "beam_profile.hpp"
+ 
+ #include "encoding.hpp"
+ #include "pipeline_cache.hpp"
+@@ -48,7 +49,8 @@ bool same(const AuroraEnhancedConfig& a, const AuroraEnhancedConfig& b) {
+          EQ(ssaoIntensity) && EQ(ssaoRadius) &&
+          // 0031: the fields added after 0016 (changing only them did not reach the renderer)
+          EQ(extraShadows) && EQ(extraShadowQuality) && EQ(extraShadowMode) && EQ(extraShadowLights) &&
+-         EQ(extraShadowMapSize) && EQ(extraShadowSoftness) && EQ(shadowDarkness) && EQ(shadowAmbientKeep);
++         EQ(extraShadowMapSize) && EQ(extraShadowSoftness) && EQ(shadowDarkness) && EQ(shadowAmbientKeep) &&
++         EQ(realisticFlashlight) && EQ(beamDensity) && EQ(beamDust);
+ #undef EQ
+ }
+ 
+@@ -71,6 +73,33 @@ struct Flashlight {
+ Flashlight g_flash;
+ float g_flashDist2 = 0.f;
+ 
++// 0196: realistic flashlight. The flashlight's shadow map as the game's receivers see it: taken
++// from the first main-view draw doing the shadow compare (TEV GR16 compare of the depth-ramp key
++// against the Z16 copy read as IA8), with its two projective texgens turned into view space
++// (texgen x post matrix x inverse position matrix), so the scattering pass can test any point in
++// the air the same way. In interpolated replays the receivers' matrices are rebuilt from the
++// blended light (docs/INTERPOLATION.md), so this follows the presented frame.
++struct BeamShadow {
++  bool valid = false;
++  float map[3][4]{};  // view -> s, t, q of the shadow map
++  float ramp[2][4]{}; // view -> s, q of the depth ramp (receiver key = floor(65536 s / q))
++  float center[3]{};  // the light the map was rendered from (where all three map rows vanish)
++  bool centerValid = false;
++  TextureHandle tex;
++  uint32_t sr = 0, sg = 0;
++};
++BeamShadow g_beam;
++// World anchor (AURORA_EXTRA_LIGHT_ANCHOR pseudo-lights): view positions of world points.
++std::array<std::array<float, 3>, 3> g_anchor{};
++bool g_anchorValid = false;
++// Flash / flare detection: the flashlight's brightness relative to its recent steady level.
++float g_flashLevel = 0.f;
++float g_flare = 0.f;
++float g_flarePulse = 0.f;              // decaying flare impulse (aurora_enhanced_beam_flare, power-on)
++std::atomic<float> g_flareKick{0.f};   // set from any thread
++float g_flashOffTime = 0.f;            // seconds the flashlight has been off (scene ends without it)
++bool beam_on() noexcept { return g_cfg.enabled && g_cfg.realisticFlashlight != 0; }
++
+ // Vibrance: push a light color away from its gray (luma) by `sat`, keeping its brightest channel,
+ // so every provider (ghost lights, test lights) gets one consistent saturated look.
+ std::array<float, 3> vivid(const float c[3], float sat) noexcept {
+@@ -203,6 +232,7 @@ struct Fx {
+   bloom2: vec4f, // scene highlights amount, emissive amount, light glow amount, light count
+   glowdepth: vec4f, // glow depth pass: source scale xy (glow -> target pixels), reversed z, bias
+   xl: array<vec4f, 36>, // light shadows (0187: 16 lights): see fs_xlshadow / cube_occlusion
++  beam: array<vec4f, 16>, // 0196 realistic flashlight (see fs_beam)
+ };
+ @group(0) @binding(0) var<uniform> fx: Fx;
+ @group(0) @binding(1) var samp: sampler;
+@@ -711,6 +741,307 @@ fn fs_vol(in: VsOut) -> @location(0) vec4f {
+   return vec4f(fx.lcol.rgb * (1.0 - exp(-v)), 1.0);
+ }
+ 
++// ---- 0196: realistic flashlight -----------------------------------------------------------
++// Single scattering of the flashlight in the room's air, ray-marched along each view ray through
++// the part of it inside the beam, every sample tested against the flashlight's own shadow map
++// (the game's Z16 copy, read as the receivers read it), so Luigi's hand, furniture, ghosts and
++// door frames cut shadow shafts into the haze. fx.beam:
++//   0-2  shadow map texgen rows (view space -> s, t, q)      3, 4  depth-ramp texgen rows (s, q)
++//   5    shadow valid, swap index of the key's low / high byte, map width
++//   6    density (scattering coefficient), dust, steps, march range from the lens
++//   7    cone edge cosine (GX cutoff), anchor valid, time (s), flare
++//   8-10 world anchor: view positions of a world point and of points 256 units along world X / Y
++//   11   reflector rings, lens radius^2, reference distance^2, world size of a pixel at distance 1
++//   12   map height, quality, 0, 0
++fn beam_key(t: vec4f, sr: u32, sg: u32) -> f32 {
++  let v = round(clamp(t, vec4f(0.0), vec4f(1.0)) * 255.0);
++  return v[sg] * 256.0 + v[sr];
++}
++// Fraction of the flashlight reaching view-space point p (2x2 bilinear PCF on the shadow map).
++fn beam_vis(p: vec3f) -> f32 {
++  if (fx.beam[5].x < 0.5) { return 1.0; }
++  let h = vec4f(p, 1.0);
++  let q = dot(fx.beam[2], h);
++  if (q <= 1e-4) { return 1.0; }
++  let uv = vec2f(dot(fx.beam[0], h), dot(fx.beam[1], h)) / q;
++  if (any(uv < vec2f(0.0)) || any(uv > vec2f(1.0))) { return 1.0; }
++  let rq = dot(fx.beam[4], h);
++  if (abs(rq) < 1e-6) { return 1.0; }
++  let recv = min(floor(clamp(dot(fx.beam[3], h) / rq, 0.0, 1.0) * 65536.0), 65535.0);
++  let dims = vec2f(fx.beam[5].w, fx.beam[12].x);
++  let sr = u32(fx.beam[5].y);
++  let sg = u32(fx.beam[5].z);
++  let f = uv * dims - vec2f(0.5);
++  let b = floor(f);
++  let w = f - b;
++  var v = vec4f(0.0);
++  for (var k = 0u; k < 4u; k++) {
++    let c = clamp(vec2i(b) + vec2i(i32(k & 1u), i32(k >> 1u)), vec2i(0), vec2i(dims) - vec2i(1));
++    v[k] = select(1.0, 0.0, recv - 48.0 > beam_key(textureLoad(t0, c, 0), sr, sg));
++  }
++  return mix(mix(v.x, v.y, w.x), mix(v.z, v.w, w.x), w.y);
++}
++fn beam_inside(p: vec3f, a: vec3f, cosc: f32) -> bool {
++  let v = p - fx.lpos.xyz;
++  let d = dot(v, a);
++  return d > 0.0 && d >= cosc * length(v);
++}
++// [t0, t1] of the ray (origin 0, direction dir, up to tmax) inside the cone (apex at the lens,
++// axis a, half-angle acos(cosc)); x < 0 when it misses. The cone is convex: one interval at most.
++fn beam_interval(dir: vec3f, tmax: f32, a: vec3f, cosc: f32) -> vec2f {
++  let co = -fx.lpos.xyz;
++  let da = dot(dir, a);
++  let ca = dot(co, a);
++  let c2 = cosc * cosc;
++  let qa = da * da - c2;
++  let qb = 2.0 * (da * ca - c2 * dot(dir, co));
++  let qc = ca * ca - c2 * dot(co, co);
++  var ts = array<f32, 4>(0.0, tmax, tmax, tmax);
++  var n = 2u;
++  var r0 = -1.0;
++  var r1 = -1.0;
++  if (abs(qa) > 1e-7) {
++    let disc = qb * qb - 4.0 * qa * qc;
++    if (disc >= 0.0) {
++      let sd = sqrt(disc);
++      r0 = (-qb - sd) / (2.0 * qa);
++      r1 = (-qb + sd) / (2.0 * qa);
++      if (r0 > r1) { let tt = r0; r0 = r1; r1 = tt; }
++    }
++  } else if (abs(qb) > 1e-7) {
++    r0 = -qc / qb;
++  }
++  if (r0 > 0.0 && r0 < tmax) { ts[1] = r0; ts[2] = tmax; n = 3u; }
++  if (r1 > 0.0 && r1 < tmax && r1 > ts[n - 2u]) { ts[n - 1u] = r1; ts[n] = tmax; n = n + 1u; }
++  var lo = -1.0;
++  var hi = -1.0;
++  for (var i = 0u; i + 1u < n; i++) {
++    let m = 0.5 * (ts[i] + ts[i + 1u]);
++    if (ts[i + 1u] > ts[i] && beam_inside(dir * m, a, cosc)) {
++      if (lo < 0.0) { lo = ts[i]; }
++      hi = ts[i + 1u];
++    }
++  }
++  return vec2f(lo, hi);
++}
++// Henyey-Greenstein phase (unnormalised: 1 at 90 degrees for g = 0).
++fn beam_hg(c: f32, g: f32) -> f32 {
++  let d = 1.0 + g * g - 2.0 * g * c;
++  return (1.0 - g * g) / (d * sqrt(d));
++}
++// World-anchored detail (haze, dust) is sampled relative to the anchor point (fx.beam[8..10]),
++// which the port snaps to 1024 units: every pattern repeats every 1024 units, so re-anchoring is
++// seamless.
++// Integer hash (PCG 3D): cheap and exact on every GPU, unlike sin-based hashes.
++fn beam_pcg3(v0: vec3u) -> vec3u {
++  var v = v0 * 1664525u + vec3u(1013904223u);
++  v.x = v.x + v.y * v.z;
++  v.y = v.y + v.z * v.x;
++  v.z = v.z + v.x * v.y;
++  v = v ^ (v >> vec3u(16u));
++  v.x = v.x + v.y * v.z;
++  v.y = v.y + v.z * v.x;
++  v.z = v.z + v.x * v.y;
++  return v;
++}
++fn beam_hash3p(c: vec3i, period: i32) -> vec3f {
++  let m = ((c % vec3i(period)) + vec3i(period)) % vec3i(period);
++  return vec3f(beam_pcg3(vec3u(m))) * (1.0 / 4294967296.0);
++}
++fn beam_hashp(c: vec3i, period: i32) -> f32 { return beam_hash3p(c, period).x; }
++// Periodic value noise (lattice `cell` units, `period` cells = 1024 units).
++fn beam_noise(w: vec3f, cell: f32, period: i32) -> f32 {
++  let p = w / cell;
++  let i = vec3i(floor(p));
++  let f = fract(p);
++  let u = f * f * (3.0 - 2.0 * f);
++  let a = mix(mix(beam_hashp(i, period), beam_hashp(i + vec3i(1, 0, 0), period), u.x),
++              mix(beam_hashp(i + vec3i(0, 1, 0), period), beam_hashp(i + vec3i(1, 1, 0), period), u.x), u.y);
++  let b = mix(mix(beam_hashp(i + vec3i(0, 0, 1), period), beam_hashp(i + vec3i(1, 0, 1), period), u.x),
++              mix(beam_hashp(i + vec3i(0, 1, 1), period), beam_hashp(i + vec3i(1, 1, 1), period), u.x), u.y);
++  return mix(a, b, u.z);
++}
++// Light arriving at p from the flashlight (no phase): profile x inverse square x extinction x shadow.
++fn beam_light(p: vec3f, a: vec3f, thc: f32) -> f32 {
++  let v = p - fx.lpos.xyz;
++  let r = length(v);
++  let x = acos(clamp(dot(v, a) / max(r, 1e-4), -1.0, 1.0)) / thc;
++  let prof = enh_beam_profile(x, fx.beam[11].x);
++  if (prof <= 0.0) { return 0.0; }
++  // Inverse square, capped at 4x the reference level: right at the lens the air (and a camera looking
++  // down the beam from close by) would otherwise see an unbounded, screen-filling white.
++  let e = min((fx.beam[11].z + fx.beam[11].y) / (r * r + fx.beam[11].y), 4.0);
++  // Light lost on the way: the room air (a beam fades within a few metres) plus the haze density.
++  return prof * e * exp(-r * (0.0007 + fx.beam[6].x * 0.15)) * beam_vis(p);
++}
++@fragment
++fn fs_beam(in: VsOut) -> @location(0) vec4f {
++  let px = in.uv * fx.size.xy;
++  let d = load_depth(px);
++  let empty = d <= fx.dr.x + 1e-7;
++  let surf = view_pos(px, select(d, fx.dr.x + 2e-7, empty));
++  let slen = length(surf);
++  let dir = surf / max(slen, 1e-4);
++  let zout = min(select(-surf.z, 60000.0, empty), 60000.0);
++  if (fx.lpos.w < 0.5) { return vec4f(0.0, 0.0, zout, 1.0); }
++  let a = -normalize(fx.ldir.xyz);
++  let thc = acos(clamp(fx.beam[7].x, -1.0, 0.9999));
++  let cosSpill = cos(min(thc * 1.45, 1.5));
++  let L = fx.lpos.xyz;
++  let tmax = min(select(slen, 1e6, empty), length(L) + fx.beam[6].w);
++  var iv = beam_interval(dir, tmax, a, cosSpill);
++  // Only within the march range of the lens (sphere around it): the inverse square has faded.
++  {
++    let bL = dot(dir, L);
++    let disc = bL * bL - (dot(L, L) - fx.beam[6].w * fx.beam[6].w);
++    if (disc <= 0.0) { return vec4f(0.0, 0.0, zout, 1.0); }
++    let sd = sqrt(disc);
++    iv = vec2f(max(iv.x, bL - sd), min(iv.y, bL + sd));
++  }
++  if (iv.y <= iv.x) { return vec4f(0.0, 0.0, zout, 1.0); }
++  if (iv.x < 0.0 || iv.y <= iv.x) { return vec4f(0.0, 0.0, zout, 1.0); }
++  // Scattering: a fixed per-pixel jitter (stable at any frame rate), smoothed by the blur pass.
++  let steps = max(fx.beam[6].z, 4.0);
++  let dt = (iv.y - iv.x) / steps;
++  let jit = ign(floor(in.pos.xy));
++  let anchored = fx.beam[7].y > 0.5;
++  let time = fx.beam[7].z;
++  // World frame of the ray (anchor pseudo-lights): w(t) = wc + wd * t.
++  let o = fx.beam[8].xyz;
++  let ex = normalize(fx.beam[9].xyz - o);
++  var ey = fx.beam[10].xyz - o;
++  ey = normalize(ey - ex * dot(ey, ex));
++  let ez = cross(ex, ey);
++  let wc = vec3f(dot(-o, ex), dot(-o, ey), dot(-o, ez));
++  let wd = vec3f(dot(dir, ex), dot(dir, ey), dot(dir, ez));
++  // Haze: slowly drifting, world-anchored density, evaluated at 9 points along the lit segment
++  // and interpolated (integrated along the ray, finer detail would average out anyway).
++  var hz = array<f32, 9>(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
++  if (anchored) {
++    let drift = vec3f(time * 6.0, time * 2.5, time * -4.0);
++    for (var k = 0u; k < 9u; k++) {
++      let w = wc + wd * (iv.x + (iv.y - iv.x) * f32(k) / 8.0) + drift;
++      hz[k] = 0.4 + 1.2 * (beam_noise(w, 128.0, 8) * 0.7 + beam_noise(w + vec3f(37.0), 64.0, 16) * 0.3);
++    }
++  }
++  var acc = 0.0;
++  for (var s = 0.0; s < steps; s = s + 1.0) {
++    let u = (s + jit) / steps;
++    let t = iv.x + u * (iv.y - iv.x);
++    let p = dir * t;
++    let li = beam_light(p, a, thc);
++    if (li <= 0.0) { continue; }
++    let lv = normalize(L - p);
++    // Dust and droplets scatter mostly forward (looking into the lens is brighter), plus an
++    // isotropic part so the beam stays visible from the side.
++    let phase = 0.55 + 0.1 * beam_hg(dot(lv, dir), 0.35);
++    let hf = min(u * 8.0, 7.999);
++    let hi = u32(hf);
++    let haze = mix(hz[hi], hz[hi + 1u], hf - f32(hi));
++    acc = acc + li * phase * haze * exp(-fx.beam[6].x * 0.04 * t);
++  }
++  let scatter = acc * dt * fx.beam[6].x;
++  // Dust motes: one possible mote per 32-unit world cell (periodic hash), walked with a 3D DDA
++  // along the lit part of the ray near the lens; each is a tiny glint lit only by the beam (and
++  // its shadows).
++  var motes = 0.0;
++  if (anchored && fx.beam[6].y > 0.0) {
++    let C = 32.0;
++    let t0 = iv.x;
++    // Only where the beam is bright enough to light dust (within ~900 units of the lens).
++    let bL = dot(dir, L);
++    let disc = bL * bL - (dot(L, L) - 900.0 * 900.0);
++    let t1 = select(-1.0, min(iv.y, bL + sqrt(max(disc, 0.0))), disc > 0.0);
++    let w0 = wc + wd * t0;
++    var cell = vec3i(floor(w0 / C));
++    let stp = vec3i(sign(wd));
++    let inv = 1.0 / max(abs(wd), vec3f(1e-6));
++    let cellf = vec3f(cell);
++    let bnd = select(cellf * C, (cellf + vec3f(1.0)) * C, wd > vec3f(0.0));
++    var tmx = abs(bnd - w0) * inv;
++    let tdl = C * inv;
++    var tc = 0.0;
++    let maxIt = u32(fx.beam[12].y);
++    let chance = 0.16 * fx.beam[6].y;
++    for (var it = 0u; it < maxIt; it++) {
++      if (t0 + tc > t1) { break; }
++      let h = beam_hash3p(cell, 32);
++      if (h.x < chance) {
++        let r = beam_hash3p(cell + vec3i(7, 11, 13), 32);
++        let ph = r * 6.2831853;
++        let drift = vec3f(sin(time * (0.21 + 0.17 * r.x) + ph.x), sin(time * (0.13 + 0.11 * r.y) + ph.y),
++                          sin(time * (0.17 + 0.13 * r.z) + ph.z)) * (0.18 * C);
++        let mw = (vec3f(cell) + vec3f(0.2) + r * 0.6) * C + drift;
++        let mv = o + ex * mw.x + ey * mw.y + ez * mw.z;
++        let tm = dot(mv, dir);
++        if (tm > 1.0 && tm < tmax) {
++          let pr = tm * fx.beam[11].w;
++          let sig = max(0.7, pr * 0.55);
++          let off = mv - dir * tm;
++          let d2 = dot(off, off);
++          if (d2 < 9.0 * sig * sig) {
++            let li = beam_light(mv, a, thc);
++            if (li > 0.0) {
++              let lv = normalize(L - mv);
++              let tw = 0.3 + 0.7 * (0.5 + 0.5 * sin(time * (1.3 + 2.7 * h.y) + h.z * 18.0));
++              motes = motes + li * exp(-0.5 * d2 / (sig * sig)) * (0.49 / (sig * sig)) * tw *
++                              (0.25 + 0.75 * beam_hg(dot(lv, dir), 0.6) * 0.15) * exp(-fx.beam[6].x * 0.04 * tm);
++            }
++          }
++        }
++      }
++      // next cell
++      if (tmx.x < tmx.y && tmx.x < tmx.z) { tc = tmx.x; tmx.x = tmx.x + tdl.x; cell.x = cell.x + stp.x; }
++      else if (tmx.y < tmx.z) { tc = tmx.y; tmx.y = tmx.y + tdl.y; cell.y = cell.y + stp.y; }
++      else { tc = tmx.z; tmx.z = tmx.z + tdl.z; cell.z = cell.z + stp.z; }
++    }
++    motes = motes * 1.1 * fx.beam[6].y;
++  }
++  return vec4f(scatter, motes, zout, 1.0);
++}
++// Depth-aware separable blur of the scattering (r); motes (g) and depth (b) pass through.
++@fragment
++fn fs_beamblur(in: VsOut) -> @location(0) vec4f {
++  let dims = vec2i(textureDimensions(t0));
++  let c0 = vec2i(floor(in.pos.xy));
++  let ctr = textureLoad(t0, c0, 0);
++  let tol = ctr.b * 0.03 + 4.0;
++  var sum = 0.0;
++  var ws = 0.0;
++  for (var k = -4; k <= 4; k++) {
++    let c = clamp(c0 + vec2i(fx.pp.xy * f32(k)), vec2i(0), dims - vec2i(1));
++    let v = textureLoad(t0, c, 0);
++    let w = exp(-f32(k * k) / 8.0) * exp(-abs(v.b - ctr.b) / tol);
++    sum = sum + v.r * w;
++    ws = ws + w;
++  }
++  return vec4f(sum / max(ws, 1e-5), ctr.g, ctr.b, 1.0);
++}
++// The beam at a full-resolution pixel: depth-aware upsample of the beam target (t1), so the
++// haze stops cleanly at silhouettes in front of it.
++fn beam_upsample(uv: vec2f) -> vec2f {
++  let px = uv * fx.size.xy;
++  let dd = load_depth(px);
++  let z0 = select(-view_pos(px, dd).z, 60000.0, dd <= fx.dr.x + 1e-7);
++  let bd = vec2f(textureDimensions(t1));
++  let f = uv * bd - vec2f(0.5);
++  let b = floor(f);
++  let w = f - b;
++  var acc = vec2f(0.0);
++  var ws = 0.0;
++  let tol = z0 * 0.03 + 4.0;
++  for (var k = 0u; k < 4u; k++) {
++    let o = vec2i(i32(k & 1u), i32(k >> 1u));
++    let c = clamp(vec2i(b) + o, vec2i(0), vec2i(bd) - vec2i(1));
++    let v = textureLoad(t1, c, 0);
++    let bw = select(1.0 - w.x, w.x, o.x == 1) * select(1.0 - w.y, w.y, o.y == 1);
++    let wt = bw * exp(-abs(min(v.b, 60000.0) - min(z0, 60000.0)) / tol) + 1e-4 * bw;
++    acc = acc + v.rg * wt;
++    ws = ws + wt;
++  }
++  return acc / max(ws, 1e-6);
++}
++
+ // Ambient occlusion from the depth buffer (normal from depth, 12 hemisphere samples).
+ @fragment
+ fn fs_ao(in: VsOut) -> @location(0) vec4f {
+@@ -795,7 +1126,21 @@ fn fs_composite(in: VsOut) -> @location(0) vec4f {
+   if ((mask & 1u) != 0u) {
+     add = add + textureSampleLevel(t0, samp, in.uv, 0.0).rgb * fx.bloom.x;
+   }
+-  if ((mask & 2u) != 0u) {
++  if ((mask & 32u) != 0u) {
++    // 0196: realistic flashlight: scattering + motes in the flashlight's colour, a little whiter
++    // where the beam is dense (the eye sees a bright beam as white), compressed so a beam pointing
++    // into the camera saturates smoothly; flare (fx.beam[7].w) brightens it during a flash.
++    let b = beam_upsample(in.uv);
++    var v = (b.x + b.y) * (1.0 + fx.beam[7].w * 2.5);
++    if ((mask & 128u) != 0u) { v = b.y * 20.0; } // AURORA_BEAM_SHOW=2: the dust motes alone, amplified
++    let fl = fx.beam[7].w;
++    let col = mix(fx.lcol.rgb, vec3f(1.0), clamp(v * 0.25 + fl * 0.4, 0.0, 0.6));
++    add = add + col * (1.0 - exp(-v));
++    // (No glare sprite at the lens: enhanced lighting never draws a halo or orb at a light's
++    // position, which showed as a ball behind Luigi's head when the lens was hidden. The flash
++    // brightens the beam itself; the game's own lens sprite glows through the glow buffer.)
++    if ((mask & 64u) != 0u) { return vec4f(col * (1.0 - exp(-v)), 0.0); } // AURORA_BEAM_SHOW: the beam alone
++  } else if ((mask & 2u) != 0u) {
+     add = add + textureSampleLevel(t1, samp, in.uv, 0.0).rgb;
+   }
+   var ao = 1.0;
+@@ -824,8 +1169,9 @@ struct FxUniform {
+   float bloom2[4];
+   float glowdepth[4];
+   float xl[36][4];
++  float beam[16][4]; // 0196
+ };
+-static_assert(sizeof(FxUniform) == 224 + 32 + 576);
++static_assert(sizeof(FxUniform) == 224 + 32 + 576 + 256);
+ 
+ constexpr uint32_t MaxBloomLevels = 6;
+ constexpr auto HdrFormat = wgpu::TextureFormat::RGBA16Float;
+@@ -868,6 +1214,9 @@ struct Gpu {
+   // 0186: raw occlusion before the 4x4 blur
+   Tex maskAoRaw;
+   wgpu::RenderPipeline aoBlur4Pipe;
++  // 0196 realistic flashlight
++  wgpu::RenderPipeline beam, beamBlur;
++  Tex beamTex, beamTmp;
+ };
+ Gpu g_gpu;
+ 
+@@ -922,7 +1271,9 @@ bool init_gpu() {
+     return !g_gpu.failed;
+   }
+   g_gpu.initialized = true;
+-  const wgpu::ShaderSourceWGSL wgsl{{.code = FxShader.data()}};
++  // 0196: the beam profile shared with the surface shaders comes first.
++  static const std::string code = std::string(BeamProfileWgsl) + std::string(FxShader);
++  const wgpu::ShaderSourceWGSL wgsl{{.code = code.c_str()}};
+   const wgpu::ShaderModuleDescriptor moduleDesc{.nextInChain = &wgsl, .label = "Enhanced lighting effects"};
+   g_gpu.module = webgpu::g_device.CreateShaderModule(&moduleDesc);
+   std::array<wgpu::BindGroupLayoutEntry, 6> entries{};
+@@ -966,6 +1317,11 @@ bool init_gpu() {
+   g_gpu.vol = make_pipeline("fs_vol", HdrFormat, 1, nullptr, all);
+   g_gpu.ao = make_pipeline("fs_ao", HdrFormat, 1, nullptr, all);
+   g_gpu.aoblur = make_pipeline("fs_aoblur", HdrFormat, 1, nullptr, all);
++  g_gpu.beam = make_pipeline("fs_beam", HdrFormat, 1, nullptr, all);
++  g_gpu.beamBlur = make_pipeline("fs_beamblur", HdrFormat, 1, nullptr, all);
++  if (!g_gpu.beam || !g_gpu.beamBlur) {
++    Log.error("Realistic flashlight pass failed to build");
++  }
+   if (!g_gpu.bright || !g_gpu.down || !g_gpu.up || !g_gpu.vol || !g_gpu.ao || !g_gpu.aoblur) {
+     Log.error("Enhanced lighting effects failed to build; screen-space effects disabled");
+     g_gpu.failed = true;
+@@ -988,14 +1344,16 @@ wgpu::BindGroup bind(const Range& uniform, const wgpu::TextureView& a, const wgp
+ }
+ 
+ void run_pass(const wgpu::CommandEncoder& cmd, const char* label, const wgpu::TextureView& target,
+-              const wgpu::RenderPipeline& pipeline, const wgpu::BindGroup& bg, bool load) {
++              const wgpu::RenderPipeline& pipeline, const wgpu::BindGroup& bg, bool load,
++              const wgpu::PassTimestampWrites* timing = nullptr) {
+   const wgpu::RenderPassColorAttachment att{
+       .view = target,
+       .loadOp = load ? wgpu::LoadOp::Load : wgpu::LoadOp::Clear,
+       .storeOp = wgpu::StoreOp::Store,
+       .clearValue = {0, 0, 0, 0},
+   };
+-  const wgpu::RenderPassDescriptor desc{.label = label, .colorAttachmentCount = 1, .colorAttachments = &att};
++  const wgpu::RenderPassDescriptor desc{
++      .label = label, .colorAttachmentCount = 1, .colorAttachments = &att, .timestampWrites = timing};
+   const auto pass = cmd.BeginRenderPass(&desc);
+   pass.SetPipeline(pipeline);
+   pass.SetBindGroup(0, bg);
+@@ -1015,12 +1373,16 @@ std::pair<uint32_t, uint32_t> bloom_base_size(uint32_t width, uint32_t height) n
+ }
+ 
+ struct SceneJob {
+-  uint32_t mask = 0; // 1 bloom, 2 volumetric, 4 ambient occlusion
++  uint32_t mask = 0; // 1 bloom, 2 volumetric, 4 ambient occlusion, 32 realistic flashlight (0196)
+   uint32_t bloomLevels = 0;
+   bool glowValid = false; // the glow buffer was rendered this frame
+   uint32_t volDiv = 2;
+   Range base{};                                  // FxUniform for full-size passes
+   std::array<Range, MaxBloomLevels * 2 + 2> passes{}; // per bloom pass + ao blur
++  // 0196 realistic flashlight: shadow map, target size, blur passes
++  TextureHandle beamShadow;
++  uint32_t beamW = 0, beamH = 0;
++  Range beamBlur[2]{};
+ };
+ 
+ // Glow buffer (bloom level 0 size). Emissive draws are re-rendered right after the EFB pass
+@@ -1484,6 +1846,83 @@ void encode_mask(const wgpu::CommandEncoder& cmd, const MaskJob& job) {
+   timing_end(cmd);
+ }
+ 
++// 0196: GPU time of the flashlight passes (AURORA_ENH_GPU_TIMING=1): the realistic flashlight
++// (scattering + blur) or, with it off, the volumetric beam; averaged and logged every 240 frames.
++struct BeamTiming {
++  wgpu::QuerySet qs;
++  struct Slot {
++    wgpu::Buffer resolve, readback;
++    std::atomic<int> state{0}; // 0 free, 1 written, 2 mapping, 3 mapped
++  };
++  std::array<Slot, 6> slots;
++  wgpu::PassTimestampWrites first{}, last{};
++  int cur = -1;
++  double sum = 0, cnt = 0;
++} g_beamTiming;
++bool beam_timing_begin() {
++  auto& b = g_beamTiming;
++  b.cur = -1;
++  if (!timing_on()) {
++    return false;
++  }
++  if (!b.qs) {
++    const wgpu::QuerySetDescriptor qd{.label = "Flashlight timing", .type = wgpu::QueryType::Timestamp, .count = 2};
++    b.qs = webgpu::g_device.CreateQuerySet(&qd);
++    for (auto& sl : b.slots) {
++      const wgpu::BufferDescriptor rd{.usage = wgpu::BufferUsage::QueryResolve | wgpu::BufferUsage::CopySrc, .size = 16};
++      sl.resolve = webgpu::g_device.CreateBuffer(&rd);
++      const wgpu::BufferDescriptor bd{.usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst, .size = 16};
++      sl.readback = webgpu::g_device.CreateBuffer(&bd);
++    }
++    b.first = {.querySet = b.qs, .beginningOfPassWriteIndex = 0, .endOfPassWriteIndex = wgpu::kQuerySetIndexUndefined};
++    b.last = {.querySet = b.qs, .beginningOfPassWriteIndex = wgpu::kQuerySetIndexUndefined, .endOfPassWriteIndex = 1};
++  }
++  for (int i = 0; i < int(b.slots.size()); ++i) {
++    if (b.slots[i].state.load() == 0) {
++      b.cur = i;
++      return true;
++    }
++  }
++  return false;
++}
++void beam_timing_end(const wgpu::CommandEncoder& cmd) {
++  auto& b = g_beamTiming;
++  if (b.cur < 0) {
++    return;
++  }
++  auto& sl = b.slots[b.cur];
++  cmd.ResolveQuerySet(b.qs, 0, 2, sl.resolve, 0);
++  cmd.CopyBufferToBuffer(sl.resolve, 0, sl.readback, 0, 16);
++  sl.state.store(1);
++  b.cur = -1;
++}
++void beam_timing_after_submit() {
++  auto& b = g_beamTiming;
++  for (auto& sl : b.slots) {
++    if (sl.state.load() == 3) {
++      const auto* ts = static_cast<const uint64_t*>(sl.readback.GetConstMappedRange(0, 16));
++      if (ts != nullptr && ts[1] > ts[0] && ts[1] - ts[0] < 1000000000ull) {
++        b.sum += double(ts[1] - ts[0]) * 1e-6;
++        b.cnt += 1;
++      }
++      sl.readback.Unmap();
++      sl.state.store(0);
++      if (b.cnt >= 240) {
++        Log.info("flashlight GPU (ms per frame): {:.3f} ({})", b.sum / b.cnt,
++                 g_cfg.realisticFlashlight != 0 ? "realistic" : "volumetric beam");
++        b.sum = 0;
++        b.cnt = 0;
++      }
++    } else if (sl.state.load() == 1) {
++      sl.state.store(2);
++      sl.readback.MapAsync(wgpu::MapMode::Read, 0, 16, wgpu::CallbackMode::AllowSpontaneous,
++                           [&sl](wgpu::MapAsyncStatus status, wgpu::StringView) {
++                             sl.state.store(status == wgpu::MapAsyncStatus::Success ? 3 : 0);
++                           });
++    }
++  }
++}
++
+ void encode_scene(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, const SceneJob& job) {
+   if (!init_gpu()) {
+     return;
+@@ -1524,7 +1963,23 @@ void encode_scene(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, co
+     bloomView = g_gpu.bloom[0].view;
+   }
+   wgpu::TextureView volView;
+-  if ((job.mask & 2u) != 0) {
++  if ((job.mask & 32u) != 0 && g_gpu.beam && g_gpu.beamBlur) {
++    // 0196: scattering + motes at reduced resolution, then a depth-aware separable blur.
++    ensure_tex(g_gpu.beamTex, job.beamW, job.beamH, HdrFormat, rt, "Realistic flashlight");
++    ensure_tex(g_gpu.beamTmp, job.beamW, job.beamH, HdrFormat, rt, "Realistic flashlight blur");
++    const wgpu::TextureView shadow = job.beamShadow ? job.beamShadow->sampleTextureView : wgpu::TextureView{};
++    const bool timed = beam_timing_begin();
++    run_pass(cmd, "Flashlight scattering", g_gpu.beamTex.view, g_gpu.beam, bind(job.base, shadow, {}, {}, g_gpu.depth.view),
++             false, timed ? &g_beamTiming.first : nullptr);
++    run_pass(cmd, "Flashlight blur H", g_gpu.beamTmp.view, g_gpu.beamBlur, bind(job.beamBlur[0], g_gpu.beamTex.view, {}, {}, {}),
++             false);
++    run_pass(cmd, "Flashlight blur V", g_gpu.beamTex.view, g_gpu.beamBlur, bind(job.beamBlur[1], g_gpu.beamTmp.view, {}, {}, {}),
++             false, timed ? &g_beamTiming.last : nullptr);
++    if (timed) {
++      beam_timing_end(cmd);
++    }
++    volView = g_gpu.beamTex.view;
++  } else if ((job.mask & 2u) != 0) {
+     // The haze is smooth: at most 540 (low) / 720 lines whatever the render resolution.
+     uint32_t vw = std::max(t.width / job.volDiv, 1u), vh = std::max(t.height / job.volDiv, 1u);
+     const uint32_t cap = job.volDiv >= 4 ? 540u : 720u;
+@@ -1533,7 +1988,14 @@ void encode_scene(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, co
+       vh = cap;
+     }
+     ensure_tex(g_gpu.volTex, vw, vh, HdrFormat, rt, "Enhanced volumetric");
+-    run_pass(cmd, "Volumetric beam", g_gpu.volTex.view, g_gpu.vol, bind(job.base, {}, {}, {}, g_gpu.depth.view), false);
++    if (beam_timing_begin()) {
++      // Both writes on the one pass: begin and end.
++      const wgpu::PassTimestampWrites both{.querySet = g_beamTiming.qs, .beginningOfPassWriteIndex = 0, .endOfPassWriteIndex = 1};
++      run_pass(cmd, "Volumetric beam", g_gpu.volTex.view, g_gpu.vol, bind(job.base, {}, {}, {}, g_gpu.depth.view), false, &both);
++      beam_timing_end(cmd);
++    } else {
++      run_pass(cmd, "Volumetric beam", g_gpu.volTex.view, g_gpu.vol, bind(job.base, {}, {}, {}, g_gpu.depth.view), false);
++    }
+     volView = g_gpu.volTex.view;
+   }
+   wgpu::TextureView aoView;
+@@ -1572,7 +2034,9 @@ void encode_scene(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, co
+                                                                                         : g_gpu.glow.view)
+                                                  : bloomView,
+                             volView, aoView,
+-                            (job.mask & 16u) != 0 ? g_gpu.glowSrcDepth.view : wgpu::TextureView{}));
++                            (job.mask & 16u) != 0   ? g_gpu.glowSrcDepth.view
++                            : (job.mask & 32u) != 0 ? g_gpu.depth.view
++                                                    : wgpu::TextureView{}));
+   pass.Draw(3);
+   pass.End();
+ }
+@@ -1684,6 +2148,15 @@ DrawUniform draw_uniform() noexcept {
+     u.flashSoft = std::clamp(c.flashlightSoftness, 0.f, 1.f);
+     u.flashSpec = std::clamp(c.flashlightSpecular, 0.f, 2.f);
+   }
++  if (c.realisticFlashlight != 0) {
++    // 0196: the realistic footprint replaces the spot term of bright spot lights (per pixel).
++    u.flags |= 8u | 32u;
++    u.flashSoft = 0.f;
++    u.beamGain = 1.2f * (1.f + 0.6f * g_flare);
++    u.beamDref2 = 650.f * 650.f;
++    u.beamFloor = 0.25f;
++    u.beamRings = c.realisticFlashlight >= 2 ? 1.f : 0.6f;
++  }
+   // 0032: forward ambient occlusion in opaque (and alpha-tested) world surfaces only: nothing
+   // translucent or additive in front of occluded geometry gets darker.
+   const auto& gs = gx::g_gxState;
+@@ -1780,8 +2253,25 @@ void assign_shadow_slots() noexcept {
+ }
+ } // namespace
+ 
+-void set_lights(const ExtraLight* lights, uint32_t count) noexcept {
+-  count = std::min(count, MaxExtraLights);
++void set_lights(const ExtraLight* in, uint32_t count) noexcept {
++  // 0196: world-anchor pseudo-lights are taken out of the set.
++  std::array<ExtraLight, MaxExtraLights> real{};
++  uint32_t n = 0;
++  uint32_t anchors = 0;
++  for (uint32_t i = 0; i < std::min(count, MaxExtraLights); ++i) {
++    if ((in[i].flags & AURORA_EXTRA_LIGHT_ANCHOR) != 0) {
++      const uint32_t k = in[i].id - AURORA_BEAM_ANCHOR_ID;
++      if (k < 3) {
++        g_anchor[k] = {in[i].pos[0], in[i].pos[1], in[i].pos[2]};
++        anchors |= 1u << k;
++      }
++      continue;
++    }
++    real[n++] = in[i];
++  }
++  g_anchorValid = anchors == 7u;
++  const ExtraLight* lights = real.data();
++  count = n;
+   if (count == g_lightCount && std::memcmp(lights, g_lights.data(), count * sizeof(ExtraLight)) == 0) {
+     return;
+   }
+@@ -1871,6 +2361,244 @@ void note_glow_draw(const gx::PipelineConfig& config, const gx::DrawData& data)
+   g_glowDraws.push_back(g);
+ }
+ 
++// 0196: a 3x4 matrix as 12 floats (row-major, the layout Aurora stores XF matrices in).
++using M34 = std::array<float, 12>;
++M34 m34(const Mat3x4<float>& m) noexcept {
++  M34 r;
++  std::memcpy(r.data(), &m, sizeof(r));
++  return r;
++}
++// a x [b; 0 0 0 1]
++M34 m34_mul(const M34& a, const M34& b) noexcept {
++  M34 r{};
++  for (int i = 0; i < 3; ++i) {
++    for (int j = 0; j < 4; ++j) {
++      float v = a[i * 4 + 0] * b[0 * 4 + j] + a[i * 4 + 1] * b[1 * 4 + j] + a[i * 4 + 2] * b[2 * 4 + j];
++      if (j == 3) {
++        v += a[i * 4 + 3];
++      }
++      r[i * 4 + j] = v;
++    }
++  }
++  return r;
++}
++bool m34_inverse(const M34& m, M34& out) noexcept {
++  const float a = m[0], b = m[1], c = m[2], d = m[4], e = m[5], f = m[6], g = m[8], h = m[9], i = m[10];
++  const float A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g;
++  const float det = a * A + b * B + c * C;
++  if (!(std::abs(det) > 1e-12f) || !std::isfinite(det)) {
++    return false;
++  }
++  const float s = 1.f / det;
++  const float r[9] = {A * s, -(b * i - c * h) * s, (b * f - c * e) * s, B * s, (a * i - c * g) * s, -(a * f - c * d) * s,
++                      C * s, -(a * h - b * g) * s, (a * e - b * d) * s};
++  for (int k = 0; k < 3; ++k) {
++    out[k * 4 + 0] = r[k * 3 + 0];
++    out[k * 4 + 1] = r[k * 3 + 1];
++    out[k * 4 + 2] = r[k * 3 + 2];
++    out[k * 4 + 3] = -(r[k * 3 + 0] * m[3] + r[k * 3 + 1] * m[7] + r[k * 3 + 2] * m[11]);
++  }
++  return true;
++}
++// View space -> projective texcoord (s, t, q) of a POS texgen of the current draw, or false when
++// it depends on per-vertex matrix indices or is not a linear projective texgen.
++bool view_texgen(const gx::ShaderConfig& sc, GXTexCoordID coord, M34& out) noexcept {
++  const auto& st = gx::g_gxState;
++  const auto& tcg = sc.tcgs[coord];
++  if (tcg.type != GX_TG_MTX3x4 || tcg.src != GX_TG_POS || tcg.normalize) {
++    return false;
++  }
++  if (sc.attrs[GX_VA_PNMTXIDX].attrType != GX_NONE || sc.attrs[GX_VA_TEX0MTXIDX + coord].attrType != GX_NONE) {
++    return false;
++  }
++  M34 pinv;
++  if (!m34_inverse(m34(st.pnMtx[std::min<u32>(st.currentPnMtx, gx::MaxPnMtx - 1)].pos), pinv)) {
++    return false;
++  }
++  M34 t{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
++  if (tcg.mtx != GX_IDENTITY) {
++    const u32 k = u32(tcg.mtx) / 3;
++    if (k < gx::MaxPnMtx) {
++      t = m34(st.pnMtx[k].pos);
++    } else if (k - gx::MaxPnMtx < gx::MaxTexMtx) {
++      t = m34(st.texMtxs[k - gx::MaxPnMtx]);
++    } else {
++      return false;
++    }
++  }
++  if (tcg.postMtx != GX_PTIDENTITY) {
++    const u32 k = (u32(tcg.postMtx) - GX_PTTEXMTX0) / 3;
++    if (k >= gx::MaxPTTexMtx) {
++      return false;
++    }
++    t = m34_mul(m34(st.ptTexMtxs[k]), t);
++  }
++  out = m34_mul(t, pinv);
++  for (float v : out) {
++    if (!std::isfinite(v)) {
++      return false;
++    }
++  }
++  return true;
++}
++u32 swap_idx(GXTevColorChan c) noexcept { return c == GX_CH_RED ? 0 : c == GX_CH_GREEN ? 1 : c == GX_CH_BLUE ? 2 : 3; }
++// The first main-view receiver of the game's shadow map this frame (see BeamShadow).
++void capture_beam_shadow(const gx::PipelineConfig& config) noexcept {
++  const auto& sc = config.shaderConfig;
++  for (u32 i = 1; i < sc.tevStageCount; ++i) {
++    const auto& stg = sc.tevStages[i];
++    if (stg.alphaOp.op != GX_TEV_COMP_GR16_GT || stg.colorPass.b != GX_CC_TEXC || stg.texMapId == GX_TEXMAP_NULL ||
++        stg.texCoordId == GX_TEXCOORD_NULL) {
++      continue;
++    }
++    const auto& prev = sc.tevStages[i - 1];
++    if (prev.texMapId == GX_TEXMAP_NULL || prev.texCoordId == GX_TEXCOORD_NULL) {
++      continue;
++    }
++    M34 map, ramp;
++    if (!view_texgen(sc, stg.texCoordId, map) || !view_texgen(sc, prev.texCoordId, ramp)) {
++      continue;
++    }
++    const auto& tex = gx::g_gxState.textures[stg.texMapId];
++    if (!tex || !tex.ref->sampleTextureView) {
++      continue;
++    }
++    BeamShadow b;
++    b.valid = true;
++    std::memcpy(b.map, map.data(), sizeof(b.map));
++    std::memcpy(b.ramp[0], &ramp[0], 16);
++    std::memcpy(b.ramp[1], &ramp[8], 16);
++    // Centre of projection: A c = -t over the three rows (singular for an orthographic map).
++    M34 inv;
++    if (m34_inverse(map, inv)) {
++      b.center[0] = inv[3], b.center[1] = inv[7], b.center[2] = inv[11];
++      b.centerValid = true;
++    }
++    b.tex = tex.ref;
++    const auto& swap = sc.tevSwapTable[stg.tevSwapTex];
++    b.sr = swap_idx(swap.red);
++    b.sg = swap_idx(swap.green);
++    g_beam = std::move(b);
++    return;
++  }
++}
++
++// The beam is welded to the game's own flashlight cone mesh (handlight_ef, the draw that is
++// hidden while the realistic beam is on). Its position matrix (model -> view) is the lens: the
++// translation is the lens position and -X of the model is the beam axis (the game builds the
++// flashlight GX light from the same matrix: same position, direction = -X, measured in the
++// nursery). Frame interpolation blends this matrix with Luigi's hand (it is one of his model
++// matrices), so the beam stays on the lens at any frame rate. The spot parameters (cone, colour)
++// come from the frame's bright spot light at the lens. (The cone mesh itself is lit by a dummy
++// light 7 at (0, 0, 10000): its look does not depend on the flashlight light.)
++// The first version took "the bright spot light nearest the camera": in the nursery about one
++// scene end in five picked a second spot light 216 units above the lens with the same direction,
++// in the gold-ghost room whole stretches picked a light 1100+ units away pointing elsewhere (the
++// beam started in mid-air at the far wall), and in interpolated replays the light (blended as a
++// light) and the hand (blended as a model matrix) differed by up to ~13 units / 2 degrees.
++struct Cone {
++  bool valid = false;
++  M34 m{};
++  uint32_t draws = 0;
++};
++Cone g_cone;
++// Bright spot lights seen on this frame's world draws (candidates for the lens).
++std::array<Flashlight, 16> g_spots{};
++// Where the game's flashlight light is (its shadow map's eye) when the beam follows the mesh.
++Vec4<float> g_shadowRef{};
++uint32_t g_spotCount = 0;
++// Whether the last frame's cone mesh had the flashlight light at its lens. When it did not (the
++// lift between floors, scripted scenes: the game lights the scene with other lights and the
++// flashlight is only the mesh), the realistic beam is not drawn and the game's mesh stays visible,
++// as in the original.
++bool g_coneLit = true;
++void note_cone(const gx::PipelineConfig& config, uint32_t vtxCount) noexcept {
++  const auto& st = gx::g_gxState;
++  static const bool sLog = std::getenv("AURORA_BEAM_LOG") != nullptr;
++  ++g_cone.draws;
++  if (g_cone.valid) {
++    return; // its three materials share one matrix
++  }
++  // Per-vertex matrix indices: the matrix is not the current one (not seen for handlight_ef).
++  if (config.shaderConfig.attrs[GX_VA_PNMTXIDX].attrType != GX_NONE) {
++    return;
++  }
++  const M34 m = m34(st.pnMtx[std::min<u32>(st.currentPnMtx, gx::MaxPnMtx - 1)].pos);
++  const float ax = std::sqrt(m[0] * m[0] + m[4] * m[4] + m[8] * m[8]);
++  if (!(ax > 1e-6f) || !std::isfinite(ax + m[3] + m[7] + m[11])) {
++    return;
++  }
++  g_cone.valid = true;
++  g_cone.m = m;
++  if (sLog) {
++    Log.info("cone: vtx {} lens {} {} {} axis {} {} {}", vtxCount, m[3], m[7], m[11], -m[0] / ax, -m[4] / ax, -m[8] / ax);
++  }
++}
++// The flashlight of this frame for the beam: the cone mesh's lens and axis with the spot
++// parameters of the flashlight's spot light (below). Without a cone mesh (cutscene lights): the
++// nearest bright spot light.
++void resolve_flash() noexcept {
++  // A/B: AURORA_BEAM_NOCONE=1 the first version's choice (nearest bright spot light), =2 that on
++  // every other scene end (logged, to pair with the port's LM_BEAM_LOG frame numbers).
++  static const int sNoCone = [] {
++    const char* v = std::getenv("AURORA_BEAM_NOCONE");
++    return v != nullptr ? std::max(std::atoi(v), 1) : 0;
++  }();
++  static const bool sLog = std::getenv("AURORA_BEAM_LOG") != nullptr;
++  const bool skip = sNoCone == 1 || (sNoCone == 2 && (g_sceneEnds & 1) != 0);
++  g_shadowRef = g_flash.pos;
++  if (sNoCone == 2) {
++    Log.info("beam: scene {} {}", g_sceneEnds, skip ? "nearest spot light (first version)" : "cone mesh");
++  }
++  if (!g_cone.valid || skip) {
++    if (skip) {
++      g_coneLit = true;
++    }
++    return;
++  }
++  const auto& m = g_cone.m;
++  const float ax = std::sqrt(m[0] * m[0] + m[4] * m[4] + m[8] * m[8]);
++  const Vec4<float> lens{m[3], m[7], m[11], 1.f};
++  const Vec4<float> dir{-m[0] / ax, -m[4] / ax, -m[8] / ax, 0.f};
++  // The flashlight light: near the lens and pointing about the same way. During some of Luigi's
++  // animations (startled, turning on the spot in the gold-ghost room) the game's light trails the
++  // hand by up to ~220 units, smoothly; in the lift and scripted scenes the only spot light is a
++  // scene light far away pointing elsewhere (no match: the mesh is the flashlight there).
++  int best = -1;
++  float bestD = 400.f, bestAng = 0.f;
++  for (uint32_t i = 0; i < g_spotCount; ++i) {
++    const auto& l = g_spots[i];
++    const float dx = l.pos.x() - lens.x(), dy = l.pos.y() - lens.y(), dz = l.pos.z() - lens.z();
++    const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
++    const float ll = std::sqrt(l.dir.x() * l.dir.x() + l.dir.y() * l.dir.y() + l.dir.z() * l.dir.z());
++    const float c = ll > 1e-6f ? (l.dir.x() * dir.x() + l.dir.y() * dir.y() + l.dir.z() * dir.z()) / ll : -1.f;
++    if (c > 0.866f && d < bestD) {
++      bestD = d;
++      bestAng = std::acos(std::clamp(c, -1.f, 1.f)) * 57.2958f;
++      best = int(i);
++    }
++  }
++  if (sLog) {
++    float nd = -1.f;
++    if (g_flash.valid) {
++      const float dx = g_flash.pos.x() - lens.x(), dy = g_flash.pos.y() - lens.y(), dz = g_flash.pos.z() - lens.z();
++      nd = std::sqrt(dx * dx + dy * dy + dz * dz);
++    }
++    Log.info("beam: scene {} cone lens, {} spot lights, light at the lens {} ({} units, {} deg); nearest-spot choice off the lens by {} units",
++             g_sceneEnds, g_spotCount, best >= 0, best >= 0 ? bestD : -1.f, bestAng, nd);
++  }
++  g_coneLit = best >= 0;
++  if (best < 0) {
++    g_flash.valid = false; // the flashlight is only the mesh this frame (shown as the game draws it)
++    return;
++  }
++  Flashlight f = g_spots[best];
++  g_shadowRef = f.pos; // the game's shadow map is rendered from its light, not from the mesh
++  f.pos = lens;
++  f.dir = dir;
++  g_flash = f;
++}
++
+ bool note_draw(const gx::PipelineConfig& config, uint8_t drawClass, uint32_t vtxCount, const gx::DrawData& data) noexcept {
+   static const bool sHide = std::getenv("AURORA_ENH_HIDE_ADDITIVE") != nullptr;
+   if (sHide && drawClass != AURORA_DRAW_CLASS_OTHER && is_emissive(config)) {
+@@ -1952,6 +2680,46 @@ bool note_draw(const gx::PipelineConfig& config, uint8_t drawClass, uint32_t vtx
+   if (drawClass == AURORA_DRAW_CLASS_OTHER || st.projType != GX_PERSPECTIVE) {
+     return false;
+   }
++  // 0196: realistic flashlight: the shadow map's receivers, and the game's cone mesh (additive,
++  // alpha from a colour-texgen lookup of the spot light: handlight_ef) is hidden, the scattering
++  // pass draws the beam instead (no double cone).
++  bool hide = false;
++  if (beam_on() && !is_offscreen()) {
++    if (!g_beam.valid) {
++      capture_beam_shadow(config);
++    }
++    static const bool sNoHide = std::getenv("AURORA_BEAM_NOHIDE") != nullptr; // debug: keep the game's cone
++    bool cone = false;
++    if (config.blendMode == GX_BM_BLEND && config.blendFacDst == GX_BL_ONE) {
++      for (u32 i = 0; i < config.shaderConfig.tevStageCount && !cone; ++i) {
++        const auto tc = config.shaderConfig.tevStages[i].texCoordId;
++        cone = tc != GX_TEXCOORD_NULL && config.shaderConfig.tcgs[tc].type == GX_TG_SRTG;
++      }
++    }
++    if (cone) {
++      note_cone(config, vtxCount);
++    }
++    hide = cone && !sNoHide && g_coneLit;
++    // The cone also writes the EFB alpha, which the game's later full-screen passes read (without
++    // it the beam area takes the room's blue darkening): keep that write, drop only the colour.
++    if (hide && config.alphaUpdate) {
++      static std::unordered_map<uint64_t, PipelineRef> sAlphaOnly;
++      const auto layout = get_render_target_layout();
++      const uint64_t key = uint64_t(data.pipeline) * 0x9E3779B97F4A7C15ull ^ uint64_t(layout.key);
++      PipelineRef pipe{};
++      if (const auto it = sAlphaOnly.find(key); it != sAlphaOnly.end()) {
++        pipe = it->second;
++      } else {
++        gx::PipelineConfig ac = config;
++        ac.colorUpdate = false;
++        pipe = find_pipeline(ac, layout);
++        sAlphaOnly.emplace(key, pipe);
++      }
++      gx::DrawData d = data;
++      d.pipeline = pipe;
++      push_draw_command(d);
++    }
++  }
+   const auto& p = st.proj;
+   g_camera = {
+       .valid = true,
+@@ -1963,7 +2731,7 @@ bool note_draw(const gx::PipelineConfig& config, uint8_t drawClass, uint32_t vtx
+   // is nearest to the camera (Luigi holds it; room spot lights are farther away).
+   const auto& cc = config.shaderConfig.colorChannels[0];
+   if (!cc.lightingEnabled || cc.attnFn != GX_AF_SPOT) {
+-    return false;
++    return hide;
+   }
+   const auto mask = st.colorChannelState[0].lightMask.to_ulong();
+   for (int i = 0; i < 8; ++i) {
+@@ -1976,13 +2744,21 @@ bool note_draw(const gx::PipelineConfig& config, uint8_t drawClass, uint32_t vtx
+     if (!angular || lum < 0.2f) {
+       continue;
+     }
++    bool known = false;
++    for (uint32_t k = 0; k < g_spotCount && !known; ++k) {
++      known = std::abs(g_spots[k].pos.x() - l.pos.x()) + std::abs(g_spots[k].pos.y() - l.pos.y()) +
++                  std::abs(g_spots[k].pos.z() - l.pos.z()) < 1e-3f;
++    }
++    if (!known && g_spotCount < g_spots.size()) {
++      g_spots[g_spotCount++] = {.valid = true, .pos = l.pos, .dir = l.dir, .cosAtt = l.cosAtt, .distAtt = l.distAtt, .color = l.color};
++    }
+     const float d2 = l.pos.x() * l.pos.x() + l.pos.y() * l.pos.y() + l.pos.z() * l.pos.z();
+     if (!g_flash.valid || d2 < g_flashDist2) {
+       g_flash = {.valid = true, .pos = l.pos, .dir = l.dir, .cosAtt = l.cosAtt, .distAtt = l.distAtt, .color = l.color};
+       g_flashDist2 = d2;
+     }
+   }
+-  return false;
++  return hide;
+ }
+ 
+ void flush_glow() noexcept {
+@@ -2194,6 +2970,7 @@ void flush_shadows() noexcept {
+ }
+ 
+ void after_submit() noexcept {
++  beam_timing_after_submit();
+   for (auto& t : g_tslots) {
+     if (t.state.load() == 3) {
+       const auto* ts = static_cast<const uint64_t*>(t.readback.GetConstMappedRange(0, TimingQueries * 8));
+@@ -2260,6 +3037,135 @@ void begin_frame() noexcept {
+   g_lightRangeValid = false;
+   g_camera.valid = false;
+   g_flash.valid = false;
++  g_beam = {};
++  g_cone = {};
++  g_spotCount = 0;
++  g_anchorValid = false;
++}
++
++// 0196: realistic flashlight uniforms (fx.beam, see fs_beam) and target size.
++void fill_beam(FxUniform& u, SceneJob& job, uint32_t width, uint32_t height) noexcept {
++  const auto& c = g_cfg;
++  const auto& f = g_flash;
++  const uint32_t q = std::clamp(c.realisticFlashlight, 1u, 3u);
++  // Cone edge: where the GX angular polynomial a0 + a1 c + a2 c^2 reaches 0.
++  const float a0 = f.cosAtt.x(), a1 = f.cosAtt.y(), a2 = f.cosAtt.z();
++  float cut = 0.82f;
++  if (std::abs(a2) > 1e-6f) {
++    const float disc = a1 * a1 - 4.f * a2 * a0;
++    if (disc >= 0.f) {
++      const float sd = std::sqrt(disc);
++      float best = -2.f;
++      for (const float r : {(-a1 + sd) / (2.f * a2), (-a1 - sd) / (2.f * a2)}) {
++        if (r > -1.f && r < 0.9999f) {
++          best = std::max(best, r);
++        }
++      }
++      if (best > -1.f) {
++        cut = best;
++      }
++    }
++  } else if (std::abs(a1) > 1e-6f) {
++    cut = std::clamp(-a0 / a1, -0.99f, 0.9999f);
++  }
++  // Shadow map: only when it was rendered from the flashlight itself (in lit rooms and during
++  // lightning the game's shadow light is another light).
++  bool shadow = g_beam.valid && g_beam.tex;
++  float centerDist = -1.f;
++  if (shadow) {
++    if (!g_beam.centerValid) {
++      shadow = false;
++    } else {
++      const auto& sp = g_shadowRef;
++      const float dx = g_beam.center[0] - sp.x(), dy = g_beam.center[1] - sp.y(), dz = g_beam.center[2] - sp.z();
++      centerDist = std::sqrt(dx * dx + dy * dy + dz * dz);
++      shadow = centerDist < 120.f;
++    }
++  }
++  if (shadow) {
++    std::memcpy(u.beam[0], g_beam.map, sizeof(g_beam.map));
++    std::memcpy(u.beam[3], g_beam.ramp, sizeof(g_beam.ramp));
++    u.beam[5][0] = 1.f;
++    u.beam[5][1] = float(g_beam.sr);
++    u.beam[5][2] = float(g_beam.sg);
++    u.beam[5][3] = float(g_beam.tex->size.width);
++    u.beam[12][0] = float(g_beam.tex->size.height);
++    job.beamShadow = g_beam.tex;
++  }
++  static const float sDensity = [] {
++    const char* v = std::getenv("AURORA_BEAM_SIGMA"); // tuning aid: scattering coefficient at density 1
++    return v != nullptr ? float(std::atof(v)) : 1.4e-3f;
++  }();
++  u.beam[6][0] = sDensity * std::clamp(c.beamDensity, 0.f, 3.f);
++  u.beam[6][1] = std::clamp(c.beamDust, 0.f, 2.f);
++  u.beam[6][2] = q == 1 ? 20.f : q == 2 ? 32.f : 48.f;
++  u.beam[6][3] = 1500.f;
++  u.beam[7][0] = cut;
++  u.beam[7][1] = g_anchorValid ? 1.f : 0.f;
++  {
++    static const auto sStart = std::chrono::steady_clock::now();
++    static const bool sFreeze = std::getenv("AURORA_BEAM_FREEZE_TIME") != nullptr; // test aid: deterministic dust/haze
++    u.beam[7][2] = sFreeze ? 0.f : std::fmod(std::chrono::duration<float>(std::chrono::steady_clock::now() - sStart).count(), 3600.f);
++  }
++  // Flare: the flashlight brighter than its recent steady level (the game's flash).
++  {
++    using Clock = std::chrono::steady_clock;
++    static Clock::time_point sPrev = Clock::now();
++    const auto now = Clock::now();
++    const float dt = std::clamp(std::chrono::duration<float>(now - sPrev).count(), 0.f, 0.25f);
++    sPrev = now;
++    const float level = 0.2126f * f.color.x() + 0.7152f * f.color.y() + 0.0722f * f.color.z();
++    if (g_flashLevel <= 0.f) {
++      g_flashLevel = level;
++    }
++    const float rel = level / std::max(g_flashLevel, 1e-3f);
++    // Impulses: a ghost stunned by the light (port), the light switched on after a while off.
++    const float kick = g_flareKick.exchange(0.f);
++    if (g_flashOffTime > 0.4f) {
++      g_flarePulse = std::max(g_flarePulse, 0.45f);
++    }
++    g_flashOffTime = 0.f;
++    g_flarePulse = std::max(g_flarePulse * std::exp(-dt * 4.5f), std::clamp(kick, 0.f, 1.f));
++    const float target = std::max(std::clamp((rel - 1.04f) * 2.5f, 0.f, 1.f), g_flarePulse);
++    g_flare += (target - g_flare) * std::min(1.f, dt * (target > g_flare ? 30.f : 6.f));
++    // The steady level follows slowly upward (a flash is short) and quickly downward.
++    g_flashLevel += (level - g_flashLevel) * std::min(1.f, dt * (level > g_flashLevel ? 0.6f : 4.f));
++    u.beam[7][3] = g_flare;
++  }
++  for (int k = 0; k < 3; ++k) {
++    u.beam[8 + k][0] = g_anchor[k][0], u.beam[8 + k][1] = g_anchor[k][1], u.beam[8 + k][2] = g_anchor[k][2];
++  }
++  u.beam[11][0] = q >= 2 ? 1.f : 0.6f;
++  u.beam[11][1] = 40.f * 40.f;
++  u.beam[11][2] = 650.f * 650.f;
++  // Beam target: 1/2 resolution up to 540 / 720 lines (medium / high), full resolution up to
++  // 1080 lines (ultra).
++  const uint32_t div = 2;
++  uint32_t bw = std::max(width / div, 1u), bh = std::max(height / div, 1u);
++  const uint32_t cap = q == 1 ? 540u : q == 2 ? 720u : 1080u;
++  if (bh > cap) {
++    bw = std::max(bw * cap / bh, 1u);
++    bh = cap;
++  }
++  job.beamW = bw;
++  job.beamH = bh;
++  const float vpH = std::max(g_camera.vp.height, 1.f) * float(bh) / float(std::max(height, 1u));
++  u.beam[11][3] = 2.f / (std::max(std::abs(g_camera.p11), 1e-3f) * vpH);
++  u.beam[12][1] = q == 1 ? 24.f : q == 2 ? 40.f : 64.f;
++  static const bool sBeamLog = std::getenv("AURORA_BEAM_LOG") != nullptr; // every scene end
++  if (sBeamLog) {
++    Log.info("beam: col {} {} {} {} cos {} {} {} dist {} {} {} cut {} flare {} level {} shadow {}", f.color.x(), f.color.y(),
++             f.color.z(), f.color.w(), a0, a1, a2, f.distAtt.x(), f.distAtt.y(), f.distAtt.z(), cut, g_flare, g_flashLevel,
++             shadow);
++    Log.info("beam: light pos {} {} {} dir {} {} {} cone draws {}", f.pos.x(), f.pos.y(), f.pos.z(), f.dir.x(), f.dir.y(), f.dir.z(), g_cone.draws);
++  }
++  if (g_log) {
++    static uint32_t sLogged = 0;
++    if (sLogged++ % 120 == 0) {
++      Log.info("beam: q {} cut {} shadow {} (centre {}, {}x{}) anchor {} flare {} target {}x{}", q, cut, shadow, centerDist,
++               shadow ? g_beam.tex->size.width : 0, shadow ? g_beam.tex->size.height : 0, g_anchorValid, g_flare, bw, bh);
++    }
++  }
+ }
+ 
+ void scene_end() noexcept {
+@@ -2288,6 +3194,27 @@ void scene_end() noexcept {
+   if (c.ssao && c.ssaoIntensity > 0.f && g_aoPost) { // 0032: otherwise forward (mask pass)
+     job.mask |= 4u;
+   }
++  // 0196: the realistic flashlight replaces the volumetric beam.
++  if (beam_on() && !g_flash.valid) {
++    using Clock = std::chrono::steady_clock;
++    static Clock::time_point sOff = Clock::now();
++    const auto now = Clock::now();
++    const float dt = std::clamp(std::chrono::duration<float>(now - sOff).count(), 0.f, 0.25f);
++    sOff = now;
++    g_flashOffTime += dt;
++  }
++  static const bool sNoPass = std::getenv("AURORA_BEAM_NOPASS") != nullptr; // debug: no scattering pass
++  if (beam_on()) {
++    resolve_flash();
++  }
++  const bool realistic = beam_on() && g_flash.valid && !sNoPass;
++  if (realistic) {
++    job.mask = (job.mask & ~2u) | 32u;
++    static const bool sShow = std::getenv("AURORA_BEAM_SHOW") != nullptr; // debug: the beam alone
++    if (sShow) {
++      job.mask |= std::atoi(std::getenv("AURORA_BEAM_SHOW")) == 2 ? 192u : 64u;
++    }
++  }
+   if (job.mask == 0) {
+     return;
+   }
+@@ -2356,7 +3283,17 @@ void scene_end() noexcept {
+   job.volDiv = q == 0 ? 4 : 2;
+   u.ao[0] = c.ssaoIntensity;
+   u.ao[1] = std::max(c.ssaoRadius, 1.f);
++  if (realistic) {
++    fill_beam(u, job, size.x, size.y);
++  }
+   job.base = push_uniform(reinterpret_cast<const uint8_t*>(&u), sizeof(u));
++  if (realistic) {
++    FxUniform pu = u;
++    pu.pass[0] = 1.f, pu.pass[1] = 0.f;
++    job.beamBlur[0] = push_uniform(reinterpret_cast<const uint8_t*>(&pu), sizeof(pu));
++    pu.pass[0] = 0.f, pu.pass[1] = 1.f;
++    job.beamBlur[1] = push_uniform(reinterpret_cast<const uint8_t*>(&pu), sizeof(pu));
++  }
+ 
+   // Per-pass uniforms: source texel sizes of the bloom chain and the upsample radius.
+   if ((job.mask & 1u) != 0) {
+@@ -2422,6 +3359,13 @@ void aurora_enhanced_set_config(const AuroraEnhancedConfig* config) {
+   g_pendingGen.fetch_add(1, std::memory_order_release);
+ }
+ 
++void aurora_enhanced_beam_flare(float strength) {
++  using namespace aurora::gfx::enhanced;
++  float cur = g_flareKick.load();
++  while (strength > cur && !g_flareKick.compare_exchange_weak(cur, strength)) {
++  }
++}
++
+ void aurora_enhanced_shadow_stats(uint32_t* lights, uint32_t* casters, uint32_t* skipped) {
+   using namespace aurora::gfx::enhanced;
+   if (lights != nullptr) {
+diff --git a/lib/gfx/enhanced.hpp b/lib/gfx/enhanced.hpp
+index e821f5d..35c3b73 100644
+--- a/lib/gfx/enhanced.hpp
++++ b/lib/gfx/enhanced.hpp
+@@ -31,8 +31,13 @@ struct DrawUniform {
+   float shadowDark = 1.f;  // AuroraEnhancedConfig::shadowDarkness
+   float shadowKeep = 0.f;  // AuroraEnhancedConfig::shadowAmbientKeep
+   float material = 0.f;  // 1 = character (GX_AURORA_SET_MATERIAL_HINT)
++  // 0196: realistic flashlight footprint (flags bit 5)
++  float beamGain = 1.f;
++  float beamDref2 = 0.f;
++  float beamFloor = 0.f;
++  float beamRings = 0.f;
+ };
+-static_assert(sizeof(DrawUniform) == 64);
++static_assert(sizeof(DrawUniform) == 80);
+ 
+ // --- FIFO thread ---
+ // Takes a newly set configuration; true when it changed (pipelines must be re-derived).
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index 1f40ef5..143499c 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1,3 +1,4 @@
++#include "../gfx/beam_profile.hpp"
+ #include "../gfx/hash.hpp"
+ #include "../gfx/types.hpp"
+ 
+@@ -917,7 +918,18 @@ std::string enh_lighting_func(const ShaderConfig& config, const ColorChannelConf
+               cos_attn = mix(cos_attn, ca * ca * (3.0 - 2.0 * ca), ubuf.enh_flash_soft);
+             }
+             let dist_attn = gx_attn_poly(light.dist_att, dist);
+-            attn = max(0.0, cos_attn / dist_attn);)"""s;
++            attn = max(0.0, cos_attn / dist_attn);
++            // 0196: realistic flashlight footprint (bright spot cones only): the reflector profile
++            // (hot centre, rings, soft edge, spill) over the cone the game defines, and an
++            // inverse-square falloff (lens-size regularised) instead of the game's flat distance.
++            if ((ubuf.enh_flags & 32u) != 0u && dot(light.color.rgb, vec3f(0.3333)) > 0.15) {
++              let cut = enh_beam_cut(light.cos_att);
++              if (cut > -1.0) {
++                let bx = acos(clamp(cosine, -1.0, 1.0)) / max(acos(cut), 1e-3);
++                let be = clamp((ubuf.enh_beam_dref2 + 1600.0) / (dist2 + 1600.0), ubuf.enh_beam_floor, 2.2);
++                attn = enh_beam_profile(bx, ubuf.enh_beam_rings) * be * ubuf.enh_beam_gain;
++              }
++            })"""s;
+   } else {
+     const std::string dist_attn = cc.diffFn != GX_DF_NONE
+                                       ? "max(0.0, dot(normalize(light.dist_att), vec3f(1.0, attn, attn * attn)))"
+@@ -1946,6 +1958,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+                                  "\n    var enh_s_xl = 0.0;",
+                                  config.enhClass == 2 ? "true"sv : "false"sv);
+     uniformPre += EnhHelpers;
++    uniformPre += gfx::BeamProfileWgsl;
+   }
+   // Color channels feeding a color texgen (GX_TG_SRTG: the flashlight beam's lookup) keep
+   // their exact lighting result: extra lights would move the lookup.
+@@ -2512,7 +2525,13 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+         "\n    enh_flash_spec: f32,"
+         "\n    enh_shadow_dark: f32,"
+         "\n    enh_shadow_keep: f32,"
+-        "\n    enh_material: f32,";
++        "\n    enh_material: f32,"
++        // 0196: realistic flashlight footprint (enh_flags bit 5): gain, reference distance^2,
++        // minimum distance falloff, reflector ring amount.
++        "\n    enh_beam_gain: f32,"
++        "\n    enh_beam_dref2: f32,"
++        "\n    enh_beam_floor: f32,"
++        "\n    enh_beam_rings: f32,";
+   }
+   if (config.intTev) {
+     // Already wrapped to 8 bits after the last stage.

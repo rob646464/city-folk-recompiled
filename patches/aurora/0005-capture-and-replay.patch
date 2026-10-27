@@ -1,0 +1,124 @@
+diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
+index 1a312fb..fe40f9f 100644
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -173,6 +173,20 @@ void GXCreateFrameBuffer(u32 width, u32 height);
+  */
+ void GXRestoreFrameBuffer(void);
+ 
++/**
++ * Command capture, for replaying a frame's commands later (e.g. frame interpolation).
++ * While capturing, GX commands issued on the calling thread are written to `buf`
++ * instead of the FIFO, and GXDrawDone/AuroraGXSync on that thread don't wait.
++ * Other threads keep using the FIFO normally.
++ */
++void AuroraCaptureBegin(void* buf, u32 size);
++/** Ends the capture on the calling thread; returns the bytes written (32-byte padded). */
++u32 AuroraCaptureEnd(void);
++/** Bytes written so far by the current capture on the calling thread. */
++u32 AuroraCapturePos(void);
++/** Submits captured commands to the FIFO (inside an open frame). */
++void AuroraReplay(const void* data, u32 size);
++
+ #if __cplusplus
+ }
+ #endif
+diff --git a/lib/dolphin/gx/GXAurora.cpp b/lib/dolphin/gx/GXAurora.cpp
+index 85a4285..1513ec0 100644
+--- a/lib/dolphin/gx/GXAurora.cpp
++++ b/lib/dolphin/gx/GXAurora.cpp
+@@ -46,6 +46,18 @@ void AuroraGetRenderSize(u32* width, u32* height) {
+   }
+ }
+ 
++void AuroraCaptureBegin(void* buf, u32 size) {
++  aurora::gx::fifo::begin_display_list(static_cast<u8*>(buf), size);
++}
++
++u32 AuroraCaptureEnd() { return aurora::gx::fifo::end_display_list(); }
++
++u32 AuroraCapturePos() { return aurora::gx::fifo::display_list_pos(); }
++
++void AuroraReplay(const void* data, u32 size) {
++  aurora::gx::fifo::replay(static_cast<const u8*>(data), size);
++}
++
+ void AuroraGXSync() {
+   GXFlush();
+   aurora::gx::fifo::drain();
+diff --git a/lib/gx/fifo.cpp b/lib/gx/fifo.cpp
+index bcaba60..2f68795 100644
+--- a/lib/gx/fifo.cpp
++++ b/lib/gx/fifo.cpp
+@@ -16,10 +16,10 @@ namespace detail {
+ uint8_t* sBufferData = nullptr;
+ uint32_t sBufferSize = 0;
+ uint32_t sBufferCapacity = 0;
+-bool sInDisplayList = false;
+-uint8_t* sDlBuffer = nullptr;
+-uint32_t sDlSize = 0;
+-uint32_t sDlWritePos = 0;
++thread_local bool sInDisplayList = false;
++thread_local uint8_t* sDlBuffer = nullptr;
++thread_local uint32_t sDlSize = 0;
++thread_local uint32_t sDlWritePos = 0;
+ } // namespace detail
+ 
+ namespace {
+@@ -231,8 +231,22 @@ uint32_t end_display_list() {
+ 
+ bool in_display_list() { return detail::sInDisplayList; }
+ 
++uint32_t display_list_pos() { return detail::sDlWritePos; }
++
++void replay(const uint8_t* data, uint32_t size) {
++  AURORA_ASSERT(!detail::sInDisplayList, "fifo::replay: called while recording");
++  if (size <= detail::sBufferCapacity - detail::sBufferSize) {
++    std::memcpy(detail::sBufferData + detail::sBufferSize, data, size);
++    detail::sBufferSize += size;
++  } else {
++    write_data_grow(data, size);
++  }
++  publish();
++}
++
+ void drain() {
+-  if (detail::sBufferSize == 0) {
++  // A thread that is recording has nothing of its own in the FIFO.
++  if (detail::sInDisplayList || detail::sBufferSize == 0) {
+     return;
+   }
+ 
+diff --git a/lib/gx/fifo.hpp b/lib/gx/fifo.hpp
+index 0d6a5d8..0f706a7 100644
+--- a/lib/gx/fifo.hpp
++++ b/lib/gx/fifo.hpp
+@@ -10,10 +10,12 @@ namespace detail {
+ extern uint8_t* sBufferData;
+ extern uint32_t sBufferSize;
+ extern uint32_t sBufferCapacity;
+-extern bool sInDisplayList;
+-extern uint8_t* sDlBuffer;
+-extern uint32_t sDlSize;
+-extern uint32_t sDlWritePos;
++// Per thread, so one thread can record (a display list, or a capture) while
++// another submits to the FIFO.
++extern thread_local bool sInDisplayList;
++extern thread_local uint8_t* sDlBuffer;
++extern thread_local uint32_t sDlSize;
++extern thread_local uint32_t sDlWritePos;
+ } // namespace detail
+ 
+ enum class ProcessingMode : uint8_t {
+@@ -103,6 +105,11 @@ DrawDoneCallback set_draw_done_callback(DrawDoneCallback callback) noexcept;
+ void begin_display_list(uint8_t* buf, uint32_t size);
+ uint32_t end_display_list();
+ bool in_display_list();
++uint32_t display_list_pos();
++
++// Appends recorded commands to the FIFO and publishes them (bypasses the
++// calling thread's display-list redirection).
++void replay(const uint8_t* data, uint32_t size);
+ 
+ // Ensure all buffered commands have been processed.
+ void drain();

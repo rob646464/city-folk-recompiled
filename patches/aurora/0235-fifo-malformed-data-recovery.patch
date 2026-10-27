@@ -1,0 +1,819 @@
+0235: malformed FIFO data no longer stops the game (issue #17: "command_processor: unknown opcode
+0x1D at pos 11946", fatal on every start afterwards).
+
+- The command processor checks each command before carrying it out: an unknown opcode, a draw with
+  an impossible primitive or more vertex data than the block holds, a truncated BP/CP/XF/indexed
+  load, an XF load past the end, a known Aurora subcommand that does not fit or carries an impossible
+  draw, an indexed XF load from an unmapped array. Each is reported (ERROR log with the absolute
+  stream position, its offset in the block, the bytes skipped and 64 bytes before / 32 after; the
+  first 10, then at most one a second, with a count of those not shown) and through
+  AuroraSetFifoErrorCallback (the application names the guest code that wrote it), then processing
+  resumes at the next position where at least 8 plausible commands parse in a row (exact opcodes,
+  known CP/XF addresses, sane counts, Aurora subcommand lengths) or commands parse to the exact end
+  of the block; otherwise the rest of the block (one publish) is dropped. Draws of 0 vertices and
+  strips/fans of fewer than 3 are skipped (their index buffer size underflowed).
+- Only a stream that stays broken is fatal, with a clear message: AURORA_FIFO_ERROR_LIMIT errors
+  (default 300) within 10 s.
+- Recordings stop at the first write that does not fit (they used to drop only that write and go
+  on, leaving a list cut inside a command); GXEndDisplayList returns 0 for a list that overflowed,
+  as the SDK does.
+- AuroraCaptureJoin: a thread writes into the capture (or display list) another thread began last.
+  Emulated guest threads share the console's one CPU FIFO; a guest thread other than the capturing
+  one used to write into the FIFO directly, at the same time as the host thread's replays.
+- AuroraFifoStreamPos: absolute stream position of the next byte the calling thread writes.
+
+diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -343,6 +343,37 @@
+ u32 AuroraCapturePos(void);
+ /** Submits captured commands to the FIFO (inside an open frame). */
+ void AuroraReplay(const void* data, u32 size);
++/**
++ * 0235: the calling thread's GX commands go into the capture (or display list) that another thread
++ * began last, instead of the FIFO, while one is open (join = true); or into its own again. For
++ * emulated threads that share one CPU FIFO and never write at the same time. Never join a thread
++ * that submits to the FIFO concurrently (e.g. one that replays captures).
++ */
++void AuroraCaptureJoin(u8 join);
++/** 0235: absolute FIFO stream position of the next byte the calling thread writes to the FIFO. */
++u64 AuroraFifoStreamPos(void);
++
++/**
++ * 0235: malformed FIFO data. The command processor no longer stops on a bad command: it reports
++ * it (rate-limited) through this callback, on the FIFO thread, skips to the next position where
++ * the stream parses as valid commands again (or to the end of the submitted block) and goes on.
++ * Only a stream that stays broken (AURORA_FIFO_ERROR_LIMIT errors within 10 s, default 300) is fatal.
++ */
++typedef struct AuroraFifoError {
++  const char* what;        // "unknown opcode 0x1D", "draw vertex data overrun", ...
++  u64 streamPos;           // absolute stream position of the bad command's first byte
++  u32 blockOffset;         // its offset in the block being processed
++  u32 blockSize;           // size of that block (one publish: a draw, a display list, a replay)
++  u32 skipped;             // bytes skipped to resynchronize
++  u8 resynced;             // false: skipped to the end of the block
++  u32 count;               // errors so far in this session
++  const u8* before;        // up to 64 bytes before the bad command
++  u32 beforeLen;
++  const u8* after;         // up to 32 bytes from the bad command on
++  u32 afterLen;
++} AuroraFifoError;
++typedef void (*AuroraFifoErrorCallback)(const AuroraFifoError* error);
++void AuroraSetFifoErrorCallback(AuroraFifoErrorCallback callback);
+ 
+ /**
+  * Draw probe: while a callback is set, every draw the FIFO processes (except masked ones) is
+diff --git a/lib/dolphin/gx/GXAurora.cpp b/lib/dolphin/gx/GXAurora.cpp
+--- a/lib/dolphin/gx/GXAurora.cpp
++++ b/lib/dolphin/gx/GXAurora.cpp
+@@ -10,6 +10,7 @@
+ #include "gx.hpp"
+ #include "../../window.hpp"
+ 
++#include "../../gx/command_processor.hpp"
+ #include "../../gx/fifo.hpp"
+ 
+ static void GXWriteString(const char* label) {
+@@ -62,6 +63,12 @@
+   aurora::gx::fifo::replay(static_cast<const u8*>(data), size);
+ }
+ 
++void AuroraCaptureJoin(u8 join) { aurora::gx::fifo::join_recording(join != 0); }
++
++u64 AuroraFifoStreamPos() { return aurora::gx::fifo::stream_position(); }
++
++void AuroraSetFifoErrorCallback(AuroraFifoErrorCallback callback) { aurora::gx::fifo::set_error_callback(callback); }
++
+ void AuroraGXSync() {
+   GXFlush();
+   aurora::gx::fifo::drain();
+diff --git a/lib/dolphin/gx/GXDispList.cpp b/lib/dolphin/gx/GXDispList.cpp
+--- a/lib/dolphin/gx/GXDispList.cpp
++++ b/lib/dolphin/gx/GXDispList.cpp
+@@ -35,6 +35,12 @@
+ 
+   // End FIFO redirection and get the byte count (ROUNDUP32)
+   u32 bytesWritten = aurora::gx::fifo::end_display_list();
++  // 0235: as the SDK, a list that overflowed its buffer has size 0 (it was cut off inside a
++  // command: calling it would desynchronize the FIFO).
++  if (aurora::gx::fifo::display_list_overflowed()) {
++    Log.error("GXEndDisplayList: display list commands overflowed the buffer; returning 0");
++    bytesWritten = 0;
++  }
+ 
+   // Restore saved shadow register state
+   if (__gx->dlSaveContext != 0) {
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -27,6 +27,8 @@
+ #include <cstdint>
+ #include <cstdlib>
+ #include <span>
++#include <array>
++#include <chrono>
+ #include <string>
+ #include <vector>
+ 
+@@ -254,20 +256,293 @@
+ 
+ static void handle_draw(u8 cmd, ByteReader& reader) noexcept;
+ static void handle_aurora(ByteReader& reader) noexcept;
++static u32 calc_vtx_size(GXVtxFmt fmt) noexcept;
+ 
+-ProcessResult process(const u8* data, u32 size) noexcept {
++// ---- Malformed FIFO data (0235) -----------------------------------------------------------------
++// A bad command used to be fatal ("command_processor: unknown opcode 0x1D at pos 11946", issue #17).
++// Now it is reported (rate-limited, with the bytes around it and through the application's
++// callback), the processor skips to the next position where the stream parses as valid commands
++// again (or to the end of the block it was given: one publish, so the next block starts on a command
++// boundary) and goes on. Only a stream that stays broken is fatal (AURORA_FIFO_ERROR_LIMIT errors
++// within 10 s, default 300).
++namespace {
++std::atomic<AuroraFifoErrorCallback> sErrorCallback{nullptr};
++u64 sBlockBase = 0;   // absolute stream position of the block being processed (FIFO thread)
++u32 sErrorCount = 0;  // errors this session
++std::array<std::chrono::steady_clock::time_point, 4096> sErrorTimes{};
++std::chrono::steady_clock::time_point sLastVerbose{};
++u32 sSuppressed = 0;
++
++u16 be16(const u8* p) noexcept { return static_cast<u16>(p[0] << 8 | p[1]); }
++u32 be32(const u8* p) noexcept { return u32(p[0]) << 24 | u32(p[1]) << 16 | u32(p[2]) << 8 | p[3]; }
++
++bool valid_draw_prim(u8 cmd) noexcept {
++  switch (cmd & CP_OPCODE_MASK) {
++  case GX_DRAW_QUADS:
++  case GX_DRAW_TRIANGLES:
++  case GX_DRAW_TRIANGLE_STRIP:
++  case GX_DRAW_TRIANGLE_FAN:
++  case GX_DRAW_LINES:
++  case GX_DRAW_LINE_STRIP:
++  case GX_DRAW_POINTS:
++    return true;
++  default:
++    return false;
++  }
++}
++
++// Bytes a GX_AURORA command takes after its 2-byte subcommand; -1 when it does not fit in `avail`
++// or carries an impossible draw, -2 for a subcommand not listed here (a new subcommand should be
++// added, or resynchronization will not accept it). `p` points after the subcommand.
++s64 aurora_payload_len(u16 subCmd, const u8* p, size_t avail) noexcept {
++  const auto fixed = [avail](s64 n) -> s64 { return static_cast<size_t>(n) <= avail ? n : -1; };
++  if (subCmd >= GX_AURORA_LOAD_ARRAYBASE && subCmd <= (GX_AURORA_LOAD_ARRAYBASE | 0x0f)) {
++    return fixed(13);
++  }
++  switch (subCmd) {
++  case GX_AURORA_LOAD_VIEWPORT_RENDER:
++    return fixed(24);
++  case GX_AURORA_LOAD_SCISSOR_RENDER:
++  case GX_AURORA_LOAD_COPY_SRC:
++    return fixed(16);
++  case GX_AURORA_LOAD_PROJECTION_FULL:
++    return fixed(64);
++  case GX_AURORA_DEBUG_GROUP_PUSH:
++  case GX_AURORA_DEBUG_MARKER_INSERT:
++    return avail >= 2 ? fixed(2 + be16(p)) : -1;
++  case GX_AURORA_DEBUG_GROUP_POP:
++  case GX_AURORA_SCENE_END:
++  case GX_AURORA_REQUEST_DEPTH_SNAPSHOT:
++  case GX_AURORA_END_OFFSCREEN:
++    return 0;
++  case GX_AURORA_LOAD_TEXOBJ:
++    return avail >= 1 && p[0] < MaxTextures ? fixed(42) : -1;
++  case GX_AURORA_LOAD_TLUT:
++    return avail >= 1 && p[0] < MaxTluts ? fixed(23) : -1;
++  case GX_AURORA_DESTROY_TEXOBJ:
++  case GX_AURORA_DESTROY_TLUT:
++  case GX_AURORA_PROBE_TAG:
++    return fixed(4);
++  case GX_AURORA_DESTROY_COPY_TEX:
++  case GX_AURORA_LOAD_COPY_DEST:
++  case GX_AURORA_BEGIN_OFFSCREEN:
++    return fixed(8);
++  case GX_AURORA_LOAD_COPY_DST:
++    return fixed(13);
++  case GX_AURORA_SET_WIREFRAME:
++    return fixed(5);
++  case GX_AURORA_SET_CULL_OVERRIDE:
++  case GX_AURORA_SET_DRAW_CLASS:
++  case GX_AURORA_SET_MATERIAL_HINT:
++  case GX_AURORA_STATE_SAVE:
++  case GX_AURORA_STATE_RESTORE:
++  case GX_AURORA_COPY_GENERATION:
++  case GX_AURORA_SET_FADE:
++  case GX_AURORA_SET_REPLAY_MASK:
++    return fixed(1);
++  case GX_AURORA_SET_EXTRA_LIGHTS:
++    return avail >= 1 && p[0] <= gfx::MaxExtraLights ? fixed(1 + s64(p[0]) * GX_AURORA_EXTRA_LIGHT_WORDS * 4) : -1;
++  case GX2_SET_POLYGON_OFFSET:
++    return fixed(20);
++  case GX_AURORA_DRAW_SIZED: {
++    if (avail < 5 || !valid_draw_prim(p[0])) {
++      return -1;
++    }
++    const u32 byteLen = be32(p + 1);
++    if (byteLen != 0) {
++      const u32 vtxSize = calc_vtx_size(static_cast<GXVtxFmt>(p[0] & CP_VAT_MASK));
++      if (vtxSize == 0 || byteLen % vtxSize != 0 || byteLen / vtxSize > 0xFFFF) {
++        return -1;
++      }
++    }
++    return fixed(5 + s64(byteLen));
++  }
++  case GX_AURORA_DRAW_INDEXED: {
++    if (avail < 7 || (p[0] & CP_OPCODE_MASK) != GX_DRAW_TRIANGLES) {
++      return -1;
++    }
++    const u32 vtxSize = calc_vtx_size(static_cast<GXVtxFmt>(p[0] & CP_VAT_MASK));
++    return fixed(7 + s64(be32(p + 3)) * 2 + s64(be16(p + 1)) * vtxSize);
++  }
++  default:
++    return -2;
++  }
++}
++
++// Length of the command at `pos` if it is a plausible one, else 0. Stricter than the processor (exact
++// opcodes, known CP/XF addresses, sane counts): used to find where a broken stream is whole again.
++// `counts` is false for commands that prove nothing (NOPs, empty draws).
++size_t plausible_command_len(const u8* data, size_t size, size_t pos, bool& counts) noexcept {
++  const u8 cmd = data[pos];
++  const size_t avail = size - pos - 1;
++  const u8* p = data + pos + 1;
++  counts = true;
++  switch (cmd) {
++  case GX_NOP:
++  case GX_CMD_INVL_VC:
++    counts = cmd != GX_NOP;
++    return 1;
++  case GX_LOAD_BP_REG:
++    return avail >= 4 ? 5 : 0;
++  case GX_LOAD_CP_REG: {
++    if (avail < 5) {
++      return 0;
++    }
++    const u8 hi = p[0] >> 4, lo = p[0] & 0xF;
++    const bool known = ((hi == 3 || hi == 4 || hi == 5 || hi == 6) && lo == 0) ||
++                       ((hi == 7 || hi == 8 || hi == 9) && lo < 8) || ((hi == 0xA || hi == 0xB) && lo < 12);
++    return known ? 6 : 0;
++  }
++  case GX_LOAD_XF_REG: {
++    if (avail < 4) {
++      return 0;
++    }
++    const u32 header = be32(p);
++    const u32 count = ((header >> 16) & 0xFFFF) + 1;
++    const u32 addr = header & 0xFFFF;
++    const bool known = count <= 64 && (addr + count <= 0x500 || (addr >= 0x1000 && addr + count <= 0x1060));
++    return known && avail >= 4 + size_t(count) * 4 ? 5 + size_t(count) * 4 : 0;
++  }
++  case GX_LOAD_INDX_A:
++  case GX_LOAD_INDX_B:
++  case GX_LOAD_INDX_C:
++  case GX_LOAD_INDX_D:
++    return avail >= 4 ? 5 : 0;
++  case GX_CMD_CALL_DL:
++    return avail >= 8 ? 9 : 0;
++  case GX_AURORA: {
++    if (avail < 2) {
++      return 0;
++    }
++    const s64 len = aurora_payload_len(be16(p), p + 2, avail - 2);
++    return len >= 0 ? 3 + static_cast<size_t>(len) : 0;
++  }
++  default:
++    break;
++  }
++  if (!valid_draw_prim(cmd) || avail < 2) {
++    return 0;
++  }
++  const u16 nVerts = be16(p);
++  const u32 vtxSize = calc_vtx_size(static_cast<GXVtxFmt>(cmd & CP_VAT_MASK));
++  const size_t bytes = size_t(nVerts) * vtxSize;
++  counts = nVerts != 0 && vtxSize != 0;
++  return avail - 2 >= bytes ? 3 + bytes : 0;
++}
++
++// The first position at or after `from` where at least 8 commands that count parse in a row, or
++// commands parse up to the exact end of the block; `size` if there is none.
++size_t find_resync(const u8* data, size_t size, size_t from) noexcept {
++  for (size_t q = from; q < size; ++q) {
++    size_t p = q;
++    int good = 0;
++    bool ok = true;
++    while (p < size && good < 8) {
++      bool counts = false;
++      const size_t len = plausible_command_len(data, size, p, counts);
++      if (len == 0) {
++        ok = false;
++        break;
++      }
++      good += counts ? 1 : 0;
++      p += len;
++    }
++    if (ok && good >= 1) {
++      return q;
++    }
++  }
++  return size;
++}
++
++u32 error_limit() noexcept {
++  static const u32 limit = [] {
++    const char* env = std::getenv("AURORA_FIFO_ERROR_LIMIT");
++    const long v = env != nullptr ? std::strtol(env, nullptr, 10) : 300;
++    return static_cast<u32>(std::clamp<long>(v, 1, static_cast<long>(sErrorTimes.size())));
++  }();
++  return limit;
++}
++
++// Reports the bad command at `cmdPos` and returns where processing continues.
++size_t bad_command(const u8* data, size_t size, size_t cmdPos, std::string what) noexcept {
++  const size_t next = find_resync(data, size, cmdPos + 1);
++  ++sErrorCount;
++  const auto now = std::chrono::steady_clock::now();
++  const u32 limit = error_limit();
++  sErrorTimes[sErrorCount % limit] = now;
++  const bool verbose = sErrorCount <= 10 || now - sLastVerbose >= std::chrono::seconds(1);
++  if (verbose) {
++    sLastVerbose = now;
++    const size_t beforeStart = cmdPos > 64 ? cmdPos - 64 : 0;
++    const size_t afterEnd = std::min(size, cmdPos + 32);
++    std::string hex;
++    for (size_t i = beforeStart; i < afterEnd; ++i) {
++      hex += i == cmdPos ? fmt::format("[{:02x}]", data[i]) : fmt::format(" {:02x}", data[i]);
++    }
++    Log.error("FIFO: {} at stream position {} (offset {} of a {}-byte block); {} bytes skipped, {} (error {}{})",
++              what, sBlockBase + cmdPos, cmdPos, size, next - cmdPos,
++              next < size ? "resynchronized" : "rest of the block dropped", sErrorCount,
++              sSuppressed != 0 ? fmt::format(", {} not shown", sSuppressed) : std::string{});
++    Log.error("FIFO:   bytes {}..{}:{}", sBlockBase + beforeStart, sBlockBase + afterEnd - 1, hex);
++    sSuppressed = 0;
++    if (const auto cb = sErrorCallback.load(std::memory_order_acquire); cb != nullptr) {
++      const AuroraFifoError error{
++          .what = what.c_str(),
++          .streamPos = sBlockBase + cmdPos,
++          .blockOffset = static_cast<u32>(cmdPos),
++          .blockSize = static_cast<u32>(size),
++          .skipped = static_cast<u32>(next - cmdPos),
++          .resynced = static_cast<u8>(next < size ? 1 : 0),
++          .count = sErrorCount,
++          .before = data + beforeStart,
++          .beforeLen = static_cast<u32>(cmdPos - beforeStart),
++          .after = data + cmdPos,
++          .afterLen = static_cast<u32>(afterEnd - cmdPos),
++      };
++      cb(&error);
++    }
++  } else {
++    ++sSuppressed;
++  }
++  // Hopeless: the limit's worth of errors within 10 s (the oldest of them is recent).
++  if (sErrorCount >= limit && now - sErrorTimes[(sErrorCount + 1) % limit] < std::chrono::seconds(10)) {
++    FATAL("The game's graphics command stream stays corrupted ({} malformed commands within 10 seconds, the "
++          "last: {}). The log has the details.",
++          limit, what);
++  }
++  return next;
++}
++} // namespace
++
++void set_error_callback(AuroraFifoErrorCallback callback) noexcept {
++  sErrorCallback.store(callback, std::memory_order_release);
++}
++
++ProcessResult process(const u8* data, u32 size, u64 streamBase) noexcept {
+   ZoneScoped;
++  sBlockBase = streamBase;
+   ByteReader reader{{data, size}};
++  // Continues at `pos` after a bad command (0235).
++  const auto resume = [&](size_t pos) {
++    reader = ByteReader{{data, size}};
++    reader.skip(pos);
++  };
+ 
+   while (!reader.empty()) {
++    const size_t cmdPos = reader.offset();
+     const u8 cmd = reader.read<u8>();
+     u8 opcode = cmd & CP_OPCODE_MASK;
++    const size_t avail = reader.remaining();
+ 
+     switch (opcode) {
+     case CP_CMD_NOP:
+       continue;
+ 
+     case CP_CMD_LOAD_BP_REG: {
++      if (avail < 4) {
++        resume(bad_command(data, size, cmdPos, "truncated BP register load"));
++        break;
++      }
+       const u32 value = reader.read<u32>();
+       handle_bp(value);
+       if (reg_get(value, 8, 24) == GX_BP_REG_DRAWDONE) {
+@@ -277,14 +552,22 @@
+     }
+ 
+     case CP_CMD_LOAD_CP_REG: {
++      if (avail < 5) {
++        resume(bad_command(data, size, cmdPos, "truncated CP register load"));
++        break;
++      }
+       const u8 addr = reader.read<u8>();
+       handle_cp(addr, reader.read<u32>());
+       break;
+     }
+ 
+     case CP_CMD_LOAD_XF_REG: {
++      const u32 count = avail >= 4 ? ((be32(data + cmdPos + 1) >> 16) & 0xFFFF) + 1 : 0;
++      if (avail < 4 || avail - 4 < size_t(count) * sizeof(u32)) {
++        resume(bad_command(data, size, cmdPos, fmt::format("XF load of {} words past the end of the block", count)));
++        break;
++      }
+       const u32 header = reader.read<u32>();
+-      const u32 count = ((header >> 16) & 0xFFFF) + 1;
+       const u16 addr = header & 0xFFFF;
+       handle_xf(addr, reader.take(count * sizeof(u32)));
+       break;
+@@ -295,6 +578,10 @@
+     case CP_CMD_LOAD_INDX_C:
+     case CP_CMD_LOAD_INDX_D: {
+       ZoneScopedN("LOAD_INDX");
++      if (avail < 4) {
++        resume(bad_command(data, size, cmdPos, "truncated indexed XF load"));
++        break;
++      }
+       const u32 arrayType = GX_POS_MTX_ARRAY + (opcode - CP_CMD_LOAD_INDX_A) / 0x08;
+       const u16 srcArrayIdx = reader.read<u16>();
+       const u16 addrLen = reader.read<u16>();
+@@ -304,10 +591,15 @@
+       auto const& array = g_gxState.arrays[arrayType];
+       const u32 srcOffset = static_cast<u32>(srcArrayIdx) * array.stride;
+       const u32 srcSize = static_cast<u32>(len) * sizeof(u32);
+-      AURORA_ASSERT(array.data != nullptr, "indexed XF load from unmapped array {}", arrayType);
+-      AURORA_ASSERT(array.size == 0 || (srcOffset <= array.size && srcSize <= array.size - srcOffset),
+-                    "indexed XF load outside array {}: offset={}, size={}, array size={}", arrayType, srcOffset,
+-                    srcSize, array.size);
++      if (array.data == nullptr ||
++          (array.size != 0 && (srcOffset > array.size || srcSize > array.size - srcOffset))) {
++        // A whole command that cannot be carried out: skipped, the stream stays in step.
++        bad_command(data, size, cmdPos,
++                    fmt::format("indexed XF load outside array {} (offset {}, size {}, array {} bytes{})", arrayType,
++                                srcOffset, srcSize, array.size, array.data == nullptr ? ", unmapped" : ""));
++        resume(cmdPos + 5);
++        break;
++      }
+       auto const* srcData = static_cast<const u8*>(array.data) + srcOffset;
+       if (!copy_xf_data(dstAddr, srcData, len, array.le ? std::endian::little : std::endian::big)) {
+ #ifndef NDEBUG
+@@ -318,6 +610,10 @@
+     }
+ 
+     case CP_CMD_CALL_DL: {
++      if (avail < 8) {
++        resume(bad_command(data, size, cmdPos, "truncated display list call"));
++        break;
++      }
+       // Call display list: 8 bytes (address + size)
+       Log.warn("Ignoring nested GX_CMD_CALL_DL");
+       reader.skip(8);
+@@ -333,44 +629,49 @@
+     }
+ 
+     case GX_AURORA: {
++      if (avail < 2) {
++        resume(bad_command(data, size, cmdPos, "truncated Aurora command"));
++        break;
++      }
++      const u16 subCmd = be16(data + cmdPos + 1);
++      const s64 len = aurora_payload_len(subCmd, data + cmdPos + 3, avail - 2);
++      if (len == -1) {
++        // A known subcommand that does not fit (or carries an impossible draw) would stop the
++        // processor; unknown ones (another patch's) are left to handle_aurora as before.
++        resume(bad_command(data, size, cmdPos, fmt::format("malformed Aurora command {:04X}", subCmd)));
++        break;
++      }
+       handle_aurora(reader);
+       break;
+     }
+ 
+-    // Draw commands: 0x80-0xBF
+-    case GX_DRAW_QUADS:
+-    case GX_DRAW_TRIANGLES:
+-    case GX_DRAW_TRIANGLE_STRIP:
+-    case GX_DRAW_TRIANGLE_FAN:
+-    case GX_DRAW_LINES:
+-    case GX_DRAW_LINE_STRIP:
+-    case GX_DRAW_POINTS: {
++    default: {
++      if (cmd < 0x80 || !valid_draw_prim(cmd)) {
++        resume(bad_command(data, size, cmdPos, fmt::format("unknown opcode 0x{:02X}", cmd)));
++        break;
++      }
++      if (avail < 2) {
++        resume(bad_command(data, size, cmdPos, "truncated draw"));
++        break;
++      }
++      const u16 nVerts = be16(data + cmdPos + 1);
++      const auto fmt = static_cast<GXVtxFmt>(cmd & CP_VAT_MASK);
++      const u32 vtxSize = g_gxState.lastVtxFmt == fmt ? g_gxState.lastVtxSize : calc_vtx_size(fmt);
++      const size_t bytes = size_t(nVerts) * vtxSize;
++      if (avail - 2 < bytes) {
++        resume(bad_command(data, size, cmdPos,
++                           fmt::format("draw vertex data overrun (0x{:02X}: {} vertices of {} bytes, {} left)", cmd,
++                                       nVerts, vtxSize, avail - 2)));
++        break;
++      }
++      const auto prim = static_cast<GXPrimitive>(cmd & CP_OPCODE_MASK);
++      if (nVerts == 0 || ((prim == GX_TRIANGLESTRIP || prim == GX_TRIANGLEFAN) && nVerts < 3)) {
++        reader.skip(2 + bytes);  // nothing to draw (and no index buffer can be built for it)
++        break;
++      }
+       handle_draw(cmd, reader);
+       break;
+     }
+-
+-    default:
+-      // Check if it's a draw command (0x80-0xBF range)
+-      if (cmd >= 0x80) {
+-        handle_draw(cmd, reader);
+-      } else {
+-        // Hex dump surrounding bytes for debugging
+-        {
+-          const size_t pos = reader.offset();
+-          size_t dumpStart = (pos > 17) ? pos - 17 : 0;
+-          size_t dumpEnd = (pos + 16 < size) ? pos + 16 : size;
+-          std::string hex;
+-          for (size_t i = dumpStart; i < dumpEnd; i++) {
+-            if (i == pos - 1)
+-              hex += fmt::format("[{:02x}]", data[i]);
+-            else
+-              hex += fmt::format(" {:02x}", data[i]);
+-          }
+-          Log.error("  hex dump (pos {}-{}):{}", dumpStart, dumpEnd - 1, hex);
+-        }
+-        FATAL("command_processor: unknown opcode 0x{:02X} at pos {}", cmd, reader.offset() - 1);
+-      }
+-      break;
+     }
+   }
+   return {size, false};
+diff --git a/lib/gx/command_processor.hpp b/lib/gx/command_processor.hpp
+--- a/lib/gx/command_processor.hpp
++++ b/lib/gx/command_processor.hpp
+@@ -4,6 +4,8 @@
+ 
+ #include <cstdint>
+ 
++#include <dolphin/gx/GXAurora.h>
++
+ namespace aurora::gx::fifo {
+ 
+ struct ProcessResult {
+@@ -12,7 +14,10 @@
+ };
+ 
+ // Process GX FIFO commands until the next draw done event or end of buffer
+-ProcessResult process(const uint8_t* data, uint32_t size) noexcept;
++// streamBase: absolute stream position of data[0] (error reports, 0235).
++ProcessResult process(const uint8_t* data, uint32_t size, uint64_t streamBase = 0) noexcept;
++// 0235: called for each reported malformed command (on the processing thread).
++void set_error_callback(AuroraFifoErrorCallback callback) noexcept;
+ void clear_draw_cache() noexcept;
+ // Forgets this frame's uploads of dynamically sized vertex arrays (see size_dynamic_arrays).
+ void reset_dynamic_arrays() noexcept;
+diff --git a/lib/gx/fifo.cpp b/lib/gx/fifo.cpp
+--- a/lib/gx/fifo.cpp
++++ b/lib/gx/fifo.cpp
+@@ -19,10 +19,8 @@
+ uint8_t* sBufferData = nullptr;
+ uint32_t sBufferSize = 0;
+ uint32_t sBufferCapacity = 0;
+-thread_local bool sInDisplayList = false;
+-thread_local uint8_t* sDlBuffer = nullptr;
+-thread_local uint32_t sDlSize = 0;
+-thread_local uint32_t sDlWritePos = 0;
++thread_local Recording tOwnRecording;
++thread_local Recording* tJoinedRecording = nullptr;
+ } // namespace detail
+ 
+ namespace {
+@@ -67,7 +65,7 @@
+                     sStreamBase + detail::sBufferSize);
+       const auto start = static_cast<uint32_t>(processed - sStreamBase);
+       const auto size = static_cast<uint32_t>(target - processed);
+-      result = process(detail::sBufferData + start, size);
++      result = process(detail::sBufferData + start, size, processed);
+     }
+     AURORA_ASSERT(result.bytesProcessed > 0 && result.bytesProcessed <= target - processed,
+                   "FIFO processor made invalid progress: processed {} of {} remaining bytes", result.bytesProcessed,
+@@ -140,10 +138,7 @@
+   AURORA_ASSERT(detail::sBufferData != nullptr, "fifo::init: failed to allocate {} bytes", initialCapacity);
+   detail::sBufferSize = 0;
+   detail::sBufferCapacity = initialCapacity;
+-  detail::sInDisplayList = false;
+-  detail::sDlBuffer = nullptr;
+-  detail::sDlSize = 0;
+-  detail::sDlWritePos = 0;
++  detail::recording() = {};
+ 
+   sFrameActive = false;
+   sPendingDraws = 0;
+@@ -188,7 +183,7 @@
+ }
+ 
+ void publish() noexcept {
+-  if (!sFrameActive || kProcessingMode == ProcessingMode::Drain || detail::sInDisplayList) {
++  if (!sFrameActive || kProcessingMode == ProcessingMode::Drain || detail::recording().active) {
+     return;
+   }
+ 
+@@ -209,7 +204,7 @@
+ }
+ 
+ void finish_draw() noexcept {
+-  if (!sFrameActive || kProcessingMode == ProcessingMode::Drain || detail::sInDisplayList) {
++  if (!sFrameActive || kProcessingMode == ProcessingMode::Drain || detail::recording().active) {
+     return;
+   }
+   if (++sPendingDraws >= kDrawBatchSize) {
+@@ -218,7 +213,7 @@
+ }
+ 
+ void patch_u32(uint32_t offset, uint32_t val) {
+-  AURORA_ASSERT(!detail::sInDisplayList && offset <= detail::sBufferSize &&
++  AURORA_ASSERT(!detail::recording().active && offset <= detail::sBufferSize &&
+                     sizeof(uint32_t) <= detail::sBufferSize - offset,
+                 "fifo::patch_u32: invalid patch offset {} (buffer size {})", offset, detail::sBufferSize);
+   AURORA_ASSERT(sStreamBase + offset >= sPublished.load(std::memory_order_relaxed),
+@@ -227,32 +222,56 @@
+   std::memcpy(detail::sBufferData + offset, &out, sizeof(out));
+ }
+ 
++namespace {
++std::atomic<detail::Recording*> sLastRecording{nullptr}; // 0235: what join_recording joins
++bool sLastOverflow = false;
++} // namespace
++
+ void begin_display_list(uint8_t* buf, uint32_t size) {
+-  detail::sInDisplayList = true;
+-  detail::sDlBuffer = buf;
+-  detail::sDlSize = size;
+-  detail::sDlWritePos = 0;
++  auto& rec = detail::recording();
++  rec.active = true;
++  rec.overflow = false;
++  rec.buffer = buf;
++  rec.size = size;
++  rec.pos = 0;
++  if (detail::tJoinedRecording == nullptr) {
++    sLastRecording.store(&rec, std::memory_order_release);
++  }
+ }
+ 
+ uint32_t end_display_list() {
+-  detail::sInDisplayList = false;
+-  const uint32_t bytesWritten = detail::sDlWritePos;
++  auto& rec = detail::recording();
++  rec.active = false;
++  const uint32_t bytesWritten = rec.pos;
+   const uint32_t padded = (bytesWritten + 31) & ~31u;
+-  while (detail::sDlWritePos < padded && detail::sDlWritePos < detail::sDlSize) {
+-    detail::sDlBuffer[detail::sDlWritePos++] = 0;
++  while (rec.pos < padded && rec.pos < rec.size) {
++    rec.buffer[rec.pos++] = 0;
+   }
+-  detail::sDlBuffer = nullptr;
+-  detail::sDlSize = 0;
+-  detail::sDlWritePos = 0;
++  sLastOverflow = rec.overflow;
++  rec.buffer = nullptr;
++  rec.size = 0;
++  rec.pos = 0;
++  rec.overflow = false;
+   return padded;
+ }
+ 
+-bool in_display_list() { return detail::sInDisplayList; }
++bool display_list_overflowed() { return sLastOverflow; }
++
++void join_recording(bool join) {
++  if (!join) {
++    detail::tJoinedRecording = nullptr;
++    return;
++  }
++  auto* last = sLastRecording.load(std::memory_order_acquire);
++  detail::tJoinedRecording = last == &detail::tOwnRecording ? nullptr : last;
++}
++
++bool in_display_list() { return detail::recording().active; }
+ 
+-uint32_t display_list_pos() { return detail::sDlWritePos; }
++uint32_t display_list_pos() { return detail::recording().pos; }
+ 
+ void replay(const uint8_t* data, uint32_t size) {
+-  AURORA_ASSERT(!detail::sInDisplayList, "fifo::replay: called while recording");
++  AURORA_ASSERT(!detail::recording().active, "fifo::replay: called while recording");
+   if (size <= detail::sBufferCapacity - detail::sBufferSize) {
+     std::memcpy(detail::sBufferData + detail::sBufferSize, data, size);
+     detail::sBufferSize += size;
+@@ -264,7 +283,7 @@
+ 
+ void drain() {
+   // A thread that is recording has nothing of its own in the FIFO.
+-  if (detail::sInDisplayList || detail::sBufferSize == 0) {
++  if (detail::recording().active || detail::sBufferSize == 0) {
+     return;
+   }
+ 
+diff --git a/lib/gx/fifo.hpp b/lib/gx/fifo.hpp
+--- a/lib/gx/fifo.hpp
++++ b/lib/gx/fifo.hpp
+@@ -10,12 +10,22 @@
+ extern uint8_t* sBufferData;
+ extern uint32_t sBufferSize;
+ extern uint32_t sBufferCapacity;
+-// Per thread, so one thread can record (a display list, or a capture) while
+-// another submits to the FIFO.
+-extern thread_local bool sInDisplayList;
+-extern thread_local uint8_t* sDlBuffer;
+-extern thread_local uint32_t sDlSize;
+-extern thread_local uint32_t sDlWritePos;
++// A display-list (or capture) recording. Per thread, so one thread can record while another
++// submits to the FIFO; a thread may instead share the recording another thread started
++// (0235, join_recording: guest threads of an emulated console share its one CPU FIFO).
++struct Recording {
++  bool active = false;
++  bool overflow = false; // a write did not fit: the recording is incomplete (GXEndDisplayList returns 0)
++  uint8_t* buffer = nullptr;
++  uint32_t size = 0;
++  uint32_t pos = 0;
++};
++extern thread_local Recording tOwnRecording;
++extern thread_local Recording* tJoinedRecording;
++inline Recording& recording() noexcept {
++  Recording* joined = tJoinedRecording;
++  return joined != nullptr ? *joined : tOwnRecording;
++}
+ } // namespace detail
+ 
+ enum class ProcessingMode : uint8_t {
+@@ -38,7 +48,8 @@
+ void write_data_grow(const void* data, uint32_t length);
+ 
+ inline void write_data(const void* data, const uint32_t length) {
+-  if (!detail::sInDisplayList)
++  auto& rec = detail::recording();
++  if (!rec.active)
+     LIKELY {
+       if (length <= detail::sBufferCapacity - detail::sBufferSize)
+         LIKELY {
+@@ -48,14 +59,20 @@
+         }
+       write_data_grow(data, length);
+     }
+-  else if (length <= detail::sDlSize - detail::sDlWritePos) {
+-    std::memcpy(detail::sDlBuffer + detail::sDlWritePos, data, length);
+-    detail::sDlWritePos += length;
++  else if (length <= rec.size - rec.pos) {
++    std::memcpy(rec.buffer + rec.pos, data, length);
++    rec.pos += length;
++  } else {
++    // 0235: nothing more is written once one write did not fit (a partial command would make the
++    // rest of the list unparseable); end_display_list reports the overflow.
++    rec.overflow = true;
++    rec.pos = rec.size;
+   }
+ }
+ 
+ inline void write_u8(const uint8_t val) {
+-  if (!detail::sInDisplayList)
++  auto& rec = detail::recording();
++  if (!rec.active)
+     LIKELY {
+       if (detail::sBufferSize < detail::sBufferCapacity)
+         LIKELY {
+@@ -64,8 +81,10 @@
+         }
+       write_data_grow(&val, 1);
+     }
+-  else if (detail::sDlWritePos < detail::sDlSize) {
+-    detail::sDlBuffer[detail::sDlWritePos++] = val;
++  else if (rec.pos < rec.size) {
++    rec.buffer[rec.pos++] = val;
++  } else {
++    rec.overflow = true;
+   }
+ }
+ 
+@@ -106,6 +125,11 @@
+ uint32_t end_display_list();
+ bool in_display_list();
+ uint32_t display_list_pos();
++// 0235: whether the recording being ended overflowed its buffer (valid until the next begin).
++bool display_list_overflowed();
++// 0235: the calling thread writes into the recording of the thread that last began one (shares it:
++// both must never write at the same time), or (false) into its own again.
++void join_recording(bool join);
+ 
+ // Appends recorded commands to the FIFO and publishes them (bypasses the
+ // calling thread's display-list redirection).

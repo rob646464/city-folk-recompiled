@@ -1,0 +1,230 @@
+diff --git a/lib/gfx/recording.cpp b/lib/gfx/recording.cpp
+index 78b1ca1..40d4ce9 100644
+--- a/lib/gfx/recording.cpp
++++ b/lib/gfx/recording.cpp
+@@ -841,6 +841,7 @@ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bo
+       .offset = {static_cast<float>(rect.x) / srcW, static_cast<float>(rect.y) / srcH},
+       .scale = {static_cast<float>(rect.width) / srcW, static_cast<float>(rect.height) / srcH},
+       .opaqueAlpha = !gx::efb_has_alpha(sourceFormat),
++      .quantize = (gx::g_accuracyFlags.load(std::memory_order_relaxed) & GX_AURORA_ACCURACY_EFB_DEPTH) != 0,
+   };
+   prevPass.resolveUniformRange = push_uniform(uniforms);
+   if (g_nextResolveOp) {
+diff --git a/lib/gfx/tex_copy_conv.cpp b/lib/gfx/tex_copy_conv.cpp
+index a3f3560..d474775 100644
+--- a/lib/gfx/tex_copy_conv.cpp
++++ b/lib/gfx/tex_copy_conv.cpp
+@@ -28,6 +28,7 @@ struct Uniforms {
+     offset: vec2f,
+     scale: vec2f,
+     opaqueAlpha: u32,
++    quantize: u32,
+ };
+ @group(0) @binding(2) var<uniform> ubuf: Uniforms;
+ 
+@@ -67,6 +68,13 @@ fn intensity(rgb: vec3f) -> f32 {
+ fn quantize4(v: f32) -> f32 {
+     return floor(v * 16.0) / 15.0;
+ }
++
++// The top n bits of an 8-bit channel, expanded back to 8 bits by bit replication (as the texture
++// unit decodes RGB565/RGB5A3 texels).
++fn bits8(v: f32, n: u32) -> f32 {
++    let x = (u32(round(clamp(v, 0.0, 1.0) * 255.0)) >> (8u - n)) << (8u - n);
++    return f32(x | (x >> n) | (x >> (2u * n))) / 255.0;
++}
+ )"sv;
+ 
+ static const std::string DepthShaderPreamble = R"(
+@@ -165,10 +173,27 @@ static constexpr std::string_view FragIA8 = R"(
+ static constexpr std::string_view FragRGB565 = R"(
+ @fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+     let c = sample_efb(in.uv);
++    if (ubuf.quantize != 0u) {
++        return vec4f(bits8(c.r, 5u), bits8(c.g, 6u), bits8(c.b, 5u), 1.0);
++    }
+     return vec4f(c.rgb, 1.0);
+ }
+ )"sv;
+ 
++// GX_TF_RGB5A3: opaque texels (alpha >= 0xE0) store RGB555, the others RGB444 + 3-bit alpha
++static constexpr std::string_view FragRGB5A3 = R"(
++@fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
++    let c = sample_efb(in.uv);
++    if (ubuf.quantize == 0u) {
++        return c;
++    }
++    if (u32(round(clamp(c.a, 0.0, 1.0) * 255.0)) >= 0xE0u) {
++        return vec4f(bits8(c.r, 5u), bits8(c.g, 5u), bits8(c.b, 5u), 1.0);
++    }
++    return vec4f(bits8(c.r, 4u), bits8(c.g, 4u), bits8(c.b, 4u), bits8(c.a, 3u));
++}
++)"sv;
++
+ // GX_CTF_R4: 4-bit red -> R8Unorm
+ static constexpr std::string_view FragR4 = R"(
+ @fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+@@ -312,6 +337,7 @@ static constexpr std::array ConvPipelines{
+     ConvPipeline{GX_TF_IA4, FragIA4, wgpu::TextureFormat::RGBA8Unorm, "TexCopyConv IA4"},
+     ConvPipeline{GX_TF_IA8, FragIA8, wgpu::TextureFormat::RGBA8Unorm, "TexCopyConv IA8"},
+     ConvPipeline{GX_TF_RGB565, FragRGB565, wgpu::TextureFormat::RGBA8Unorm, "TexCopyConv RGB565"},
++    ConvPipeline{GX_TF_RGB5A3, FragRGB5A3, wgpu::TextureFormat::RGBA8Unorm, "TexCopyConv RGB5A3"},
+     ConvPipeline{GX_CTF_R4, FragR4, wgpu::TextureFormat::RGBA8Unorm, "TexCopyConv R4"},
+     ConvPipeline{GX_CTF_RA4, FragRA4, wgpu::TextureFormat::RGBA8Unorm, "TexCopyConv RA4"},
+     ConvPipeline{GX_CTF_RA8, FragRA8, wgpu::TextureFormat::RGBA8Unorm, "TexCopyConv RA8"},
+diff --git a/lib/gfx/tex_copy_conv.hpp b/lib/gfx/tex_copy_conv.hpp
+index a6946f9..45367ac 100644
+--- a/lib/gfx/tex_copy_conv.hpp
++++ b/lib/gfx/tex_copy_conv.hpp
+@@ -17,7 +17,8 @@ struct alignas(16) Uniforms {
+   Vec2<float> offset;
+   Vec2<float> scale{1.f, 1.f};
+   uint32_t opaqueAlpha = 0;
+-  std::array<uint32_t, 3> _pad{};
++  uint32_t quantize = 0; // RGB565/RGB5A3 copies: store the format's precision (GX_AURORA_ACCURACY_EFB_DEPTH)
++  std::array<uint32_t, 2> _pad{};
+ };
+ static_assert(sizeof(Uniforms) == 32);
+ 
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index a041c4b..295af0a 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1683,27 +1683,30 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+       // Apply indirect texture matrix (produces a texel-space offset)
+       std::string indirectOffsetTexel;
+       if (needsIndirectCoord && hasIndirectStage) {
+-        std::string_view fmtShift;
++        // ITF_5/4/3 offsets are the low bits of each component; the high bits are the bump alpha
++        // (alpha_bump_sel masks 0xE0/0xF0/0xF8).
++        u32 fmtMask = 0;
+         switch (stage.indTexFormat) {
+         case GX_ITF_8:
+           break;
+         case GX_ITF_5:
+-          fmtShift = " / 8.0"sv;
++          fmtMask = 0x1F;
+           break;
+         case GX_ITF_4:
+-          fmtShift = " / 16.0"sv;
++          fmtMask = 0x0F;
+           break;
+         case GX_ITF_3:
+-          fmtShift = " / 32.0"sv;
++          fmtMask = 0x07;
+           break;
+         default:
+           FATAL("unhandled indirect format {}", underlying(stage.indTexFormat));
+         }
+-        if (fmtShift.empty()) {
++        if (fmtMask == 0) {
+           fragmentFnPre += fmt::format("\n    var ind{0}_coord = t_IndTexCoord{1};", i, underlying(stage.indTexStage));
+         } else {
+-          fragmentFnPre += fmt::format("\n    var ind{0}_coord = floor(t_IndTexCoord{1}{2});", i,
+-                                       underlying(stage.indTexStage), fmtShift);
++          fragmentFnPre +=
++              fmt::format("\n    var ind{0}_coord = vec3f(vec3u(round(t_IndTexCoord{1})) & vec3u(0x{2:X}u));", i,
++                          underlying(stage.indTexStage), fmtMask);
+         }
+ 
+         if (stage.indTexBiasSel != GX_ITB_NONE) {
+@@ -1732,28 +1735,46 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+               "\n    let ind{0}_c0 = ubuf.ind_mtx[{1}][0];"
+               "\n    let ind{0}_c1 = ubuf.ind_mtx[{1}][1];",
+               i, mtxIdx);
+-          indirectOffsetTexel = fmt::format(
+-              "vec2f("
+-              "dot(vec3f(ind{0}_c0.xz, ind{0}_c1.x), ind{0}_coord), "
+-              "dot(vec3f(ind{0}_c0.yw, ind{0}_c1.y), ind{0}_coord)"
+-              ") * ind{0}_c1.z",
+-              i);
++          if (config.intTev) {
++            // Hardware: s1.10 matrix x s8 offsets, >> 3 into texel units with 7 fractional bits, then
++            // the scale shift (right shifts truncate toward -inf).
++            fragmentFnPre += fmt::format("\n    let ind{0}_raw = round(1024.0 * vec2f("
++                                         "dot(vec3f(ind{0}_c0.xz, ind{0}_c1.x), ind{0}_coord), "
++                                         "dot(vec3f(ind{0}_c0.yw, ind{0}_c1.y), ind{0}_coord)));",
++                                         i);
++            indirectOffsetTexel = fmt::format("(floor(floor(ind{0}_raw / 8.0) * ind{0}_c1.z) / 128.0)", i);
++          } else {
++            indirectOffsetTexel = fmt::format(
++                "vec2f("
++                "dot(vec3f(ind{0}_c0.xz, ind{0}_c1.x), ind{0}_coord), "
++                "dot(vec3f(ind{0}_c0.yw, ind{0}_c1.y), ind{0}_coord)"
++                ") * ind{0}_c1.z",
++                i);
++          }
+         } else if (stage.indTexMtxId >= GX_ITM_S0 && stage.indTexMtxId <= GX_ITM_S2 && hasBaseCoord) {
+           // Dynamic S: result = scaled texcoord * ind_coord.x * scale / 256
+           u32 mtxIdx = stage.indTexMtxId - GX_ITM_S0;
+           u32 regTexCoord = underlying(stage.texCoordId);
+-          indirectOffsetTexel = fmt::format(
+-              "tex{1}_uv * ubuf.texcoord_scale[{1}].xy * ind{0}_coord.x"
+-              " * ubuf.ind_mtx[{2}][1][2] / 256.0",
+-              i, regTexCoord, mtxIdx);
++          indirectOffsetTexel =
++              config.intTev
++                  ? fmt::format("(floor(floor(floor(tex{1}_uv * ubuf.texcoord_scale[{1}].xy * 128.0) * ind{0}_coord.x / "
++                                "256.0) * ubuf.ind_mtx[{2}][1][2]) / 128.0)",
++                                i, regTexCoord, mtxIdx)
++                  : fmt::format("tex{1}_uv * ubuf.texcoord_scale[{1}].xy * ind{0}_coord.x"
++                                " * ubuf.ind_mtx[{2}][1][2] / 256.0",
++                                i, regTexCoord, mtxIdx);
+         } else if (stage.indTexMtxId >= GX_ITM_T0 && stage.indTexMtxId <= GX_ITM_T2 && hasBaseCoord) {
+           // Dynamic T: result = scaled texcoord * ind_coord.y * scale / 256
+           u32 mtxIdx = stage.indTexMtxId - GX_ITM_T0;
+           u32 regTexCoord = underlying(stage.texCoordId);
+-          indirectOffsetTexel = fmt::format(
+-              "tex{1}_uv * ubuf.texcoord_scale[{1}].xy * ind{0}_coord.y"
+-              " * ubuf.ind_mtx[{2}][1][2] / 256.0",
+-              i, regTexCoord, mtxIdx);
++          indirectOffsetTexel =
++              config.intTev
++                  ? fmt::format("(floor(floor(floor(tex{1}_uv * ubuf.texcoord_scale[{1}].xy * 128.0) * ind{0}_coord.y / "
++                                "256.0) * ubuf.ind_mtx[{2}][1][2]) / 128.0)",
++                                i, regTexCoord, mtxIdx)
++                  : fmt::format("tex{1}_uv * ubuf.texcoord_scale[{1}].xy * ind{0}_coord.y"
++                                " * ubuf.ind_mtx[{2}][1][2] / 256.0",
++                                i, regTexCoord, mtxIdx);
+         }
+       }
+ 
+@@ -1766,15 +1787,15 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+         case GX_ITW_OFF:
+           return std::move(coord);
+         case GX_ITW_256:
+-          return fmt::format("({} % 256.0)", coord);
++          return fmt::format("({0} - 256.0 * floor({0} / 256.0))", coord);
+         case GX_ITW_128:
+-          return fmt::format("({} % 128.0)", coord);
++          return fmt::format("({0} - 128.0 * floor({0} / 128.0))", coord);
+         case GX_ITW_64:
+-          return fmt::format("({} % 64.0)", coord);
++          return fmt::format("({0} - 64.0 * floor({0} / 64.0))", coord);
+         case GX_ITW_32:
+-          return fmt::format("({} % 32.0)", coord);
++          return fmt::format("({0} - 32.0 * floor({0} / 32.0))", coord);
+         case GX_ITW_16:
+-          return fmt::format("({} % 16.0)", coord);
++          return fmt::format("({0} - 16.0 * floor({0} / 16.0))", coord);
+         case GX_ITW_0:
+           return "0.0";
+         default:
+@@ -1787,8 +1808,15 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+         if (useSimpleCoords) {
+           baseCoordExpr = fmt::format("tex{}_uv", texCoordId);
+         } else {
+-          fragmentFnPre +=
+-              fmt::format("\n    var ind{0}_texel = tex{1}_uv * ubuf.texcoord_scale[{1}].xy;", i, texCoordId);
++          // The TEV's texture coordinates are fixed point (texel units, 7 fractional bits).
++          if (config.intTev) {
++            fragmentFnPre += fmt::format(
++                "\n    var ind{0}_texel = floor(tex{1}_uv * ubuf.texcoord_scale[{1}].xy * 128.0) / 128.0;", i,
++                texCoordId);
++          } else {
++            fragmentFnPre +=
++                fmt::format("\n    var ind{0}_texel = tex{1}_uv * ubuf.texcoord_scale[{1}].xy;", i, texCoordId);
++          }
+           baseCoordExpr = fmt::format("ind{}_texel", i);
+         }
+       }

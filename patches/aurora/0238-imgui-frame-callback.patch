@@ -1,0 +1,103 @@
+0238: ImGui frame callback before NewFrame (UI scale / font atlas rebuilds)
+
+The F1 menu's "Menu size" option (issue #20) rebuilds the font atlas at the scaled pixel size and
+rescales the style from a clean base. Dear ImGui 1.91 locks the atlas between NewFrame and Render,
+so it has to happen before NewFrame: aurora_imgui_set_frame_callback(cb) is called at the start of
+every ImGui frame with the window size. An atlas the callback leaves unbuilt is rebuilt and
+uploaded right after it.
+
+Recreating the backend's device objects (atlas rebuild, and the existing display-scale change)
+released the font texture and the frame vertex/index buffers while the previous frame's ImGui draw
+could still be running on the render worker: render_worker::synchronize() first. The SDL renderer
+fallback destroys its font texture so NewFrame uploads the new atlas.
+
+diff --git a/include/aurora/imgui.h b/include/aurora/imgui.h
+index 77eba9a..92ff82b 100644
+--- a/include/aurora/imgui.h
++++ b/include/aurora/imgui.h
+@@ -1,6 +1,7 @@
+ #ifndef AURORA_IMGUI_H
+ #define AURORA_IMGUI_H
+ 
++#include <aurora/aurora.h>
+ #include <imgui.h>
+ 
+ #ifdef __cplusplus
+@@ -13,6 +14,14 @@ extern "C" {
+ 
+ ImTextureID aurora_imgui_add_texture(uint32_t width, uint32_t height, const void* rgba8);
+ 
++/* Called on the main thread at the start of every ImGui frame, before ImGui::NewFrame, with the
++ * window size (also the first frame). The callback may change the font atlas (clear it and add
++ * fonts at another size) and the style: an atlas left unbuilt is rebuilt and uploaded right
++ * after it returns, once the previous frame's ImGui draw has finished on the render worker.
++ * Fonts cannot be changed between NewFrame and Render, so this is the place for a UI scale. */
++typedef void (*AuroraImGuiFrameCallback)(const AuroraWindowSize* size);
++void aurora_imgui_set_frame_callback(AuroraImGuiFrameCallback callback);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/lib/imgui.cpp b/lib/imgui.cpp
+index 77f65fd..a337e3e 100644
+--- a/lib/imgui.cpp
++++ b/lib/imgui.cpp
+@@ -1,5 +1,7 @@
+ #include "imgui.hpp"
+ 
++#include <aurora/imgui.h>
++
+ #include <cstddef>
+ #include <cmath>
+ #include <cstring>
+@@ -30,6 +32,7 @@ float g_scale;
+ std::string g_imguiSettings{};
+ std::string g_imguiLog{};
+ bool g_useSdlRenderer = false;
++AuroraImGuiFrameCallback g_frameCallback = nullptr;
+ 
+ std::vector<SDL_Texture*> g_sdlTextures;
+ std::vector<wgpu::Texture> g_wgpuTextures;
+@@ -201,6 +204,9 @@ void new_frame(const AuroraWindowSize& size) noexcept {
+       size.height > 0 ? static_cast<float>(size.native_fb_height) / static_cast<float>(size.height) : 1.0f,
+   };
+   ImVec2 displaySize{static_cast<float>(size.width), static_cast<float>(size.height)};
++  if (g_frameCallback != nullptr) {
++    g_frameCallback(&size);
++  }
+ 
+   if (g_useSdlRenderer) {
+     if (SDL_Renderer* renderer = window::get_sdl_renderer()) {
+@@ -219,16 +225,26 @@ void new_frame(const AuroraWindowSize& size) noexcept {
+         framebufferScale = {renderScaleX, renderScaleY};
+       }
+     }
++    if (!ImGui::GetIO().Fonts->IsBuilt()) {
++      // The frame callback rebuilt the atlas: the previous frame may still be drawn with the old
++      // font texture on the render worker.
++      gfx::render_worker::synchronize();
++      ImGui_ImplSDLRenderer3_DestroyFontsTexture();
++    }
+     ImGui_ImplSDLRenderer3_NewFrame();
+     g_scale = size.scale;
+   } else {
++    // Recreating the device objects releases the font texture and the vertex/index buffers the
++    // previous frame's ImGui draw (on the render worker) may still use: wait for it first.
+     if (g_scale != size.scale) {
+       if (g_scale > 0.f) {
++        gfx::render_worker::synchronize();
+         ImGui_ImplWGPU_CreateDeviceObjects();
+       }
+       g_scale = size.scale;
+     }
+     if (!ImGui::GetIO().Fonts->IsBuilt()) {
++      gfx::render_worker::synchronize();
+       ImGui_ImplWGPU_CreateDeviceObjects();
+     }
+     ImGui_ImplWGPU_NewFrame();
+@@ -333,4 +349,5 @@ extern "C" {
+ ImTextureID aurora_imgui_add_texture(uint32_t width, uint32_t height, const void* rgba8) {
+   return aurora::imgui::add_texture(width, height, static_cast<const uint8_t*>(rgba8));
+ }
++void aurora_imgui_set_frame_callback(AuroraImGuiFrameCallback callback) { aurora::imgui::g_frameCallback = callback; }
+ }

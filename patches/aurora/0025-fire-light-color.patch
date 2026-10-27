@@ -1,0 +1,47 @@
+diff --git a/include/aurora/lights.h b/include/aurora/lights.h
+index c5617f2..0c53056 100644
+--- a/include/aurora/lights.h
++++ b/include/aurora/lights.h
+@@ -25,6 +25,8 @@ constexpr uint32_t MaxExtraLights = 64; // 0023: was 16 (world lights: candles,
+ constexpr uint32_t ExtraLightCastShadows = 1u << 0;
+ constexpr uint32_t ExtraLightTranslucent = 1u << 1;
+ constexpr uint32_t ExtraLightSpecular = 1u << 2;
++// 0025: a flame: yellow-white near the source, red-orange toward the edge of its reach.
++constexpr uint32_t ExtraLightFire = 1u << 3;
+ 
+ // Call once per game frame (guest thread), before the frame's draws; applies to world-geometry
+ // draws of that frame. Lights beyond MaxExtraLights are dropped (pass the strongest first).
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+index f57aed3..62c7ba5 100644
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -71,6 +71,12 @@ float g_flashDist2 = 0.f;
+ std::array<float, 3> vivid(const float c[3], float sat) noexcept {
+   const float l = 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
+   const float mx = std::max({c[0], c[1], c[2]});
++  // Hue-preserving (0025): the boost stops where the weakest channel reaches 0. Clamping a
++  // channel that would go negative shifts the hue (orange fire turned pure red, a gold ghost red).
++  const float mn = std::min({c[0], c[1], c[2]});
++  if (mn < l && sat > 1.f) {
++    sat = std::min(sat, l / (l - mn));
++  }
+   std::array<float, 3> o{};
+   float omx = 0.f;
+   for (int i = 0; i < 3; ++i) {
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index 49aeb13..32a3c27 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1025,6 +1025,12 @@ fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
+     // softly instead of a hard terminator; no highlight.
+     ndl = select(ndl, clamp((dot(n, l) + 0.45) / 1.45, 0.0, 1.0) * 0.85, ubuf.enh_material > 0.5 && !ghost);
+     var col = vec3f(enh_ld(b + 4u), enh_ld(b + 5u), enh_ld(b + 6u)) * enh_ld(b + 7u);
++    if ((flags & 8u) != 0u) {
++      // Fire (ExtraLightFire): yellow-white near the flame, deepening to red-orange with distance
++      // (green and blue fall off faster than red), like the glow around a real fire.
++      let x = sqrt(x2);
++      col = col * vec3f(1.0, mix(1.2, 0.62, x), mix(1.5, 0.35, x));
++    }
+     let slot = abuf[b + 10u];
+     if (slot < 4u) {
+       // Shadow weight in flags bits 8..15 (0 = full): shadows fade in/out when the set of

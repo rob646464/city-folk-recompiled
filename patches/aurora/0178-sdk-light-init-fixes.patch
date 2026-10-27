@@ -1,0 +1,33 @@
+diff --git a/lib/dolphin/gx/GXLighting.cpp b/lib/dolphin/gx/GXLighting.cpp
+--- a/lib/dolphin/gx/GXLighting.cpp
++++ b/lib/dolphin/gx/GXLighting.cpp
+@@ -54,15 +54,17 @@
+     a2 = 1.f / (1.f - cr);
+     break;
+   case GX_SP_SHARP: {
++    // 0178: as the SDK: every term over (1 - cr)^2, so the curve is 0 at the cutoff and 1 on the axis
+     const float d = (1.f - cr) * (1.f - cr);
+-    a0 = cr * (cr - 2.f);
++    a0 = cr * (cr - 2.f) / d;
+     a1 = 2.f / d;
+     a2 = -1.f / d;
+     break;
+   }
+   case GX_SP_RING1: {
++    // 0178: as the SDK: a0 is negative (0 at the cutoff and on the axis, peak half way)
+     const float d = (1.f - cr) * (1.f - cr);
+-    a0 = 4.f * cr / d;
++    a0 = -4.f * cr / d;
+     a1 = 4.f * (1.f + cr) / d;
+     a2 = -4.f / d;
+     break;
+@@ -83,7 +85,8 @@
+ }
+
+ void GXInitLightDistAttn(GXLightObj* light_, float refDistance, float refBrightness, GXDistAttnFn distFunc) {
+-  if (refDistance < 0.f || refBrightness < 0.f || refBrightness >= 1.f) {
++  // 0178: as the SDK, a brightness of 0 also turns the attenuation off (it would divide by zero)
++  if (refDistance < 0.f || refBrightness <= 0.f || refBrightness >= 1.f) {
+     distFunc = GX_DA_OFF;
+   }
+   float k0 = 1.f;

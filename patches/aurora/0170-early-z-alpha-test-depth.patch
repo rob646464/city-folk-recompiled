@@ -1,0 +1,107 @@
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+index 7e65029..fa4eca4 100644
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -714,6 +714,91 @@ static bool draw_debug_note(const PipelineConfig& pc, GXPrimitive prim, u16 vtxC
+   return skip;
+ }
+ 
++// Z compare before texturing (GXSetZCompLoc(GX_TRUE)) tests *and updates* Z before the TEV and
++// the alpha test, so a pixel the alpha test rejects still writes its depth (SDK: "when alpha
++// compare is used, Z buffering must be done after texturing"; the Z-texture patent: the alpha
++// result masks Z writes only with late Z; Dolphin forces early fragment tests for it). WebGPU
++// never writes depth for a discarded fragment, so such draws are split in two: a depth-only pass
++// without the alpha test (the depth this draw writes on the console), then the colour pass with
++// the alpha test against that depth (no Z write; LESS/GREATER widened by equality, which the
++// fragment's own depth now has). AURORA_EARLY_Z_SPLIT=0 turns it off (A/B).
++static bool alpha_compare_passes(const AlphaCompare& ac, u32 a) noexcept {
++  const auto cmp = [a](GXCompare c, u32 ref) {
++    switch (c) {
++    case GX_NEVER: return false;
++    case GX_LESS: return a < ref;
++    case GX_EQUAL: return a == ref;
++    case GX_LEQUAL: return a <= ref;
++    case GX_GREATER: return a > ref;
++    case GX_NEQUAL: return a != ref;
++    case GX_GEQUAL: return a >= ref;
++    default: return true;
++    }
++  };
++  const bool p0 = cmp(ac.comp0, ac.ref0), p1 = cmp(ac.comp1, ac.ref1);
++  switch (ac.op) {
++  case GX_AOP_AND: return p0 && p1;
++  case GX_AOP_OR: return p0 || p1;
++  case GX_AOP_XOR: return p0 != p1;
++  default: return p0 == p1; // XNOR
++  }
++}
++static bool early_z_alpha_split(const PipelineConfig& pc) noexcept {
++  // AURORA_EARLY_Z_SPLIT=0 off, =ab only in odd frames (A/B within one run)
++  static const int mode = [] {
++    const char* e = std::getenv("AURORA_EARLY_Z_SPLIT");
++    return e == nullptr ? 1 : e[0] == '0' ? 0 : e[0] == 'a' ? 2 : 1;
++  }();
++  const bool enabled = mode == 1 || (mode == 2 && (sDbgFrame.load(std::memory_order_relaxed) & 1) != 0);
++  if (!enabled || !g_gxState.zCompLocBeforeTex || !pc.depthCompare || !pc.depthUpdate ||
++      !pc.shaderConfig.alphaCompare || pc.shaderConfig.lineMode != 0 || pc.shaderConfig.wireframe) {
++    return false;
++  }
++  for (u32 a = 0; a < 256; ++a) {
++    if (!alpha_compare_passes(pc.shaderConfig.alphaCompare, a)) {
++      return true;
++    }
++  }
++  return false;
++}
++static void push_early_z_split(const DrawCache& cache, const DrawData& data) noexcept {
++  static const bool sLog = std::getenv("AURORA_EARLY_Z_LOG") != nullptr;
++  if (sLog) {
++    static u32 sCount = 0, sLastFrame = 0;
++    ++sCount;
++    if (const u32 f = sDbgFrame.load(std::memory_order_relaxed); f >= sLastFrame + 300) {
++      Log.info("[early-z] {} split draws in frames {}..{}", sCount, sLastFrame, f);
++      sCount = 0;
++      sLastFrame = f;
++    }
++  }
++  PipelineConfig depthOnly = cache.config;
++  depthOnly.shaderConfig.alphaCompare = AlphaCompare{GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0};
++  depthOnly.colorUpdate = false;
++  depthOnly.alphaUpdate = false;
++  depthOnly.blendMode = GX_BM_NONE;
++  depthOnly.blendFacSrc = GX_BL_ONE;
++  depthOnly.blendFacDst = GX_BL_ZERO;
++  depthOnly.blendOp = GX_LO_COPY;
++  depthOnly.dstAlpha = UINT32_MAX;
++  DrawData first = data;
++  first.pipeline = gfx::pipeline_ref(depthOnly);
++  first.dstAlpha = UINT32_MAX;
++  gfx::push_draw_command(first);
++
++  PipelineConfig color = cache.config;
++  color.depthUpdate = false;
++  switch (color.depthFunc) {
++  case GX_LESS: color.depthFunc = GX_LEQUAL; break;
++  case GX_GREATER: color.depthFunc = GX_GEQUAL; break;
++  case GX_NEQUAL: color.depthFunc = GX_EQUAL; break;
++  default: break;
++  }
++  DrawData second = data;
++  second.pipeline = gfx::pipeline_ref(color);
++  gfx::push_draw_command(second);
++}
++
+ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
+                          u32 numIndices) noexcept {
+   auto& state = g_gxState;
+@@ -827,6 +912,10 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
+       return; // debug: hidden
+     }
+   }
++  if (early_z_alpha_split(cache.config)) [[unlikely]] {
++    push_early_z_split(cache, drawData);
++    return;
++  }
+   gfx::push_draw_command(drawData);
+ }
+ 

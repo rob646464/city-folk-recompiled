@@ -1,0 +1,74 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "windows-clang",
+      "displayName": "Windows (clang-cl, Ninja)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_COMPILER": "clang-cl",
+        "CMAKE_CXX_COMPILER": "clang-cl"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "linux-clang",
+      "displayName": "Linux x86_64 (clang + lld, Ninja; docs/LINUX.md)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_EXE_LINKER_FLAGS": "-fuse-ld=lld",
+        "CMAKE_SHARED_LINKER_FLAGS": "-fuse-ld=lld"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "macos-clang",
+      "displayName": "macOS arm64 (Apple clang, Ninja; self-contained, no Homebrew libraries; docs/MACOS.md)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_COMPILER": "/usr/bin/clang",
+        "CMAKE_CXX_COMPILER": "/usr/bin/clang++",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "13.0",
+        "CMAKE_IGNORE_PREFIX_PATH": "/opt/homebrew;/usr/local",
+        "AURORA_SDL3_PROVIDER": "vendor",
+        "CMAKE_DISABLE_FIND_PACKAGE_PkgConfig": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-clang",
+      "configurePreset": "windows-clang"
+    },
+    {
+      "name": "linux-clang",
+      "configurePreset": "linux-clang"
+    },
+    {
+      "name": "macos-clang",
+      "configurePreset": "macos-clang"
+    }
+  ]
+}

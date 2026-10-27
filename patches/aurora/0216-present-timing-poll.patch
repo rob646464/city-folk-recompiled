@@ -1,0 +1,35 @@
+0216: present timing polls the GPU completion instead of blocking in WaitAny
+
+With implicit device synchronization, Instance::WaitAny with a timeout holds Dawn's device lock
+until the GPU finishes, so every other thread's Dawn call (the render worker encoding the next
+frame, the FIFO thread creating textures, the game thread's EFB readbacks) waited for the GPU as
+well. LM's original-30 path (no frame-ahead limit) fell from 28 to 18.5 fps at 4K with enhanced
+lighting while the record was on (docs/INTERPOLATION.md "Pass 5"). The waiter thread now polls
+with a zero timeout every ~0.25 ms; a done stamp is at most that late.
+
+diff --git a/lib/aurora.cpp b/lib/aurora.cpp
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -286,10 +286,20 @@
+       p = g_pending.front();
+     }
+     bool ok = false;
+-    for (int i = 0; i < 50 && !ok; i++) {  // up to 5 s
+-      ok = webgpu::g_instance.WaitAny(p.future, 100'000'000) == wgpu::WaitStatus::Success;
++    // 0216: polled, never a blocking WaitAny. With implicit device synchronization a WaitAny with a
++    // timeout holds Dawn's device lock until the GPU finishes, so every other thread's Dawn call
++    // (render worker encoding the next frame, FIFO thread creating textures, the game thread's
++    // EFB readbacks) waited for the GPU too: the original-30 path (no frame-ahead limit) fell from
++    // 28 to 18.5 fps at 4K with this record on. A zero-timeout poll every ~0.25 ms takes the lock
++    // only briefly; the stamp is up to that late.
++    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
++    while (!ok && std::chrono::steady_clock::now() < deadline) {
++      ok = webgpu::g_instance.WaitAny(p.future, 0) == wgpu::WaitStatus::Success;
+       if (g_stop) {
+         return;
++      }
++      if (!ok) {
++        std::this_thread::sleep_for(std::chrono::microseconds(250));
+       }
+     }
+     p.t.doneNs = ok ? now_ns() : 0;

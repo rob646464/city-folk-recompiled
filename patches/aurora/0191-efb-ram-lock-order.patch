@@ -1,0 +1,286 @@
+diff --git a/lib/gfx/efb_ram.cpp b/lib/gfx/efb_ram.cpp
+--- a/lib/gfx/efb_ram.cpp
++++ b/lib/gfx/efb_ram.cpp
+@@ -302,7 +302,21 @@
+   }
+ };
+ 
++// Lock order (0191). With ImplicitDeviceSynchronization every Dawn call takes the device lock,
++// and AllowSpontaneous map callbacks run inside whatever Dawn call notices the map finished
++// (often Queue::Submit on the render worker), i.e. with the device lock held. So:
++//  - the readback map callback only takes leaf locks (g_landedMutex, g_poolMutex), which are
++//    never held across a Dawn call;
++//  - g_mutex is never taken by a map callback, and no Dawn object is created or released while
++//    it is held (textures/buffers that die under it are moved out and dropped after unlocking),
++//    so a guest thread waiting for it (DCInvalidateRange -> cpu_read) never waits behind a
++//    device lock held through a pipeline compile.
++// Before, the FIFO thread held g_mutex while creating a decoded texture (device lock) while the
++// render worker held the device lock in Submit and its map callback waited for g_mutex: a
++// deadlock that froze the game when entering a room or a transition that first decodes a texture
++// from EFB copy memory (the Sealed Room from the roof, mirror warps).
+ std::mutex g_mutex;
++std::mutex g_landedMutex; // g_landed only (leaf lock: map callbacks)
+ std::atomic_bool g_enabled{true};
+ std::atomic_bool g_readbackAll{false};
+ std::atomic_bool g_scaledDepthReads{true};
+@@ -311,8 +325,8 @@
+ absl::flat_hash_map<DecodedKey, Decoded> g_decoded;
+ std::vector<std::pair<const uint8_t*, uint32_t>> g_cpuReadRanges;
+ std::vector<std::pair<const uint8_t*, uint32_t>> g_watchRanges; // read back even when disabled
+-std::deque<std::shared_ptr<Readback>> g_landed;
+-std::mutex g_poolMutex;  // readback buffer pool: render worker + map callbacks
++std::deque<std::shared_ptr<Readback>> g_landed; // guarded by g_landedMutex
++std::mutex g_poolMutex;  // readback buffer pool: render worker + map callbacks (leaf lock)
+ std::vector<wgpu::Buffer> g_readbackPool;
+ absl::flat_hash_map<const uint8_t*, std::pair<uint32_t, HashType>> g_written; // our last writeback per dest
+ uint64_t g_seq = 0;
+@@ -470,14 +484,17 @@
+   }
+ }
+ 
+-// Render worker only.
++// Render worker only. The pool lock is a leaf lock (map callbacks take it with the device lock
++// held), so the new buffer is created after releasing it.
+ wgpu::Buffer acquire_readback_buffer(uint32_t size) {
+-  std::lock_guard lock{g_poolMutex};
+-  for (auto it = g_readbackPool.begin(); it != g_readbackPool.end(); ++it) {
+-    if (it->GetSize() >= size) {
+-      auto buf = std::move(*it);
+-      g_readbackPool.erase(it);
+-      return buf;
++  {
++    std::lock_guard lock{g_poolMutex};
++    for (auto it = g_readbackPool.begin(); it != g_readbackPool.end(); ++it) {
++      if (it->GetSize() >= size) {
++        auto buf = std::move(*it);
++        g_readbackPool.erase(it);
++        return buf;
++      }
+     }
+   }
+   const wgpu::BufferDescriptor desc{
+@@ -560,15 +577,26 @@
+ }
+ 
+ void shutdown() {
+-  std::lock_guard lock{g_mutex};
+-  g_entries.clear();
+-  g_bytePool.clear();
+-  g_decoded.clear();
++  // Dropped after the locks are released (lock order above).
++  std::vector<Entry> entries;
++  absl::flat_hash_map<uint64_t, LazyBufferRef> bytePool;
++  absl::flat_hash_map<DecodedKey, Decoded> decoded;
++  std::vector<wgpu::Buffer> readbackPool;
++  std::deque<std::shared_ptr<Readback>> landed;
++  {
++    std::lock_guard lock{g_mutex};
++    entries.swap(g_entries);
++    bytePool.swap(g_bytePool);
++    decoded.swap(g_decoded);
++  }
+   {
+     std::lock_guard poolLock{g_poolMutex};
+-    g_readbackPool.clear();
++    readbackPool.swap(g_readbackPool);
++  }
++  {
++    std::lock_guard landedLock{g_landedMutex};
++    landed.swap(g_landed);
+   }
+-  g_landed.clear();
+   g_encodePipeline = {};
+   g_encodeLayout = {};
+   g_decodePipeline = {};
+@@ -601,12 +629,21 @@
+     return {};
+   }
+ 
++  std::vector<Entry> dropped; // released after g_mutex (declared before the lock)
+   std::lock_guard lock{g_mutex};
+   const CpuTimer timer;
+   ++g_stats.copies;
+   // A copy overwrites its whole range: older copies entirely inside it are gone.
+-  std::erase_if(g_entries, [&](const Entry& e) { return e.dest >= dest && e.dest + e.size <= dest + size; });
++  for (auto it = g_entries.begin(); it != g_entries.end();) {
++    if (it->dest >= dest && it->dest + it->size <= dest + size) {
++      dropped.push_back(std::move(*it));
++      it = g_entries.erase(it);
++    } else {
++      ++it;
++    }
++  }
+   if (g_entries.size() >= MaxEntries) {
++    dropped.push_back(std::move(g_entries.front()));
+     g_entries.erase(g_entries.begin());
+   }
+   auto& e = g_entries.emplace_back(Entry{
+@@ -674,27 +711,27 @@
+               Log.warn("readback map failed: {}", magic_enum::enum_name(status));
+             }
+             rb->buffer = {};
+-            std::lock_guard lock{g_mutex};
++            // Runs with Dawn's device lock held (spontaneous): leaf lock only, never g_mutex.
++            std::lock_guard lock{g_landedMutex};
+             g_landed.push_back(rb);
+           });
+     });
+   };
+ }
+ 
+-TextureHandle resolve_texture(const GXTexObj_& obj) {
+-  if (!enabled() || !obj.has_data()) {
+-    return {};
+-  }
+-  const auto* data = static_cast<const uint8_t*>(obj.data);
+-  const u32 fmt = obj.format();
+-  const u32 width = obj.width();
+-  const u32 height = obj.height();
+-  const auto texSize = static_cast<uint32_t>(gx::texture::texture_source_size(fmt, width, height, 1));
+-  if (texSize == 0) {
+-    return {};
+-  }
++namespace {
++// What resolve_texture must do outside g_mutex (lock order, see g_mutex): entries and textures that
++// went away are released, and Aurora's copy textures for dropped copies evicted, after unlocking.
++struct Deferred {
++  std::vector<Entry> entries;
++  std::vector<TextureHandle> textures;
++  std::vector<const void*> evict;
++};
+ 
+-  std::lock_guard lock{g_mutex};
++// resolve_texture's work under g_mutex. A decoded texture that does not exist yet is not created
++// here: `needTexture` asks the caller to create it unlocked and call again with it in `created`.
++TextureHandle resolve_locked(const GXTexObj_& obj, const uint8_t* data, u32 fmt, u32 width, u32 height,
++                             uint32_t texSize, TextureHandle& created, bool& needTexture, Deferred& out) {
+   if (g_entries.empty()) {
+     return {};
+   }
+@@ -712,10 +749,11 @@
+       if (hash_range(it->dest, it->size) != it->ramHash) {
+         ++g_stats.cpuOverwrites;
+         const void* dest = it->dest;
++        out.entries.push_back(std::move(*it));
+         it = g_entries.erase(it);
+         // Aurora's GPU association for the pointer goes too, unless a newer copy owns it.
+         if (std::none_of(g_entries.begin(), g_entries.end(), [&](const Entry& e) { return e.dest == dest; })) {
+-          gx::evict_copy_texture(dest);
++          out.evict.push_back(dest);
+         }
+         continue;
+       }
+@@ -756,10 +794,14 @@
+   auto& dec = g_decoded[DecodedKey{data, fmt, width, height}];
+   dec.lastUsedFrame = frame;
+   if (!dec.handle) {
+-    Log.info("texture {} {}x{} fmt {:#x} reads EFB copy memory ({} copies, newest {} {}x{} fmt {:#x}): decoding",
+-             obj.data, width, height, fmt, parts.size(), static_cast<const void*>(last->dest), last->width,
+-             last->height, static_cast<u32>(last->fmt));
+-    dec.handle = new_conv_texture(width, height, fmt, "EFB copy RAM decoded texture");
++    if (!created) {
++      Log.info("texture {} {}x{} fmt {:#x} reads EFB copy memory ({} copies, newest {} {}x{} fmt {:#x}): decoding",
++               obj.data, width, height, fmt, parts.size(), static_cast<const void*>(last->dest), last->width,
++               last->height, static_cast<u32>(last->fmt));
++      needTexture = true;
++      return {};
++    }
++    dec.handle = std::move(created);
+   }
+   if (dec.signature == signature) {
+     return dec.handle;
+@@ -832,11 +874,51 @@
+   dec.signature = signature;
+   ++g_stats.decodes;
+ 
++  TextureHandle result = dec.handle;
+   // Forget decoded textures nobody has used for a while.
+   if (g_decoded.size() > 32) {
+-    absl::erase_if(g_decoded, [&](const auto& kv) { return frame - kv.second.lastUsedFrame > 600; });
++    absl::erase_if(g_decoded, [&](auto& kv) {
++      if (frame - kv.second.lastUsedFrame <= 600) {
++        return false;
++      }
++      out.textures.push_back(std::move(kv.second.handle));
++      return true;
++    });
++  }
++  return result;
++}
++} // namespace
++
++TextureHandle resolve_texture(const GXTexObj_& obj) {
++  if (!enabled() || !obj.has_data()) {
++    return {};
+   }
+-  return dec.handle;
++  const auto* data = static_cast<const uint8_t*>(obj.data);
++  const u32 fmt = obj.format();
++  const u32 width = obj.width();
++  const u32 height = obj.height();
++  const auto texSize = static_cast<uint32_t>(gx::texture::texture_source_size(fmt, width, height, 1));
++  if (texSize == 0) {
++    return {};
++  }
++  Deferred deferred;
++  TextureHandle created;
++  TextureHandle result;
++  for (int attempt = 0; attempt < 2; ++attempt) {
++    bool needTexture = false;
++    {
++      std::lock_guard lock{g_mutex};
++      result = resolve_locked(obj, data, fmt, width, height, texSize, created, needTexture, deferred);
++    }
++    if (!needTexture) {
++      break;
++    }
++    created = new_conv_texture(width, height, fmt, "EFB copy RAM decoded texture");
++  }
++  for (const void* dest : deferred.evict) {
++    gx::evict_copy_texture(dest);
++  }
++  return result;
+ }
+ 
+ void set_generation(uint8_t generation, bool replaying, bool noReadback) {
+@@ -847,13 +929,17 @@
+ }
+ 
+ void save_slot(uint8_t slot) {
++  std::optional<std::vector<Entry>> old; // released after g_mutex
+   std::lock_guard lock{g_mutex};
++  old = std::move(g_entrySlots[slot & 3]);
+   g_entrySlots[slot & 3] = g_entries;
+ }
+ 
+ void restore_slot(uint8_t slot) {
++  std::vector<Entry> old; // released after g_mutex
+   std::lock_guard lock{g_mutex};
+   if (g_entrySlots[slot & 3]) {
++    old = std::move(g_entries);
+     g_entries = *g_entrySlots[slot & 3];
+   }
+ }
+@@ -866,9 +952,11 @@
+   if (enabled == g_enabled.exchange(enabled)) {
+     return;
+   }
++  std::vector<Entry> entries; // released after g_mutex
++  absl::flat_hash_map<DecodedKey, Decoded> decoded;
+   std::lock_guard lock{g_mutex};
+-  g_entries.clear();
+-  g_decoded.clear();
++  entries.swap(g_entries);
++  decoded.swap(g_decoded);
+   g_cpuReadRanges.clear();
+ }
+ 
+@@ -912,7 +1000,7 @@
+ uint32_t aurora_efb_ram_apply() {
+   std::deque<std::shared_ptr<Readback>> landed;
+   {
+-    std::lock_guard lock{g_mutex};
++    std::lock_guard lock{g_landedMutex};
+     landed.swap(g_landed);
+   }
+   if (landed.empty()) {

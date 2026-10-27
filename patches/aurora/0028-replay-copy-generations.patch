@@ -1,0 +1,302 @@
+diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
+index 728ae5d..c3ab124 100644
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -137,6 +137,16 @@ extern "C" {
+  */
+ #define GX_AURORA_STATE_SAVE 0x0060
+ #define GX_AURORA_STATE_RESTORE 0x0061
++/**
++ * Replay copy generation (frame interpolation): followed by a u8, bits 0-1 the generation EFB
++ * copies go into until the next one (copy textures and copy-to-RAM bytes are kept per
++ * generation, so a replayed frame's copies do not overwrite the previous frame's, which the
++ * frame's own early draws may still read), bit 7 set while a tape is replayed (copies are not
++ * dropped for memory the CPU changed meanwhile: the guest is already on a later frame), bit 6 set
++ * for a repeated replay of a tape (its copies are not read back into memory again). The state
++ * slots also save/restore the copy textures and copy-to-RAM entries. Cleared by STATE_SAVE.
++ */
++#define GX_AURORA_COPY_GENERATION 0x0062
+ 
+ #define GX2_SET_POLYGON_OFFSET 0x1000
+ 
+@@ -237,6 +247,7 @@ void GXSetCullOverrideAurora(u8 twoSided);
+  */
+ void GXSaveStateAurora(u8 slot);
+ void GXRestoreStateAurora(u8 slot);
++void GXSetCopyGenerationAurora(u8 generationAndFlags);
+ 
+ /**
+  * Load an arbitrary 4x4 projection matrix, avoiding the 6-parameter hardware encoding.
+diff --git a/lib/dolphin/gx/GXAurora.cpp b/lib/dolphin/gx/GXAurora.cpp
+index 9a01613..6695eda 100644
+--- a/lib/dolphin/gx/GXAurora.cpp
++++ b/lib/dolphin/gx/GXAurora.cpp
+@@ -120,6 +120,11 @@ void GXRestoreStateAurora(u8 slot) {
+   GX_WRITE_U8(slot);
+ }
+ 
++void GXSetCopyGenerationAurora(u8 generationAndFlags) {
++  GX_WRITE_AURORA(GX_AURORA_COPY_GENERATION);
++  GX_WRITE_U8(generationAndFlags);
++}
++
+ void GX2SetPolygonOffset(f32 mFrontOffset, f32 mFrontScale, f32 mBackOffset, f32 mBackScale, f32 mClamp) {
+   GX_WRITE_AURORA(GX2_SET_POLYGON_OFFSET);
+   GX_WRITE_F32(mFrontOffset);
+diff --git a/lib/dolphin/gx/GXFrameBuffer.cpp b/lib/dolphin/gx/GXFrameBuffer.cpp
+index 7ee6035..34fa8e5 100644
+--- a/lib/dolphin/gx/GXFrameBuffer.cpp
++++ b/lib/dolphin/gx/GXFrameBuffer.cpp
+@@ -44,6 +44,7 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
+       .width = dstWidth,
+       .height = dstHeight,
+       .format = texCopyFmt,
++      .generation = g_gxState.copyGeneration,
+   };
+   auto it = g_gxState.copyTextureCache.find(key);
+   if (it == g_gxState.copyTextureCache.end()) {
+diff --git a/lib/dolphin/gx/GXTexture.cpp b/lib/dolphin/gx/GXTexture.cpp
+index 04f97f5..3d683c1 100644
+--- a/lib/dolphin/gx/GXTexture.cpp
++++ b/lib/dolphin/gx/GXTexture.cpp
+@@ -88,6 +88,7 @@ void emit_loaded_texobj_metadata(const GXTexObj_& obj, GXTexMapID id) {
+   GX_WRITE_U8(static_cast<u8>(obj.has_mips()));
+   GX_WRITE_U32(obj.texObjId);
+   GX_WRITE_U32(obj.texDataVersion);
++  GX_WRITE_U64(0); // content (frame interpolation tapes patch it: GXState::loadedTextureContent)
+ }
+ 
+ void emit_loaded_tlut_metadata(const GXTlutObj_& obj, u32 idx) {
+diff --git a/lib/gfx/efb_ram.cpp b/lib/gfx/efb_ram.cpp
+index 0f007d2..bcf2366 100644
+--- a/lib/gfx/efb_ram.cpp
++++ b/lib/gfx/efb_ram.cpp
+@@ -19,6 +19,8 @@
+ #include <magic_enum.hpp>
+ 
+ #include <algorithm>
++#include <array>
++#include <optional>
+ #include <atomic>
+ #include <chrono>
+ #include <cstring>
+@@ -337,8 +339,14 @@ HashType hash_range(const uint8_t* p, uint32_t size) {
+ 
+ uint32_t align4(uint32_t v) { return (v + 3u) & ~3u; }
+ 
++uint8_t g_generation = 0;
++bool g_replaying = false;
++bool g_noReadback = false;  // a repeated replay of a tape: its copies were read back already
++std::array<std::optional<std::vector<Entry>>, 4> g_entrySlots;
++
+ LazyBufferRef bytes_buffer(const uint8_t* dest, uint32_t size) {
+-  const uint64_t key = reinterpret_cast<uintptr_t>(dest) ^ (static_cast<uint64_t>(size) << 40);
++  const uint64_t key = reinterpret_cast<uintptr_t>(dest) ^ (static_cast<uint64_t>(size) << 40) ^
++                       (static_cast<uint64_t>(g_generation) << 62);
+   auto& buf = g_bytePool[key];
+   if (!buf) {
+     buf = std::make_shared<LazyBuffer>(LazyBuffer{
+@@ -616,8 +624,15 @@ PassOp on_copy(const void* destPtr, GXTexFmt fmt, uint32_t width, uint32_t heigh
+   e.verifiedFrame = current_frame();
+ 
+   bool readback = watched || g_readbackAll.load(std::memory_order_relaxed);
++  // Frame interpolation replays a frame several times; only its first replay reads its copies back
++  // (as the console did once). Later replays would write the frame's copies into memory the game
++  // may have reused since (a GBH screen capture buffer later holding model data).
++
++  if (g_noReadback) {
++    readback = watched;
++  }
+   for (const auto& [p, s] : g_cpuReadRanges) {
+-    readback = readback || overlaps(p, s, dest, size);
++    readback = readback || (!g_noReadback && overlaps(p, s, dest, size));
+   }
+   if (!readback) {
+     return {}; // encoded lazily if a texture reads it with another format
+@@ -692,7 +707,7 @@ TextureHandle resolve_texture(const GXTexObj_& obj) {
+       ++it;
+       continue;
+     }
+-    if (it->verifiedFrame != frame) {
++    if (it->verifiedFrame != frame && !g_replaying) {
+       it->verifiedFrame = frame;
+       if (hash_range(it->dest, it->size) != it->ramHash) {
+         ++g_stats.cpuOverwrites;
+@@ -824,6 +839,25 @@ TextureHandle resolve_texture(const GXTexObj_& obj) {
+   return dec.handle;
+ }
+ 
++void set_generation(uint8_t generation, bool replaying, bool noReadback) {
++  std::lock_guard lock{g_mutex};
++  g_generation = generation & 3;
++  g_replaying = replaying;
++  g_noReadback = noReadback;
++}
++
++void save_slot(uint8_t slot) {
++  std::lock_guard lock{g_mutex};
++  g_entrySlots[slot & 3] = g_entries;
++}
++
++void restore_slot(uint8_t slot) {
++  std::lock_guard lock{g_mutex};
++  if (g_entrySlots[slot & 3]) {
++    g_entries = *g_entrySlots[slot & 3];
++  }
++}
++
+ } // namespace aurora::gfx::efb_ram
+ 
+ using namespace aurora::gfx::efb_ram;
+diff --git a/lib/gfx/efb_ram.hpp b/lib/gfx/efb_ram.hpp
+index 4e20e28..a9640c2 100644
+--- a/lib/gfx/efb_ram.hpp
++++ b/lib/gfx/efb_ram.hpp
+@@ -48,4 +48,11 @@ PassOp on_copy(const void* dest, GXTexFmt fmt, uint32_t width, uint32_t height,
+ // memory the CPU has overwritten. Returns an empty handle to use the normal paths.
+ TextureHandle resolve_texture(const GXTexObj_& obj);
+ 
++// Frame interpolation (GX_AURORA_COPY_GENERATION / replay state slots, FIFO thread): copies go
++// into per-generation byte buffers; while `replaying`, copies are not dropped for CPU writes.
++// The tracked copies are saved/restored with the replay state slots.
++void set_generation(uint8_t generation, bool replaying, bool noReadback);
++void save_slot(uint8_t slot);
++void restore_slot(uint8_t slot);
++
+ } // namespace aurora::gfx::efb_ram
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+index 88d50a9..895ca41 100644
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -1,9 +1,11 @@
+ #include "../gfx/enhanced.hpp"
+ #include "command_processor.hpp"
+ 
++#include <optional>
+ #include <unordered_map>
+ 
+ #include "../gfx/depth_peek.hpp"
++#include "../gfx/efb_ram.hpp"
+ #include "../gfx/recording.hpp"
+ #include "../internal.hpp"
+ #include "dolphin/gd/GDGeometry.h"
+@@ -863,9 +865,12 @@ void handle_aurora(ByteReader& reader) noexcept {
+     }
+     const u32 newTexObjId = reader.read<u32>();
+     const u32 newTexDataVersion = reader.read<u32>();
++    const auto newContent = reinterpret_cast<const void*>(reader.read<u64>());
+     if (slot.data != newData || slot.mWidth != newWidth || slot.mHeight != newHeight ||
+         slot.mFormat != static_cast<u32>(newFormat) || slot.tlut != newTlut || slot.flags != newFlags ||
+-        slot.texObjId != newTexObjId || slot.texDataVersion != newTexDataVersion) {
++        slot.texObjId != newTexObjId || slot.texDataVersion != newTexDataVersion ||
++        g_gxState.loadedTextureContent[texMapId] != newContent) {
++      g_gxState.loadedTextureContent[texMapId] = newContent;
+       slot.data = newData;
+       slot.mWidth = newWidth;
+       slot.mHeight = newHeight;
+@@ -1039,8 +1044,20 @@ void handle_aurora(ByteReader& reader) noexcept {
+     // Replay state slots: everything but the copy-texture caches (copies made since stay valid)
+     // and the per-frame cache state (array upload ranges, texture binds), which is rebuilt.
+     static std::array<std::unique_ptr<GXState>, 4> sSlots;
++    // The copy textures each slot's frame ended with (by generation, so they stay as they were).
++    static std::array<std::optional<decltype(GXState::copyTextures)>, 4> sCopySlots;
+     const u8 slot = reader.read<u8>() & 3;
+     auto& state = g_gxState;
++    const u8 generation = state.copyGeneration;
++    if (subCmd == GX_AURORA_STATE_SAVE) {
++      sCopySlots[slot] = state.copyTextures;
++      gfx::efb_ram::save_slot(slot);
++      gfx::efb_ram::set_generation(generation, false, false);
++    } else if (sCopySlots[slot]) {
++      state.copyTextures = *sCopySlots[slot];
++      gfx::efb_ram::restore_slot(slot);
++      texture::invalidate_bindings();
++    }
+     auto copies = std::move(state.copyTextures);
+     auto copyCache = std::move(state.copyTextureCache);
+     auto binds = std::move(state.textures);
+@@ -1059,6 +1076,11 @@ void handle_aurora(ByteReader& reader) noexcept {
+     state.copyTextures = std::move(copies);
+     state.copyTextureCache = std::move(copyCache);
+     state.textures = std::move(binds);
++    state.copyGeneration = generation;
++  } else if (subCmd == GX_AURORA_COPY_GENERATION) {
++    const u8 v = reader.read<u8>();
++    g_gxState.copyGeneration = v & 3;
++    gfx::efb_ram::set_generation(v & 3, (v & 0x80) != 0, (v & 0x40) != 0);
+   } else if (subCmd == GX_AURORA_DEBUG_GROUP_PUSH) {
+     auto label = reader.read_string();
+     gfx::push_debug_group(std::move(label));
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+index 71bf91c..e7cec53 100644
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -323,16 +323,23 @@ struct GXState {
+     u32 width = 0;
+     u32 height = 0;
+     GXTexFmt format = GX_TF_I4;
++    u8 generation = 0;  // replay copy generation (GX_AURORA_COPY_GENERATION)
+ 
+     bool operator==(const CopyTextureKey& rhs) const {
+-      return dest == rhs.dest && width == rhs.width && height == rhs.height && format == rhs.format;
++      return dest == rhs.dest && width == rhs.width && height == rhs.height && format == rhs.format &&
++             generation == rhs.generation;
+     }
+ 
+     template <typename H>
+     friend H AbslHashValue(H h, const CopyTextureKey& key) {
+-      return H::combine(std::move(h), key.dest, key.width, key.height, key.format);
++      return H::combine(std::move(h), key.dest, key.width, key.height, key.format, key.generation);
+     }
+   };
++  u8 copyGeneration = 0;
++  // Frame interpolation: per loaded texture, a copy of its texels taken when the frame was
++  // captured (GX_AURORA_LOAD_TEXOBJ's content pointer). When set, the texture is read from it as
++  // plain memory, without EFB-copy lookups by its address.
++  std::array<const void*, MaxTextures> loadedTextureContent{};
+ 
+   // Decoded state
+   std::array<PnMtx, MaxPnMtx> pnMtx;
+diff --git a/lib/gx/texture.cpp b/lib/gx/texture.cpp
+index a778ece..69db264 100644
+--- a/lib/gx/texture.cpp
++++ b/lib/gx/texture.cpp
+@@ -851,13 +851,19 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
+       continue;
+     }
+ 
+-    gfx::TextureHandle handle = gfx::efb_ram::resolve_texture(obj);
++    // A capture-time copy of the texels (frame interpolation): plain memory, read from the copy.
++    const void* content = i < g_gxState.loadedTextureContent.size() ? g_gxState.loadedTextureContent[i] : nullptr;
++    GXTexObj_ src = obj;
++    if (content != nullptr) {
++      src.data = content;
++    }
++    gfx::TextureHandle handle = content != nullptr ? gfx::TextureHandle{} : gfx::efb_ram::resolve_texture(obj);
+     if (handle) {
+       obj.mFormat = resolved_format_for_handle(handle);
+       textureBind = gfx::TextureBind{obj, std::move(handle), s_bindGeneration};
+       continue;
+     }
+-    const auto copyIt = g_gxState.copyTextures.find(obj.data);
++    const auto copyIt = content != nullptr ? g_gxState.copyTextures.end() : g_gxState.copyTextures.find(obj.data);
+     const GXState::CopyTextureRef* copyRef = copyIt != g_gxState.copyTextures.end() ? &copyIt->second : nullptr;
+     if (is_palette_format(obj.format())) {
+       const auto tlutIdx = static_cast<size_t>(obj.tlut);
+@@ -867,14 +873,14 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
+           if (copyRef != nullptr) {
+             handle = resolve_dynamic_palette_texture(obj, *copyRef, tlut);
+           } else if (obj.has_data()) {
+-            handle = texture::resolve_static_palette_texture(obj, tlut);
++            handle = texture::resolve_static_palette_texture(src, tlut);
+           }
+         }
+       }
+     } else if (copyRef != nullptr) {
+       handle = copyRef->handle;
+     } else if (obj.has_data()) {
+-      handle = texture::resolve_static_texture(obj);
++      handle = texture::resolve_static_texture(src);
+     }
+ 
+     obj.mFormat = resolved_format_for_handle(handle);

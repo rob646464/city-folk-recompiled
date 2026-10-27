@@ -1,0 +1,230 @@
+0231: a start after a crash or a kill keeps the shader caches
+
+The crash journal (0017) treated every unclean end as a crash. Killed in the first seconds of
+play (the startup phase lasted 300 frames) or during the startup hold with no pipeline in flight,
+the next start deleted both caches and compiled everything again (297 s with Enhanced lighting
+Ultra here); killed while compiling, the configs in flight became crash suspects, were left out
+of the precache (compiled in play instead), and one in flight for two render target layouts was
+counted twice and refused for good.
+- aurora_pipeline_cache_note_crash() (the application's crash handler) sets a flag in the mapped
+  journal. An unclean end without it (closed or killed) keeps the caches and records no suspects.
+- Real crashes: suspects are counted once per config and still precached (a suspect that builds
+  fine is lifted, as before); the caches are reset only on the third startup crash in a row.
+- The startup phase ends 30 frames after the precache is done (was 300).
+- No whole-file quick_check of dawn_cache.db (entries are verified by checksum as they are read,
+  corruption errors on access reset it); the background prefetch also runs after an unclean exit.
+  AURORA_CACHE_QUICK_CHECK=1 for testing.
+- Stats prevExit (0 clean, 1 closed or killed, 2 crashed) and cachesReset for the hold screen.
+
+diff --git a/include/aurora/pipeline_cache.h b/include/aurora/pipeline_cache.h
+index 3a0f0e5..37f3d4d 100644
+--- a/include/aurora/pipeline_cache.h
++++ b/include/aurora/pipeline_cache.h
+@@ -56,6 +56,10 @@ typedef struct AuroraPipelineStats {
+   uint32_t blobEntriesAtOpen;
+   uint32_t blobSession;
+   uint32_t modulesReused;  // 0227: GX pipelines that reused a shader module of this session
++  // 0231: how the previous session ended: 0 cleanly, 1 closed or killed (no crash report), 2 crashed
++  // (aurora_pipeline_cache_note_crash); and whether the caches were reset after repeated crashes.
++  uint32_t prevExit;
++  uint32_t cachesReset;
+ } AuroraPipelineStats;
+ 
+ /** Adds the pipeline configs in a precache list file (format below) to the known set; they
+@@ -85,6 +89,10 @@ void aurora_pipeline_cache_set_threads(uint32_t threads);
+  *  while the application waits for a batch that loads from the shader cache (CPU bound, nothing
+  *  else running). The stats' workerThreads is the number currently taking work. */
+ void aurora_pipeline_cache_set_boost(bool enabled);
++/** 0231: tells the crash journal this run is crashing (call from the application's crash handler;
++ *  only stores a flag). Without it an unclean end counts as closed or killed: the configs being
++ *  built are not suspected and nothing is deleted. */
++void aurora_pipeline_cache_note_crash(void);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
+index eaabbcc..d169b5e 100644
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -165,6 +165,10 @@ static absl::flat_hash_map<HashType, BadPipeline> g_badPipelines;
+ // Crash suspects found by the journal at startup, recorded once the database is open.
+ static std::vector<std::pair<ShaderType, HashType>> g_journalSuspects;
+ static bool g_safeMode = false; // repeated startup crashes: ignore the shipped precache list
++// 0231: how the previous session ended (0 clean, 1 closed or killed, 2 crashed) and whether the
++// caches were reset after repeated startup crashes (aurora_pipeline_cache_get_stats).
++static uint32_t g_prevExit = 0;
++static bool g_cachesReset = false;
+ static void mark_pipeline_bad(ShaderType type, HashType cacheKey, BadReason reason, const char* why);
+ static void journal_begin(ShaderType type, HashType cacheKey);
+ static void journal_end();
+@@ -952,7 +956,11 @@ static const char* validate_cached_config(ShaderType type, const Config& config,
+ 
+ static bool is_quarantined(HashType cacheKey) {
+   std::lock_guard lock{g_badMutex};
+-  return g_badPipelines.contains(cacheKey);
++  // 0231: a config suspected once (in flight when a run crashed) is still precached: it is built
++  // like any other (guarded_create lifts the suspicion when it builds fine). Skipping it only
++  // moved its compile into play, as a hitch.
++  const auto it = g_badPipelines.find(cacheKey);
++  return it != g_badPipelines.end() && (it->second.reason == BadReason::Invalid || it->second.crashes >= 2);
+ }
+ 
+ #if defined(WEBGPU_DAWN)
+@@ -2304,7 +2312,7 @@ static void mark_pipeline_bad(ShaderType type, HashType cacheKey, BadReason reas
+ //     caches; a second consecutive startup crash also ignores the shipped precache list.
+ namespace {
+ constexpr uint32_t JournalMagic = 0x4E4A5541; // "AUJN"
+-constexpr uint32_t JournalVersion = 1;
++constexpr uint32_t JournalVersion = 2; // 2: crashed flag (0231)
+ constexpr uint32_t JournalSlots = 64;
+ constexpr size_t JournalSize = 4096;
+ enum JournalPhase : uint32_t {
+@@ -2321,7 +2329,11 @@ struct JournalData {
+   uint32_t magic;
+   uint32_t version;
+   std::atomic<uint32_t> phase;
+-  uint32_t startupCrashes; // consecutive launches that died during startup
++  uint32_t startupCrashes; // consecutive launches that crashed during startup
++  // 0231: set by aurora_pipeline_cache_note_crash (the application's crash handler). A session
++  // that ended uncleanly without it was closed or killed (task manager, a debugger, the OS at
++  // shutdown, a test harness) or lost power: no crash suspects, nothing deleted.
++  std::atomic<uint32_t> crashed;
+   JournalSlot slots[JournalSlots];
+ };
+ static_assert(sizeof(JournalData) <= JournalSize);
+@@ -2404,33 +2416,52 @@ void check_crash_journal_once() {
+   }
+ 
+   const uint32_t prevPhase = data->phase.load();
+-  // 0226: verify the cache databases on open only after a session that did not exit cleanly.
+-  webgpu::g_cacheVerifyOnOpen = prevPhase != PhaseClean;
+-  uint32_t suspects = 0;
++  const bool unclean = prevPhase != PhaseClean;
++  const bool crashed = unclean && data->crashed.load() != 0;
++  data->crashed.store(0);
++  // 0226: verify pipeline_cache.db on open only after a session that did not exit cleanly
++  // (0231: dawn_cache.db is verified per entry as it is read instead).
++  webgpu::g_cacheVerifyOnOpen = unclean;
++  g_prevExit = !unclean ? 0u : crashed ? 2u : 1u;
++  // 0231: configs that were being built are crash suspects only when the run really crashed
++  // (once each: one config can be in flight for several render target layouts at once).
++  absl::flat_hash_set<HashType> inFlight;
+   for (auto& slot : data->slots) {
+-    if (prevPhase != PhaseClean && slot.active.load() != 0) {
++    if (crashed && slot.active.load() != 0) {
+       const auto type = slot.type.load();
+-      if (type <= 255) {
+-        g_journalSuspects.emplace_back(static_cast<ShaderType>(type), static_cast<HashType>(slot.key.load()));
+-        ++suspects;
++      const auto key = static_cast<HashType>(slot.key.load());
++      if (type <= 255 && inFlight.insert(key).second) {
++        g_journalSuspects.emplace_back(static_cast<ShaderType>(type), key);
+       }
+     }
+     slot.active.store(0);
+   }
+-  if (prevPhase == PhaseClean || prevPhase == PhaseRunning) {
+-    // Clean exit, or a crash after startup (only its in-flight configs are suspect).
++  const auto suspects = static_cast<uint32_t>(inFlight.size());
++  if (!unclean) {
+     data->startupCrashes = 0;
+-    if (prevPhase == PhaseRunning && suspects > 0) {
+-      Log.warn("The previous run ended while creating {} pipeline(s)", suspects);
+-    }
++  } else if (!crashed) {
++    // 0231: closed or killed, not crashed. This used to count as a startup crash: with no
++    // pipeline in flight (e.g. killed in the first seconds of play) both caches were deleted and
++    // the next start compiled everything again (over 140 s with Enhanced lighting); killed while
++    // compiling, the configs in flight were refused as crash suspects. Everything written before
++    // is kept: Dawn stores each compiled shader and pipeline as it is made.
++    Log.warn("The previous run ended {} without a crash report (closed or killed): the shader caches are kept; "
++             "only shaders it had not finished are compiled",
++             prevPhase == PhaseStartup ? "during startup" : "while running");
++  } else if (prevPhase == PhaseRunning) {
++    // A crash after startup (only its in-flight configs are suspect).
++    data->startupCrashes = 0;
++    Log.warn("The previous run crashed{}", suspects > 0 ? fmt::format(" while creating {} pipeline(s)", suspects)
++                                                        : std::string{});
+   } else {
+     data->startupCrashes = std::min(data->startupCrashes + 1, 100u);
+-    Log.warn("The previous run ended during startup ({} time(s) in a row, {} pipeline(s) in flight)",
++    Log.warn("The previous run crashed during startup ({} time(s) in a row, {} pipeline(s) in flight)",
+              data->startupCrashes, suspects);
+-    if (suspects == 0 || data->startupCrashes >= 2) {
+-      reset_caches_after_crash("Startup crash");
+-    }
++    // 0231: the caches are only reset to break a crash loop (third crash in a row at startup);
++    // damaged entries are found by their checksums as they are read.
+     if (data->startupCrashes >= 3) {
++      reset_caches_after_crash("Repeated startup crashes");
++      g_cachesReset = true;
+       Log.warn("Repeated startup crashes: ignoring the shipped pipeline precache list for this run");
+       g_safeMode = true;
+     }
+@@ -2468,7 +2499,7 @@ static void journal_update_phase() {
+   if (g_journal == nullptr || g_journal->phase.load(std::memory_order_relaxed) != PhaseStartup) {
+     return;
+   }
+-  if (++g_journalFrames < 300) {
++  if (++g_journalFrames < 30) { // 0231: was 300 (a kill in the first seconds of play counted as startup)
+     return;
+   }
+   bool idle;
+@@ -2763,6 +2794,8 @@ void aurora_pipeline_cache_get_stats(AuroraPipelineStats* out) {
+   out->rebuildCount = aurora::gfx::g_rebuildCount.load(std::memory_order_relaxed);
+   out->prewarmPending = aurora::gfx::g_prewarmPending.load(std::memory_order_relaxed) ? 1 : 0;
+   out->modulesReused = aurora::gfx::g_moduleReuse.load(std::memory_order_relaxed);
++  out->prevExit = aurora::gfx::g_prevExit;
++  out->cachesReset = aurora::gfx::g_cachesReset ? 1 : 0;
+   out->wgslNs = aurora::gfx::g_createNs[static_cast<size_t>(aurora::gfx::CreateStage::Wgsl)].load(std::memory_order_relaxed);
+   out->moduleNs = aurora::gfx::g_createNs[static_cast<size_t>(aurora::gfx::CreateStage::Module)].load(std::memory_order_relaxed);
+   out->pipelineNs = aurora::gfx::g_createNs[static_cast<size_t>(aurora::gfx::CreateStage::Pipeline)].load(std::memory_order_relaxed);
+@@ -2774,6 +2807,14 @@ void aurora_pipeline_cache_set_wait(bool enabled) { g_waitForPipelines = enabled
+ 
+ void aurora_pipeline_cache_set_threads(uint32_t threads) { g_requestedThreads = std::min(threads, 32u); }
+ 
++void aurora_pipeline_cache_note_crash(void) {
++  // 0231: called from a crash handler: one store into the mapped journal (the OS writes the page
++  // back after the process dies).
++  if (auto* journal = aurora::gfx::g_journal) {
++    journal->crashed.store(1);
++  }
++}
++
+ void aurora_pipeline_cache_set_boost(bool enabled) {
+   using namespace aurora::gfx;
+   if (!g_hasPipelineThread) {
+diff --git a/lib/webgpu/gpu_cache.cpp b/lib/webgpu/gpu_cache.cpp
+index db5e247..b74c253 100644
+--- a/lib/webgpu/gpu_cache.cpp
++++ b/lib/webgpu/gpu_cache.cpp
+@@ -228,10 +228,17 @@ static bool cache_init_core() {
+ 
+   // Structural check of every page (a truncated or overwritten file fails here instead of
+   // somewhere in the middle of loading; the per-entry checksums catch damaged values).
+-  bool integrityOk = !g_cacheVerifyOnOpen; // 0226: only after an unclean exit
++  // 0231: no whole-file check (it read every page of a 60-500 MB file before the first pipeline);
++  // entries are verified by their checksums as they are read, and an SQLite corruption error on a
++  // lookup or store resets the file. AURORA_CACHE_QUICK_CHECK=1 runs the check anyway (testing).
++  static const bool sQuickCheck = std::getenv("AURORA_CACHE_QUICK_CHECK") != nullptr;
++  if (g_cacheVerifyOnOpen) {
++    Log.info("The previous session did not exit cleanly: Dawn cache entries are verified as they are read");
++  }
++  bool integrityOk = !sQuickCheck;
+   std::string integrityResult;
+-  ret = !g_cacheVerifyOnOpen ? SQLITE_OK
+-                             : sqlite::exec(db, "PRAGMA quick_check;", [&integrityOk, &integrityResult](int argc, char** argv, char**) {
++  ret = !sQuickCheck ? SQLITE_OK
++                     : sqlite::exec(db, "PRAGMA quick_check;", [&integrityOk, &integrityResult](int argc, char** argv, char**) {
+     if (argc > 0 && argv[0] != nullptr && std::strcmp(argv[0], "ok") == 0) {
+       integrityOk = true;
+     } else if (argc > 0 && argv[0] != nullptr && integrityResult.empty()) {
+@@ -412,7 +419,7 @@ static bool cache_init() {
+   entries_at_open = select_uint64("SELECT COUNT(*) FROM cache").value_or(0);
+   Log.info("Dawn shader cache {} opened (session {}, {} entries)", io::fs_path_to_string(cache_path()), cache_session,
+            entries_at_open);
+-  if (entries_at_open > 0 && !g_cacheVerifyOnOpen) {
++  if (entries_at_open > 0) { // 0231: also after an unclean exit (no whole-file check any more)
+     prefetch_file(cache_path());
+   }
+ 

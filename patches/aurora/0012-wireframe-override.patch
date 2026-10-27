@@ -1,0 +1,331 @@
+diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
+index e091951..38dc31d 100644
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -96,6 +96,19 @@ extern "C" {
+  */
+ #define GX_AURORA_DRAW_INDEXED 0x0041
+ 
++/**
++ * Wireframe override (debug viewers). Followed by a u8 enable flag and a u32 RGBA8 line colour.
++ * While enabled, every triangle-type draw is rasterized as its triangle edges (a line list,
++ * no culling) and every fragment gets the line colour. Lines and points are unaffected.
++ */
++#define GX_AURORA_SET_WIREFRAME 0x0050
++
++/**
++ * Back-face culling override (debug viewers). Followed by a u8: 0 = the game's cull mode,
++ * 1 = draw both faces of every triangle (GX_CULL_ALL still drops the draw).
++ */
++#define GX_AURORA_SET_CULL_OVERRIDE 0x0051
++
+ #define GX2_SET_POLYGON_OFFSET 0x1000
+ 
+ 
+@@ -167,6 +180,17 @@ void GXSetScissorRender(u32 left, u32 top, u32 wd, u32 ht);
+ 
+ void GX2SetPolygonOffset(f32 mFrontOffset, f32 mFrontScale, f32 mBackOffset, f32 mBackScale, f32 mClamp);
+ 
++/**
++ * Wireframe override (see GX_AURORA_SET_WIREFRAME): triangles are drawn as their edges in
++ * `rgba` (0xRRGGBBAA) until turned off again.
++ */
++void GXSetWireframeAurora(u8 enable, u32 rgba);
++
++/**
++ * Two-sided override (see GX_AURORA_SET_CULL_OVERRIDE).
++ */
++void GXSetCullOverrideAurora(u8 twoSided);
++
+ /**
+  * Load an arbitrary 4x4 projection matrix, avoiding the 6-parameter hardware encoding.
+  */
+diff --git a/lib/dolphin/gx/GXAurora.cpp b/lib/dolphin/gx/GXAurora.cpp
+index 66e10da..b2b1312 100644
+--- a/lib/dolphin/gx/GXAurora.cpp
++++ b/lib/dolphin/gx/GXAurora.cpp
+@@ -93,6 +93,17 @@ void GXSetProjectionFull(const void* mtx) {
+   }
+ }
+ 
++void GXSetWireframeAurora(u8 enable, u32 rgba) {
++  GX_WRITE_AURORA(GX_AURORA_SET_WIREFRAME);
++  GX_WRITE_U8(enable);
++  GX_WRITE_U32(rgba);
++}
++
++void GXSetCullOverrideAurora(u8 twoSided) {
++  GX_WRITE_AURORA(GX_AURORA_SET_CULL_OVERRIDE);
++  GX_WRITE_U8(twoSided);
++}
++
+ void GX2SetPolygonOffset(f32 mFrontOffset, f32 mFrontScale, f32 mBackOffset, f32 mBackScale, f32 mClamp) {
+   GX_WRITE_AURORA(GX2_SET_POLYGON_OFFSET);
+   GX_WRITE_F32(mFrontOffset);
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+index 6c7a6f8..7171691 100644
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -29,6 +29,25 @@ namespace aurora::gx::fifo {
+ namespace {
+ constexpr Module Log{"aurora::gx::fifo"};
+ 
++// GX_AURORA_SET_WIREFRAME: the edges of a triangle list as a line list.
++u32 wire_edges(ByteBuffer& out, const u16* tri, u32 count) noexcept {
++  out.reserve_extra((count / 3) * 6 * sizeof(u16));
++  for (u32 i = 0; i + 2 < count; i += 3) {
++    const u16 a = tri[i], b = tri[i + 1], c = tri[i + 2];
++    out.append(a);
++    out.append(b);
++    out.append(b);
++    out.append(c);
++    out.append(c);
++    out.append(a);
++  }
++  return (count / 3) * 6;
++}
++
++bool wire_prim(GXPrimitive prim) noexcept {
++  return g_gxState.wireframe && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS;
++}
++
+ u16 prepare_idx_buffer(ByteBuffer& buf, GXPrimitive prim, u16 vtxStart, u16 vtxCount) noexcept {
+   u16 numIndices = 0;
+   if (prim == GX_QUADS) {
+@@ -596,6 +615,19 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
+   u32 numIndices = 0;
+   gfx::Range idxRange;
+ 
++  if (wire_prim(prim)) {
++    static ByteBuffer triBuf, lineBuf;
++    const u32 tris = prepare_idx_buffer(triBuf, prim, 0, vtxCount);
++    numIndices = wire_edges(lineBuf, reinterpret_cast<const u16*>(triBuf.data()), tris);
++    idxRange = gfx::push_indices(lineBuf.data(), lineBuf.size(), 4);
++    triBuf.clear();
++    lineBuf.clear();
++    if (numIndices != 0) {
++      push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, numIndices);
++    }
++    return;
++  }
++
+   if (prim != GX_TRIANGLES) {
+     ZoneScopedN("build idx buffer");
+     static ByteBuffer idxBuf;
+@@ -679,7 +711,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader&
+ 
+   size_dynamic_arrays(fmt, reader.data() + reader.offset(), vtxCount, vtxSize);
+ 
+-  const bool cleanState = g_gxState.dirty == 0 && fmt == sDrawCache.lastDrawFmt && sDrawCache.lineMode == 0 &&
++  const bool cleanState = g_gxState.dirty == 0 && !g_gxState.wireframe && fmt == sDrawCache.lastDrawFmt &&
++                          sDrawCache.lineMode == 0 &&
+                           prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS;
+   auto* lastDraw = cleanState ? gfx::get_last_draw_command<DrawData>() : nullptr;
+   const bool canMerge = lastDraw != nullptr && lastDraw->instanceCount == 1;
+@@ -856,6 +889,23 @@ void handle_aurora(ByteReader& reader) noexcept {
+       slot.flags = newFlags;
+       g_gxState.dirty |= DirtyTextures;
+     }
++  } else if (subCmd == GX_AURORA_SET_WIREFRAME) {
++    const bool enable = reader.read<u8>() != 0;
++    const u32 color = reader.read<u32>();
++    if (g_gxState.wireframe != enable) {
++      g_gxState.wireframe = enable;
++      g_gxState.dirty |= DirtyPipeline;
++    }
++    if (g_gxState.wireColor != color) {
++      g_gxState.wireColor = color;
++      g_gxState.dirty |= DirtyUniform;
++    }
++  } else if (subCmd == GX_AURORA_SET_CULL_OVERRIDE) {
++    const bool twoSided = reader.read<u8>() != 0;
++    if (g_gxState.twoSided != twoSided) {
++      g_gxState.twoSided = twoSided;
++      g_gxState.dirty |= DirtyPipeline;
++    }
+   } else if (subCmd == GX2_SET_POLYGON_OFFSET) {
+     const f32 frontOffset = reader.read<f32>();
+     const f32 frontScale = reader.read<f32>();
+@@ -929,7 +979,16 @@ void handle_aurora(ByteReader& reader) noexcept {
+     const size_t idxBytes = static_cast<size_t>(indexCount) * sizeof(u16);
+     // Index data is always host-endian; push it to the GPU buffer as-is
+     const auto indexData = reader.take(idxBytes);
+-    const gfx::Range idxRange = gfx::push_indices(indexData.data(), indexData.size(), 4);
++    gfx::Range idxRange;
++    u32 drawIndexCount = indexCount;
++    if (wire_prim(prim)) {
++      static ByteBuffer lineBuf;
++      drawIndexCount = wire_edges(lineBuf, reinterpret_cast<const u16*>(indexData.data()), indexCount);
++      idxRange = gfx::push_indices(lineBuf.data(), lineBuf.size(), 4);
++      lineBuf.clear();
++    } else {
++      idxRange = gfx::push_indices(indexData.data(), indexData.size(), 4);
++    }
+     u32 vtxSize;
+     if (g_gxState.lastVtxFmt == fmt) {
+       vtxSize = g_gxState.lastVtxSize;
+@@ -939,8 +998,8 @@ void handle_aurora(ByteReader& reader) noexcept {
+     const u32 totalVtxBytes = vtxCount * vtxSize;
+     const auto vertexData = reader.take(totalVtxBytes);
+     const gfx::Range vertRange = gfx::push_verts(vertexData.data(), vertexData.size(), 4);
+-    if (indexCount != 0) {
+-      push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, indexCount);
++    if (drawIndexCount != 0) {
++      push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, drawIndexCount);
+     }
+   } else if (subCmd == GX_AURORA_DEBUG_GROUP_PUSH) {
+     auto label = reader.read_string();
+diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
+index d85e316..f261f05 100644
+--- a/lib/gx/gx.cpp
++++ b/lib/gx/gx.cpp
+@@ -203,7 +203,7 @@ wgpu::ColorWriteMask to_write_mask(bool colorUpdate, bool alphaUpdate) {
+   return writeMask;
+ }
+ 
+-wgpu::PrimitiveState to_primitive_state(GXCullMode gx_cullMode) {
++wgpu::PrimitiveState to_primitive_state(GXCullMode gx_cullMode, bool wireframe) {
+   auto cullMode = wgpu::CullMode::None;
+   switch (gx_cullMode) {
+     DEFAULT_FATAL("unsupported cull mode {}", underlying(gx_cullMode));
+@@ -219,7 +219,7 @@ wgpu::PrimitiveState to_primitive_state(GXCullMode gx_cullMode) {
+     break;
+   }
+   return {
+-      .topology = wgpu::PrimitiveTopology::TriangleList,
++      .topology = wireframe ? wgpu::PrimitiveTopology::LineList : wgpu::PrimitiveTopology::TriangleList,
+       .stripIndexFormat = wgpu::IndexFormat::Undefined,
+       .frontFace = wgpu::FrontFace::CW,
+       .cullMode = cullMode,
+@@ -375,7 +375,7 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, const gfx::Ren
+               .bufferCount = static_cast<uint32_t>(vtxBuffers.size()),
+               .buffers = vtxBuffers.data(),
+           },
+-      .primitive = to_primitive_state(config.cullMode),
++      .primitive = to_primitive_state(config.cullMode, config.shaderConfig.wireframe),
+       .depthStencil = layout.depthStencilFormat != wgpu::TextureFormat::Undefined ? &depthStencil : nullptr,
+       .multisample = wgpu::MultisampleState{.count = layout.sampleCount},
+       .fragment = &fragmentState,
+@@ -451,6 +451,7 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
+   } else {
+     config.shaderConfig.lineMode = 0;
+   }
++  config.shaderConfig.wireframe = g_gxState.wireframe && config.shaderConfig.lineMode == 0;
+   config.shaderConfig.tevSwapTable = g_gxState.tevSwapTable;
+   for (u8 i = 0; i < g_gxState.numTevStages; ++i) {
+     config.shaderConfig.tevStages[i] = g_gxState.tevStages[i];
+@@ -490,8 +491,16 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
+       }
+     }
+   }
+-  const auto cullMode = config.shaderConfig.lineMode == 0 ? g_gxState.cullMode : GX_CULL_NONE;
+-  const auto [polygonOffset, polygonOffsetScale] = polygon_offset_for_cull_mode(cullMode);
++  const auto cullMode =
++      config.shaderConfig.lineMode == 0 && !config.shaderConfig.wireframe && !g_gxState.twoSided ? g_gxState.cullMode
++                                                                                                 : GX_CULL_NONE;
++  auto [polygonOffset, polygonOffsetScale] = polygon_offset_for_cull_mode(cullMode);
++  const bool wire = config.shaderConfig.wireframe;
++  if (wire) {
++    // WebGPU allows no depth bias on line topologies.
++    polygonOffset = 0.f;
++    polygonOffsetScale = 0.f;
++  }
+   const bool hasAlpha = efb_has_alpha(g_gxState.pixelFmt);
+   const bool alphaUpdate = hasAlpha && g_gxState.alphaUpdate;
+   const auto blendFactor = [hasAlpha](GXBlendFactor factor) {
+@@ -516,7 +525,7 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
+       .dstAlpha = alphaUpdate ? g_gxState.dstAlpha : UINT32_MAX,
+       .polygonOffsetBits = std::bit_cast<uint32_t>(polygonOffset),
+       .polygonOffsetScaleBits = std::bit_cast<uint32_t>(polygonOffsetScale),
+-      .polygonOffsetClampBits = std::bit_cast<uint32_t>(g_gxState.clamp),
++      .polygonOffsetClampBits = std::bit_cast<uint32_t>(wire ? 0.f : g_gxState.clamp),
+       .depthCompare = g_gxState.depthCompare,
+       .depthUpdate = g_gxState.depthUpdate,
+       .alphaUpdate = alphaUpdate,
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+index 0586fae..0c4477e 100644
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -342,6 +342,9 @@ struct GXState {
+   GXTexOffset lineTexOffset = GX_TO_ZERO;
+   GXTexOffset pointTexOffset = GX_TO_ZERO;
+   bool lineHalfAspect = false;
++  bool wireframe = false;       // GX_AURORA_SET_WIREFRAME
++  u32 wireColor = 0xFFFFFFFF;   // RGBA8
++  bool twoSided = false;        // GX_AURORA_SET_CULL_OVERRIDE
+   GXBlendMode blendMode = GX_BM_NONE;
+   GXBlendFactor blendFacSrc = GX_BL_SRCALPHA;
+   GXBlendFactor blendFacDst = GX_BL_INVSRCALPHA;
+@@ -504,7 +507,8 @@ struct ShaderConfig {
+   u8 intTev : 1 = false;   // integer TEV arithmetic (GX_AURORA_ACCURACY_INT_TEV)
+   u8 dither : 1 = false;   // PE ordered dither (with efbFmt)
+   u8 efbBlend : 1 = false; // draw blends with the EFB: quantize color only, keep alpha as the blend factor
+-  u8 pad1 : 2 = 0;
++  u8 wireframe : 1 = false; // GX_AURORA_SET_WIREFRAME: line-list edges in ubuf.wire_*
++  u8 pad1 : 1 = 0;
+   u8 zTexOp : 2 = 0;  // GXZTexOp; non-zero only when the last TEV stage samples a texture
+   u8 zTexFmt : 2 = 0; // 0 = Z8, 1 = Z16, 2 = Z24X8
+   u8 efbFmt : 2 = 0;  // EFB format to quantize to (GX_AURORA_ACCURACY_EFB_DEPTH): 0 none (RGB8), 1 RGBA6, 2 RGB565
+@@ -547,6 +551,7 @@ struct ShaderInfo {
+   bool lightingEnabled : 1 = false;
+   bool usesZTex : 1 = false;
+   u8 lineMode : 2 = 0;
++  bool wireframe : 1 = false;
+ };
+ struct BindGroupRanges {
+   std::array<gfx::Range, MaxIndexAttr> vaRanges{};
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index 039bab5..a041c4b 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1311,6 +1311,9 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+     vtxXfrAttrsPre += "\n    out.mv_nrm = mv_nrm;";
+   }
+ 
++  if (config.wireframe) {
++    uniBufAttrs += "\n    wire_r: f32,\n    wire_g: f32,\n    wire_b: f32,\n    wire_a: f32,";
++  }
+   uniBufAttrs += "\n    proj: mat4x4f,";
+   uniBufAttrs += fmt::format("\n    postex_mtx: array<mat3x4f, {}>,", MaxPnMtx + MaxTexMtx);
+   uniBufAttrs += fmt::format("\n    nrm_mtx: array<mat3x4f, {}>,", MaxPnMtx);
+@@ -1922,6 +1925,11 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+   } else if (!prevAlphaNormalized) {
+     fragmentFn += "\n    prev.a = tev_overflow_f32(prev.a);";
+   }
++  if (config.wireframe) {
++    // GX_AURORA_SET_WIREFRAME: edges in the override colour (before alpha compare, so
++    // alpha-tested surfaces keep all their edges).
++    fragmentFn += "\n    prev = vec4f(ubuf.wire_r, ubuf.wire_g, ubuf.wire_b, ubuf.wire_a);";
++  }
+   if (config.alphaCompare) {
+     const auto comp0 = alpha_compare(config.alphaCompare.comp0, config.alphaCompare.ref0);
+     const auto comp1 = alpha_compare(config.alphaCompare.comp1, config.alphaCompare.ref1);
+diff --git a/lib/gx/shader_info.cpp b/lib/gx/shader_info.cpp
+index fcd60e6..e382007 100644
+--- a/lib/gx/shader_info.cpp
++++ b/lib/gx/shader_info.cpp
+@@ -227,6 +227,10 @@ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
+     info.uniformSize += 4 + 4 + 4 + 4; // line_width, line_aspect_y, line_tex_offset, line_texcoord_mask
+     info.lineMode = config.lineMode;
+   }
++  if (config.wireframe) {
++    info.uniformSize += 4 * 4; // wire_r, wire_g, wire_b, wire_a
++    info.wireframe = true;
++  }
+ 
+   for (int attr = 0; attr < config.attrs.size(); attr++) {
+     const auto attrType = config.attrs[attr].attrType;
+@@ -403,6 +407,13 @@ static void fill_uniform(ByteBuffer& buf, const ShaderInfo& info) noexcept {
+       buf.append<u32>(line_texcoord_mask());
+     }
+   }
++  if (info.wireframe) {
++    const u32 c = g_gxState.wireColor;
++    buf.append<f32>(static_cast<f32>((c >> 24) & 0xFF) / 255.f);
++    buf.append<f32>(static_cast<f32>((c >> 16) & 0xFF) / 255.f);
++    buf.append<f32>(static_cast<f32>((c >> 8) & 0xFF) / 255.f);
++    buf.append<f32>(static_cast<f32>(c & 0xFF) / 255.f);
++  }
+   auto proj = g_gxState.proj;
+   if constexpr (UseReversedZ) {
+     proj.m2 = proj.m2 * Vec4{-1.f, -1.f, -1.f, -1.f};

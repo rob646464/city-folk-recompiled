@@ -1,0 +1,2715 @@
+diff --git a/cmake/aurora_gx.cmake b/cmake/aurora_gx.cmake
+index 574e7e1..7b0a3e7 100644
+--- a/cmake/aurora_gx.cmake
++++ b/cmake/aurora_gx.cmake
+@@ -11,6 +11,7 @@ add_library(aurora_gx STATIC
+         lib/gfx/tex_copy_conv.cpp
+         lib/gfx/tex_palette_conv.cpp
+         lib/gfx/efb_ram.cpp
++        lib/gfx/enhanced.cpp
+         lib/gfx/texture.cpp
+         lib/gfx/texture_format.cpp
+         lib/gfx/texture_convert.cpp
+diff --git a/include/aurora/enhanced.h b/include/aurora/enhanced.h
+new file mode 100644
+index 0000000..e1a017c
+--- /dev/null
++++ b/include/aurora/enhanced.h
+@@ -0,0 +1,95 @@
++#ifndef AURORA_ENHANCED_H
++#define AURORA_ENHANCED_H
++
++// Enhanced lighting (optional, off by default): effects layered on top of the accurate GX
++// rendering of *world geometry* draws. With `enabled` false nothing here changes a pixel:
++// shader configs, passes and outputs are exactly those of the plain renderer.
++//
++// The application classifies draws with GXSetDrawClassAurora (FIFO command, so it is ordered
++// with the draws and part of captured/replayed command streams):
++//   AURORA_DRAW_CLASS_OTHER  HUD/2D, shadow-map passes, sub-views, anything not to enhance
++//   AURORA_DRAW_CLASS_WORLD  rooms, furniture, characters (opaque or blended)
++//   AURORA_DRAW_CLASS_GHOST  ghosts (lit by extra lights only when the light allows it)
++// and marks the end of the 3D scene once per frame with GXSceneEndAurora (before the HUD), where
++// the screen-space parts (bloom, volumetric flashlight beam, ambient occlusion) are applied to
++// the EFB. Extra point lights: include/aurora/lights.h.
++
++#ifdef __cplusplus
++#include <cstdint>
++extern "C" {
++#else
++#include <stdbool.h>
++#include <stdint.h>
++#endif
++
++#define AURORA_DRAW_CLASS_OTHER 0
++#define AURORA_DRAW_CLASS_WORLD 1
++#define AURORA_DRAW_CLASS_GHOST 2 // translucent world draws (ghosts): extra lights only with their translucent flag
++
++typedef struct {
++  bool enabled; // master switch
++
++  // Per-pixel evaluation of the game's GX lights (same formulas as the GX vertex lighting).
++  bool perPixelLighting;
++
++  // Flashlight / spot lights: per-pixel spot cone (even without perPixelLighting) with a
++  // smoothed penumbra; softness 0 = the GX falloff curve as is, 1 = fully smoothed edge.
++  bool flashlightQuality;
++  float flashlightSoftness;
++  float flashlightSpecular; // 0..2: glossy highlight of the flashlight on surfaces (per pixel)
++
++  // Soft shadows for the game's shadow-map compare (TEV GR16 compare against the depth map):
++  // quality 0 = PCF 8 taps, 1 = PCF 16, 2 = PCSS (contact hardening) 16+16, 3 = PCSS 32+32.
++  bool softShadows;
++  uint32_t softShadowQuality;
++  float softShadowRadius;  // filter radius in 640x480 shadow-map texels (scaled with the map)
++  float softShadowPenumbra; // PCSS: penumbra growth with blocker distance
++
++  // Extra point lights (aurora/lights.h), per pixel on world geometry.
++  bool extraLights;
++  float extraLightIntensity;
++  float extraLightSaturation; // 0..2.5: color vibrance of every extra light (1 = as submitted)
++  // Shadows of the extra lights flagged ExtraLightCastShadows (up to 4 per frame): a depth
++  // pre-pass of the opaque world draws and a screen-space ray march toward each light.
++  bool extraShadows;
++  uint32_t extraShadowQuality; // 0 low (8 steps), 1 medium (16), 2 high (32)
++
++  // Volumetric flashlight beam (scene end, uses depth).
++  bool volumetric;
++  float volumetricIntensity;
++  uint32_t volumetricQuality; // 0 low (16 steps, 1/4 res), 1 medium (24, 1/2), 2 high (48, 1/2)
++
++  // Bloom / glow of bright light sources (scene end, HUD excluded).
++  bool bloom;
++  float bloomIntensity;
++  float bloomThreshold; // 0..1 luminance where the glow starts
++  float bloomRadius;    // 0.25..2: spread
++  float bloomFlashlightSuppress; // 0..1: less glow from surfaces that are only bright from the flashlight
++  float bloomScene;     // 0..1: glow from bright scene pixels (lit walls/objects) above the threshold
++  float bloomEmissive;  // 0..2: glow from light-emitting draws (additive effects: glows, fire, beams, sparks)
++  float bloomLightGlow; // 0..2: glow around extra lights (aurora/lights.h), occluded by the scene
++
++  // Screen-space ambient occlusion (scene end).
++  bool ssao;
++  float ssaoIntensity;
++  float ssaoRadius; // world units
++} AuroraEnhancedConfig;
++
++// Replaces the configuration (any thread; takes effect at the next draw / scene end).
++void aurora_enhanced_set_config(const AuroraEnhancedConfig* config);
++
++// Draw class for the following draws (AURORA_DRAW_CLASS_*). GX FIFO command.
++void GXSetDrawClassAurora(uint8_t drawClass);
++// End of the 3D scene of this frame (before the HUD). GX FIFO command; no effect when the
++// enhanced mode or all of its screen-space parts are off, or inside an offscreen pass.
++void GXSceneEndAurora(void);
++
++// Statistics for the overlay / tests: number of extra lights in the last frame, GPU-side
++// scene-end passes recorded in the last frame.
++uint32_t aurora_enhanced_last_light_count(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/include/aurora/lights.h b/include/aurora/lights.h
+new file mode 100644
+index 0000000..84fb2a5
+--- /dev/null
++++ b/include/aurora/lights.h
+@@ -0,0 +1,33 @@
++#pragma once
++// Extra dynamic lights for the enhanced lighting mode (include/aurora/enhanced.h).
++//
++// A game-side provider (e.g. ghosts emitting colored light) hands Aurora a set of point
++// lights once per game frame. They are written into the GX FIFO as a command, so they stay in
++// order with the frame's draws and are part of captured command streams (frame interpolation
++// replays them, blended between game frames by `id`). They light world-geometry draws of that
++// frame per pixel, added to the game's own lit color channels (so the game's materials and TEV
++// decide how a surface responds), only while the enhanced lighting mode and its "extra lights"
++// part are on; otherwise they are ignored.
++#include <cstdint>
++
++namespace aurora::gfx {
++struct ExtraLight {
++  float pos[3];      // VIEW space (GX eye space, same space as GXLoadLightObjImm positions)
++  float color[3];    // linear RGB, may exceed 1
++  float radius;      // world units; smooth falloff to 0 at radius
++  float intensity;   // multiplier
++  uint32_t flags;    // bit0: cast shadows, bit1: affects ghosts/translucent, bit2: specular
++  uint32_t id;       // stable per-source id for interpolation pairing (0 = none)
++};
++static_assert(sizeof(ExtraLight) == 40);
++
++constexpr uint32_t MaxExtraLights = 16;
++constexpr uint32_t ExtraLightCastShadows = 1u << 0;
++constexpr uint32_t ExtraLightTranslucent = 1u << 1;
++constexpr uint32_t ExtraLightSpecular = 1u << 2;
++
++// Call once per game frame (guest thread), before the frame's draws; applies to world-geometry
++// draws of that frame. Lights beyond MaxExtraLights are dropped (pass the strongest first).
++// count 0 clears the set.
++void set_extra_lights(const ExtraLight* lights, uint32_t count);
++} // namespace aurora::gfx
+diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
+index 3d370ff..d1728d4 100644
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -109,6 +109,26 @@ extern "C" {
+  */
+ #define GX_AURORA_SET_CULL_OVERRIDE 0x0051
+ 
++/**
++ * Enhanced lighting (include/aurora/enhanced.h): draw class of the following draws.
++ * Followed by a u8 class (AURORA_DRAW_CLASS_*).
++ */
++#define GX_AURORA_SET_DRAW_CLASS 0x0052
++
++/**
++ * Enhanced lighting: extra point lights for this frame (include/aurora/lights.h).
++ * Followed by a u8 count, then per light 8 f32 (pos xyz, color rgb, radius, intensity) and
++ * 2 u32 (flags, id), all big-endian like the rest of the stream.
++ */
++#define GX_AURORA_SET_EXTRA_LIGHTS 0x0053
++#define GX_AURORA_EXTRA_LIGHT_WORDS 10 // 8 f32 + 2 u32 per light
++
++/**
++ * Enhanced lighting: end of the frame's 3D scene (screen-space effects are applied here).
++ * Followed by nothing.
++ */
++#define GX_AURORA_SCENE_END 0x0054
++
+ #define GX2_SET_POLYGON_OFFSET 0x1000
+ 
+ 
+diff --git a/lib/dolphin/gx/GXAurora.cpp b/lib/dolphin/gx/GXAurora.cpp
+index dff3642..7df4ab1 100644
+--- a/lib/dolphin/gx/GXAurora.cpp
++++ b/lib/dolphin/gx/GXAurora.cpp
+@@ -1,5 +1,9 @@
+ #include "dolphin/gx/GXAurora.h"
+ 
++#include <aurora/enhanced.h>
++#include <aurora/lights.h>
++
++#include <algorithm>
+ #include <limits>
+ 
+ #include "__gx.h"
+@@ -126,3 +130,31 @@ void GXRestoreFrameBuffer() {
+   GX_WRITE_AURORA(GX_AURORA_END_OFFSCREEN);
+   aurora::gx::fifo::publish();
+ }
++
++void GXSetDrawClassAurora(uint8_t drawClass) {
++  GX_WRITE_AURORA(GX_AURORA_SET_DRAW_CLASS);
++  GX_WRITE_U8(drawClass);
++}
++
++void GXSceneEndAurora(void) { GX_WRITE_AURORA(GX_AURORA_SCENE_END); }
++
++namespace aurora::gfx {
++void set_extra_lights(const ExtraLight* lights, uint32_t count) {
++  count = std::min(count, MaxExtraLights);
++  GX_WRITE_AURORA(GX_AURORA_SET_EXTRA_LIGHTS);
++  GX_WRITE_U8(count);
++  for (uint32_t i = 0; i < count; ++i) {
++    const auto& l = lights[i];
++    GX_WRITE_F32(l.pos[0]);
++    GX_WRITE_F32(l.pos[1]);
++    GX_WRITE_F32(l.pos[2]);
++    GX_WRITE_F32(l.color[0]);
++    GX_WRITE_F32(l.color[1]);
++    GX_WRITE_F32(l.color[2]);
++    GX_WRITE_F32(l.radius);
++    GX_WRITE_F32(l.intensity);
++    GX_WRITE_U32(l.flags);
++    GX_WRITE_U32(l.id);
++  }
++}
++} // namespace aurora::gfx
+diff --git a/lib/gfx/encoding.cpp b/lib/gfx/encoding.cpp
+index fd5c624..2c6c028 100644
+--- a/lib/gfx/encoding.cpp
++++ b/lib/gfx/encoding.cpp
+@@ -431,6 +431,8 @@ void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const FrameOp& op)
+ }
+ } // namespace detail
+ 
++void reset_bound_pipeline() noexcept { g_currentPipeline = nullptr; }
++
+ void bind_pipeline(const wgpu::RenderPipeline& pipeline, const wgpu::RenderPassEncoder& pass) {
+   if (pipeline.Get() == g_currentPipeline) {
+     return;
+diff --git a/lib/gfx/encoding.hpp b/lib/gfx/encoding.hpp
+index 1920bc8..c22fbec 100644
+--- a/lib/gfx/encoding.hpp
++++ b/lib/gfx/encoding.hpp
+@@ -6,6 +6,8 @@ namespace aurora::gfx {
+ 
+ bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass);
+ void bind_pipeline(const wgpu::RenderPipeline& pipeline, const wgpu::RenderPassEncoder& pass);
++// Forgets the pipeline bind_pipeline last set (a pass encoded outside render_pass).
++void reset_bound_pipeline() noexcept;
+ 
+ namespace detail {
+ void encode_op(wgpu::CommandEncoder& encoder, FramePacket& frame, const FrameOp& op);
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+new file mode 100644
+index 0000000..b4625f4
+--- /dev/null
++++ b/lib/gfx/enhanced.cpp
+@@ -0,0 +1,1622 @@
++// Enhanced lighting: configuration, extra lights, per-draw uniforms and the scene-end
++// screen-space effects (bloom, volumetric flashlight beam, ambient occlusion).
++// See include/aurora/enhanced.h and include/aurora/lights.h.
++#include "enhanced.hpp"
++
++#include "encoding.hpp"
++#include "recording.hpp"
++#include "resources.hpp"
++#include "tex_copy_conv.hpp"
++#include "../gx/gx.hpp"
++#include "../gx/pipeline.hpp"
++#include "../internal.hpp"
++#include "../webgpu/gpu.hpp"
++
++#include <algorithm>
++#include <array>
++#include <atomic>
++#include <chrono>
++#include <cmath>
++#include <cstdlib>
++#include <cstring>
++#include <mutex>
++#include <string>
++#include <tuple>
++#include <unordered_map>
++#include <vector>
++
++namespace aurora::gfx::enhanced {
++namespace {
++Module Log("aurora::enhanced");
++
++// --- configuration (any thread -> FIFO thread) ---
++std::mutex g_cfgMutex;
++AuroraEnhancedConfig g_pending{};
++std::atomic<uint32_t> g_pendingGen{0};
++AuroraEnhancedConfig g_cfg{};
++uint32_t g_cfgGen = 0;
++std::atomic<uint32_t> g_lastLightCount{0};
++
++bool same(const AuroraEnhancedConfig& a, const AuroraEnhancedConfig& b) {
++#define EQ(f) (a.f == b.f)
++  return EQ(enabled) && EQ(perPixelLighting) && EQ(flashlightQuality) && EQ(flashlightSoftness) && EQ(flashlightSpecular) && EQ(softShadows) &&
++         EQ(softShadowQuality) && EQ(softShadowRadius) && EQ(softShadowPenumbra) && EQ(extraLights) && EQ(extraLightSaturation) &&
++         EQ(extraLightIntensity) && EQ(volumetric) && EQ(volumetricIntensity) && EQ(volumetricQuality) && EQ(bloom) &&
++         EQ(bloomIntensity) && EQ(bloomThreshold) && EQ(bloomRadius) && EQ(bloomFlashlightSuppress) && EQ(bloomScene) && EQ(bloomEmissive) && EQ(bloomLightGlow) && EQ(ssao) &&
++         EQ(ssaoIntensity) && EQ(ssaoRadius);
++#undef EQ
++}
++
++// --- frame state (FIFO thread) ---
++std::array<ExtraLight, MaxExtraLights> g_lights{};
++uint32_t g_lightCount = 0;
++Range g_lightRange{};
++bool g_lightRangeValid = false;
++
++struct Camera {
++  bool valid = false;
++  float p00 = 1, p11 = 1, p02 = 0, p12 = 0, p03 = 0, p13 = 0, a = 0, b = 0;
++  Viewport vp{};
++};
++Camera g_camera;
++struct Flashlight {
++  bool valid = false;
++  Vec4<float> pos, dir, cosAtt, distAtt, color;
++};
++Flashlight g_flash;
++float g_flashDist2 = 0.f;
++
++// Vibrance: push a light color away from its gray (luma) by `sat`, keeping its brightest channel,
++// so every provider (ghost lights, test lights) gets one consistent saturated look.
++std::array<float, 3> vivid(const float c[3], float sat) noexcept {
++  const float l = 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
++  const float mx = std::max({c[0], c[1], c[2]});
++  std::array<float, 3> o{};
++  float omx = 0.f;
++  for (int i = 0; i < 3; ++i) {
++    o[i] = std::max(l + (c[i] - l) * sat, 0.f);
++    omx = std::max(omx, o[i]);
++  }
++  if (omx > 1e-5f) {
++    for (float& v : o) {
++      v *= mx / omx;
++    }
++  }
++  return o;
++}
++
++// Bloom glow buffer: emissive draws (additive blending: what the game adds as light) recorded
++// with a copy of their pipeline that renders into the glow buffer, depth-tested against the
++// scene's depth, at scene end.
++struct GlowDraw {
++  gx::DrawData data;
++  Viewport viewport;
++  ClipRect scissor;
++  uint32_t pass = UINT32_MAX, command = 0; // the recorded draw (merged draws extend it)
++  uint32_t vtxCount = 0; // debug
++  uint32_t tevStages = 0;
++  bool lit = false;
++};
++std::vector<GlowDraw> g_glowDraws;
++
++// Extra-light shadows: lights flagged ExtraLightCastShadows get a mask slot (up to 4); the opaque
++// world draws are re-rendered depth-only (same mechanism as the glow draws) into a pre-pass
++// before the EFB pass they belong to, a ray-march pass writes the RGBA8 mask and it is copied
++// into a storage-buffer range that the world shaders of that pass read.
++constexpr uint32_t MaxShadowLights = 4;
++std::array<uint32_t, MaxExtraLights> g_shadowSlot{};
++uint32_t g_shadowCount = 0;
++std::vector<GlowDraw> g_depthDraws;
++Range g_maskRange{};
++bool g_maskReserved = false; // this frame
++size_t g_depthFlushed = 0;   // g_depthDraws already resolved and in a queued mask
++uint32_t g_maskW = 0, g_maskH = 0, g_maskPitch = 0; // pitch in u32 words
++std::vector<uint8_t> g_maskZeros;
++constexpr auto GlowFormat = wgpu::TextureFormat::RGBA16Float;
++constexpr size_t MaxGlowDraws = 4096;
++
++uint32_t g_sceneEnds = 0;
++const uint32_t g_drawLogFrame = [] {
++  const char* v = std::getenv("AURORA_ENH_DRAWLOG"); // log every draw of the n-th scene (1-based)
++  return v != nullptr ? uint32_t(std::atoi(v)) : 0u;
++}();
++const int g_glowDbg = [] {
++  const char* v = std::getenv("AURORA_ENH_GLOWDBG"); // 1: show the glow buffer, 2: one glow draw per frame
++  return v != nullptr ? std::atoi(v) : 0;
++}();
++uint32_t g_segDraws[3] = {};
++const bool g_drawLogAll = std::getenv("AURORA_ENH_DRAWLOG_ALL") != nullptr;
++const bool g_log = [] {
++  const char* v = std::getenv("AURORA_ENH_LOG");
++  return v != nullptr && v[0] == '1';
++}();
++
++// --- GPU side (render worker) ---
++constexpr std::string_view FxShader = R"""(
++struct Fx {
++  size: vec4f,   // target w, h, 1/w, 1/h
++  vp: vec4f,     // render viewport x, y, w, h (target pixels)
++  proj: vec4f,   // P00, P11, P02, P12
++  projz: vec4f,  // A, B (depth = A + B / z), P03, P13
++  dr: vec4f,     // viewport min/max depth, frame, effect mask
++  lpos: vec4f,   // flashlight (view space), w = valid
++  ldir: vec4f,
++  lcos: vec4f,
++  ldist: vec4f,
++  lcol: vec4f,
++  bloom: vec4f,  // intensity, threshold, knee, flashlight suppression
++  vol: vec4f,    // intensity, steps, max distance, 0
++  ao: vec4f,     // intensity, radius, 0, 0
++  pp: vec4f,     // per pass: source texel size xy, radius, weight
++  bloom2: vec4f, // scene highlights amount, emissive amount, light glow amount, light count
++  glowdepth: vec4f, // glow depth pass: source scale xy (glow -> target pixels), reversed z, bias
++  xl: array<vec4f, 32>, // light glows: view pos + core radius, color * intensity
++};
++@group(0) @binding(0) var<uniform> fx: Fx;
++@group(0) @binding(1) var samp: sampler;
++@group(0) @binding(2) var t0: texture_2d<f32>;
++@group(0) @binding(3) var t1: texture_2d<f32>;
++@group(0) @binding(4) var t2: texture_2d<f32>;
++@group(0) @binding(5) var tdepth: texture_2d<f32>;
++
++struct VsOut {
++  @builtin(position) pos: vec4f,
++  @location(0) uv: vec2f,
++};
++@vertex
++fn vs_main(@builtin(vertex_index) vtx: u32) -> VsOut {
++  let p = vec2f(f32((vtx << 1u) & 2u), f32(vtx & 2u));
++  var out: VsOut;
++  out.pos = vec4f(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0, 0.0, 1.0);
++  out.uv = p;
++  return out;
++}
++
++fn ign(p: vec2f) -> f32 { return fract(52.9829189 * fract(dot(p, vec2f(0.06711056, 0.00583715)))); }
++fn luma(c: vec3f) -> f32 { return dot(c, vec3f(0.2126, 0.7152, 0.0722)); }
++
++// View-space position of a target pixel (pixel units) at raw depth d.
++fn view_pos(px: vec2f, d: f32) -> vec3f {
++  let dn = (d - fx.dr.x) / max(fx.dr.y - fx.dr.x, 1e-6);
++  let ndc = vec2f((px.x - fx.vp.x) / fx.vp.z * 2.0 - 1.0, 1.0 - (px.y - fx.vp.y) / fx.vp.w * 2.0);
++  // Raw depth (reversed Z as the EFB stores it) = A + B / z_view (A, B from the GX projection).
++  let den = dn - fx.projz.x;
++  let z = fx.projz.y / select(den, 1e-7, abs(den) < 1e-7);
++  let w = -z;
++  return vec3f((ndc.x * w - fx.proj.z * z - fx.projz.z) / fx.proj.x, (ndc.y * w - fx.proj.w * z - fx.projz.w) / fx.proj.y, z);
++}
++fn load_depth(px: vec2f) -> f32 {
++  let dims = vec2i(textureDimensions(tdepth));
++  return textureLoad(tdepth, clamp(vec2i(px), vec2i(0), dims - vec2i(1)), 0).r;
++}
++// GX spot light attenuation of the flashlight at a view-space point (no N.L).
++fn flash_attn(p: vec3f) -> f32 {
++  var l = fx.lpos.xyz - p;
++  let dist2 = dot(l, l);
++  let dist = sqrt(dist2);
++  l = l / max(dist, 1e-4);
++  let c = max(0.0, dot(l, fx.ldir.xyz));
++  let ca = max(0.0, dot(fx.lcos.xyz, vec3f(1.0, c, c * c)));
++  let da = max(dot(fx.ldist.xyz, vec3f(1.0, dist, dist2)), 1e-4);
++  return ca / da;
++}
++
++// Bloom bright pass: 13-tap downsample of the scene (Karis-weighted against fireflies) with a
++// soft-knee threshold; surfaces that are only bright because the flashlight shines on them glow
++// less (bloom.w).
++fn tap(uv: vec2f) -> vec3f { return textureSampleLevel(t0, samp, uv, 0.0).rgb; }
++fn karis(c: vec3f) -> f32 { return 1.0 / (1.0 + luma(c)); }
++@fragment
++fn fs_bright(in: VsOut) -> @location(0) vec4f {
++  let ts = fx.pp.xy;
++  let uv = in.uv;
++  let a = tap(uv + ts * vec2f(-2.0, -2.0));
++  let b = tap(uv + ts * vec2f(0.0, -2.0));
++  let c = tap(uv + ts * vec2f(2.0, -2.0));
++  let d = tap(uv + ts * vec2f(-1.0, -1.0));
++  let e = tap(uv + ts * vec2f(1.0, -1.0));
++  let f = tap(uv + ts * vec2f(-2.0, 0.0));
++  let g = tap(uv);
++  let h = tap(uv + ts * vec2f(2.0, 0.0));
++  let i = tap(uv + ts * vec2f(-1.0, 1.0));
++  let j = tap(uv + ts * vec2f(1.0, 1.0));
++  let k = tap(uv + ts * vec2f(-2.0, 2.0));
++  let l = tap(uv + ts * vec2f(0.0, 2.0));
++  let m = tap(uv + ts * vec2f(2.0, 2.0));
++  let g0 = (d + e + i + j) * 0.25;
++  let g1 = (a + b + f + g) * 0.25;
++  let g2 = (b + c + g + h) * 0.25;
++  let g3 = (f + g + k + l) * 0.25;
++  let g4 = (g + h + l + m) * 0.25;
++  let w0 = karis(g0) * 0.5;
++  let w1 = karis(g1) * 0.125;
++  let w2 = karis(g2) * 0.125;
++  let w3 = karis(g3) * 0.125;
++  let w4 = karis(g4) * 0.125;
++  var col = (g0 * w0 + g1 * w1 + g2 * w2 + g3 * w3 + g4 * w4) / (w0 + w1 + w2 + w3 + w4);
++  // Soft knee on the brightest channel (saturated light sources keep their color).
++  let br = max(col.r, max(col.g, col.b));
++  let th = fx.bloom.y;
++  let knee = max(fx.bloom.z, 1e-4);
++  var soft = clamp(br - th + knee, 0.0, 2.0 * knee);
++  soft = soft * soft / (4.0 * knee);
++  let contrib = max(soft, br - th) / max(br, 1e-4);
++  col = col * max(contrib, 0.0);
++  if (fx.lpos.w > 0.5 && fx.bloom.w > 0.0) {
++    let px = uv * fx.size.xy;
++    let p = view_pos(px, load_depth(px));
++    let lit = clamp(flash_attn(p) * luma(fx.lcol.rgb), 0.0, 1.0);
++    col = col * (1.0 - fx.bloom.w * lit);
++  }
++  // Ordinary lit surfaces only glow by the "scene highlights" amount; light sources come from the
++  // glow buffer (additive/emissive draws re-rendered depth-tested at this resolution) and from
++  // the light glows below.
++  // The glow buffer is compressed (Reinhard on luma) so large additive areas such as the
++  // flashlight beam pointing at the camera glow softly instead of blowing out.
++  let gl = textureSampleLevel(t1, samp, uv, 0.0).rgb * fx.bloom2.y;
++  col = col * fx.bloom2.x + gl / (1.0 + luma(gl));
++  let nl = u32(fx.bloom2.w);
++  if (nl > 0u && fx.bloom2.z > 0.0) {
++    let px = uv * fx.size.xy;
++    for (var li = 0u; li < nl; li++) {
++      let lp = fx.xl[li * 2u];
++      let w = -lp.z;
++      if (w <= 1.0) { continue; }
++      let cx = (fx.proj.x * lp.x + fx.proj.z * lp.z + fx.projz.z) / w;
++      let cy = (fx.proj.y * lp.y + fx.proj.w * lp.z + fx.projz.w) / w;
++      let sp = vec2f(fx.vp.x + (cx * 0.5 + 0.5) * fx.vp.z, fx.vp.y + (0.5 - cy * 0.5) * fx.vp.w);
++      let sigma = max(lp.w * fx.proj.y * 0.5 * fx.vp.w / w, 1.0);
++      let dd = px - sp;
++      let r2 = dot(dd, dd) / (sigma * sigma);
++      if (r2 > 16.0) { continue; }
++      // Hidden behind a surface in front of the light (with a margin of the core radius).
++      let sz = view_pos(sp, load_depth(sp)).z;
++      if (sz > lp.z + lp.w * 2.0) { continue; }
++      col = col + fx.xl[li * 2u + 1u].rgb * (exp(-0.5 * r2) * fx.bloom2.z);
++    }
++  }
++  return vec4f(col, 1.0);
++}
++
++// Glow buffer depth: the scene depth at the glow buffer's resolution, nudged slightly farther so
++// re-rendered emissive surfaces pass the depth test against themselves.
++@fragment
++fn fs_glowdepth(in: VsOut) -> @builtin(frag_depth) f32 {
++  let d = load_depth(floor(in.pos.xy * fx.glowdepth.xy) + vec2f(0.5));
++  if (fx.glowdepth.z > 0.5) {
++    return d * (1.0 - fx.glowdepth.w);
++  }
++  return 1.0 - (1.0 - d) * (1.0 - fx.glowdepth.w);
++}
++
++// Extra-light shadow mask (pre-pass depth at mask resolution in tdepth): per shadowed light (up
++// to 4, fx.xl[i] = view position + reach), march from the surface toward the light through the
++// depth buffer; a stored surface in front of the ray (within a thickness) occludes it.
++// pp: steps, target pixels per mask pixel, light count.
++fn mask_view_pos(mp: vec2f) -> vec3f {
++  let dims = vec2i(textureDimensions(tdepth));
++  let d = textureLoad(tdepth, clamp(vec2i(mp), vec2i(0), dims - vec2i(1)), 0).r;
++  return view_pos((floor(mp) + vec2f(0.5)) * fx.pp.y, d);
++}
++@fragment
++fn fs_xlshadow(in: VsOut) -> @location(0) vec4f {
++  let mp = floor(in.pos.xy);
++  let dims = vec2i(textureDimensions(tdepth));
++  let d0 = textureLoad(tdepth, vec2i(mp), 0).r;
++  if (fx.pp.w > 0.5 && fx.pp.w < 1.5) { return vec4f(fract(d0 * 1000.0), fract(d0 * 100.0), d0 * 10.0, 1.0); } // debug: depth
++  if (d0 <= 1e-7) { return vec4f(0.0); } // nothing drawn (cleared to far)
++  let p = view_pos((mp + vec2f(0.5)) * fx.pp.y, d0);
++  let steps = max(fx.pp.x, 4.0);
++  let jitter = ign(mp + vec2f(fx.dr.z * 7.0, fx.dr.z * 3.0));
++  var occ = vec4f(0.0);
++  if (fx.pp.w > 1.5) {
++    return vec4f(-p.z / 3000.0, -fx.xl[0].z / 3000.0, length(fx.xl[0].xyz - p) / 3000.0, fx.pp.z / 4.0);
++  }
++  for (var s = 0u; s < u32(fx.pp.z); s++) {
++    let lp = fx.xl[s];
++    let toL = lp.xyz - p;
++    let dist = length(toL);
++    if (dist >= lp.w || dist < 1.0) { continue; }
++    let dir = toL / dist;
++    if (fx.pp.w > 1.5) { occ[s] = dist / 1000.0; continue; } // debug: distance to the light
++    // Start a little off the surface (self-shadowing), stop short of the light (its own body).
++    let t0 = max(3.0, dist * 0.02);
++    let len = dist * 0.92 - t0;
++    if (len <= 0.0) { continue; }
++    var o = 0.0;
++    for (var k = 0.0; k < steps; k = k + 1.0) {
++      let t = t0 + (k + jitter) / steps * len;
++      let q = p + dir * t;
++      let w = -q.z;
++      if (w <= 1.0) { break; }
++      let cx = (fx.proj.x * q.x + fx.proj.z * q.z + fx.projz.z) / w;
++      let cy = (fx.proj.y * q.y + fx.proj.w * q.z + fx.projz.w) / w;
++      let sp = vec2f(fx.vp.x + (cx * 0.5 + 0.5) * fx.vp.z, fx.vp.y + (0.5 - cy * 0.5) * fx.vp.w) / fx.pp.y;
++      if (any(sp < vec2f(0.0)) || any(sp >= vec2f(dims))) { break; }
++      let sz = mask_view_pos(sp).z;
++      let front = sz - q.z; // > 0: the stored surface is nearer to the camera than the ray point
++      if (front > 2.0 + t * 0.01 && front < 160.0) {
++        o = 1.0;
++        break;
++      }
++    }
++    occ[s] = o;
++  }
++  return occ;
++}
++
++// Downsample (13-tap, as above without threshold).
++@fragment
++fn fs_down(in: VsOut) -> @location(0) vec4f {
++  let ts = fx.pp.xy;
++  let uv = in.uv;
++  let a = tap(uv + ts * vec2f(-2.0, -2.0));
++  let b = tap(uv + ts * vec2f(0.0, -2.0));
++  let c = tap(uv + ts * vec2f(2.0, -2.0));
++  let d = tap(uv + ts * vec2f(-1.0, -1.0));
++  let e = tap(uv + ts * vec2f(1.0, -1.0));
++  let f = tap(uv + ts * vec2f(-2.0, 0.0));
++  let g = tap(uv);
++  let h = tap(uv + ts * vec2f(2.0, 0.0));
++  let i = tap(uv + ts * vec2f(-1.0, 1.0));
++  let j = tap(uv + ts * vec2f(1.0, 1.0));
++  let k = tap(uv + ts * vec2f(-2.0, 2.0));
++  let l = tap(uv + ts * vec2f(0.0, 2.0));
++  let m = tap(uv + ts * vec2f(2.0, 2.0));
++  var col = (d + e + i + j) * 0.125;
++  col = col + (a + b + f + g) * 0.03125 + (b + c + g + h) * 0.03125;
++  col = col + (f + g + k + l) * 0.03125 + (g + h + l + m) * 0.03125;
++  return vec4f(col, 1.0);
++}
++
++// Upsample: 9-tap tent of the smaller level, added onto the larger one (blend one/one).
++@fragment
++fn fs_up(in: VsOut) -> @location(0) vec4f {
++  let ts = fx.pp.xy * fx.pp.z;
++  let uv = in.uv;
++  var col = tap(uv) * 4.0;
++  col = col + (tap(uv + vec2f(-ts.x, 0.0)) + tap(uv + vec2f(ts.x, 0.0)) + tap(uv + vec2f(0.0, -ts.y)) + tap(uv + vec2f(0.0, ts.y))) * 2.0;
++  col = col + tap(uv - ts) + tap(uv + ts) + tap(uv + vec2f(-ts.x, ts.y)) + tap(uv + vec2f(ts.x, -ts.y));
++  return vec4f(col * (fx.pp.w / 16.0), 1.0);
++}
++
++fn hash3(p: vec3f) -> f32 { return fract(sin(dot(p, vec3f(127.1, 311.7, 74.7))) * 43758.5453); }
++fn vnoise(p: vec3f) -> f32 {
++  let i = floor(p);
++  let f = fract(p);
++  let u = f * f * (3.0 - 2.0 * f);
++  let a = mix(mix(hash3(i), hash3(i + vec3f(1.0, 0.0, 0.0)), u.x), mix(hash3(i + vec3f(0.0, 1.0, 0.0)), hash3(i + vec3f(1.0, 1.0, 0.0)), u.x), u.y);
++  let b = mix(mix(hash3(i + vec3f(0.0, 0.0, 1.0)), hash3(i + vec3f(1.0, 0.0, 1.0)), u.x), mix(hash3(i + vec3f(0.0, 1.0, 1.0)), hash3(i + vec3f(1.0, 1.0, 1.0)), u.x), u.y);
++  return mix(a, b, u.z);
++}
++
++// Volumetric flashlight beam: in-scattering along the view ray up to the surface, through the
++// flashlight's GX spot attenuation.
++@fragment
++fn fs_vol(in: VsOut) -> @location(0) vec4f {
++  if (fx.lpos.w < 0.5) { return vec4f(0.0); }
++  let px = in.uv * fx.size.xy;
++  let surf = view_pos(px, load_depth(px));
++  let dist = min(length(surf), fx.vol.z);
++  let dir = surf / max(length(surf), 1e-4);
++  let steps = max(fx.vol.y, 4.0);
++  let ds = dist / steps;
++  var t = ds * ign(in.pos.xy + vec2f(fx.dr.z * 5.588238, fx.dr.z * 3.1));
++  var acc = 0.0;
++  let r0 = 320.0; // haze falls off with distance from the lens (r0: half-density distance)
++  for (var s = 0.0; s < steps; s = s + 1.0) {
++    let p = dir * t;
++    let lv = fx.lpos.xyz - p;
++    let dl2 = dot(lv, lv);
++    // Forward-scattering phase (looking toward the lens is brighter).
++    let phase = 0.6 + 0.4 * max(dot(-dir, lv * inverseSqrt(max(dl2, 1e-4))), 0.0);
++    // Dust: slowly drifting value noise modulates the density (motes in the beam).
++    let dq = p * 0.045 + vec3f(0.0, fx.vol.w * 0.35, fx.vol.w * 0.2);
++    let dust = 0.4 + 1.2 * vnoise(dq) * vnoise(dq * 2.7 + vec3f(17.0)) * 2.0;
++    acc = acc + min(flash_attn(p), 1.0) * phase * dust / (1.0 + dl2 / (r0 * r0));
++    t = t + ds;
++  }
++  // Normalized so a ray along the whole beam gathers about 1 (the falloff integrates to pi * r0).
++  let v = acc * ds / (3.14159 * r0) * fx.vol.x * 0.45;
++  return vec4f(fx.lcol.rgb * (1.0 - exp(-v)), 1.0);
++}
++
++// Ambient occlusion from the depth buffer (normal from depth, 12 hemisphere samples).
++@fragment
++fn fs_ao(in: VsOut) -> @location(0) vec4f {
++  let px = in.uv * fx.size.xy;
++  let d = load_depth(px);
++  if (d <= fx.dr.x + 1e-7) { return vec4f(1.0); }
++  let p = view_pos(px, d);
++  let s = max(fx.size.x / 640.0, 1.0);
++  let pr = view_pos(px + vec2f(s, 0.0), load_depth(px + vec2f(s, 0.0)));
++  let pl = view_pos(px - vec2f(s, 0.0), load_depth(px - vec2f(s, 0.0)));
++  let pu = view_pos(px + vec2f(0.0, s), load_depth(px + vec2f(0.0, s)));
++  let pd = view_pos(px - vec2f(0.0, s), load_depth(px - vec2f(0.0, s)));
++  let dx = select(pr - p, p - pl, abs(pr.z - p.z) > abs(p.z - pl.z));
++  let dy = select(pu - p, p - pd, abs(pu.z - p.z) > abs(p.z - pd.z));
++  var n = normalize(cross(dx, dy));
++  n = select(n, -n, dot(n, p) > 0.0);
++  let radius = fx.ao.y;
++  let rot = ign(in.pos.xy) * 6.2831853;
++  var occ = 0.0;
++  for (var k = 0u; k < 12u; k++) {
++    let r = sqrt((f32(k) + 0.5) / 12.0);
++    let a = f32(k) * 2.39996323 + rot;
++    // A point on a disk around the normal, pushed out along it (cosine-ish hemisphere).
++    var tg = normalize(cross(n, select(vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), abs(n.y) > 0.9)));
++    let bt = cross(n, tg);
++    let h = sqrt(max(1.0 - r * r, 0.0));
++    let q = p + (tg * (cos(a) * r) + bt * (sin(a) * r) + n * h) * radius * (0.35 + 0.65 * fract(f32(k) * 0.618 + rot));
++    // Project q back to the screen.
++    let w = -q.z;
++    if (w <= 1.0) { continue; }
++    let cx = (fx.proj.x * q.x + fx.proj.z * q.z + fx.projz.z) / w;
++    let cy = (fx.proj.y * q.y + fx.proj.w * q.z + fx.projz.w) / w;
++    let sp = vec2f(fx.vp.x + (cx * 0.5 + 0.5) * fx.vp.z, fx.vp.y + (0.5 - cy * 0.5) * fx.vp.w);
++    let sd = load_depth(sp);
++    let sz = view_pos(sp, sd).z;
++    // Occluded when the stored surface is in front of the sample (range-checked).
++    let diff = sz - q.z;
++    if (diff > 2.0) {
++      occ = occ + smoothstep(0.0, 1.0, radius / max(abs(p.z - sz), 1e-3));
++    }
++  }
++  let ao = 1.0 - occ / 12.0;
++  return vec4f(vec3f(pow(clamp(ao, 0.0, 1.0), 1.0 + fx.ao.x * 2.0)), 1.0);
++}
++
++// Depth-aware 5x5 blur of the occlusion.
++@fragment
++fn fs_aoblur(in: VsOut) -> @location(0) vec4f {
++  let px = in.uv * fx.size.xy;
++  let z0 = view_pos(px, load_depth(px)).z;
++  var sum = 0.0;
++  var wsum = 0.0;
++  for (var y = -2; y <= 2; y++) {
++    for (var x = -2; x <= 2; x++) {
++      let o = vec2f(f32(x), f32(y)) * fx.pp.xy;
++      let uv = in.uv + o;
++      let z = view_pos(uv * fx.size.xy, load_depth(uv * fx.size.xy)).z;
++      let w = exp(-abs(z - z0) * 0.05);
++      sum = sum + textureSampleLevel(t0, samp, uv, 0.0).r * w;
++      wsum = wsum + w;
++    }
++  }
++  return vec4f(vec3f(sum / max(wsum, 1e-4)), 1.0);
++}
++
++// Composite onto the EFB: rgb added (bloom + beam), alpha = occlusion factor
++// (blend: src * 1 + dst * src.a).
++@fragment
++fn fs_composite(in: VsOut) -> @location(0) vec4f {
++  let mask = u32(fx.dr.w);
++  if ((mask & 16u) != 0u) { // AURORA_ENH_GLOWDBG=7: the glow pass's scene depth
++    let dd = load_depth(in.uv * fx.size.xy);
++    return vec4f(fract(dd * 1000.0), fract(dd * 100.0), dd * 10.0, 0.0);
++  }
++  if ((mask & 8u) != 0u) { // AURORA_ENH_GLOWDBG: the glow buffer instead of the picture
++    return vec4f(textureSampleLevel(t0, samp, in.uv, 0.0).rgb, 0.0);
++  }
++  var add = vec3f(0.0);
++  if ((mask & 1u) != 0u) {
++    add = add + textureSampleLevel(t0, samp, in.uv, 0.0).rgb * fx.bloom.x;
++  }
++  if ((mask & 2u) != 0u) {
++    add = add + textureSampleLevel(t1, samp, in.uv, 0.0).rgb;
++  }
++  var ao = 1.0;
++  if ((mask & 4u) != 0u) {
++    ao = textureSampleLevel(t2, samp, in.uv, 0.0).r;
++  }
++  return vec4f(add, ao);
++}
++)""";
++
++struct FxUniform {
++  float size[4];
++  float vp[4];
++  float proj[4];
++  float projz[4];
++  float dr[4];
++  float lpos[4];
++  float ldir[4];
++  float lcos[4];
++  float ldist[4];
++  float lcol[4];
++  float bloom[4];
++  float vol[4];
++  float ao[4];
++  float pass[4];
++  float bloom2[4];
++  float glowdepth[4];
++  float xl[32][4];
++};
++static_assert(sizeof(FxUniform) == 224 + 32 + 512);
++
++constexpr uint32_t MaxBloomLevels = 6;
++constexpr auto HdrFormat = wgpu::TextureFormat::RGBA16Float;
++
++struct Tex {
++  wgpu::Texture texture;
++  wgpu::TextureView view;
++  uint32_t width = 0, height = 0;
++  wgpu::TextureFormat format = wgpu::TextureFormat::Undefined;
++};
++
++struct Gpu {
++  bool initialized = false;
++  bool failed = false;
++  wgpu::ShaderModule module;
++  wgpu::BindGroupLayout bgl;
++  wgpu::PipelineLayout layout;
++  wgpu::Sampler sampler;
++  Tex dummy, dummyDepth;
++  wgpu::RenderPipeline bright, down, up, vol, ao, aoblur;
++  wgpu::RenderPipeline composite;
++  wgpu::TextureFormat compositeFormat = wgpu::TextureFormat::Undefined;
++  uint32_t compositeSamples = 0;
++  Tex scene, depth;
++  std::array<Tex, MaxBloomLevels> bloom;
++  Tex volTex, aoTex, aoBlur;
++  Tex glow, glowDepth, glowSrcDepth;
++  wgpu::RenderPipeline glowDepthPipe;
++  Tex maskDepth, maskDepthR, mask;
++  wgpu::RenderPipeline maskPipe;
++};
++Gpu g_gpu;
++
++void ensure_tex(Tex& t, uint32_t w, uint32_t h, wgpu::TextureFormat format, wgpu::TextureUsage usage, const char* label) {
++  w = std::max(w, 1u);
++  h = std::max(h, 1u);
++  if (t.texture && t.width == w && t.height == h && t.format == format) {
++    return;
++  }
++  const wgpu::TextureDescriptor desc{
++      .label = label,
++      .usage = usage,
++      .dimension = wgpu::TextureDimension::e2D,
++      .size = {w, h, 1},
++      .format = format,
++      .mipLevelCount = 1,
++      .sampleCount = 1,
++  };
++  t.texture = webgpu::g_device.CreateTexture(&desc);
++  t.view = t.texture.CreateView();
++  t.width = w;
++  t.height = h;
++  t.format = format;
++}
++
++wgpu::RenderPipeline make_pipeline(const char* entry, wgpu::TextureFormat format, uint32_t samples,
++                                   const wgpu::BlendState* blend, wgpu::ColorWriteMask mask) {
++  const wgpu::ColorTargetState target{
++      .format = format,
++      .blend = blend,
++      .writeMask = mask,
++  };
++  const wgpu::FragmentState fragment{
++      .module = g_gpu.module,
++      .entryPoint = entry,
++      .targetCount = 1,
++      .targets = &target,
++  };
++  const wgpu::RenderPipelineDescriptor desc{
++      .label = entry,
++      .layout = g_gpu.layout,
++      .vertex = {.module = g_gpu.module, .entryPoint = "vs_main"},
++      .primitive = {.topology = wgpu::PrimitiveTopology::TriangleList},
++      .multisample = {.count = samples},
++      .fragment = &fragment,
++  };
++  return webgpu::g_device.CreateRenderPipeline(&desc);
++}
++
++bool init_gpu() {
++  if (g_gpu.initialized) {
++    return !g_gpu.failed;
++  }
++  g_gpu.initialized = true;
++  const wgpu::ShaderSourceWGSL wgsl{{.code = FxShader.data()}};
++  const wgpu::ShaderModuleDescriptor moduleDesc{.nextInChain = &wgsl, .label = "Enhanced lighting effects"};
++  g_gpu.module = webgpu::g_device.CreateShaderModule(&moduleDesc);
++  std::array<wgpu::BindGroupLayoutEntry, 6> entries{};
++  entries[0] = {.binding = 0,
++                .visibility = wgpu::ShaderStage::Fragment | wgpu::ShaderStage::Vertex,
++                .buffer = {.type = wgpu::BufferBindingType::Uniform, .minBindingSize = sizeof(FxUniform)}};
++  entries[1] = {.binding = 1, .visibility = wgpu::ShaderStage::Fragment, .sampler = {.type = wgpu::SamplerBindingType::Filtering}};
++  for (uint32_t i = 2; i < 5; ++i) {
++    entries[i] = {.binding = i,
++                  .visibility = wgpu::ShaderStage::Fragment,
++                  .texture = {.sampleType = wgpu::TextureSampleType::Float, .viewDimension = wgpu::TextureViewDimension::e2D}};
++  }
++  entries[5] = {.binding = 5,
++                .visibility = wgpu::ShaderStage::Fragment,
++                .texture = {.sampleType = wgpu::TextureSampleType::UnfilterableFloat,
++                            .viewDimension = wgpu::TextureViewDimension::e2D}};
++  const wgpu::BindGroupLayoutDescriptor bglDesc{.label = "Enhanced FX", .entryCount = entries.size(), .entries = entries.data()};
++  g_gpu.bgl = webgpu::g_device.CreateBindGroupLayout(&bglDesc);
++  const wgpu::PipelineLayoutDescriptor plDesc{.label = "Enhanced FX", .bindGroupLayoutCount = 1, .bindGroupLayouts = &g_gpu.bgl};
++  g_gpu.layout = webgpu::g_device.CreatePipelineLayout(&plDesc);
++  const wgpu::SamplerDescriptor sampDesc{
++      .label = "Enhanced FX linear",
++      .addressModeU = wgpu::AddressMode::ClampToEdge,
++      .addressModeV = wgpu::AddressMode::ClampToEdge,
++      .magFilter = wgpu::FilterMode::Linear,
++      .minFilter = wgpu::FilterMode::Linear,
++  };
++  g_gpu.sampler = webgpu::g_device.CreateSampler(&sampDesc);
++  ensure_tex(g_gpu.dummy, 1, 1, HdrFormat, wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::RenderAttachment,
++             "Enhanced dummy");
++  ensure_tex(g_gpu.dummyDepth, 1, 1, wgpu::TextureFormat::R32Float,
++             wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::RenderAttachment, "Enhanced dummy depth");
++  constexpr auto all = wgpu::ColorWriteMask::All;
++  static const wgpu::BlendState additive{
++      .color = {.operation = wgpu::BlendOperation::Add, .srcFactor = wgpu::BlendFactor::One, .dstFactor = wgpu::BlendFactor::One},
++      .alpha = {.operation = wgpu::BlendOperation::Add, .srcFactor = wgpu::BlendFactor::One, .dstFactor = wgpu::BlendFactor::One},
++  };
++  g_gpu.bright = make_pipeline("fs_bright", HdrFormat, 1, nullptr, all);
++  g_gpu.down = make_pipeline("fs_down", HdrFormat, 1, nullptr, all);
++  g_gpu.up = make_pipeline("fs_up", HdrFormat, 1, &additive, all);
++  g_gpu.vol = make_pipeline("fs_vol", HdrFormat, 1, nullptr, all);
++  g_gpu.ao = make_pipeline("fs_ao", HdrFormat, 1, nullptr, all);
++  g_gpu.aoblur = make_pipeline("fs_aoblur", HdrFormat, 1, nullptr, all);
++  if (!g_gpu.bright || !g_gpu.down || !g_gpu.up || !g_gpu.vol || !g_gpu.ao || !g_gpu.aoblur) {
++    Log.error("Enhanced lighting effects failed to build; screen-space effects disabled");
++    g_gpu.failed = true;
++  }
++  return !g_gpu.failed;
++}
++
++wgpu::BindGroup bind(const Range& uniform, const wgpu::TextureView& a, const wgpu::TextureView& b,
++                     const wgpu::TextureView& c, const wgpu::TextureView& depth) {
++  const std::array<wgpu::BindGroupEntry, 6> entries{
++      wgpu::BindGroupEntry{.binding = 0, .buffer = detail::resources().uniformBuffer, .offset = uniform.offset, .size = sizeof(FxUniform)},
++      wgpu::BindGroupEntry{.binding = 1, .sampler = g_gpu.sampler},
++      wgpu::BindGroupEntry{.binding = 2, .textureView = a ? a : g_gpu.dummy.view},
++      wgpu::BindGroupEntry{.binding = 3, .textureView = b ? b : g_gpu.dummy.view},
++      wgpu::BindGroupEntry{.binding = 4, .textureView = c ? c : g_gpu.dummy.view},
++      wgpu::BindGroupEntry{.binding = 5, .textureView = depth ? depth : g_gpu.dummyDepth.view},
++  };
++  const wgpu::BindGroupDescriptor desc{.layout = g_gpu.bgl, .entryCount = entries.size(), .entries = entries.data()};
++  return webgpu::g_device.CreateBindGroup(&desc);
++}
++
++void run_pass(const wgpu::CommandEncoder& cmd, const char* label, const wgpu::TextureView& target,
++              const wgpu::RenderPipeline& pipeline, const wgpu::BindGroup& bg, bool load) {
++  const wgpu::RenderPassColorAttachment att{
++      .view = target,
++      .loadOp = load ? wgpu::LoadOp::Load : wgpu::LoadOp::Clear,
++      .storeOp = wgpu::StoreOp::Store,
++      .clearValue = {0, 0, 0, 0},
++  };
++  const wgpu::RenderPassDescriptor desc{.label = label, .colorAttachmentCount = 1, .colorAttachments = &att};
++  const auto pass = cmd.BeginRenderPass(&desc);
++  pass.SetPipeline(pipeline);
++  pass.SetBindGroup(0, bg);
++  pass.Draw(3);
++  pass.End();
++}
++
++// Everything the render worker needs for one scene end, captured on the FIFO thread.
++// Bloom level 0 (and glow buffer): half the target, at most 720 lines.
++std::pair<uint32_t, uint32_t> bloom_base_size(uint32_t width, uint32_t height) noexcept {
++  uint32_t w = std::max(width / 2, 1u), h = std::max(height / 2, 1u);
++  if (h > 720) {
++    w = std::max(w * 720 / h, 1u);
++    h = 720;
++  }
++  return {w, h};
++}
++
++struct SceneJob {
++  uint32_t mask = 0; // 1 bloom, 2 volumetric, 4 ambient occlusion
++  uint32_t bloomLevels = 0;
++  bool glowValid = false; // the glow buffer was rendered this frame
++  uint32_t volDiv = 2;
++  Range base{};                                  // FxUniform for full-size passes
++  std::array<Range, MaxBloomLevels * 2 + 2> passes{}; // per bloom pass + ao blur
++};
++
++// Glow buffer (bloom level 0 size). Emissive draws are re-rendered right after the EFB pass
++// they were drawn in (before a later EFB copy can overwrite textures they sample), depth-tested
++// against that pass's depth without writing it. The first flush of a frame clears the buffer;
++// later ones add to it.
++struct GlowFlush {
++  std::vector<GlowDraw> draws;
++  Range uniform{}; // FxUniform: glowdepth
++  bool clear = true;
++};
++bool g_glowValid = false; // FIFO thread: the glow buffer holds this frame's draws (any flush)
++
++void encode_glow(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, const GlowFlush& job) {
++  if (!init_gpu()) {
++    return;
++  }
++  const auto rt = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
++  const auto [gw, gh] = bloom_base_size(t.width, t.height);
++  ensure_tex(g_gpu.glow, gw, gh, GlowFormat, rt, "Enhanced glow");
++  ensure_tex(g_gpu.glowSrcDepth, t.width, t.height, wgpu::TextureFormat::R32Float, rt, "Enhanced glow scene depth");
++  tex_copy_conv::snapshot_depth(cmd, t.depthSource, t.msaa, g_gpu.glowSrcDepth.view);
++  const auto depthFormat = webgpu::g_graphicsConfig.depthFormat;
++  ensure_tex(g_gpu.glowDepth, gw, gh, depthFormat, wgpu::TextureUsage::RenderAttachment, "Enhanced glow depth");
++  if (!g_gpu.glowDepthPipe) {
++    const wgpu::DepthStencilState ds{
++        .format = depthFormat,
++        .depthWriteEnabled = true,
++        .depthCompare = wgpu::CompareFunction::Always,
++    };
++    const wgpu::FragmentState fragment{.module = g_gpu.module, .entryPoint = "fs_glowdepth", .targetCount = 0};
++    const wgpu::RenderPipelineDescriptor desc{
++        .label = "Enhanced glow depth",
++        .layout = g_gpu.layout,
++        .vertex = {.module = g_gpu.module, .entryPoint = "vs_main"},
++        .primitive = {.topology = wgpu::PrimitiveTopology::TriangleList},
++        .depthStencil = &ds,
++        .fragment = &fragment,
++    };
++    g_gpu.glowDepthPipe = webgpu::g_device.CreateRenderPipeline(&desc);
++  }
++  {
++    const wgpu::RenderPassDepthStencilAttachment da{
++        .view = g_gpu.glowDepth.view,
++        .depthLoadOp = wgpu::LoadOp::Clear,
++        .depthStoreOp = wgpu::StoreOp::Store,
++        .depthClearValue = 0.f,
++    };
++    const wgpu::RenderPassDescriptor desc{.label = "Enhanced glow depth", .depthStencilAttachment = &da};
++    const auto pass = cmd.BeginRenderPass(&desc);
++    pass.SetPipeline(g_gpu.glowDepthPipe);
++    pass.SetBindGroup(0, bind(job.uniform, {}, {}, {}, g_gpu.glowSrcDepth.view));
++    pass.Draw(3);
++    pass.End();
++  }
++  const wgpu::RenderPassColorAttachment att{.view = g_gpu.glow.view,
++                                            .loadOp = job.clear ? wgpu::LoadOp::Clear : wgpu::LoadOp::Load,
++                                            .storeOp = wgpu::StoreOp::Store,
++                                            .clearValue = {0, 0, 0, 0}};
++  const wgpu::RenderPassDepthStencilAttachment da{
++      .view = g_gpu.glowDepth.view,
++      .depthLoadOp = wgpu::LoadOp::Load,
++      .depthStoreOp = wgpu::StoreOp::Discard,
++  };
++  const wgpu::RenderPassDescriptor desc{
++      .label = "Enhanced glow", .colorAttachmentCount = 1, .colorAttachments = &att, .depthStencilAttachment = &da};
++  const auto pass = cmd.BeginRenderPass(&desc);
++  reset_bound_pipeline();
++  pass.SetBindGroup(0, detail::resources().staticBindGroup);
++  pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
++  const float sx = float(gw) / float(std::max(t.width, 1u));
++  const float sy = float(gh) / float(std::max(t.height, 1u));
++  for (const auto& g : job.draws) {
++    const auto& vp = g.viewport;
++    const float minDepth = gx::UseReversedZ ? 1.f - vp.zfar : vp.znear;
++    const float maxDepth = gx::UseReversedZ ? 1.f - vp.znear : vp.zfar;
++    pass.SetViewport(vp.left * sx, vp.top * sy, std::max(vp.width * sx, 1.f), std::max(vp.height * sy, 1.f), minDepth,
++                     maxDepth);
++    const auto& sc = g.scissor;
++    const uint32_t x0 = std::min(uint32_t(std::max(std::floor(float(sc.x) * sx), 0.f)), gw);
++    const uint32_t y0 = std::min(uint32_t(std::max(std::floor(float(sc.y) * sy), 0.f)), gh);
++    const uint32_t x1 = std::min(uint32_t(std::max(std::ceil(float(sc.x + sc.width) * sx), 0.f)), gw);
++    const uint32_t y1 = std::min(uint32_t(std::max(std::ceil(float(sc.y + sc.height) * sy), 0.f)), gh);
++    pass.SetScissorRect(x0, y0, x1 > x0 ? x1 - x0 : 0, y1 > y0 ? y1 - y0 : 0);
++    gx::render(g.data, pass);
++  }
++  pass.End();
++  reset_bound_pipeline();
++}
++
++struct MaskJob {
++  std::vector<GlowDraw> draws;
++  Range uniform{};
++  uint32_t maskOffset = 0, maskW = 0, maskH = 0, pitchBytes = 0;
++  float scaleBack = 2.f; // EFB target pixels per mask pixel
++};
++
++// Extra-light shadow mask, before the EFB pass whose world draws read it: depth pre-pass of the
++// opaque world draws at mask resolution, ray march, copy into the storage buffer.
++void encode_mask(const wgpu::CommandEncoder& cmd, const MaskJob& job) {
++  if (!init_gpu()) {
++    return;
++  }
++  const uint32_t w = job.maskW, h = job.maskH;
++  const auto depthFormat = webgpu::g_graphicsConfig.depthFormat;
++  ensure_tex(g_gpu.maskDepth, w, h, depthFormat, wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding,
++             "Enhanced light-shadow depth");
++  ensure_tex(g_gpu.maskDepthR, w, h, wgpu::TextureFormat::R32Float,
++             wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding, "Enhanced light-shadow depth R");
++  ensure_tex(g_gpu.mask, w, h, wgpu::TextureFormat::RGBA8Unorm,
++             wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc | wgpu::TextureUsage::TextureBinding,
++             "Enhanced light-shadow mask");
++  if (!g_gpu.maskPipe) {
++    g_gpu.maskPipe = make_pipeline("fs_xlshadow", wgpu::TextureFormat::RGBA8Unorm, 1, nullptr, wgpu::ColorWriteMask::All);
++  }
++  {
++    const wgpu::RenderPassDepthStencilAttachment da{
++        .view = g_gpu.maskDepth.view,
++        .depthLoadOp = wgpu::LoadOp::Clear,
++        .depthStoreOp = wgpu::StoreOp::Store,
++        .depthClearValue = gx::UseReversedZ ? 0.f : 1.f,
++    };
++    const wgpu::RenderPassDescriptor desc{.label = "Enhanced light-shadow depth", .depthStencilAttachment = &da};
++    const auto pass = cmd.BeginRenderPass(&desc);
++    reset_bound_pipeline();
++    pass.SetBindGroup(0, detail::resources().staticBindGroup);
++    pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
++    // Viewports are in EFB target pixels; the mask is bloom-level-0 sized.
++    const float sx = 1.f / std::max(job.scaleBack, 1e-3f), sy = sx;
++    for (const auto& g : job.draws) {
++      const auto& vp = g.viewport;
++      const float minDepth = gx::UseReversedZ ? 1.f - vp.zfar : vp.znear;
++      const float maxDepth = gx::UseReversedZ ? 1.f - vp.znear : vp.zfar;
++      pass.SetViewport(vp.left * sx, vp.top * sy, std::max(vp.width * sx, 1.f), std::max(vp.height * sy, 1.f), minDepth,
++                       maxDepth);
++      const auto& sc = g.scissor;
++      const uint32_t x0 = std::min(uint32_t(std::max(std::floor(float(sc.x) * sx), 0.f)), w);
++      const uint32_t y0 = std::min(uint32_t(std::max(std::floor(float(sc.y) * sy), 0.f)), h);
++      const uint32_t x1 = std::min(uint32_t(std::max(std::ceil(float(sc.x + sc.width) * sx), 0.f)), w);
++      const uint32_t y1 = std::min(uint32_t(std::max(std::ceil(float(sc.y + sc.height) * sy), 0.f)), h);
++      pass.SetScissorRect(x0, y0, x1 > x0 ? x1 - x0 : 0, y1 > y0 ? y1 - y0 : 0);
++      gx::render(g.data, pass);
++    }
++    pass.End();
++    reset_bound_pipeline();
++  }
++  tex_copy_conv::snapshot_depth(cmd, g_gpu.maskDepth.view, 1, g_gpu.maskDepthR.view);
++  run_pass(cmd, "Light-shadow mask", g_gpu.mask.view, g_gpu.maskPipe, bind(job.uniform, {}, {}, {}, g_gpu.maskDepthR.view),
++           false);
++  const wgpu::TexelCopyTextureInfo src{.texture = g_gpu.mask.texture};
++  const wgpu::TexelCopyBufferInfo dst{
++      .layout = {.offset = job.maskOffset, .bytesPerRow = job.pitchBytes, .rowsPerImage = h},
++      .buffer = detail::resources().storageBuffer,
++  };
++  const wgpu::Extent3D extent{w, h, 1};
++  cmd.CopyTextureToBuffer(&src, &dst, &extent);
++}
++
++void encode_scene(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, const SceneJob& job) {
++  if (!init_gpu()) {
++    return;
++  }
++  const auto rt = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
++  ensure_tex(g_gpu.scene, t.width, t.height, t.colorFormat,
++             wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::TextureBinding, "Enhanced scene color");
++  ensure_tex(g_gpu.depth, t.width, t.height, wgpu::TextureFormat::R32Float, rt, "Enhanced scene depth");
++  {
++    const wgpu::TexelCopyTextureInfo src{.texture = t.colorSource};
++    const wgpu::TexelCopyTextureInfo dst{.texture = g_gpu.scene.texture};
++    const wgpu::Extent3D size{t.width, t.height, 1};
++    cmd.CopyTextureToTexture(&src, &dst, &size);
++  }
++  tex_copy_conv::snapshot_depth(cmd, t.depthSource, t.msaa, g_gpu.depth.view);
++
++  // Bloom chain.
++  wgpu::TextureView bloomView;
++  if ((job.mask & 1u) != 0 && job.bloomLevels > 0) {
++    auto [w, h] = bloom_base_size(t.width, t.height);
++    for (uint32_t i = 0; i < job.bloomLevels; ++i) {
++      ensure_tex(g_gpu.bloom[i], w, h, HdrFormat, rt, "Enhanced bloom");
++      w = std::max(w / 2, 1u);
++      h = std::max(h / 2, 1u);
++    }
++    run_pass(cmd, "Bloom bright", g_gpu.bloom[0].view, g_gpu.bright,
++             bind(job.passes[0], g_gpu.scene.view, job.glowValid ? g_gpu.glow.view : wgpu::TextureView{}, {},
++                  g_gpu.depth.view),
++             false);
++    for (uint32_t i = 1; i < job.bloomLevels; ++i) {
++      run_pass(cmd, "Bloom down", g_gpu.bloom[i].view, g_gpu.down, bind(job.passes[i], g_gpu.bloom[i - 1].view, {}, {}, {}),
++               false);
++    }
++    for (uint32_t i = job.bloomLevels - 1; i > 0; --i) {
++      run_pass(cmd, "Bloom up", g_gpu.bloom[i - 1].view, g_gpu.up,
++               bind(job.passes[MaxBloomLevels + i], g_gpu.bloom[i].view, {}, {}, {}), true);
++    }
++    bloomView = g_gpu.bloom[0].view;
++  }
++  wgpu::TextureView volView;
++  if ((job.mask & 2u) != 0) {
++    // The haze is smooth: at most 540 (low) / 720 lines whatever the render resolution.
++    uint32_t vw = std::max(t.width / job.volDiv, 1u), vh = std::max(t.height / job.volDiv, 1u);
++    const uint32_t cap = job.volDiv >= 4 ? 540u : 720u;
++    if (vh > cap) {
++      vw = std::max(vw * cap / vh, 1u);
++      vh = cap;
++    }
++    ensure_tex(g_gpu.volTex, vw, vh, HdrFormat, rt, "Enhanced volumetric");
++    run_pass(cmd, "Volumetric beam", g_gpu.volTex.view, g_gpu.vol, bind(job.base, {}, {}, {}, g_gpu.depth.view), false);
++    volView = g_gpu.volTex.view;
++  }
++  wgpu::TextureView aoView;
++  if ((job.mask & 4u) != 0) {
++    ensure_tex(g_gpu.aoTex, t.width / 2, t.height / 2, HdrFormat, rt, "Enhanced AO");
++    ensure_tex(g_gpu.aoBlur, t.width / 2, t.height / 2, HdrFormat, rt, "Enhanced AO blur");
++    run_pass(cmd, "Ambient occlusion", g_gpu.aoTex.view, g_gpu.ao, bind(job.base, {}, {}, {}, g_gpu.depth.view), false);
++    run_pass(cmd, "Ambient occlusion blur", g_gpu.aoBlur.view, g_gpu.aoblur,
++             bind(job.passes[MaxBloomLevels * 2], g_gpu.aoTex.view, {}, {}, g_gpu.depth.view), false);
++    aoView = g_gpu.aoBlur.view;
++  }
++
++  // Composite onto the EFB.
++  if (!g_gpu.composite || g_gpu.compositeFormat != t.colorFormat || g_gpu.compositeSamples != t.msaa) {
++    static const wgpu::BlendState blend{
++        .color = {.operation = wgpu::BlendOperation::Add, .srcFactor = wgpu::BlendFactor::One, .dstFactor = wgpu::BlendFactor::SrcAlpha},
++        .alpha = {.operation = wgpu::BlendOperation::Add, .srcFactor = wgpu::BlendFactor::Zero, .dstFactor = wgpu::BlendFactor::One},
++    };
++    g_gpu.composite = make_pipeline("fs_composite", t.colorFormat, t.msaa, &blend,
++                                    wgpu::ColorWriteMask::Red | wgpu::ColorWriteMask::Green | wgpu::ColorWriteMask::Blue);
++    g_gpu.compositeFormat = t.colorFormat;
++    g_gpu.compositeSamples = t.msaa;
++  }
++  const wgpu::RenderPassColorAttachment att{
++      .view = t.colorView,
++      .resolveTarget = t.resolveView,
++      .loadOp = wgpu::LoadOp::Load,
++      .storeOp = wgpu::StoreOp::Store,
++  };
++  const wgpu::RenderPassDescriptor desc{.label = "Enhanced composite", .colorAttachmentCount = 1, .colorAttachments = &att};
++  const auto pass = cmd.BeginRenderPass(&desc);
++  pass.SetPipeline(g_gpu.composite);
++  pass.SetBindGroup(0, bind(job.base,
++                            (job.mask & 8u) != 0 ? (g_glowDbg >= 8 && g_gpu.mask.view ? g_gpu.mask.view : g_gpu.glow.view)
++                                                 : bloomView,
++                            volView, aoView,
++                            (job.mask & 16u) != 0 ? g_gpu.glowSrcDepth.view : wgpu::TextureView{}));
++  pass.Draw(3);
++  pass.End();
++}
++
++} // namespace
++
++bool sync_config() noexcept {
++  const uint32_t gen = g_pendingGen.load(std::memory_order_acquire);
++  if (gen == g_cfgGen) {
++    return false;
++  }
++  std::lock_guard lock{g_cfgMutex};
++  const bool masterChanged = g_cfg.enabled != g_pending.enabled;
++  g_cfg = g_pending;
++  g_cfgGen = gen;
++  gx::g_gxState.dirty |= gx::DirtyUniform;
++  // Only the master switch selects shader variants; the parts are uniforms.
++  return masterChanged;
++}
++
++const AuroraEnhancedConfig& config() noexcept { return g_cfg; }
++
++uint8_t shader_class(const gx::ShaderConfig& sc, uint8_t drawClass, bool blended, bool additive) noexcept {
++  static const bool sNoVariant = std::getenv("AURORA_ENH_NOVARIANT") != nullptr; // debug aid
++  if (sNoVariant || !g_cfg.enabled || drawClass == AURORA_DRAW_CLASS_OTHER || additive || sc.lineMode != 0 || sc.wireframe ||
++      gx::g_gxState.projType != GX_PERSPECTIVE) {
++    return 0;
++  }
++  bool want = false;
++  for (const auto& cc : sc.colorChannels) {
++    want = want || cc.lightingEnabled;
++  }
++  // Surfaces have textures; untextured lit draws are effect volumes whose color/alpha *is* the
++  // lighting result (e.g. the flashlight's darkness/haze volumes in the nursery): left alone.
++  bool textured = false;
++  for (u32 i = 0; i < sc.tevStageCount; ++i) {
++    const auto& st = sc.tevStages[i];
++    textured = textured || st.texMapId != GX_TEXMAP_NULL;
++    want = want || (st.alphaOp.op == GX_TEV_COMP_GR16_GT && st.colorPass.b == GX_CC_TEXC);
++  }
++  if (!want || !textured) {
++    return 0;
++  }
++  // Only the ghost pass gets the ghost variant (extra lights reach it only with their
++  // translucent flag); blended room geometry is ordinary world geometry.
++  (void)blended;
++  return drawClass == AURORA_DRAW_CLASS_GHOST ? 2 : 1;
++}
++
++DrawUniform draw_uniform() noexcept {
++  const auto& c = g_cfg;
++  DrawUniform u{};
++  if (!c.enabled) {
++    return u;
++  }
++  if (c.perPixelLighting) {
++    u.flags |= 1u;
++  }
++  if (c.extraLights && g_lightCount > 0) {
++    if (!g_lightRangeValid) {
++      std::array<uint32_t, MaxExtraLights * 12> words{};
++      for (uint32_t i = 0; i < g_lightCount; ++i) {
++        const auto& l = g_lights[i];
++        uint32_t* w = &words[i * 12];
++        std::memcpy(w + 0, l.pos, 12);
++        std::memcpy(w + 3, &l.radius, 4);
++        const auto vc = vivid(l.color, std::clamp(c.extraLightSaturation, 0.f, 2.5f));
++        std::memcpy(w + 4, vc.data(), 12);
++        std::memcpy(w + 7, &l.intensity, 4);
++        w[8] = l.flags;
++        w[9] = l.id;
++        w[10] = g_shadowSlot[i];
++      }
++      g_lightRange = push_storage(reinterpret_cast<const uint8_t*>(words.data()), g_lightCount * 12 * sizeof(uint32_t));
++      g_lightRangeValid = true;
++    }
++    u.flags |= 2u;
++    u.lightBase = g_lightRange.offset / 4;
++    u.lightCount = g_lightCount;
++  }
++  if (c.softShadows) {
++    u.flags |= 4u;
++    switch (c.softShadowQuality) {
++    case 0:
++      u.shadowTaps = 8;
++      break;
++    case 1:
++      u.shadowTaps = 16;
++      break;
++    case 2:
++      u.shadowTaps = 16 | 0x10000u;
++      break;
++    default:
++      u.shadowTaps = 32 | 0x10000u;
++      break;
++    }
++  }
++  if (c.flashlightQuality) {
++    u.flags |= 8u;
++    u.flashSoft = std::clamp(c.flashlightSoftness, 0.f, 1.f);
++    u.flashSpec = std::clamp(c.flashlightSpecular, 0.f, 2.f);
++  }
++  if (c.extraLights && c.extraShadows && g_shadowCount > 0) {
++    if (!g_maskReserved) {
++      const auto size = get_render_target_size();
++      const auto [w, h] = bloom_base_size(size.x, size.y);
++      g_maskW = w;
++      g_maskH = h;
++      g_maskPitch = AURORA_ALIGN(w * 4, 256) / 4;
++      const size_t bytes = size_t(g_maskPitch) * 4 * h;
++      if (g_maskZeros.size() < bytes) {
++        g_maskZeros.assign(bytes, 0);
++      }
++      g_maskRange = push_storage(g_maskZeros.data(), bytes);
++      g_maskReserved = true;
++    }
++    u.maskBase = g_maskRange.offset / 4;
++    u.maskPitch = g_maskPitch;
++    u.maskDims = g_maskW | g_maskH << 16;
++    const auto size = get_render_target_size();
++    u.maskScale = float(g_maskW) / float(std::max(size.x, 1u));
++  }
++  u.extraScale = c.extraLightIntensity;
++  u.shadowRadius = std::max(c.softShadowRadius, 0.f);
++  u.pcss = std::max(c.softShadowPenumbra, 0.f);
++  return u;
++}
++
++void set_lights(const ExtraLight* lights, uint32_t count) noexcept {
++  count = std::min(count, MaxExtraLights);
++  if (count == g_lightCount && std::memcmp(lights, g_lights.data(), count * sizeof(ExtraLight)) == 0) {
++    return;
++  }
++  std::memcpy(g_lights.data(), lights, count * sizeof(ExtraLight));
++  g_lightCount = count;
++  g_shadowCount = 0;
++  for (uint32_t i = 0; i < MaxExtraLights; ++i) {
++    g_shadowSlot[i] = UINT32_MAX;
++    if (i < count && (lights[i].flags & ExtraLightCastShadows) != 0 && g_shadowCount < MaxShadowLights &&
++        lights[i].intensity > 0.f && lights[i].radius > 0.f) {
++      g_shadowSlot[i] = g_shadowCount++;
++    }
++  }
++  g_lightRangeValid = false;
++  g_lastLightCount.store(count, std::memory_order_relaxed);
++  gx::g_gxState.dirty |= gx::DirtyUniform;
++}
++
++RenderTargetLayout glow_layout() noexcept {
++  RenderTargetLayout layout{
++      .colorAttachmentCount = 1,
++      .colorAttachments = {{{
++          .semantic = ColorAttachmentSemantic::SceneColor,
++          .format = GlowFormat,
++      }}},
++      .depthStencilFormat = webgpu::g_graphicsConfig.depthFormat,
++      .sampleCount = 1,
++  };
++  detail::finalize_render_target_layout(layout);
++  return layout;
++}
++
++// Additive draws: what they add to the picture is light (glows, sparkles, lens/beam sprites,
++// fire, lightning effects).
++bool is_emissive(const gx::PipelineConfig& c) noexcept {
++  if (g_glowDbg >= 3 && g_glowDbg != 4) {
++    return c.colorUpdate;
++  }
++  if (!(c.colorUpdate && c.blendMode == GX_BM_BLEND && c.blendFacDst == GX_BL_ONE &&
++        (c.blendFacSrc == GX_BL_SRCALPHA || c.blendFacSrc == GX_BL_ONE || c.blendFacSrc == GX_BL_SRCCLR))) {
++    return false;
++  }
++  // The flashlight beam volume (handlight_ef: its alpha is a color-texgen lookup of the spot
++  // light) is a big soft haze already; glowing it again washes the picture out when it points at
++  // the camera. Its lens sprite and the volumetric beam option cover the beam's glow.
++  for (const auto& tcg : c.shaderConfig.tcgs) {
++    if (tcg.type == GX_TG_SRTG) {
++      return false;
++    }
++  }
++  return true;
++}
++
++void note_glow_draw(const gx::PipelineConfig& config, const gx::DrawData& data) noexcept {
++  if (g_glowDraws.size() >= MaxGlowDraws) {
++    return;
++  }
++  gx::PipelineConfig gc = config;
++  // The game's own depth function, made inclusive: the glow depth is the scene's (nudged
++  // farther), so the draw's surface passes against itself.
++  if (gc.depthFunc == GX_LESS) {
++    gc.depthFunc = GX_LEQUAL;
++  } else if (gc.depthFunc == GX_GREATER) {
++    gc.depthFunc = GX_GEQUAL;
++  }
++  if (g_glowDbg == 5) {
++    gc.depthCompare = false;
++  }
++  if (g_glowDbg == 6) {
++    gc.depthFunc = GX_GREATER;
++  }
++  gc.depthUpdate = false;
++  gc.alphaUpdate = false;
++  gc.colorUpdate = true;
++  gc.dstAlpha = UINT32_MAX;
++  static const RenderTargetLayout layout = glow_layout();
++  GlowDraw g{.data = data,
++             .viewport = current_viewport(),
++             .scissor = current_scissor(),
++             .vtxCount = data.vtxCount,
++             .tevStages = config.shaderConfig.tevStageCount,
++             .lit = config.shaderConfig.colorChannels[0].lightingEnabled};
++  // The variant follows from the draw's own pipeline: cached by its ref (FIFO thread).
++  static std::unordered_map<PipelineRef, PipelineRef> sVariants;
++  if (const auto it = sVariants.find(data.pipeline); it != sVariants.end()) {
++    g.data.pipeline = it->second;
++  } else {
++    g.data.pipeline = find_pipeline(gc, layout);
++    sVariants.emplace(data.pipeline, g.data.pipeline);
++  }
++  std::tie(g.pass, g.command) = next_command_position();
++  g.data.dstAlpha = UINT32_MAX;
++  g_glowDraws.push_back(g);
++}
++
++bool note_draw(const gx::PipelineConfig& config, uint8_t drawClass, uint32_t vtxCount, const gx::DrawData& data) noexcept {
++  static const bool sHide = std::getenv("AURORA_ENH_HIDE_ADDITIVE") != nullptr;
++  if (sHide && drawClass != AURORA_DRAW_CLASS_OTHER && is_emissive(config)) {
++    return true;
++  }
++  const auto& st = gx::g_gxState;
++  ++g_segDraws[std::min<uint8_t>(drawClass, 2)];
++  if (st.projType != GX_PERSPECTIVE) {
++    drawClass = AURORA_DRAW_CLASS_OTHER; // 2D quads inside the 3D view (ghost-layer composite, screen copies)
++  }
++  if (drawClass != AURORA_DRAW_CLASS_OTHER && g_cfg.bloom && g_cfg.bloomEmissive > 0.f && is_emissive(config) &&
++      !is_offscreen()) {
++    note_glow_draw(config, data);
++  }
++  if (drawClass == AURORA_DRAW_CLASS_WORLD && g_shadowCount > 0 && g_cfg.extraLights && g_cfg.extraShadows &&
++      config.depthCompare && config.depthUpdate && !(config.blendMode == GX_BM_BLEND && config.blendFacDst == GX_BL_ONE) &&
++      g_depthDraws.size() < MaxGlowDraws && !is_offscreen()) {
++    gx::PipelineConfig dc = config;
++    dc.colorUpdate = false;
++    dc.alphaUpdate = false;
++    dc.dstAlpha = UINT32_MAX;
++    static const RenderTargetLayout layout = [] {
++      RenderTargetLayout l{
++          .colorAttachmentCount = 0,
++          .depthStencilFormat = webgpu::g_graphicsConfig.depthFormat,
++          .sampleCount = 1,
++      };
++      detail::finalize_render_target_layout(l);
++      return l;
++    }();
++    GlowDraw g{.data = data, .viewport = current_viewport(), .scissor = current_scissor()};
++    static std::unordered_map<PipelineRef, PipelineRef> sVariants;
++    if (const auto it = sVariants.find(data.pipeline); it != sVariants.end()) {
++      g.data.pipeline = it->second;
++    } else {
++      g.data.pipeline = find_pipeline(dc, layout);
++      sVariants.emplace(data.pipeline, g.data.pipeline);
++    }
++    g.data.dstAlpha = UINT32_MAX;
++    std::tie(g.pass, g.command) = next_command_position();
++    g_depthDraws.push_back(g);
++  }
++  if (g_drawLogFrame != 0 && g_sceneEnds + 1 == g_drawLogFrame && (g_drawLogAll || is_emissive(config))) {
++    const auto& sc = config.shaderConfig;
++    std::string tex;
++    for (u32 i = 0; i < sc.tevStageCount; ++i) {
++      const auto& t = sc.tevStages[i];
++      tex += fmt::format(" [{}:m{} c{} {}{}{}{} a{}{}{}{}]", i, int(t.texMapId), int(t.texCoordId), int(t.colorPass.a),
++                         int(t.colorPass.b), int(t.colorPass.c), int(t.colorPass.d), int(t.alphaPass.a),
++                         int(t.alphaPass.b), int(t.alphaPass.c), int(t.alphaPass.d));
++    }
++    Log.info("draw cls {} proj {} vtx {} blend {} {}/{} z {}{}{} col {} lit {}{}{}{} mat {}{} amb {}{} attn {} nrm {} tg {} "
++             "kc {}{}",
++             drawClass, int(st.projType), vtxCount, int(config.blendMode), int(config.blendFacSrc),
++             int(config.blendFacDst), config.depthCompare, config.depthUpdate, int(config.depthFunc), config.colorUpdate,
++             sc.colorChannels[0].lightingEnabled, sc.colorChannels[1].lightingEnabled, sc.colorChannels[2].lightingEnabled,
++             sc.colorChannels[3].lightingEnabled, int(sc.colorChannels[0].matSrc), int(sc.colorChannels[2].matSrc),
++             int(sc.colorChannels[0].ambSrc), int(sc.colorChannels[2].ambSrc), int(sc.colorChannels[0].attnFn),
++             int(sc.attrs[GX_VA_NRM].attrType), int(sc.tcgs[0].type), sc.tevStageCount, tex);
++  }
++  if (drawClass == AURORA_DRAW_CLASS_OTHER || st.projType != GX_PERSPECTIVE) {
++    return false;
++  }
++  const auto& p = st.proj;
++  g_camera = {
++      .valid = true,
++      .p00 = p.m0.x(), .p11 = p.m1.y(), .p02 = p.m0.z(), .p12 = p.m1.z(), .p03 = p.m0.w(), .p13 = p.m1.w(),
++      .a = p.m2.z(), .b = p.m2.w(),
++      .vp = st.renderViewport,
++  };
++  // The flashlight: the bright spot light (GX angular attenuation) lighting world geometry that
++  // is nearest to the camera (Luigi holds it; room spot lights are farther away).
++  const auto& cc = config.shaderConfig.colorChannels[0];
++  if (!cc.lightingEnabled || cc.attnFn != GX_AF_SPOT) {
++    return false;
++  }
++  const auto mask = st.colorChannelState[0].lightMask.to_ulong();
++  for (int i = 0; i < 8; ++i) {
++    if ((mask & (1u << i)) == 0) {
++      continue;
++    }
++    const auto& l = st.lights[i];
++    const bool angular = std::abs(l.cosAtt.y()) + std::abs(l.cosAtt.z()) > 1e-3f;
++    const float lum = 0.2126f * l.color.x() + 0.7152f * l.color.y() + 0.0722f * l.color.z();
++    if (!angular || lum < 0.2f) {
++      continue;
++    }
++    const float d2 = l.pos.x() * l.pos.x() + l.pos.y() * l.pos.y() + l.pos.z() * l.pos.z();
++    if (!g_flash.valid || d2 < g_flashDist2) {
++      g_flash = {.valid = true, .pos = l.pos, .dir = l.dir, .cosAtt = l.cosAtt, .distAtt = l.distAtt, .color = l.color};
++      g_flashDist2 = d2;
++    }
++  }
++  return false;
++}
++
++void flush_glow() noexcept {
++  if (g_glowDraws.empty()) {
++    return;
++  }
++  GlowFlush job{.draws = std::move(g_glowDraws), .clear = !g_glowValid};
++  g_glowDraws.clear();
++  // Take over what was merged into each draw after it was noted.
++  for (auto& g : job.draws) {
++    if (const auto* d = gx_draw_at(g.pass, g.command)) {
++      g.data.vertRange = d->vertRange;
++      g.data.idxRange = d->idxRange;
++      g.data.vtxCount = d->vtxCount;
++      g.data.indexCount = d->indexCount;
++      g.data.instanceCount = d->instanceCount;
++    }
++  }
++  if ((g_glowDbg == 2 || g_glowDbg == 4) && !job.draws.empty()) { // one draw per frame, cycling, logged
++    static uint32_t sCycle = 0;
++    const uint32_t i = sCycle++ % job.draws.size();
++    const auto& g = job.draws[i];
++    Log.info("glow dbg scene {}: draw {} of {} vtx {} tev {} lit {} vp {} {} {} {} z {} {}", g_sceneEnds, i,
++             job.draws.size(), g.vtxCount, g.tevStages, g.lit, g.viewport.left, g.viewport.top, g.viewport.width,
++             g.viewport.height, g.viewport.znear, g.viewport.zfar);
++    job.draws = {job.draws[i]};
++  }
++  const auto size = get_render_target_size();
++  const auto [w0, h0] = bloom_base_size(size.x, size.y);
++  FxUniform u{};
++  u.glowdepth[0] = float(size.x) / float(w0);
++  u.glowdepth[1] = float(size.y) / float(h0);
++  u.glowdepth[2] = gx::UseReversedZ ? 1.f : 0.f;
++  u.glowdepth[3] = 2e-4f;
++  job.uniform = push_uniform(reinterpret_cast<const uint8_t*>(&u), sizeof(u));
++  if (push_scene_op([job = std::move(job)](const wgpu::CommandEncoder& cmd, const ScenePassTargets& t) {
++        encode_glow(cmd, t, job);
++      })) {
++    g_glowValid = true;
++  }
++}
++
++void flush_shadows() noexcept {
++  // The mask is computed before every EFB pass that added opaque world draws, from all of the
++  // frame's opaque world draws so far (the pass's own included: they are recorded, not yet run).
++  if (g_log && g_depthDraws.size() != g_depthFlushed) {
++    Log.info("light shadows: {} lights, {} depth draws ({} new), mask reserved {} camera {}", g_shadowCount,
++             g_depthDraws.size(), g_depthDraws.size() - g_depthFlushed, g_maskReserved, g_camera.valid);
++    for (uint32_t i = 0; i < g_lightCount; ++i) {
++      Log.info("  light {} slot {} pos {} {} {} r {} I {}", i, g_shadowSlot[i], g_lights[i].pos[0], g_lights[i].pos[1],
++               g_lights[i].pos[2], g_lights[i].radius, g_lights[i].intensity);
++    }
++  }
++  if (g_depthDraws.size() == g_depthFlushed || !g_maskReserved || !g_camera.valid) {
++    return;
++  }
++  for (size_t i = g_depthFlushed; i < g_depthDraws.size(); ++i) {
++    auto& g = g_depthDraws[i];
++    if (const auto* d = gx_draw_at(g.pass, g.command)) {
++      g.data.vertRange = d->vertRange;
++      g.data.idxRange = d->idxRange;
++      g.data.vtxCount = d->vtxCount;
++      g.data.indexCount = d->indexCount;
++      g.data.instanceCount = d->instanceCount;
++    }
++  }
++  g_depthFlushed = g_depthDraws.size();
++  MaskJob job{.draws = g_depthDraws,
++              .maskOffset = static_cast<uint32_t>(g_maskRange.offset),
++              .maskW = g_maskW,
++              .maskH = g_maskH,
++              .pitchBytes = g_maskPitch * 4};
++  const auto size = get_render_target_size();
++  FxUniform u{};
++  u.size[0] = float(size.x);
++  u.size[1] = float(size.y);
++  const auto& vp = g_camera.vp;
++  u.vp[0] = vp.left;
++  u.vp[1] = vp.top;
++  u.vp[2] = std::max(vp.width, 1.f);
++  u.vp[3] = std::max(vp.height, 1.f);
++  u.proj[0] = g_camera.p00;
++  u.proj[1] = g_camera.p11;
++  u.proj[2] = g_camera.p02;
++  u.proj[3] = g_camera.p12;
++  u.projz[0] = g_camera.a;
++  u.projz[1] = g_camera.b;
++  u.projz[2] = g_camera.p03;
++  u.projz[3] = g_camera.p13;
++  u.dr[0] = gx::UseReversedZ ? 1.f - vp.zfar : vp.znear;
++  u.dr[1] = gx::UseReversedZ ? 1.f - vp.znear : vp.zfar;
++  static uint32_t sFrame = 0;
++  u.dr[2] = float(sFrame++ % 64);
++  const uint32_t q = std::min(g_cfg.extraShadowQuality, 2u);
++  u.pass[0] = q == 0 ? 8.f : q == 1 ? 16.f : 32.f;
++  u.pass[1] = float(size.x) / float(std::max(g_maskW, 1u));
++  for (uint32_t i = 0; i < g_lightCount; ++i) {
++    const uint32_t s = g_shadowSlot[i];
++    if (s >= MaxShadowLights) {
++      continue;
++    }
++    const auto& l = g_lights[i];
++    u.xl[s][0] = l.pos[0];
++    u.xl[s][1] = l.pos[1];
++    u.xl[s][2] = l.pos[2];
++    u.xl[s][3] = l.radius;
++  }
++  u.pass[2] = float(g_shadowCount);
++  u.pass[3] = g_glowDbg == 9 ? 1.f : g_glowDbg == 10 ? 2.f : 0.f;
++  job.scaleBack = u.pass[1];
++  if (g_log) {
++    Log.info("  mask uniform: size {} {} vp {} {} {} {} proj {} {} {} {} projz {} {} {} {} dr {} {} pass {} {} {}", u.size[0],
++             u.size[1], u.vp[0], u.vp[1], u.vp[2], u.vp[3], u.proj[0], u.proj[1], u.proj[2], u.proj[3], u.projz[0],
++             u.projz[1], u.projz[2], u.projz[3], u.dr[0], u.dr[1], u.pass[0], u.pass[1], u.pass[2]);
++  }
++  job.uniform = push_uniform(reinterpret_cast<const uint8_t*>(&u), sizeof(u));
++  std::vector<efb_ram::PassOp> ops;
++  ops.emplace_back([job = std::move(job)](const wgpu::CommandEncoder& cmd, detail::FramePacket&) {
++    encode_mask(cmd, job);
++  });
++  queue_pre_pass_ops(std::move(ops));
++}
++
++void before_efb_copy() noexcept {
++  if (g_cfg.enabled) {
++    flush_shadows();
++    flush_glow();
++  }
++}
++
++void efb_cleared(float fraction, bool color, bool depth) noexcept {
++  struct Reset {
++    ~Reset() { g_segDraws[0] = g_segDraws[1] = g_segDraws[2] = 0; }
++  } reset;
++  if (g_log) {
++    Log.info("scene {} EFB clear c{} z{} ({:.0f}%) after {}/{}/{} draws, glow {}", g_sceneEnds, color, depth,
++             fraction * 100.f, g_segDraws[0], g_segDraws[1], g_segDraws[2], g_glowValid);
++  }
++  // A new 3D scene: earlier glow is no longer in the picture.
++  if (fraction >= 0.5f && color && depth) {
++    g_glowDraws.clear();
++    g_glowValid = false;
++  }
++  if (fraction >= 0.5f && depth) {
++    g_depthDraws.clear();
++    g_depthFlushed = 0;
++  }
++}
++
++void begin_frame() noexcept {
++  g_glowDraws.clear();
++  g_depthDraws.clear();
++  g_depthFlushed = 0;
++  g_maskReserved = false;
++  g_glowValid = false;
++  g_lightRangeValid = false;
++  g_camera.valid = false;
++  g_flash.valid = false;
++}
++
++void scene_end() noexcept {
++  const auto& c = g_cfg;
++  ++g_sceneEnds;
++  flush_shadows();
++  flush_glow();
++  struct Reset {
++    ~Reset() { g_segDraws[0] = g_segDraws[1] = g_segDraws[2] = 0; }
++  } reset;
++  if (g_log) {
++    Log.info("scene end {} after {}/{}/{} draws: {} glow draws, camera {}", g_sceneEnds, g_segDraws[0], g_segDraws[1],
++             g_segDraws[2], g_glowDraws.size(), g_camera.valid);
++  }
++  if (!c.enabled || !g_camera.valid) {
++    return;
++  }
++  SceneJob job;
++  if (c.bloom && c.bloomIntensity > 0.f) {
++    job.mask |= 1u;
++    job.bloomLevels = MaxBloomLevels;
++  }
++  if (c.volumetric && c.volumetricIntensity > 0.f && g_flash.valid) {
++    job.mask |= 2u;
++  }
++  if (c.ssao && c.ssaoIntensity > 0.f) {
++    job.mask |= 4u;
++  }
++  if (job.mask == 0) {
++    return;
++  }
++  const auto size = get_render_target_size();
++  static uint32_t sFrame = 0;
++  ++sFrame;
++  FxUniform u{};
++  u.size[0] = float(size.x);
++  u.size[1] = float(size.y);
++  u.size[2] = 1.f / float(std::max(size.x, 1u));
++  u.size[3] = 1.f / float(std::max(size.y, 1u));
++  const auto& vp = g_camera.vp;
++  u.vp[0] = vp.left;
++  u.vp[1] = vp.top;
++  u.vp[2] = std::max(vp.width, 1.f);
++  u.vp[3] = std::max(vp.height, 1.f);
++  u.proj[0] = g_camera.p00;
++  u.proj[1] = g_camera.p11;
++  u.proj[2] = g_camera.p02;
++  u.proj[3] = g_camera.p12;
++  u.projz[0] = g_camera.a;
++  u.projz[1] = g_camera.b;
++  u.projz[2] = g_camera.p03;
++  u.projz[3] = g_camera.p13;
++  u.dr[0] = gx::UseReversedZ ? 1.f - vp.zfar : vp.znear;
++  u.dr[1] = gx::UseReversedZ ? 1.f - vp.znear : vp.zfar;
++  u.dr[2] = float(sFrame % 64);
++  job.glowValid = g_glowValid;
++  if (g_glowDbg != 0 && (job.mask & 1u) != 0) {
++    job.mask |= g_glowDbg == 7 ? 24u : 8u;
++  }
++  u.dr[3] = float(job.mask);
++  if (g_flash.valid) {
++    const auto& f = g_flash;
++    u.lpos[0] = f.pos.x(), u.lpos[1] = f.pos.y(), u.lpos[2] = f.pos.z(), u.lpos[3] = 1.f;
++    u.ldir[0] = f.dir.x(), u.ldir[1] = f.dir.y(), u.ldir[2] = f.dir.z();
++    u.lcos[0] = f.cosAtt.x(), u.lcos[1] = f.cosAtt.y(), u.lcos[2] = f.cosAtt.z();
++    u.ldist[0] = f.distAtt.x(), u.ldist[1] = f.distAtt.y(), u.ldist[2] = f.distAtt.z();
++    u.lcol[0] = f.color.x(), u.lcol[1] = f.color.y(), u.lcol[2] = f.color.z(), u.lcol[3] = f.color.w();
++  }
++  u.bloom[0] = c.bloomIntensity;
++  u.bloom[1] = std::clamp(c.bloomThreshold, 0.f, 2.f);
++  u.bloom[2] = std::max(0.5f * u.bloom[1], 0.05f);
++  u.bloom[3] = std::clamp(c.bloomFlashlightSuppress, 0.f, 1.f);
++  u.bloom2[0] = std::max(c.bloomScene, 0.f);
++  u.bloom2[1] = std::max(c.bloomEmissive, 0.f);
++  u.bloom2[2] = c.extraLights ? std::max(c.bloomLightGlow, 0.f) * std::max(c.extraLightIntensity, 0.f) : 0.f;
++  u.bloom2[3] = 0.f;
++  if (u.bloom2[2] > 0.f) {
++    uint32_t n = 0;
++    for (uint32_t i = 0; i < g_lightCount && n < MaxExtraLights; ++i) {
++      const auto& l = g_lights[i];
++      if (l.intensity <= 0.f || l.radius <= 0.f) {
++        continue;
++      }
++      // Core of the glow: a small fraction of the light's reach.
++      u.xl[n * 2][0] = l.pos[0], u.xl[n * 2][1] = l.pos[1], u.xl[n * 2][2] = l.pos[2];
++      u.xl[n * 2][3] = std::clamp(l.radius * 0.03f, 4.f, 20.f);
++      const auto vc = vivid(l.color, std::clamp(c.extraLightSaturation, 0.f, 2.5f));
++      u.xl[n * 2 + 1][0] = vc[0] * l.intensity * 0.35f;
++      u.xl[n * 2 + 1][1] = vc[1] * l.intensity * 0.35f;
++      u.xl[n * 2 + 1][2] = vc[2] * l.intensity * 0.35f;
++      ++n;
++    }
++    u.bloom2[3] = float(n);
++  }
++  {
++    const auto [w0, h0] = bloom_base_size(size.x, size.y);
++    u.glowdepth[0] = float(size.x) / float(w0);
++    u.glowdepth[1] = float(size.y) / float(h0);
++  }
++  u.glowdepth[2] = gx::UseReversedZ ? 1.f : 0.f;
++  u.glowdepth[3] = 2e-4f;
++  const uint32_t q = std::min(c.volumetricQuality, 2u);
++  u.vol[0] = c.volumetricIntensity;
++  u.vol[1] = q == 0 ? 16.f : q == 1 ? 24.f : 48.f;
++  u.vol[2] = 3000.f;
++  {
++    static const auto sStart = std::chrono::steady_clock::now();
++    u.vol[3] = std::fmod(std::chrono::duration<float>(std::chrono::steady_clock::now() - sStart).count(), 1000.f);
++  }
++  job.volDiv = q == 0 ? 4 : 2;
++  u.ao[0] = c.ssaoIntensity;
++  u.ao[1] = std::max(c.ssaoRadius, 1.f);
++  job.base = push_uniform(reinterpret_cast<const uint8_t*>(&u), sizeof(u));
++
++  // Per-pass uniforms: source texel sizes of the bloom chain and the upsample radius.
++  if ((job.mask & 1u) != 0) {
++    auto [w, h] = bloom_base_size(size.x, size.y);
++    std::array<std::pair<uint32_t, uint32_t>, MaxBloomLevels> dims{};
++    for (uint32_t i = 0; i < job.bloomLevels; ++i) {
++      dims[i] = {w, h};
++      w = std::max(w / 2, 1u);
++      h = std::max(h / 2, 1u);
++    }
++    FxUniform pu = u;
++    pu.pass[0] = 1.f / float(size.x);
++    pu.pass[1] = 1.f / float(size.y);
++    job.passes[0] = push_uniform(reinterpret_cast<const uint8_t*>(&pu), sizeof(pu));
++    for (uint32_t i = 1; i < job.bloomLevels; ++i) {
++      pu.pass[0] = 1.f / float(dims[i - 1].first);
++      pu.pass[1] = 1.f / float(dims[i - 1].second);
++      job.passes[i] = push_uniform(reinterpret_cast<const uint8_t*>(&pu), sizeof(pu));
++    }
++    const float radius = std::clamp(c.bloomRadius, 0.25f, 2.f);
++    for (uint32_t i = job.bloomLevels - 1; i > 0; --i) {
++      pu.pass[0] = 1.f / float(dims[i].first);
++      pu.pass[1] = 1.f / float(dims[i].second);
++      pu.pass[2] = radius;
++      // Wider levels weigh less with a small radius, more with a large one.
++      pu.pass[3] = std::pow(0.7f, float(i)) * (0.6f + 0.4f * radius);
++      job.passes[MaxBloomLevels + i] = push_uniform(reinterpret_cast<const uint8_t*>(&pu), sizeof(pu));
++    }
++  }
++  if ((job.mask & 4u) != 0) {
++    FxUniform pu = u;
++    pu.pass[0] = 1.f / float(std::max(size.x / 2, 1u));
++    pu.pass[1] = 1.f / float(std::max(size.y / 2, 1u));
++    job.passes[MaxBloomLevels * 2] = push_uniform(reinterpret_cast<const uint8_t*>(&pu), sizeof(pu));
++  }
++  if (g_log) {
++    static uint32_t sLogged = 0;
++    if (sLogged++ % 120 == 0) {
++      Log.info("scene end: mask {} target {}x{} vp {} {} {} {} proj {} {} {} {} A {} B {} flash {} pos {} {} {} dir {} {} {} "
++               "cos {} {} {} dist {} {} {} col {} {} {}",
++               job.mask, size.x, size.y, vp.left, vp.top, vp.width, vp.height, u.proj[0], u.proj[1], u.proj[2],
++               u.proj[3], u.projz[0], u.projz[1], g_flash.valid, u.lpos[0], u.lpos[1], u.lpos[2], u.ldir[0],
++               u.ldir[1], u.ldir[2], u.lcos[0], u.lcos[1], u.lcos[2], u.ldist[0], u.ldist[1], u.ldist[2], u.lcol[0],
++               u.lcol[1], u.lcol[2]);
++    }
++  }
++  push_scene_op([job](const wgpu::CommandEncoder& cmd, const ScenePassTargets& t) { encode_scene(cmd, t, job); });
++}
++
++} // namespace aurora::gfx::enhanced
++
++extern "C" {
++void aurora_enhanced_set_config(const AuroraEnhancedConfig* config) {
++  using namespace aurora::gfx::enhanced;
++  if (config == nullptr) {
++    return;
++  }
++  std::lock_guard lock{g_cfgMutex};
++  if (same(*config, g_pending)) {
++    return;
++  }
++  g_pending = *config;
++  g_pendingGen.fetch_add(1, std::memory_order_release);
++}
++
++uint32_t aurora_enhanced_last_light_count(void) {
++  return aurora::gfx::enhanced::g_lastLightCount.load(std::memory_order_relaxed);
++}
++}
+diff --git a/lib/gfx/enhanced.hpp b/lib/gfx/enhanced.hpp
+new file mode 100644
+index 0000000..72a3ad8
+--- /dev/null
++++ b/lib/gfx/enhanced.hpp
+@@ -0,0 +1,62 @@
++#pragma once
++// Enhanced lighting (include/aurora/enhanced.h, include/aurora/lights.h): configuration, the
++// frame's extra lights, per-draw uniforms and the scene-end screen-space effects.
++#include <aurora/enhanced.h>
++#include <aurora/lights.h>
++
++#include "types.hpp"
++
++namespace aurora::gx {
++struct PipelineConfig;
++struct ShaderConfig;
++struct DrawData;
++} // namespace aurora::gx
++
++namespace aurora::gfx::enhanced {
++
++struct DrawUniform {
++  uint32_t flags = 0; // bit0 per-pixel lighting, bit1 extra lights, bit2 soft shadows, bit3 flashlight quality
++  uint32_t lightBase = 0; // u32 index into the storage buffer
++  uint32_t lightCount = 0;
++  uint32_t shadowTaps = 0; // taps | 0x10000 for PCSS
++  float extraScale = 1.f;
++  float shadowRadius = 1.f;
++  float flashSoft = 0.f;
++  float pcss = 1.f;
++  uint32_t maskBase = 0;  // extra-light shadow mask: u32 index into the storage buffer
++  uint32_t maskPitch = 0; // words per row
++  uint32_t maskDims = 0;  // width | height << 16 (0: no mask this frame)
++  float maskScale = 0.f;  // mask pixels per target pixel
++  float flashSpec = 0.f;  // flashlight specular strength
++  float pad[3] = {};
++};
++static_assert(sizeof(DrawUniform) == 64);
++
++// --- FIFO thread ---
++// Takes a newly set configuration; true when it changed (pipelines must be re-derived).
++bool sync_config() noexcept;
++const AuroraEnhancedConfig& config() noexcept;
++// Shader variant for a draw (ShaderConfig::enhClass) given the current draw class and blend mode.
++// Additive draws (light effects) are left as they are: their look is built on the GX vertex
++// lighting (e.g. the flashlight beam's cone).
++uint8_t shader_class(const gx::ShaderConfig& sc, uint8_t drawClass, bool blended, bool additive) noexcept;
++// Per-draw uniform block (pushes this frame's extra lights into the storage buffer on first use).
++DrawUniform draw_uniform() noexcept;
++// GX_AURORA_SET_EXTRA_LIGHTS.
++void set_lights(const ExtraLight* lights, uint32_t count) noexcept;
++// A draw is about to be recorded while the mode is on (world class: camera projection /
++// flashlight capture).
++// True: drop the draw (debug aid AURORA_ENH_HIDE_ADDITIVE).
++bool note_draw(const gx::PipelineConfig& config, uint8_t drawClass, uint32_t vtxCount, const gx::DrawData& data) noexcept;
++// An EFB copy cleared `fraction` of the EFB color: emissive draws recorded before a large clear
++// are no longer in the picture.
++void efb_cleared(float fraction, bool color, bool depth) noexcept;
++// An EFB copy is about to be recorded (renders the pending glow draws while their textures are
++// still the ones they were drawn with).
++void before_efb_copy() noexcept;
++// GX_AURORA_SCENE_END.
++void scene_end() noexcept;
++// A new frame starts recording.
++void begin_frame() noexcept;
++
++} // namespace aurora::gfx::enhanced
+diff --git a/lib/gfx/recording.cpp b/lib/gfx/recording.cpp
+index 40d4ce9..43d7488 100644
+--- a/lib/gfx/recording.cpp
++++ b/lib/gfx/recording.cpp
+@@ -2,6 +2,7 @@
+ #include "recording.hpp"
+ 
+ #include "encoding.hpp"
++#include "enhanced.hpp"
+ #include "frame.hpp"
+ #include "resource_cache.hpp"
+ 
+@@ -571,6 +572,7 @@ void begin_recording(FramePacket& packet, size_t frameSlot) {
+   g_recorder.packet = &packet;
+   g_recorder.frameSlot = frameSlot;
+   g_passSnapshotPools[frameSlot].used = 0;
++  enhanced::begin_frame();
+   g_recorder.drawCallCount = 0;
+   g_recorder.mergedDrawCallCount = 0;
+   g_recorder.suspendedEfbPass.reset();
+@@ -792,6 +794,25 @@ gx::DrawData* get_last_draw_command() {
+   return &inline_payload<gx::DrawData>(last.data.draw.payload.data());
+ }
+ 
++std::pair<uint32_t, uint32_t> next_command_position() noexcept {
++  if (g_recorder.currentRenderPass >= current_render_passes().size()) {
++    return {UINT32_MAX, 0};
++  }
++  return {g_recorder.currentRenderPass,
++          static_cast<uint32_t>(current_render_passes()[g_recorder.currentRenderPass].commands.size())};
++}
++
++const gx::DrawData* gx_draw_at(uint32_t pass, uint32_t index) noexcept {
++  if (pass >= current_render_passes().size() || index >= current_render_passes()[pass].commands.size()) {
++    return nullptr;
++  }
++  const auto& cmd = current_render_passes()[pass].commands[index];
++  if (cmd.type != CommandType::Draw || cmd.data.draw.encoder != encode_draw<gx::render, gx::DrawData>) {
++    return nullptr;
++  }
++  return &inline_payload<gx::DrawData>(const_cast<std::byte*>(cmd.data.draw.payload.data()));
++}
++
+ Vec2<uint32_t> get_render_target_size() noexcept {
+   if (g_recorder.currentRenderPass < current_render_passes().size()) {
+     const auto& size =
+@@ -829,6 +850,9 @@ PipelineRef pipeline_ref(const clear::PipelineConfig& config) {
+ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
+                        Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat,
+                        GXPixelFmt sourceFormat) {
++  if (!g_recorder.inOffscreen) {
++    enhanced::before_efb_copy();
++  }
+   // Resolve current render pass
+   auto& prevPass = current_render_passes()[g_recorder.currentRenderPass];
+   prevPass.resolveTarget = std::move(texture);
+@@ -859,6 +883,11 @@ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bo
+   const auto bottom = std::clamp<int32_t>(rect.y + rect.height, top, static_cast<int32_t>(targetSize.height));
+   const ClipRect clearRect{.x = left, .y = top, .width = right - left, .height = bottom - top};
+   const bool fullTarget = left == 0 && top == 0 && right == targetSize.width && bottom == targetSize.height;
++  if ((clearColor || clearDepth) && !g_recorder.inOffscreen) {
++    enhanced::efb_cleared(float(clearRect.width) * float(clearRect.height) /
++                              std::max(float(targetSize.width) * float(targetSize.height), 1.f),
++                          clearColor, clearDepth);
++  }
+   RenderPass newPass{
+       .label = pass_label(g_recorder.inOffscreen ? "Offscreen" : "EFB"),
+       .colorAttachments = prevPass.colorAttachments,
+@@ -936,6 +965,39 @@ bool queue_pre_pass_ops(std::vector<efb_ram::PassOp> ops) {
+ 
+ void set_next_resolve_op(efb_ram::PassOp op) { g_nextResolveOp = std::move(op); }
+ 
++Viewport current_viewport() noexcept { return g_recorder.cachedViewport; }
++ClipRect current_scissor() noexcept { return g_recorder.cachedScissor; }
++
++bool push_scene_op(SceneOp op) {
++  if (!g_recorder.active() || g_recorder.currentRenderPass == UINT32_MAX || g_recorder.inOffscreen) {
++    return false;
++  }
++  auto& prevPass = current_render_passes()[g_recorder.currentRenderPass];
++  const auto& color = prevPass.colorAttachments[SceneColorAttachmentIndex];
++  if (color.semantic != ColorAttachmentSemantic::SceneColor || !prevPass.copySourceTexture ||
++      !prevPass.copySourceDepthView) {
++    return false;
++  }
++  ScenePassTargets targets{
++      .colorView = color.view,
++      .resolveView = color.resolveView,
++      .colorFormat = color.format,
++      .colorSource = prevPass.copySourceTexture,
++      .depthSource = prevPass.copySourceDepthView,
++      .msaa = prevPass.msaaSamples,
++      .width = color.size.width,
++      .height = color.size.height,
++  };
++  prevPass.ramPostOps.push_back([op = std::move(op), targets](const wgpu::CommandEncoder& cmd, detail::FramePacket&) {
++    op(cmd, targets);
++  });
++  // The op must run even when the pass itself drew nothing.
++  prevPass.discardable = false;
++  enqueue_pass(current_frame_packet(), g_recorder.currentRenderPass);
++  resume_efb_pass_loading(prevPass);
++  return true;
++}
++
+ void queue_palette_conv(tex_palette_conv::ConvRequest req) {
+   auto& renderPass = current_render_passes()[g_recorder.currentRenderPass];
+   AURORA_ASSERT(!renderPass.sealed, "Attempted to append palette conversion to sealed render pass {}",
+diff --git a/lib/gfx/recording.hpp b/lib/gfx/recording.hpp
+index 8a9f256..bfe3e7b 100644
+--- a/lib/gfx/recording.hpp
++++ b/lib/gfx/recording.hpp
+@@ -5,6 +5,11 @@
+ 
+ #include <cstddef>
+ #include <string>
++#include <utility>
++
++namespace aurora::gx {
++struct DrawData;
++}
+ 
+ namespace aurora::gfx::detail {
+ 
+@@ -102,6 +107,28 @@ PipelineRef pipeline_ref(const PipelineConfig& config);
+ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
+                        Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat,
+                        GXPixelFmt sourceFormat);
++// Enhanced lighting scene-end effects: the EFB targets as the sealed pass leaves them.
++struct ScenePassTargets {
++  wgpu::TextureView colorView;   // EFB color attachment (multisampled with MSAA)
++  wgpu::TextureView resolveView; // its resolve target (MSAA) or null
++  wgpu::TextureFormat colorFormat = wgpu::TextureFormat::Undefined;
++  wgpu::Texture colorSource;     // single-sample color after the pass (copy source)
++  wgpu::TextureView depthSource; // depth attachment view (multisampled with MSAA)
++  uint32_t msaa = 1;
++  uint32_t width = 0;
++  uint32_t height = 0;
++};
++using SceneOp = std::function<void(const wgpu::CommandEncoder& cmd, const ScenePassTargets& targets)>;
++// Seals the current EFB pass, runs `op` on the frame encoder right after it and continues on a
++// pass that loads the existing contents. False (nothing recorded) outside an EFB pass.
++bool push_scene_op(SceneOp op);
++// Where the next recorded command goes (pass, index), and a recorded GX draw by that position
++// (its final state: later draws may have been merged into it). Enhanced lighting glow.
++std::pair<uint32_t, uint32_t> next_command_position() noexcept;
++const gx::DrawData* gx_draw_at(uint32_t pass, uint32_t index) noexcept;
++// The viewport / scissor the next recorded draw uses (target pixels).
++Viewport current_viewport() noexcept;
++ClipRect current_scissor() noexcept;
+ // EFB copy to RAM work: run before the current pass / right after the next resolve.
+ bool queue_pre_pass_ops(std::vector<efb_ram::PassOp> ops);
+ void set_next_resolve_op(efb_ram::PassOp op);
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+index 7171691..a67fc6d 100644
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -1,3 +1,4 @@
++#include "../gfx/enhanced.hpp"
+ #include "command_processor.hpp"
+ 
+ #include <unordered_map>
+@@ -533,6 +534,9 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
+     sLastAccuracy = accuracy;
+     state.dirty |= DirtyPipeline;
+   }
++  if (gfx::enhanced::sync_config()) {
++    state.dirty |= DirtyPipeline;
++  }
+   const u8 lineMode = line_mode_for_prim(prim);
+   const auto targetLayoutKey = gfx::get_render_target_layout().key;
+   const bool pipelineValid = cache.hasPipeline && (state.dirty & DirtyPipeline) == 0 && cache.fmt == fmt &&
+@@ -596,7 +600,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
+     instanceCount = vtxCount;
+   }
+   cache.lastDrawFmt = fmt;
+-  gfx::push_draw_command(DrawData{
++  const DrawData drawData{
+       .pipeline = cache.pipelineRef,
+       .bindGroups = cache.bindGroups,
+       .vertRange = vertRange,
+@@ -607,7 +611,13 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
+       .indexCount = numIndices,
+       .instanceCount = instanceCount,
+       .dstAlpha = state.dstAlpha,
+-  });
++  };
++  if (gfx::enhanced::config().enabled) {
++    if (gfx::enhanced::note_draw(cache.config, state.drawClass, vtxCount, drawData)) {
++      return; // debug: hidden
++    }
++  }
++  gfx::push_draw_command(drawData);
+ }
+ 
+ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange) noexcept {
+@@ -906,6 +916,30 @@ void handle_aurora(ByteReader& reader) noexcept {
+       g_gxState.twoSided = twoSided;
+       g_gxState.dirty |= DirtyPipeline;
+     }
++  } else if (subCmd == GX_AURORA_SET_DRAW_CLASS) {
++    const u8 drawClass = reader.read<u8>();
++    if (g_gxState.drawClass != drawClass) {
++      g_gxState.drawClass = drawClass;
++      static const bool sNoDirty = std::getenv("AURORA_ENH_NODIRTY") != nullptr; // debug aid
++      if (gfx::enhanced::config().enabled && !sNoDirty) {
++        g_gxState.dirty |= DirtyPipeline;
++      }
++    }
++  } else if (subCmd == GX_AURORA_SET_EXTRA_LIGHTS) {
++    const u32 count = std::min<u32>(reader.read<u8>(), gfx::MaxExtraLights);
++    std::array<gfx::ExtraLight, gfx::MaxExtraLights> lights{};
++    for (u32 i = 0; i < count; ++i) {
++      auto& l = lights[i];
++      for (float& v : l.pos) v = reader.read<f32>();
++      for (float& v : l.color) v = reader.read<f32>();
++      l.radius = reader.read<f32>();
++      l.intensity = reader.read<f32>();
++      l.flags = reader.read<u32>();
++      l.id = reader.read<u32>();
++    }
++    gfx::enhanced::set_lights(lights.data(), count);
++  } else if (subCmd == GX_AURORA_SCENE_END) {
++    gfx::enhanced::scene_end();
+   } else if (subCmd == GX2_SET_POLYGON_OFFSET) {
+     const f32 frontOffset = reader.read<f32>();
+     const f32 frontScale = reader.read<f32>();
+diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
+index 3d82b50..986782c 100644
+--- a/lib/gx/gx.cpp
++++ b/lib/gx/gx.cpp
+@@ -10,6 +10,7 @@
+ #include "../gfx/recording.hpp"
+ #include "../gfx/resource_cache.hpp"
+ #include "../gfx/texture.hpp"
++#include "../gfx/enhanced.hpp"
+ #include "gx_fmt.hpp"
+ #include "dolphin/gx/GXAurora.h"
+ 
+@@ -576,6 +577,9 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
+       .alphaUpdate = alphaUpdate,
+       .colorUpdate = g_gxState.colorUpdate,
+   };
++  config.shaderConfig.enhClass =
++      gfx::enhanced::shader_class(config.shaderConfig, g_gxState.drawClass, config.blendMode != GX_BM_NONE,
++                                  config.blendMode == GX_BM_BLEND && config.blendFacDst == GX_BL_ONE);
+ }
+ 
+ GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept {
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+index 35a7afe..a327bbe 100644
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -345,6 +345,7 @@ struct GXState {
+   bool wireframe = false;       // GX_AURORA_SET_WIREFRAME
+   u32 wireColor = 0xFFFFFFFF;   // RGBA8
+   bool twoSided = false;        // GX_AURORA_SET_CULL_OVERRIDE
++  u8 drawClass = 0;             // GX_AURORA_SET_DRAW_CLASS (AURORA_DRAW_CLASS_*)
+   GXBlendMode blendMode = GX_BM_NONE;
+   GXBlendFactor blendFacSrc = GX_BL_SRCALPHA;
+   GXBlendFactor blendFacDst = GX_BL_INVSRCALPHA;
+@@ -513,7 +514,7 @@ struct ShaderConfig {
+   u8 zTexOp : 2 = 0;  // GXZTexOp; non-zero only when the last TEV stage samples a texture
+   u8 zTexFmt : 2 = 0; // 0 = Z8, 1 = Z16, 2 = Z24X8
+   u8 efbFmt : 2 = 0;  // EFB format to quantize to (GX_AURORA_ACCURACY_EFB_DEPTH): 0 none (RGB8), 1 RGBA6, 2 RGB565
+-  u8 pad2 : 2 = 0;
++  u8 enhClass : 2 = 0; // enhanced lighting variant (aurora/enhanced.h): 0 off, 1 world, 2 world translucent/ghost
+   std::array<AttrConfig, MaxVtxAttr> attrs;
+   std::array<TevSwap, MaxTevSwap> tevSwapTable;
+   std::array<TevStage, MaxTevStages> tevStages;
+@@ -553,6 +554,7 @@ struct ShaderInfo {
+   bool usesZTex : 1 = false;
+   u8 lineMode : 2 = 0;
+   bool wireframe : 1 = false;
++  bool enh : 1 = false; // enhanced lighting uniforms (enh_*), appended last
+ };
+ struct BindGroupRanges {
+   std::array<gfx::Range, MaxIndexAttr> vaRanges{};
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index 295af0a..f2b04c0 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -872,6 +872,285 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8
+                      alpha ? "a"sv : ""sv);
+ }
+ 
++// ---- Enhanced lighting (include/aurora/enhanced.h) ---------------------------------------------
++// World-geometry draws get a shader variant (ShaderConfig::enhClass) whose extra work is switched
++// at runtime by ubuf.enh_flags (bit0 per-pixel lighting, bit1 extra lights, bit2 soft shadows,
++// bit3 flashlight quality), so toggling a part never rebuilds pipelines.
++
++// Per-pixel version of lighting_func: the same GX channel math, evaluated with the interpolated
++// view-space position and normal (in.enh_pos / enh_n), writing rast{i}.
++std::string enh_lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8 i, bool alpha) {
++  std::string_view swizzle = alpha ? ".a"sv : ".rgb"sv;
++  std::string ambSrc, matSrc;
++  if (cc.ambSrc == GX_SRC_VTX) {
++    ambSrc = fmt::format("in.enh_clr{}", i);
++  } else {
++    ambSrc = fmt::format("ubuf.cc{0}{1}_amb", i, alpha ? "a"sv : ""sv);
++  }
++  if (cc.matSrc == GX_SRC_VTX) {
++    matSrc = fmt::format("in.enh_clr{}", i);
++  } else {
++    matSrc = fmt::format("ubuf.cc{0}{1}_mat", i, alpha ? "a"sv : ""sv);
++  }
++  if (!cc.lightingEnabled) {
++    return fmt::format("\n      rast{0}{2} = {1}{2};", i, matSrc, swizzle);
++  }
++  std::string lightAttnFn;
++  if (cc.attnFn == GX_AF_NONE) {
++    lightAttnFn = "attn = 1.0;"s;
++  } else if (cc.attnFn == GX_AF_SPOT) {
++    // Spot cone with an optional smoothed penumbra (flashlight quality): the GX angular term is
++    // remapped by smoothstep so the cone edge has no kink at the cutoff.
++    // Only the color channel's cone edge (cos_attn below 1) is reshaped: alpha channels are
++    // masks (the shadow light's ALPHA1 scales the shadow strength) and stay exact.
++    lightAttnFn = alpha ? R"""(
++            let cosine = max(0.0, dot(ldir, light.dir));
++            let cos_attn = dot(light.cos_att, vec3f(1.0, cosine, cosine * cosine));
++            let dist_attn = dot(light.dist_att, vec3f(1.0, dist, dist2));
++            attn = max(0.0, cos_attn / dist_attn);)"""s
++                        : R"""(
++            let cosine = max(0.0, dot(ldir, light.dir));
++            var cos_attn = dot(light.cos_att, vec3f(1.0, cosine, cosine * cosine));
++            if (cos_attn < 1.0) {
++              let ca = clamp(cos_attn, 0.0, 1.0);
++              cos_attn = mix(cos_attn, ca * ca * (3.0 - 2.0 * ca), ubuf.enh_flash_soft);
++            }
++            let dist_attn = dot(light.dist_att, vec3f(1.0, dist, dist2));
++            attn = max(0.0, cos_attn / dist_attn);)"""s;
++  } else {
++    const std::string dist_attn = cc.diffFn != GX_DF_NONE
++                                      ? "max(0.0, dot(normalize(light.dist_att), vec3f(1.0, attn, attn * attn)))"
++                                      : "max(0.0, dot(light.dist_att, vec3f(1.0, attn, attn * attn)))";
++    lightAttnFn = fmt::format(R"""(
++            attn = select(0.0, max(0.0, dot(enh_n, light.dir)), dot(enh_n, ldir) >= 0.0);
++            let cos_attn = dot(light.cos_att, vec3f(1.0, attn, attn * attn));
++            let dist_attn = {};
++            attn = max(0.0, cos_attn / dist_attn);)""",
++                              dist_attn);
++  }
++  std::string_view lightDiffFn = "1.0"sv;
++  if (cc.diffFn == GX_DF_SIGN) {
++    lightDiffFn = "dot(ldir, enh_n)"sv;
++  } else if (cc.diffFn == GX_DF_CLAMP) {
++    lightDiffFn = "max(0.0, dot(ldir, enh_n))"sv;
++  }
++  // Flashlight specular (color channels with spot lights): a glossy highlight where the beam hits,
++  // scaled by ubuf.enh_flash_spec (0 = the GX result only).
++  const bool spec = !alpha && cc.attnFn == GX_AF_SPOT && cc.diffFn != GX_DF_NONE;
++  const std::string_view specDecl =
++      spec ? "\n        var spec = vec3f(0.0);\n        let enh_v = normalize(-in.enh_pos);"sv : ""sv;
++  const std::string_view specAcc =
++      spec ? "\n            if (dot(ldir, enh_n) > 0.0) { spec = spec + attn * pow(max(dot(enh_n, normalize(ldir + enh_v)), 0.0), 28.0) * light.color.rgb; }"sv
++           : ""sv;
++  const std::string specApply =
++      spec ? fmt::format("\n        rast{0}.rgb = min(rast{0}.rgb + {1}.rgb * spec * ubuf.enh_flash_spec, vec3f(1.0));", i, matSrc)
++           : std::string{};
++  return fmt::format(R"""(
++      {{
++        var lighting = {4}{6};{9}
++        for (var i = 0u; i < {1}u; i++) {{
++            if ((ubuf.lightState{0}{5} & (1u << i)) == 0u) {{ continue; }}
++            let light = ubuf.lights[i];
++            var ldir = light.pos - in.enh_pos;
++            let dist2 = dot(ldir, ldir);
++            let dist = sqrt(dist2);
++            ldir = ldir / dist;
++            var attn: f32;{2}
++            let diff = {3};
++            lighting = lighting + (attn * diff * light.color){6};{10}
++        }}
++        rast{0}{6} = ({7}{6} * clamp(lighting, {8}(0.0), {8}(1.0)));{11}
++      }})""",
++                     i, GX::MaxLights, lightAttnFn, lightDiffFn, ambSrc, alpha ? "a"sv : ""sv, swizzle, matSrc,
++                     alpha ? "f32"sv : "vec3f"sv, specDecl, specAcc, specApply);
++}
++
++// Material color expression of color channel i (for extra lights added to its lighting sum).
++std::string enh_mat_src(const ColorChannelConfig& cc, u8 i) {
++  if (cc.matSrc == GX_SRC_VTX) {
++    return fmt::format("in.enh_clr{}.rgb", i);
++  }
++  return fmt::format("ubuf.cc{}_mat.rgb", i);
++}
++
++constexpr std::string_view EnhHelpers = R"""(
++fn enh_ld(i: u32) -> f32 { return bitcast<f32>(abuf[i]); }
++// Shadow of extra light `slot` at a fragment: occlusion (0 lit .. 1 shadowed) from this frame's
++// mask (RGBA8, one channel per shadowed light, written into the storage buffer before the pass),
++// bilinear from 2x2 taps for a softer edge.
++fn enh_mask(frag: vec2f, slot: u32) -> f32 {
++  let dims = vec2i(i32(ubuf.enh_mask_dims & 0xFFFFu), i32(ubuf.enh_mask_dims >> 16u));
++  if (dims.x == 0) { return 0.0; }
++  let m = frag * ubuf.enh_mask_scale - vec2f(0.5);
++  let base = vec2i(floor(m));
++  let f = fract(m);
++  var acc = 0.0;
++  for (var k = 0; k < 4; k++) {
++    let o = vec2i(k & 1, k >> 1u);
++    let c = clamp(base + o, vec2i(0), dims - vec2i(1));
++    let word = abuf[ubuf.enh_mask_base + u32(c.y) * ubuf.enh_mask_pitch + u32(c.x)];
++    let v = f32((word >> (slot * 8u)) & 0xFFu) / 255.0;
++    let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
++    acc = acc + v * w;
++  }
++  return acc;
++}
++// Extra point lights (aurora/lights.h), 12 words each in the storage buffer:
++// pos xyz, radius, color rgb, intensity, flags, id, shadow slot (or ~0), 0.
++fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
++  var sum = vec3f(0.0);
++  let cnt = min(ubuf.enh_light_count, 16u);
++  let v = normalize(-p);
++  for (var i = 0u; i < cnt; i++) {
++    let b = ubuf.enh_light_base + i * 12u;
++    let flags = abuf[b + 8u];
++    if (ghost && (flags & 2u) == 0u) { continue; }
++    let d = vec3f(enh_ld(b), enh_ld(b + 1u), enh_ld(b + 2u)) - p;
++    let radius = max(enh_ld(b + 3u), 1.0);
++    let dist2 = dot(d, d);
++    if (dist2 >= radius * radius) { continue; }
++    let l = d * inverseSqrt(max(dist2, 1e-6));
++    let x2 = dist2 / (radius * radius);
++    let w = (1.0 - x2) * (1.0 - x2);
++    let fall = w / (1.0 + 8.0 * x2);
++    var ndl = dot(n, l);
++    ndl = select(max(ndl, 0.0), ndl * 0.5 + 0.5, ghost);
++    var col = vec3f(enh_ld(b + 4u), enh_ld(b + 5u), enh_ld(b + 6u)) * enh_ld(b + 7u);
++    let slot = abuf[b + 10u];
++    if (slot < 4u) { col = col * (1.0 - enh_mask(frag, slot)); }
++    sum = sum + col * (ndl * fall);
++    if ((flags & 4u) != 0u) {
++      let h = normalize(l + v);
++      sum = sum + col * (fall * 0.35 * pow(max(dot(n, h), 0.0), 24.0));
++    }
++  }
++  return sum * ubuf.enh_extra_scale;
++}
++// Interleaved gradient noise (per-pixel rotation of the filter kernels).
++fn enh_ign(p: vec2f) -> f32 { return fract(52.9829189 * fract(dot(p, vec2f(0.06711056, 0.00583715)))); }
++fn enh_key(t: vec4f, sr: u32, sg: u32) -> f32 {
++  let v = round(clamp(t, vec4f(0.0), vec4f(1.0)) * 255.0);
++  return v[sg] * 256.0 + v[sr];
++}
++fn enh_fetch_key(tex: texture_2d<f32>, uv: vec2f, off: vec2f, dims: vec2f, sr: u32, sg: u32) -> f32 {
++  let c = clamp(vec2i(floor(uv * dims + off)), vec2i(0), vec2i(dims) - vec2i(1));
++  return enh_key(textureLoad(tex, c, 0), sr, sg);
++}
++fn enh_pick_key(tev: f32, analytic: f32) -> f32 { return select(tev, analytic, abs(analytic - tev) < 768.0); }
++fn enh_vogel(k: u32, n: u32, rot: f32) -> vec2f {
++  let r = sqrt((f32(k) + 0.5) / f32(n));
++  let a = f32(k) * 2.39996323 + rot;
++  return vec2f(cos(a), sin(a)) * r;
++}
++// Soft version of the game's shadow-map compare (receiver key > map key, GR16 keys of the
++// packed depth): the fraction of taps in shadow. PCF over a rotated Vogel disk; with PCSS the
++// radius follows the receiver-blocker distance (contact hardening). `slope` is the receiver
++// key's change per map texel (slope-scaled bias).
++fn enh_shadow(tex: texture_2d<f32>, uv: vec2f, recv: f32, sr: u32, sg: u32, frag: vec2f, slope: f32) -> f32 {
++  let dims = vec2f(textureDimensions(tex));
++  let rot = enh_ign(frag) * 6.2831853;
++  let q = ubuf.enh_shadow_taps;
++  let taps = max(q & 0xFFFFu, 1u);
++  var radius = ubuf.enh_shadow_radius * dims.x / 640.0;
++  // Slope-scaled bias for the off-centre taps only, capped: with a grazing light (e.g. a ghost's
++  // own light near the floor) a full receiver-plane bias would remove thin casters' shadows.
++  let sl = clamp(slope * 0.75, 0.0, 96.0);
++  // Early out: centre and an outer ring of 4 taps (at the widest search radius) agree -> the
++  // pixel is fully lit or fully shadowed, no penumbra to filter (most pixels).
++  {
++    let ro = radius * select(1.0, 1.5, (q & 0x10000u) != 0u);
++    var n = 0.0;
++    for (var k = 0u; k < 5u; k++) {
++      let a = rot + f32(k) * 1.5707963;
++      let o = select(vec2f(cos(a), sin(a)) * ro, vec2f(0.0), k == 4u);
++      let key = enh_fetch_key(tex, uv, o, dims, sr, sg);
++      n = n + select(0.0, 1.0, recv - (3.0 + sl * length(o)) > key);
++    }
++    if (n == 0.0 || n == 5.0) { return n / 5.0; }
++  }
++  if ((q & 0x10000u) != 0u) {
++    var bsum = 0.0;
++    var bcnt = 0.0;
++    let sr2 = radius * 1.5;
++    for (var k = 0u; k < taps; k++) {
++      let o = enh_vogel(k, taps, rot) * sr2;
++      let key = enh_fetch_key(tex, uv, o, dims, sr, sg);
++      if (recv - (3.0 + sl * length(o)) > key) {
++        bsum = bsum + key;
++        bcnt = bcnt + 1.0;
++      }
++    }
++    if (bcnt == 0.0) { return 0.0; }
++    let blk = bsum / bcnt;
++    // Penumbra from the receiver-blocker key distance; capped at 1.5x the filter radius so thin
++    // casters (spears, chair legs) keep a visible shadow.
++    let pen = clamp((recv - blk) / max(65535.0 - blk, 256.0) * ubuf.enh_pcss * 0.35, 0.0, 1.0);
++    radius = mix(max(radius * 0.3, 0.75), radius * 1.5, pen);
++  }
++  var s = 0.0;
++  for (var k = 0u; k < taps; k++) {
++    let o = enh_vogel(k, taps, rot) * radius;
++    let key = enh_fetch_key(tex, uv, o, dims, sr, sg);
++    s = s + select(0.0, 1.0, recv - (3.0 + sl * length(o)) > key);
++  }
++  return s / f32(taps);
++}
++)""";
++
++u32 swap_index(GXTevColorChan c) noexcept {
++  switch (c) {
++  case GX_CH_RED:
++    return 0;
++  case GX_CH_GREEN:
++    return 1;
++  case GX_CH_BLUE:
++    return 2;
++  default:
++    return 3;
++  }
++}
++
++// Enhanced soft shadows: a stage doing the game's shadow-map compare (alpha GR16 GT of the
++// color inputs A = receiver depth key, B = TEXC = packed map depth). Returns the WGSL that sets
++// `enh_sf{idx}` (fraction of the stage's compare that is true) or "" when not applicable.
++// `binaryCond` is the original compare condition (used when soft shadows are off).
++std::string enh_shadow_stage(size_t idx, const ShaderConfig& config, const TevStage& stage,
++                             std::string_view recvKeyExpr, std::string_view binaryCond) {
++  const u32 map = underlying(stage.texMapId);
++  const u32 coord = underlying(stage.texCoordId);
++  const auto& swap = config.tevSwapTable[stage.tevSwapTex];
++  // Receiver key: analytic from the depth-ramp lookup of the previous stage when it is the
++  // game's ramp LUT (texel (x, y) = (A x, I y), s clamped, t = 256 s repeating: key =
++  // floor(65536 s)), which avoids the LINEAR-filtered LUT's byte-wrap stripes; otherwise the
++  // TEV's own key.
++  std::string recv = fmt::format("f32({})", recvKeyExpr);
++  static const bool sTevKey = std::getenv("AURORA_ENH_TEVKEY") != nullptr; // debug aid
++  if (idx > 0 && !sTevKey) {
++    const auto& prev = config.tevStages[idx - 1];
++    if (prev.texMapId != GX_TEXMAP_NULL && prev.texCoordId != GX_TEXCOORD_NULL && prev.colorOp.outReg == GX_TEVPREV &&
++        config.tcgs[prev.texCoordId].type == GX_TG_MTX3x4) {
++      // Only where it agrees with the TEV's key (other materials map the ramp differently, e.g.
++      // the room geometry in lit rooms; a wrong key loses every shadow).
++      recv = fmt::format("enh_pick_key({}, min(floor(clamp(tex{}_uv.x, 0.0, 1.0) * 65536.0), 65535.0))", recv,
++                         underlying(prev.texCoordId));
++    }
++  }
++  return fmt::format(
++      "\n    // Enhanced soft shadow (stage {0})"
++      "\n    let enh_recv{0} = {1};"
++      "\n    let enh_slope{0} = fwidth(enh_recv{0}) / max(length(fwidth(tex{2}_uv * vec2f(textureDimensions(tex{3})))), 1e-3);"
++      "\n    var enh_sf{0} = select(0.0, 1.0, {4});"
++      "\n    if ((ubuf.enh_flags & 4u) != 0u) {{"
++      "\n      enh_sf{0} = enh_shadow(tex{3}, tex{2}_uv, enh_recv{0}, {5}u, {6}u, in.pos.xy, enh_slope{0});"
++      "\n    }}",
++      idx, recv, coord, map, binaryCond, swap_index(swap.red), swap_index(swap.green));
++}
++
++bool enh_is_shadow_stage(const ShaderConfig& config, const TevStage& stage) noexcept {
++  return config.enhClass != 0 && stage.alphaOp.op == GX_TEV_COMP_GR16_GT && stage.colorPass.b == GX_CC_TEXC &&
++         stage.texMapId != GX_TEXMAP_NULL && stage.texCoordId != GX_TEXCOORD_NULL;
++}
++
+ // ---- Integer TEV (GX_AURORA_ACCURACY_INT_TEV) -------------------------------------------------
+ // The hardware combiner works on integers: A/B/C inputs are 8 bits (the low byte of a register),
+ // D and the registers are signed 11-bit, C is widened to 0..256 (C + C>>7) for the lerp, and every
+@@ -1066,8 +1345,14 @@ std::string build_int_tev_stage(size_t idx, const ShaderConfig& config, const Te
+         const auto a = int_color_arg(stage.colorPass.a, idx, config, stage, false);
+         const auto b = int_color_arg(stage.colorPass.b, idx, config, stage, false);
+         cond = fmt::format("({} {} {})", int_cmp_key(op.op, a), rel, int_cmp_key(op.op, b));
++        if (enh_is_shadow_stage(config, stage)) {
++          out += enh_shadow_stage(idx, config, stage, int_cmp_key(op.op, a), cond);
++          expr = fmt::format("itev_clamp1({} + i32(round(f32({}) * enh_sf{})), {})", d, c, idx, op.clamp);
++        }
++      }
++      if (expr.empty()) {
++        expr = fmt::format("itev_clamp1({} + select(0, {}, {}), {})", d, c, cond, op.clamp);
+       }
+-      expr = fmt::format("itev_clamp1({} + select(0, {}, {}), {})", d, c, cond, op.clamp);
+     }
+     out += fmt::format("\n    let teva{} = {};", idx, expr);
+   }
+@@ -1362,10 +1647,20 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+         auto value = color_arg_reg(carg, idx, config, stage);
+         return fmt::format("vec3f({})", value);
+       };
+-      std::string op = tev_alpha_op(stage.alphaOp.op, tev_bias(stage.alphaOp.bias), tev_scale(stage.alphaOp.scale),
+-                                    stage.alphaOp.clamp, cmp_arg(stage.colorPass.a, stage.alphaPass.a),
+-                                    cmp_arg(stage.colorPass.b, stage.alphaPass.b),
+-                                    alpha_arg(stage.alphaPass.c), alpha_arg_reg(stage.alphaPass.d, idx, config, stage));
++      std::string op;
++      if (enh_is_shadow_stage(config, stage)) {
++        const auto ka = fmt::format("round(dot({}.rg * 255.0, vec2(1.0, 256.0)))", cmp_arg(stage.colorPass.a, stage.alphaPass.a));
++        const auto kb = fmt::format("round(dot({}.rg * 255.0, vec2(1.0, 256.0)))", cmp_arg(stage.colorPass.b, stage.alphaPass.b));
++        fragmentFn += enh_shadow_stage(idx, config, stage, ka, fmt::format("{} > {}", ka, kb));
++        const auto expr = fmt::format("{} * enh_sf{} + {}", alpha_arg(stage.alphaPass.c), idx,
++                                      alpha_arg_reg(stage.alphaPass.d, idx, config, stage));
++        op = stage.alphaOp.clamp ? fmt::format("clamp({}, 0.0, 1.0)", expr) : fmt::format("clamp({}, -4.0, 4.0)", expr);
++      } else {
++        op = tev_alpha_op(stage.alphaOp.op, tev_bias(stage.alphaOp.bias), tev_scale(stage.alphaOp.scale),
++                          stage.alphaOp.clamp, cmp_arg(stage.colorPass.a, stage.alphaPass.a),
++                          cmp_arg(stage.colorPass.b, stage.alphaPass.b), alpha_arg(stage.alphaPass.c),
++                          alpha_arg_reg(stage.alphaPass.d, idx, config, stage));
++      }
+       fragmentFn += fmt::format("\n    let teva{0} = {1};", idx, op);
+       fragmentFn += fmt::format("\n    {0} = vec4f(tevc{1}, {0}.a);", regName[stage.colorOp.outReg], idx);
+       fragmentFn += fmt::format("\n    {0}.a = teva{1};", outReg, idx);
+@@ -1448,6 +1743,37 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+     }
+   }
+ 
++  // Enhanced lighting variant: view-space position/normal for per-pixel work.
++  const bool enh = config.enhClass != 0;
++  if (enh) {
++    vtxOutAttrs += fmt::format("\n    @location({}) enh_pos: vec3f,", vtxOutIdx++);
++    vtxXfrAttrs += "\n    out.enh_pos = mv_pos;";
++    if (config.attrs[GX_VA_NRM].attrType != GX_NONE) {
++      vtxOutAttrs += fmt::format("\n    @location({}) enh_nrm: vec3f,", vtxOutIdx++);
++      vtxXfrAttrs += "\n    out.enh_nrm = mv_nrm;";
++      fragmentFnPre += "\n    let enh_nl = dot(in.enh_nrm, in.enh_nrm);"
++                       "\n    let enh_n = select(vec3f(0.0, 0.0, 1.0), in.enh_nrm * inverseSqrt(max(enh_nl, 1e-20)), enh_nl > 1e-10);";
++    } else {
++      // No normals: the face normal from the position derivatives, facing the camera.
++      fragmentFnPre += "\n    let enh_c = cross(dpdx(in.enh_pos), dpdy(in.enh_pos));"
++                       "\n    let enh_cl = dot(enh_c, enh_c);"
++                       "\n    var enh_n = select(vec3f(0.0, 0.0, 1.0), enh_c * inverseSqrt(max(enh_cl, 1e-30)), enh_cl > 1e-20);"
++                       "\n    enh_n = select(enh_n, -enh_n, dot(enh_n, in.enh_pos) > 0.0);";
++    }
++    fragmentFnPre += fmt::format("\n    var enh_xl = vec3f(0.0);"
++                                 "\n    if ((ubuf.enh_flags & 2u) != 0u) {{ enh_xl = enh_extra_lights(in.enh_pos, enh_n, {}, in.pos.xy); }}",
++                                 config.enhClass == 2 ? "true"sv : "false"sv);
++    uniformPre += EnhHelpers;
++  }
++  // Color channels feeding a color texgen (GX_TG_SRTG: the flashlight beam's lookup) keep
++  // their exact lighting result: extra lights would move the lookup.
++  std::bitset<2> srtgChannels;
++  for (int i = 0; i < info.sampledTexCoords.size(); ++i) {
++    if (info.sampledTexCoords.test(i) && config.tcgs[i].type == GX_TG_SRTG) {
++      srtgChannels.set(config.tcgs[i].src == GX_TG_COLOR1 ? 1 : 0);
++    }
++  }
++
+   for (int i = 0; i < info.sampledColorChannels.size(); ++i) {
+     if (!info.sampledColorChannels.test(i)) {
+       continue;
+@@ -1455,6 +1781,11 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+ 
+     const auto& cc = config.colorChannels[i];
+     const auto& cca = config.colorChannels[i + GX_ALPHA0];
++    if (enh && ((cc.lightingEnabled && cc.ambSrc == GX_SRC_VTX) || cc.matSrc == GX_SRC_VTX ||
++                (cca.lightingEnabled && cca.ambSrc == GX_SRC_VTX) || cca.matSrc == GX_SRC_VTX)) {
++      vtxOutAttrs += fmt::format("\n    @location({}) enh_clr{}: vec4f,", vtxOutIdx++, i);
++      vtxXfrAttrs += fmt::format("\n    out.enh_clr{} = {};", i, vtx_attr(config, static_cast<GXAttr>(GX_VA_CLR0 + i)));
++    }
+     if (cc.lightingEnabled && cc.ambSrc == GX_SRC_REG) {
+       uniBufAttrs += fmt::format("\n    cc{0}_amb: vec4f,", i);
+     }
+@@ -1490,6 +1821,28 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+         vtxXfrAttrs += fmt::format("\n    out.cc{0} = round(clamp(out.cc{0}, vec4f(0.0), vec4f(1.0)) * 255.0) / 255.0;", i);
+       }
+       fragmentFnPre += fmt::format("\n    var rast{0} = in.cc{0};", i);
++      // Ghost-pass draws (enhClass 2) keep the GX vertex lighting: the ghost layer is composited
++      // from its own copy, and invisible ghosts must stay black there.
++      if (enh && config.enhClass == 1 && info.lightingEnabled && (cc.lightingEnabled || cca.lightingEnabled) &&
++          !srtgChannels.test(i)) {
++        const bool spot = (cc.lightingEnabled && cc.attnFn == GX_AF_SPOT) || (cca.lightingEnabled && cca.attnFn == GX_AF_SPOT);
++        fragmentFnPre += fmt::format("\n    if ((ubuf.enh_flags & {}u) != 0u) {{", spot ? 9 : 1);
++        fragmentFnPre += enh_lighting_func(config, cc, i, false);
++        fragmentFnPre += enh_lighting_func(config, cca, i, true);
++        fragmentFnPre += "\n    }";
++      }
++      if (enh && cc.lightingEnabled && cc.diffFn != GX_DF_NONE && !srtgChannels.test(i)) {
++        // Extra lights join the channel's lighting sum (approximately: mat * extra added after
++        // the clamp), so the game's material and TEV decide how the surface responds.
++        fragmentFnPre += fmt::format(
++            "\n    if ((ubuf.enh_flags & 2u) != 0u) {{"
++            "\n      rast{0} = vec4f(clamp(rast{0}.rgb + {1} * enh_xl, vec3f(0.0), vec3f(1.0)), rast{0}.a);"
++            "\n    }}",
++            i, enh_mat_src(cc, i));
++      }
++      if (enh && config.intTev) {
++        fragmentFnPre += fmt::format("\n    rast{0} = round(clamp(rast{0}, vec4f(0.0), vec4f(1.0)) * 255.0) / 255.0;", i);
++      }
+     }
+   }
+   for (int i = 0; i < info.sampledKColors.size(); ++i) {
+@@ -1944,6 +2297,26 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+   if (info.usesZTex) {
+     uniBufAttrs += "\n    ztex_bias: vec4u,";
+   }
++  if (enh) {
++    // Must stay last (fill_uniform appends them last).
++    uniBufAttrs +=
++        "\n    enh_flags: u32,"
++        "\n    enh_light_base: u32,"
++        "\n    enh_light_count: u32,"
++        "\n    enh_shadow_taps: u32,"
++        "\n    enh_extra_scale: f32,"
++        "\n    enh_shadow_radius: f32,"
++        "\n    enh_flash_soft: f32,"
++        "\n    enh_pcss: f32,"
++        "\n    enh_mask_base: u32,"
++        "\n    enh_mask_pitch: u32,"
++        "\n    enh_mask_dims: u32,"
++        "\n    enh_mask_scale: f32,"
++        "\n    enh_flash_spec: f32,"
++        "\n    enh_pad0: f32,"
++        "\n    enh_pad1: f32,"
++        "\n    enh_pad2: f32,";
++  }
+   if (config.intTev) {
+     // Already wrapped to 8 bits after the last stage.
+   } else if (!prevColorNormalized && !prevAlphaNormalized) {
+@@ -2472,6 +2845,15 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}{11}
+   if (EnableDebugPrints) {
+     Log.info("Generated shader (hash {:x}): {}", hash, shaderSource);
+   }
++  // Enhanced lighting debug aid: AURORA_SHADER_DUMP=<dir> writes every generated shader.
++  static const char* sDumpDir = std::getenv("AURORA_SHADER_DUMP");
++  if (sDumpDir != nullptr) {
++    const auto path = fmt::format("{}/{:016x}_e{}.wgsl", sDumpDir, hash, int(config.enhClass));
++    if (FILE* f = std::fopen(path.c_str(), "wb")) {
++      std::fwrite(shaderSource.data(), 1, shaderSource.size(), f);
++      std::fclose(f);
++    }
++  }
+ 
+   return shaderSource;
+ }
+diff --git a/lib/gx/shader_info.cpp b/lib/gx/shader_info.cpp
+index e382007..0ad71a9 100644
+--- a/lib/gx/shader_info.cpp
++++ b/lib/gx/shader_info.cpp
+@@ -1,6 +1,7 @@
+ #include "shader_info.hpp"
+ 
+ #include "../gfx/recording.hpp"
++#include "../gfx/enhanced.hpp"
+ 
+ #include <cmath>
+ 
+@@ -380,6 +381,10 @@ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
+   if (info.usesZTex) {
+     info.uniformSize += 16; // ztex_bias: vec4u
+   }
++  if (config.enhClass != 0) {
++    info.enh = true;
++    info.uniformSize += sizeof(gfx::enhanced::DrawUniform);
++  }
+   info.uniformSize = gfx::align_uniform(info.uniformSize);
+   if (info.uniformSize > MaxUniformSize) {
+     Log.fatal("Uniform size exceeds maximum: {} > {}", info.uniformSize, MaxUniformSize);
+@@ -521,6 +526,9 @@ static void fill_uniform(ByteBuffer& buf, const ShaderInfo& info) noexcept {
+     buf.append<u32>(0);
+     buf.append<u32>(0);
+   }
++  if (info.enh) {
++    buf.append(gfx::enhanced::draw_uniform());
++  }
+ }
+ 
+ gfx::Range build_uniform(const ShaderInfo& info) noexcept {

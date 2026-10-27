@@ -1,0 +1,142 @@
+diff --git a/include/aurora/enhanced.h b/include/aurora/enhanced.h
+index cb362fa..68eb07d 100644
+--- a/include/aurora/enhanced.h
++++ b/include/aurora/enhanced.h
+@@ -88,6 +88,11 @@ void aurora_enhanced_set_config(const AuroraEnhancedConfig* config);
+ 
+ // Draw class for the following draws (AURORA_DRAW_CLASS_*). GX FIFO command.
+ void GXSetDrawClassAurora(uint8_t drawClass);
++// Material of the following draws (GX_AURORA_SET_MATERIAL_HINT): AURORA_MATERIAL_WORLD or
++// AURORA_MATERIAL_CHARACTER. Only uniforms change (no pipeline variants).
++#define AURORA_MATERIAL_WORLD 0
++#define AURORA_MATERIAL_CHARACTER 1
++void GXSetMaterialHintAurora(uint8_t hint);
+ // End of the 3D scene of this frame (before the HUD). GX FIFO command; no effect when the
+ // enhanced mode or all of its screen-space parts are off, or inside an offscreen pass.
+ void GXSceneEndAurora(void);
+diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
+index 728ae5d..b035abf 100644
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -129,6 +129,13 @@ extern "C" {
+  */
+ #define GX_AURORA_SCENE_END 0x0054
+ 
++/**
++ * Enhanced lighting: material of the following draws. Followed by a u8 (AURORA_MATERIAL_*):
++ * 0 world geometry, 1 characters (matte: the game's own vertex lighting, no glossy highlights,
++ * soft wrap-around response to the extra lights).
++ */
++#define GX_AURORA_SET_MATERIAL_HINT 0x0055
++
+ /**
+  * Replay state slots (frame interpolation): GX_AURORA_STATE_SAVE stores the processed GX state
+  * (registers, matrices, vertex layout and arrays, loaded textures; not the copy-texture caches)
+diff --git a/lib/dolphin/gx/GXAurora.cpp b/lib/dolphin/gx/GXAurora.cpp
+index 9a01613..59e3fce 100644
+--- a/lib/dolphin/gx/GXAurora.cpp
++++ b/lib/dolphin/gx/GXAurora.cpp
+@@ -148,6 +148,11 @@ void GXSetDrawClassAurora(uint8_t drawClass) {
+ 
+ void GXSceneEndAurora(void) { GX_WRITE_AURORA(GX_AURORA_SCENE_END); }
+ 
++void GXSetMaterialHintAurora(uint8_t hint) {
++  GX_WRITE_AURORA(GX_AURORA_SET_MATERIAL_HINT);
++  GX_WRITE_U8(hint);
++}
++
+ namespace aurora::gfx {
+ void set_extra_lights(const ExtraLight* lights, uint32_t count) {
+   count = std::min(count, MaxExtraLights);
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+index 75c0105..f57aed3 100644
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -1093,6 +1093,13 @@ DrawUniform draw_uniform() noexcept {
+   u.pcss = std::max(c.softShadowPenumbra, 0.f);
+   u.shadowDark = std::clamp(c.shadowDarkness, 0.f, 1.5f);
+   u.shadowKeep = std::clamp(c.shadowAmbientKeep, 0.f, 1.f);
++  if (gx::g_gxState.materialHint == AURORA_MATERIAL_CHARACTER) {
++    // Characters keep the game's own (vertex) lighting balance: no per-pixel re-evaluation of
++    // the GX lights and no flashlight highlight (glossy on cloth and skin); the extra lights
++    // still reach them, with a matte wrap-around response (shader: enh_material).
++    u.flags &= ~(1u | 8u);
++    u.material = 1.f;
++  }
+   return u;
+ }
+ 
+diff --git a/lib/gfx/enhanced.hpp b/lib/gfx/enhanced.hpp
+index 30b9ffa..b9d06b6 100644
+--- a/lib/gfx/enhanced.hpp
++++ b/lib/gfx/enhanced.hpp
+@@ -30,7 +30,7 @@ struct DrawUniform {
+   float flashSpec = 0.f;  // flashlight specular strength
+   float shadowDark = 1.f;  // AuroraEnhancedConfig::shadowDarkness
+   float shadowKeep = 0.f;  // AuroraEnhancedConfig::shadowAmbientKeep
+-  float pad = 0.f;
++  float material = 0.f;  // 1 = character (GX_AURORA_SET_MATERIAL_HINT)
+ };
+ static_assert(sizeof(DrawUniform) == 64);
+ 
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+index 88d50a9..38c9c51 100644
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -925,6 +925,12 @@ void handle_aurora(ByteReader& reader) noexcept {
+         g_gxState.dirty |= DirtyPipeline;
+       }
+     }
++  } else if (subCmd == GX_AURORA_SET_MATERIAL_HINT) {
++    const u8 hint = reader.read<u8>();
++    if (g_gxState.materialHint != hint) {
++      g_gxState.materialHint = hint;
++      g_gxState.dirty |= DirtyUniform;
++    }
+   } else if (subCmd == GX_AURORA_SET_EXTRA_LIGHTS) {
+     const u32 count = std::min<u32>(reader.read<u8>(), gfx::MaxExtraLights);
+     std::array<gfx::ExtraLight, gfx::MaxExtraLights> lights{};
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+index 71bf91c..8bf37f7 100644
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -350,6 +350,7 @@ struct GXState {
+   u32 wireColor = 0xFFFFFFFF;   // RGBA8
+   bool twoSided = false;        // GX_AURORA_SET_CULL_OVERRIDE
+   u8 drawClass = 0;             // GX_AURORA_SET_DRAW_CLASS (AURORA_DRAW_CLASS_*)
++  u8 materialHint = 0;          // GX_AURORA_SET_MATERIAL_HINT (AURORA_MATERIAL_*)
+   GXBlendMode blendMode = GX_BM_NONE;
+   GXBlendFactor blendFacSrc = GX_BL_SRCALPHA;
+   GXBlendFactor blendFacDst = GX_BL_INVSRCALPHA;
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index d518dbf..49aeb13 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1021,6 +1021,9 @@ fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
+     let fall = w / (1.0 + 8.0 * x2);
+     var ndl = dot(n, l);
+     ndl = select(max(ndl, 0.0), ndl * 0.5 + 0.5, ghost);
++    // Characters (enh_material 1): matte wrap-around diffuse, so a colored light shapes the body
++    // softly instead of a hard terminator; no highlight.
++    ndl = select(ndl, clamp((dot(n, l) + 0.45) / 1.45, 0.0, 1.0) * 0.85, ubuf.enh_material > 0.5 && !ghost);
+     var col = vec3f(enh_ld(b + 4u), enh_ld(b + 5u), enh_ld(b + 6u)) * enh_ld(b + 7u);
+     let slot = abuf[b + 10u];
+     if (slot < 4u) {
+@@ -1030,7 +1033,7 @@ fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
+       col = col * (1.0 - enh_mask(frag, slot) * select(1.0, f32(sw) / 255.0, sw != 0u));
+     }
+     sum = sum + col * (ndl * fall);
+-    if ((flags & 4u) != 0u) {
++    if ((flags & 4u) != 0u && ubuf.enh_material < 0.5) {
+       let h = normalize(l + v);
+       sum = sum + col * (fall * 0.35 * pow(max(dot(n, h), 0.0), 24.0));
+     }
+@@ -2354,7 +2357,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+         "\n    enh_flash_spec: f32,"
+         "\n    enh_shadow_dark: f32,"
+         "\n    enh_shadow_keep: f32,"
+-        "\n    enh_pad2: f32,";
++        "\n    enh_material: f32,";
+   }
+   if (config.intTev) {
+     // Already wrapped to 8 bits after the last stage.

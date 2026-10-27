@@ -1,0 +1,60 @@
+GPU keep-warm (0215) within the compatibility-mode limits. Its compute shader used
+@workgroup_size(256), above the 128 that a device without core features and limits allows (Linux on
+OpenGL ES, e.g. llvmpipe or a GPU without Vulkan): the first time keep-warm engaged, the pipeline
+creation was a fatal uncaptured validation error. Now 128 invocations per workgroup and 32768
+workgroups (the same 4 Mi invocations; at most 65535 workgroups per dimension in compatibility mode),
+and the shader and pipeline are created inside an error scope, so a failure turns keep-warm off.
+
+diff --git a/lib/aurora.cpp b/lib/aurora.cpp
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -13,6 +13,7 @@
+ #ifdef AURORA_ENABLE_GX
+ #include "gfx/resources.hpp"
+ #include "gfx/frame.hpp"
++#include "gfx/pipeline_cache.hpp"
+ #include "gfx/recording.hpp"
+ #include "gfx/render_worker.hpp"
+ #include "gx/command_processor.hpp"
+@@ -427,7 +428,10 @@
+   wgpu::BindGroup bindGroup;
+   bool failed = false;
+ } g_warm;
+-constexpr uint32_t WarmElems = 4u << 20, WarmGroupSize = 256; // 4 Mi vec4f = 64 MiB
++// 0230: 128 invocations per workgroup, 32768 workgroups: within the compatibility-mode limits
++// (maxComputeWorkgroupSizeX / maxComputeInvocationsPerWorkgroup 128, 65535 workgroups per
++// dimension). 256 was a fatal validation error on devices without core limits (Linux on OpenGL ES).
++constexpr uint32_t WarmElems = 4u << 20, WarmGroupSize = 128; // 4 Mi vec4f = 64 MiB
+ 
+ void encode_keep_warm(wgpu::CommandEncoder& encoder) {
+   const uint32_t units = std::min(g_warmUnits.load(std::memory_order_relaxed), 400u);
+@@ -439,7 +443,7 @@
+ struct Params { iters: u32, mask: u32, p1: u32, p2: u32 };
+ @group(0) @binding(0) var<storage, read_write> data: array<vec4f>;
+ @group(0) @binding(1) var<uniform> params: Params;
+-@compute @workgroup_size(256)
++@compute @workgroup_size(128)
+ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
+   var v = vec4f(0.0);
+   for (var i = 0u; i < params.iters; i++) {
+@@ -448,6 +452,8 @@
+   data[id.x] = v;
+ }
+ )";
++    // 0230: an error here turns keep-warm off instead of being a fatal uncaptured error.
++    gfx::push_shader_error_scope();
+     const wgpu::ShaderSourceWGSL wgsl{wgpu::ShaderSourceWGSL::Init{.code = Source}};
+     const wgpu::ShaderModuleDescriptor md{.nextInChain = &wgsl, .label = "GPU keep-warm"};
+     const auto module = g_device.CreateShaderModule(&md);
+@@ -455,6 +461,11 @@
+                                              .compute = wgpu::ComputeState{.module = module, .entryPoint = "cs_main"}};
+     const ::aurora::webgpu::CreateTimer createTimer_378{"pipeline aurora.cpp:378"}; // 0223 (AURORA_CREATE_LOG)
+     g_warm.pipeline = g_device.CreateComputePipeline(&pd);
++    if (!gfx::pop_shader_error_scope("GPU keep-warm")) {
++      g_warm.pipeline = {};
++      g_warm.failed = true;
++      return;
++    }
+     const wgpu::BufferDescriptor bd{.label = "GPU keep-warm data",
+                                     .usage = wgpu::BufferUsage::Storage,
+                                     .size = uint64_t(WarmElems) * 16};

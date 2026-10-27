@@ -1,0 +1,240 @@
+Present timing: per presented frame, when its command buffers were submitted, when Present
+returned and when the GPU finished it (a helper thread waits on an OnSubmittedWorkDone future per
+frame; with a variable refresh rate display that is about when the frame is shown). Also
+aurora_wait_frame_done, so the host can keep the GPU at most one frame behind. LM uses it to pace
+interpolated presentation and to log display times (src/recomp/pacing.cpp, docs/INTERPOLATION.md).
+Off until aurora_present_timing_enable(true).
+
+diff --git a/lib/aurora.cpp b/lib/aurora.cpp
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -1,5 +1,13 @@
+ #include <aurora/aurora.h>
+ #include <aurora/time.hpp>
++#include <aurora/present_timing.h>
++
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
++#include <deque>
++#include <mutex>
++#include <thread>
+ 
+ #ifdef AURORA_ENABLE_GX
+ #include "gfx/resources.hpp"
+@@ -207,10 +215,17 @@
+   };
+ }
+ 
++#ifdef AURORA_ENABLE_GX
++namespace present_timing {
++void shutdown();
++}
++#endif
++
+ void shutdown() noexcept {
+ #ifdef AURORA_ENABLE_GX
+   gx::fifo::shutdown();
+   gfx::render_worker::synchronize();
++  present_timing::shutdown();
+ #ifdef AURORA_ENABLE_RMLUI
+   rmlui::shutdown();
+ #endif
+@@ -235,6 +250,92 @@
+   return window::poll_events();
+ }
+ 
++#ifdef AURORA_ENABLE_GX
++// Present timing (present_timing.h). The render worker hands each presented frame's
++// OnSubmittedWorkDone future to a helper thread that waits on it and stamps when the GPU finished.
++namespace present_timing {
++std::atomic<bool> g_enabled{false};
++std::atomic<uint64_t> g_counter{0};
++std::atomic<uint64_t> g_lastDone{0};
++std::mutex g_mutex;
++std::condition_variable g_cv;
++struct Pending {
++  AuroraPresentTiming t;
++  wgpu::Future future;
++};
++std::deque<Pending> g_pending;
++std::deque<AuroraPresentTiming> g_done;
++std::thread g_thread;
++bool g_stop = false;
++
++int64_t now_ns() {
++  return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
++      .count();
++}
++
++void waiter() {
++  for (;;) {
++    Pending p;
++    {
++      std::unique_lock lk(g_mutex);
++      g_cv.wait(lk, [] { return g_stop || !g_pending.empty(); });
++      if (g_stop) {
++        return;
++      }
++      p = g_pending.front();
++    }
++    bool ok = false;
++    for (int i = 0; i < 50 && !ok; i++) {  // up to 5 s
++      ok = webgpu::g_instance.WaitAny(p.future, 100'000'000) == wgpu::WaitStatus::Success;
++      if (g_stop) {
++        return;
++      }
++    }
++    p.t.doneNs = ok ? now_ns() : 0;
++    {
++      std::lock_guard lk(g_mutex);
++      g_pending.pop_front();
++      g_done.push_back(p.t);
++      while (g_done.size() > 512) {
++        g_done.pop_front();
++      }
++      g_lastDone.store(p.t.frame, std::memory_order_release);
++    }
++    g_cv.notify_all();
++  }
++}
++
++// Render worker, after the frame's last submit and its Present.
++void frame_presented(uint64_t frame, int64_t submitNs, int64_t presentNs) {
++  if (!g_enabled.load(std::memory_order_acquire)) {
++    g_lastDone.store(frame, std::memory_order_release);
++    return;
++  }
++  wgpu::Future f = g_queue.OnSubmittedWorkDone(wgpu::CallbackMode::WaitAnyOnly,
++                                               [](wgpu::QueueWorkDoneStatus, wgpu::StringView) {});
++  {
++    std::lock_guard lk(g_mutex);
++    if (!g_thread.joinable()) {
++      g_thread = std::thread(waiter);
++    }
++    g_pending.push_back({AuroraPresentTiming{frame, submitNs, presentNs, 0}, f});
++  }
++  g_cv.notify_all();
++}
++
++void shutdown() {
++  {
++    std::lock_guard lk(g_mutex);
++    g_stop = true;
++  }
++  g_cv.notify_all();
++  if (g_thread.joinable()) {
++    g_thread.join();
++  }
++}
++} // namespace present_timing
++#endif
++
+ bool begin_frame() noexcept {
+   ZoneScoped;
+ #ifdef AURORA_ENABLE_GX
+@@ -258,6 +359,7 @@
+   if (!gfx::begin_frame()) {
+     return false;
+   }
++  present_timing::g_counter.fetch_add(1, std::memory_order_acq_rel);
+   gx::fifo::begin_frame();
+ #endif
+   return true;
+@@ -288,7 +390,8 @@
+ #endif
+ 
+   gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
+-                  imguiDrawData = std::move(imguiDrawData)](
++                  imguiDrawData = std::move(imguiDrawData),
++                  timingFrame = present_timing::g_counter.load(std::memory_order_acquire)](
+                      wgpu::CommandEncoder& encoder, std::vector<gfx::AfterSubmitCallback> afterSubmitCallbacks) {
+     // The frame's own GPU work is submitted before the surface texture is acquired, and its
+     // after-submit callbacks (readback maps: EFB copies to RAM, peeks) run right away. Acquiring
+@@ -400,6 +503,7 @@
+       ZoneScopedN("Queue Submit");
+       g_queue.Submit(1, &buffer);
+     }
++    const int64_t timingSubmitNs = present_timing::now_ns();
+     webgpu::gpu_prof::after_submit();
+     if (canPresent && g_surface) {
+       ZoneScopedN("Present");
+@@ -412,11 +516,13 @@
+       }
+       if (status) {
+         gfx::after_present();
++        present_timing::frame_presented(timingFrame, timingSubmitNs, present_timing::now_ns());
+       } else {
+         Log.warn("Surface present failed");
+         webgpu::release_surface();
+       }
+     } else if (g_surface) {
++      present_timing::frame_presented(timingFrame, timingSubmitNs, 0);
+       switch (surfaceStatus) {
+       case wgpu::SurfaceGetCurrentTextureStatus::Timeout:
+         Log.warn("Surface texture acquisition timed out");
+@@ -480,6 +586,29 @@
+ void aurora_shutdown() { aurora::shutdown(); }
+ const AuroraEvent* aurora_update() { return aurora::update(); }
+ bool aurora_begin_frame() { return aurora::begin_frame(); }
++#ifdef AURORA_ENABLE_GX
++void aurora_present_timing_enable(bool enable) { aurora::present_timing::g_enabled.store(enable, std::memory_order_release); }
++uint64_t aurora_frame_counter() { return aurora::present_timing::g_counter.load(std::memory_order_acquire); }
++size_t aurora_present_timings(AuroraPresentTiming* out, size_t max) {
++  std::lock_guard lk(aurora::present_timing::g_mutex);
++  size_t n = 0;
++  auto& d = aurora::present_timing::g_done;
++  while (n < max && !d.empty()) {
++    out[n++] = d.front();
++    d.pop_front();
++  }
++  return n;
++}
++bool aurora_wait_frame_done(uint64_t frame, int64_t timeoutNs) {
++  using namespace aurora::present_timing;
++  if (g_lastDone.load(std::memory_order_acquire) >= frame) {
++    return true;
++  }
++  std::unique_lock lk(g_mutex);
++  return g_cv.wait_for(lk, std::chrono::nanoseconds(timeoutNs),
++                       [frame] { return g_stop || g_lastDone.load(std::memory_order_acquire) >= frame; });
++}
++#endif
+ void aurora_end_frame() { aurora::end_frame(); }
+ SDL_Window* aurora_get_window() { return aurora::window::get_sdl_window(); }
+ AuroraWindowSize aurora_get_window_size() {
+diff --git a/include/aurora/present_timing.h b/include/aurora/present_timing.h
+new file mode 100644
+--- /dev/null
++++ b/include/aurora/present_timing.h
+@@ -0,0 +1,30 @@
++#pragma once
++// Present timing (LM patch 0197): when each frame's GPU work was submitted, when Present returned
++// and when the GPU finished the frame (with a variable refresh rate display, about when it is
++// shown). Times are std::chrono::steady_clock nanoseconds since its epoch.
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct AuroraPresentTiming {
++  uint64_t frame;     // aurora_frame_counter() of the frame
++  int64_t submitNs;   // the frame's command buffers submitted (render worker)
++  int64_t presentNs;  // Present returned
++  int64_t doneNs;     // the GPU finished everything up to the present (0: unknown)
++} AuroraPresentTiming;
++
++// Starts recording (off by default: one GPU fence wait per frame on a helper thread).
++void aurora_present_timing_enable(bool enable);
++// Frames begun so far (the counter of the frame the last aurora_begin_frame opened).
++uint64_t aurora_frame_counter(void);
++// Completed records, oldest first; returns the number written (at most `max`).
++size_t aurora_present_timings(AuroraPresentTiming* out, size_t max);
++// Blocks until the GPU finished every frame up to `frame` or `timeoutNs` passed; true if finished.
++bool aurora_wait_frame_done(uint64_t frame, int64_t timeoutNs);
++
++#ifdef __cplusplus
++}
++#endif

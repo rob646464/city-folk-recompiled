@@ -1,0 +1,109 @@
+diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
+index 38dc31d..3d370ff 100644
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -124,6 +124,16 @@ extern "C" {
+ void GXSetAuroraAccuracy(u32 flags);
+ u32 GXGetAuroraAccuracy();
+ 
++/**
++ * What a TEV or indirect stage reads from a texture coordinate at or beyond GXSetNumTexGens:
++ * 0 = (0, 0); 1 (default) = the coordinate its texgen registers describe, as if it were counted;
++ * 2 = texture coordinate 0.
++ */
++#define GX_AURORA_TEXGEN_BEYOND_ZERO 0
++#define GX_AURORA_TEXGEN_BEYOND_GENERATE 1
++#define GX_AURORA_TEXGEN_BEYOND_TEXCOORD0 2
++void GXSetAuroraTexGenBeyondCount(u32 mode);
++
+ /*
+  * Debug marker stuff
+  */
+diff --git a/lib/dolphin/gx/GXAurora.cpp b/lib/dolphin/gx/GXAurora.cpp
+index b2b1312..dff3642 100644
+--- a/lib/dolphin/gx/GXAurora.cpp
++++ b/lib/dolphin/gx/GXAurora.cpp
+@@ -67,6 +67,8 @@ void GXSetAuroraAccuracy(u32 flags) { aurora::gx::g_accuracyFlags.store(flags, s
+ 
+ u32 GXGetAuroraAccuracy() { return aurora::gx::g_accuracyFlags.load(std::memory_order_relaxed); }
+ 
++void GXSetAuroraTexGenBeyondCount(u32 mode) { aurora::gx::g_texGenBeyondCount.store(mode, std::memory_order_relaxed); }
++
+ void GXSetViewportRender(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz) {
+   GX_WRITE_AURORA(GX_AURORA_LOAD_VIEWPORT_RENDER);
+   GX_WRITE_F32(left);
+diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
+index f261f05..3d82b50 100644
+--- a/lib/gx/gx.cpp
++++ b/lib/gx/gx.cpp
+@@ -31,6 +31,7 @@ using webgpu::g_graphicsConfig;
+ 
+ GXState g_gxState{};
+ std::atomic<u32> g_accuracyFlags{GX_AURORA_ACCURACY_INT_TEV | GX_AURORA_ACCURACY_EFB_DEPTH};
++std::atomic<u32> g_texGenBeyondCount{GX_AURORA_TEXGEN_BEYOND_GENERATE};
+ wgpu::BindGroup g_emptyTextureBindGroup;
+ 
+ namespace {
+@@ -475,6 +476,50 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
+   for (u8 i = 0; i < g_gxState.numTexGens; ++i) {
+     config.shaderConfig.tcgs[i] = g_gxState.tcgs[i];
+   }
++  // Texture coordinates read by a TEV or indirect stage at or beyond numTexGens (only these: every
++  // other draw's config is unchanged). Default: generated from their texgen registers.
++  if (const u32 beyond = g_texGenBeyondCount.load(std::memory_order_relaxed);
++      beyond != GX_AURORA_TEXGEN_BEYOND_ZERO && g_gxState.numTexGens < MaxTexCoord) {
++    const auto fill = [&](u32 coord) {
++      if (coord < g_gxState.numTexGens || coord >= MaxTexCoord) {
++        return;
++      }
++      const auto& tcg = beyond == GX_AURORA_TEXGEN_BEYOND_TEXCOORD0 && g_gxState.numTexGens > 0
++                            ? g_gxState.tcgs[0]
++                            : g_gxState.tcgs[coord];
++      // Only matrix texgens whose source the vertex provides (otherwise keep (0, 0)).
++      const bool srcOk = tcg.src == GX_TG_POS ||
++                         (tcg.src >= GX_TG_TEX0 && tcg.src <= GX_TG_TEX7 &&
++                          config.shaderConfig.attrs[GX_VA_TEX0 + (tcg.src - GX_TG_TEX0)].attrType != GX_NONE) ||
++                         (tcg.src == GX_TG_NRM && config.shaderConfig.attrs[GX_VA_NRM].attrType != GX_NONE);
++      if (srcOk && (tcg.type == GX_TG_MTX2x4 || tcg.type == GX_TG_MTX3x4)) {
++        config.shaderConfig.tcgs[coord] = tcg;
++        static u32 sLogged = 0; // bit per (numTexGens, coord)
++        const u32 bit = 1u << ((g_gxState.numTexGens * 8 + coord) & 31);
++        if (!(sLogged & bit)) {
++          sLogged |= bit;
++          Log.info("texcoord {} read beyond numTexGens {}: generated from its texgen (src {}, mtx {})", coord,
++                   g_gxState.numTexGens, underlying(tcg.src), tcg.mtx);
++        }
++      }
++    };
++    const auto samples = [](const TevStage& st) {
++      const auto& c = st.colorPass;
++      const auto& a = st.alphaPass;
++      const auto tc = [](GXTevColorArg x) { return x == GX_CC_TEXC || x == GX_CC_TEXA; };
++      return tc(c.a) || tc(c.b) || tc(c.c) || tc(c.d) || a.a == GX_CA_TEXA || a.b == GX_CA_TEXA ||
++             a.c == GX_CA_TEXA || a.d == GX_CA_TEXA;
++    };
++    for (u8 i = 0; i < g_gxState.numTevStages; ++i) {
++      const auto& st = g_gxState.tevStages[i];
++      if (st.texCoordId != GX_TEXCOORD_NULL && st.texMapId != GX_TEXMAP_NULL && samples(st)) {
++        fill(st.texCoordId);
++      }
++    }
++    for (u8 i = 0; i < g_gxState.numIndStages; ++i) {
++      fill(g_gxState.indStages[i].texCoordId);
++    }
++  }
+   if (g_gxState.alphaCompare) {
+     config.shaderConfig.alphaCompare = g_gxState.alphaCompare;
+   }
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+index 0c4477e..35a7afe 100644
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -440,6 +440,7 @@ struct GXState {
+ };
+ extern GXState g_gxState;
+ extern std::atomic<u32> g_accuracyFlags; // GX_AURORA_ACCURACY_*
++extern std::atomic<u32> g_texGenBeyondCount; // GX_AURORA_TEXGEN_BEYOND_*
+ struct ShaderInfo;
+ 
+ void initialize() noexcept;

@@ -1,0 +1,18 @@
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index 0e3f22c..e097895 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1758,7 +1758,12 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+         "\n    let viewport_scale = ubuf.render_viewport_size / max(ubuf.logical_viewport_size, vec2f(1.0));"
+         "\n    let delta_px = (ndc_b - ndc_a) / 2.0 * ubuf.render_viewport_size;"
+         "\n    let dir_px = select(vec2f(1.0, 0.0), normalize(delta_px), dot(delta_px, delta_px) > 1e-10);"
+-        "\n    let perp_px = vec2f(-dir_px.y, dir_px.x);"
++        "\n    let perp_dir = vec2f(-dir_px.y, dir_px.x);"
++        // The GX rasterizer widens a line along its minor axis (vertical for a mostly
++        // horizontal line, horizontal otherwise): the ends are horizontal/vertical cuts and a
++        // sloped line is thinner than its width measured across it.
++        "\n    let perp_px = select(vec2f(sign(perp_dir.x), 0.0), vec2f(0.0, sign(perp_dir.y)),"
++        " abs(delta_px.x) >= abs(delta_px.y));"
+         "\n    let line_width = ubuf.line_width * min(viewport_scale.x, viewport_scale.y);"
+         "\n    let offset_px = perp_px * (line_width / 2.0) * select(-1.0, 1.0, (vidx & 1u) != 0u);"
+         "\n    let offset_ndc = (offset_px * 2.0) / ubuf.render_viewport_size;"

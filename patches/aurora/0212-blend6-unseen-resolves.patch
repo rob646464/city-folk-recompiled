@@ -1,0 +1,157 @@
+0212: 6-bit blend resolves that nothing would see are dropped
+
+An EFB pass with blended RGBA6 draws is quantized (copy + full-screen pass) after it ends (0176).
+When nothing in the pass reads its color afterwards (no color copy, no snapshot), the resolve now
+waits for the next op: it runs before any op as before, except when that op is the next pass on
+the same color target and clears its color completely (loadOp Clear, no pre-ops), where every
+quantized pixel would be overwritten unseen; then it is dropped. In Luigi's Mansion that is the
+shadow-map caster pass (rendered into the EFB, only its depth is copied) and similar passes ahead
+of a full clear. A resolve still waiting at the end of the frame runs before the frame is
+submitted. The picture is byte-identical. AURORA_EFB_BLEND6_NODEFER=1: resolve every pass (A/B).
+
+diff --git a/lib/gfx/efb_blend6.cpp b/lib/gfx/efb_blend6.cpp
+--- a/lib/gfx/efb_blend6.cpp
++++ b/lib/gfx/efb_blend6.cpp
+@@ -1,6 +1,7 @@
+ #include "efb_blend6.hpp"
+ 
+ #include "frame_packet.hpp"
++#include "../gx/gx.hpp"
+ #include "../webgpu/gpu.hpp"
+ #include "../webgpu/gpu_prof.hpp"
+ #include "../logging.hpp"
+@@ -15,6 +16,7 @@
+ #include <memory>
+ #include <mutex>
+ #include <string>
++#include <utility>
+ #include <vector>
+ 
+ namespace aurora::gfx::efb_blend6 {
+@@ -233,6 +235,14 @@
+   uint8_t flags = 0;
+ };
+ Pending g_pending;
++// 0212: the last pass's resolve, run (or dropped) at the next op (before_op).
++struct Deferred {
++  const detail::RenderPass* pass = nullptr;
++  uint8_t flags = 0;
++};
++Deferred g_deferred;
++uint64_t g_skipped = 0;
++void resolve(const wgpu::CommandEncoder& cmd, detail::FramePacket& frame, const detail::RenderPass& pass, uint8_t flags);
+ } // namespace
+ 
+ void after_pass(const wgpu::CommandEncoder& cmd, detail::FramePacket& frame, const detail::RenderPass& pass) {
+@@ -258,6 +268,20 @@
+     g_pending = {color.view.Get(), flags};
+     return;
+   }
++  // 0212: nothing in this pass reads its color after it (no color copy, no snapshot, no post-op):
++  // resolve before the next op, or not at all when that op clears this color target completely.
++  static const bool sNoDefer = std::getenv("AURORA_EFB_BLEND6_NODEFER") != nullptr; // A/B
++  if (!sNoDefer && !pass.snapshotColorDst && !pass.colorPostOps &&
++      (!pass.resolveTarget || gx::is_depth_format(pass.resolveFormat))) {
++    g_deferred = {&pass, flags};
++    return;
++  }
++  resolve(cmd, frame, pass, flags);
++}
++
++namespace {
++void resolve(const wgpu::CommandEncoder& cmd, detail::FramePacket& frame, const detail::RenderPass& pass, uint8_t flags) {
++  const auto& color = pass.colorAttachments[SceneColorAttachmentIndex];
+   const uint32_t samples = std::max(pass.msaaSamples, 1u);
+   const auto& scratch = scratch_for(color.size, color.format, samples);
+   const Pipeline quantize = pipeline_for({color.format, samples, static_cast<uint8_t>((flags & 2) != 0 ? 2 : 1)});
+@@ -319,6 +343,27 @@
+     finish_timing(cmd, frame, std::move(timing));
+   }
+ }
++} // namespace
++
++void before_op(const wgpu::CommandEncoder& cmd, detail::FramePacket& frame, const detail::RenderPass* next) {
++  if (g_deferred.pass == nullptr) {
++    return;
++  }
++  const auto deferred = std::exchange(g_deferred, Deferred{});
++  if (next != nullptr && next->sealed && !next->discardable && next->ramPreOps.empty() && next->paletteConvs.empty() &&
++      next->colorAttachmentCount > 0) {
++    const auto& prevColor = deferred.pass->colorAttachments[SceneColorAttachmentIndex];
++    const auto& color = next->colorAttachments[SceneColorAttachmentIndex];
++    const bool clears = color.loadOp == wgpu::LoadOp::Clear || (color.loadOp == wgpu::LoadOp::Undefined && color.clear);
++    if (clears && color.view.Get() == prevColor.view.Get() && color.resolveView.Get() == prevColor.resolveView.Get()) {
++      ++g_skipped;
++      return; // every quantized pixel would be cleared before anything reads it
++    }
++  }
++  resolve(cmd, frame, *deferred.pass, deferred.flags);
++}
++
++void flush(const wgpu::CommandEncoder& cmd, detail::FramePacket& frame) { before_op(cmd, frame, nullptr); }
+ 
+ void initialize() {
+   // Built up front: creating them at the first resolve, on the render worker, held the device
+diff --git a/lib/gfx/efb_blend6.hpp b/lib/gfx/efb_blend6.hpp
+--- a/lib/gfx/efb_blend6.hpp
++++ b/lib/gfx/efb_blend6.hpp
+@@ -21,6 +21,12 @@
+ // where the blended draws switch dither state. A pass ended by a copy of at most 64 pixels (peek probes) hands its flags to the
+ // next pass on the same target. Called after every encoded pass; render worker only.
+ void after_pass(const wgpu::CommandEncoder& cmd, detail::FramePacket& frame, const detail::RenderPass& pass);
++// 0212: a pass whose color nothing reads before the next op is resolved lazily: before_op runs
++// it before any other op, unless that op is the next pass on the same target and clears its color
++// completely (then the quantized values would be overwritten unseen and it is dropped). flush runs
++// what is left at the end of the frame.
++void before_op(const wgpu::CommandEncoder& cmd, detail::FramePacket& frame, const detail::RenderPass* next);
++void flush(const wgpu::CommandEncoder& cmd, detail::FramePacket& frame);
+ void initialize();
+ void shutdown();
+ 
+diff --git a/lib/gfx/encoding.cpp b/lib/gfx/encoding.cpp
+--- a/lib/gfx/encoding.cpp
++++ b/lib/gfx/encoding.cpp
+@@ -413,6 +413,8 @@
+ 
+ namespace detail {
+ void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const FrameOp& op) {
++  // 0212: the previous pass's 6-bit resolve, unless this pass clears that target unseen.
++  efb_blend6::before_op(cmd, frame, op.type == FrameOpType::RenderPass ? op.renderPass : nullptr);
+   copy_staging_to_high_water(cmd, frame, op);
+   switch (op.type) {
+   case FrameOpType::RenderPass:
+diff --git a/lib/gfx/frame.cpp b/lib/gfx/frame.cpp
+--- a/lib/gfx/frame.cpp
++++ b/lib/gfx/frame.cpp
+@@ -703,6 +703,7 @@
+   const size_t stagingSlot = frame.stagingBuffer;
+   render_worker::enqueue_end_frame(frameId, [frameSlot, stagingSlot, callback = std::move(callback)]() mutable {
+     auto& packet = g_framePackets[frameSlot];
++    efb_blend6::flush(packet.encoder, packet); // 0212: a resolve still deferred at the frame's end
+     g_stagingBuffers[stagingSlot].Unmap();
+     g_mappingStates[stagingSlot].store(BufferMapState::Unmapped, std::memory_order_release);
+     auto encoder = std::move(packet.encoder);
+diff --git a/lib/gfx/frame_packet.hpp b/lib/gfx/frame_packet.hpp
+--- a/lib/gfx/frame_packet.hpp
++++ b/lib/gfx/frame_packet.hpp
+@@ -112,6 +112,9 @@
+   // 0176: blended RGBA6 draws in this pass (bit 0 without dither, bit 1 with): the color target is
+   // quantized after the pass (efb_blend6::resolve)
+   uint8_t efbBlend6 = 0;
++  // 0212: a post-op reads this pass's color target (push_scene_op); EFB-copy RAM ops only read
++  // their copy textures.
++  bool colorPostOps = false;
+   std::vector<tex_palette_conv::ConvRequest> paletteConvs;
+   std::vector<efb_ram::PassOp> ramPreOps;  // before the pass (EFB copy RAM decodes)
+   std::vector<efb_ram::PassOp> ramPostOps; // after the resolve (EFB copy RAM encode/readback)
+diff --git a/lib/gfx/recording.cpp b/lib/gfx/recording.cpp
+--- a/lib/gfx/recording.cpp
++++ b/lib/gfx/recording.cpp
+@@ -1034,6 +1034,7 @@
+   prevPass.ramPostOps.push_back([op = std::move(op), targets](const wgpu::CommandEncoder& cmd, detail::FramePacket&) {
+     op(cmd, targets);
+   });
++  prevPass.colorPostOps = true; // 0212
+   // The op must run even when the pass itself drew nothing.
+   prevPass.discardable = false;
+   enqueue_pass(current_frame_packet(), g_recorder.currentRenderPass);

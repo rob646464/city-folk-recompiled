@@ -1,0 +1,24 @@
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index 9dfbdac..5530a86 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1106,8 +1106,18 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+         return fmt::format("tev_overflow_f32({})", value);
+       };
+       std::string_view outReg = regName[stage.alphaOp.outReg];
++      // The R8/GR16/BGR24 compare modes compare the stage's *color* inputs A and B even
++      // in the alpha unit; only the last mode (A8) compares the alpha inputs.
++      const auto aop = stage.alphaOp.op;
++      const bool colorCompare = aop >= GX_TEV_COMP_R8_GT && aop <= GX_TEV_COMP_BGR24_EQ;
++      const auto cmp_arg = [&](GXTevColorArg carg, GXTevAlphaArg aarg) {
++        if (!colorCompare) return alpha_arg(aarg);
++        auto value = color_arg_reg(carg, idx, config, stage);
++        return fmt::format("vec3f({})", value);
++      };
+       std::string op = tev_alpha_op(stage.alphaOp.op, tev_bias(stage.alphaOp.bias), tev_scale(stage.alphaOp.scale),
+-                                    stage.alphaOp.clamp, alpha_arg(stage.alphaPass.a), alpha_arg(stage.alphaPass.b),
++                                    stage.alphaOp.clamp, cmp_arg(stage.colorPass.a, stage.alphaPass.a),
++                                    cmp_arg(stage.colorPass.b, stage.alphaPass.b),
+                                     alpha_arg(stage.alphaPass.c), alpha_arg_reg(stage.alphaPass.d, idx, config, stage));
+       fragmentFn += fmt::format("\n    {0}.a = {1};", outReg, op);
+       alphaNormalized[stage.alphaOp.outReg] = stage.alphaOp.clamp;

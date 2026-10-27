@@ -1,0 +1,186 @@
+diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -192,6 +192,21 @@
+  * depth-only pass and the colour pass). AURORA_EARLY_Z_SPLIT overrides it (0 off, 1 on, ab).
+  */
+ #define GX_AURORA_ACCURACY_EARLY_Z 0x0010
++/**
++ * With GX_AURORA_ACCURACY_EFB_DEPTH (0190, enhancement): smooth color banding. The EFB format
++ * quantization (RGBA6 / RGB565 with the PE dither) and the RGB565 / RGB5A3 texture-copy precision
++ * output the local average of the hardware result instead of its steps: the same brightness and
++ * tint as the 6/5-bit picture (the truncation's darkening is kept), without contour bands or
++ * dither grain. Alpha keeps the exact 6-bit value; blended RGBA6 draws are not re-quantized
++ * (GX_AURORA_ACCURACY_EFB_BLEND is ignored). Runtime switch: no pipeline changes.
++ */
++#define GX_AURORA_ACCURACY_EFB_SMOOTH 0x0020
++/**
++ * With GX_AURORA_ACCURACY_EFB_SMOOTH: the smoothed EFB color also gets a sub-LSB ordered noise
++ * (+-0.5 of an 8-bit step, interleaved gradient noise by render pixel) before the 8-bit target
++ * rounds it, so dark gradients do not show 8-bit steps either.
++ */
++#define GX_AURORA_ACCURACY_EFB_SMOOTH_NOISE 0x0040
+ 
+ void GXSetAuroraAccuracy(u32 flags);
+ u32 GXGetAuroraAccuracy();
+diff --git a/lib/gfx/recording.cpp b/lib/gfx/recording.cpp
+--- a/lib/gfx/recording.cpp
++++ b/lib/gfx/recording.cpp
+@@ -885,7 +885,10 @@
+       .offset = {static_cast<float>(rect.x) / srcW, static_cast<float>(rect.y) / srcH},
+       .scale = {static_cast<float>(rect.width) / srcW, static_cast<float>(rect.height) / srcH},
+       .opaqueAlpha = !gx::efb_has_alpha(sourceFormat),
+-      .quantize = (gx::g_accuracyFlags.load(std::memory_order_relaxed) & GX_AURORA_ACCURACY_EFB_DEPTH) != 0,
++      // 1 = the format's precision, 2 = its smoothed average (0190, GX_AURORA_ACCURACY_EFB_SMOOTH)
++      .quantize = (gx::g_accuracyFlags.load(std::memory_order_relaxed) & GX_AURORA_ACCURACY_EFB_DEPTH) == 0 ? 0u
++                  : (gx::g_accuracyFlags.load(std::memory_order_relaxed) & GX_AURORA_ACCURACY_EFB_SMOOTH) != 0 ? 2u
++                                                                                                             : 1u,
+       .lineStep = rowStep,
+       .filterTaps = gx::is_depth_format(resolveFormat) ? 0u : copy_filter_taps(),
+       .clampTop = (clamp & 1) != 0 ? static_cast<float>(rect.y) / srcH + 0.5f * rowStep : -1.f,
+diff --git a/lib/gfx/tex_copy_conv.cpp b/lib/gfx/tex_copy_conv.cpp
+--- a/lib/gfx/tex_copy_conv.cpp
++++ b/lib/gfx/tex_copy_conv.cpp
+@@ -96,6 +96,25 @@
+     let x = (u32(round(clamp(v, 0.0, 1.0) * 255.0)) >> (8u - n)) << (8u - n);
+     return f32(x | (x >> n) | (x >> (2u * n))) / 255.0;
+ }
++
++// The n-bit level k widened like bits8: x | x >> n | x >> 2n with x = k << (8 - n).
++fn widen8(k: f32, lev: f32, step: f32) -> f32 {
++    let x = k * step;
++    return x + floor(x / lev) + floor(x / (lev * lev));
++}
++
++// 0190 (GX_AURORA_ACCURACY_EFB_SMOOTH, quantize == 2): the average of bits8 over a smooth input
++// instead of its steps. The EFB holds 6-bit values, so keeping n bits drops 6 - n of them, on
++// average 2 * (2^(6 - n) - 1) of 255 (2 for 5 bits, 6 for 4, 0 for 6): the ramp through the widened
++// n-bit levels, shifted by that, keeps the copy's brightness and tint without its bands.
++fn smooth8(v: f32, n: u32) -> f32 {
++    let lev = f32(1u << n);
++    let step = 256.0 / lev;
++    let t = (clamp(v, 0.0, 1.0) * 255.0 - 2.0 * (64.0 / lev - 1.0)) / step;
++    let k = clamp(floor(t), 0.0, lev - 1.0);
++    let k1 = min(k + 1.0, lev - 1.0);
++    return mix(widen8(k, lev, step), widen8(k1, lev, step), clamp(t - k, 0.0, 1.0)) / 255.0;
++}
+ )"sv;
+ 
+ static const std::string DepthShaderPreamble = R"(
+@@ -194,6 +213,9 @@
+ static constexpr std::string_view FragRGB565 = R"(
+ @fragment fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+     let c = sample_efb(in.uv);
++    if (ubuf.quantize == 2u) {
++        return vec4f(smooth8(c.r, 5u), smooth8(c.g, 6u), smooth8(c.b, 5u), 1.0);
++    }
+     if (ubuf.quantize != 0u) {
+         return vec4f(bits8(c.r, 5u), bits8(c.g, 6u), bits8(c.b, 5u), 1.0);
+     }
+@@ -208,7 +230,14 @@
+     if (ubuf.quantize == 0u) {
+         return c;
+     }
+-    if (u32(round(clamp(c.a, 0.0, 1.0) * 255.0)) >= 0xE0u) {
++    let opaque = u32(round(clamp(c.a, 0.0, 1.0) * 255.0)) >= 0xE0u;
++    if (ubuf.quantize == 2u) {
++        if (opaque) {
++            return vec4f(smooth8(c.r, 5u), smooth8(c.g, 5u), smooth8(c.b, 5u), 1.0);
++        }
++        return vec4f(smooth8(c.r, 4u), smooth8(c.g, 4u), smooth8(c.b, 4u), bits8(c.a, 3u));
++    }
++    if (opaque) {
+         return vec4f(bits8(c.r, 5u), bits8(c.g, 5u), bits8(c.b, 5u), 1.0);
+     }
+     return vec4f(bits8(c.r, 4u), bits8(c.g, 4u), bits8(c.b, 4u), bits8(c.a, 3u));
+diff --git a/lib/gfx/tex_copy_conv.hpp b/lib/gfx/tex_copy_conv.hpp
+--- a/lib/gfx/tex_copy_conv.hpp
++++ b/lib/gfx/tex_copy_conv.hpp
+@@ -17,7 +17,7 @@
+   Vec2<float> offset;
+   Vec2<float> scale{1.f, 1.f};
+   uint32_t opaqueAlpha = 0;
+-  uint32_t quantize = 0; // RGB565/RGB5A3 copies: store the format's precision (GX_AURORA_ACCURACY_EFB_DEPTH)
++  uint32_t quantize = 0; // RGB565/RGB5A3 copies: store the format's precision (GX_AURORA_ACCURACY_EFB_DEPTH); 2 = smoothed (0190)
+   // Vertical copy filter (GXSetCopyFilter, GX_AURORA_ACCURACY_COPY_FILTER): one source row in uv
+   // units (the shader derives it from the source texture; one EFB line at native resolution), and the weights (out of 64) of the line above (taps 0+1), the line itself (2+3+4)
+   // and the line below (5+6) in bytes 0-2. 0 = no filter (pass-through taps, or a depth copy).
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -790,9 +790,14 @@
+     return;
+   }
+ 
+-  // Bits 8..15: GX_AURORA_SET_FADE (the matrix index stays in the low byte).
++  // Bits 8..15: GX_AURORA_SET_FADE (the matrix index stays in the low byte). Bit 16: smooth EFB
++  // quantization, bit 17: with sub-LSB noise (0190, GX_AURORA_ACCURACY_EFB_SMOOTH / _NOISE).
++  const u32 smoothFlags = g_accuracyFlags.load(std::memory_order_relaxed);
++  const u32 smoothBits = (smoothFlags & GX_AURORA_ACCURACY_EFB_SMOOTH) == 0 ? 0u
++                         : (smoothFlags & GX_AURORA_ACCURACY_EFB_SMOOTH_NOISE) != 0 ? 0x30000u
++                                                                                     : 0x10000u;
+   DrawImmediateData immediates{.vtxStart = vertRange.offset,
+-                               .currentPnMtx = state.currentPnMtx | u32(state.fadeQ) << 8};
++                               .currentPnMtx = state.currentPnMtx | u32(state.fadeQ) << 8 | smoothBits};
+   for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+     if (state.vtxDesc[i] != GX_INDEX8 && state.vtxDesc[i] != GX_INDEX16) {
+       continue;
+@@ -891,7 +896,8 @@
+   if (draw_debug_note(cache.config, prim, vtxCount)) [[unlikely]] {
+     return;
+   }
+-  if (cache.efbBlend6 != 0 && (cache.config.colorUpdate || cache.config.alphaUpdate)) {
++  // 0190: smoothed EFB (bit 16) leaves the blend result unquantized (no 6-bit resolve of the pass).
++  if (cache.efbBlend6 != 0 && smoothBits == 0 && (cache.config.colorUpdate || cache.config.alphaUpdate)) {
+     gfx::note_efb_blend6(cache.efbBlend6 == 3);
+   }
+   if (gfx::enhanced::config().enabled) {
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1439,11 +1439,41 @@
+ // Quantize the pixel to the EFB pixel format the way the PE stores it (optionally with its 2x2
+ // ordered dither), then expand back to 8 bits as copies and the display read it.
+ std::string efb_quantize(const ShaderConfig& config) {
++  const bool rgb565 = config.efbFmt == 2;
++  // 0190 (GX_AURORA_ACCURACY_EFB_SMOOTH, immediate bit 16; bit 17 = noise): instead of the stored
++  // 6/5-bit value, the average of what the PE stores over the sub-step positions of a smooth input:
++  // with dither the mean of the dithered result is t = (c - (c >> bits)) / step levels (the dither
++  // adds 0..step-1 uniformly), without dither the truncation's mean is t = (c - (step - 1) / 2) / step
++  // for the 8-bit TEV output. The output is the widened level ramp (k << (8 - bits)) | (k >> (2 bits - 8))
++  // interpolated at t: no steps, same mean brightness and tint as the quantized picture. Alpha (dst
++  // alpha / blend factor) keeps its exact 6-bit value.
+   std::string out = "\n    // EFB pixel format quantization"
+-                    "\n    {"
+-                    "\n      let q8 = vec4i(round(clamp(prev, vec4f(0.0), vec4f(1.0)) * 255.0));"
+-                    "\n      var rgb = q8.rgb;";
+-  const bool rgb565 = config.efbFmt == 2;
++                    "\n    if ((imm.current_pnmtx & 0x10000u) != 0u) {"
++                    "\n      let sv = clamp(prev.rgb, vec3f(0.0), vec3f(1.0)) * 255.0;";
++  out += fmt::format("\n      let slev = {};", rgb565 ? "vec3f(32.0, 64.0, 32.0)"sv : "vec3f(64.0)"sv);
++  out += "\n      let sstep = vec3f(256.0) / slev;";
++  if (config.dither) {
++    out += "\n      let st = (sv - floor(sv / slev)) / sstep;";
++  } else {
++    out += "\n      let st = (sv - (sstep - 1.0) * 0.5) / sstep;";
++  }
++  out += "\n      let sk = clamp(floor(st), vec3f(0.0), slev - 1.0);"
++         "\n      let sk1 = min(sk + 1.0, slev - 1.0);"
++         "\n      let sdiv = slev * slev / 256.0;"
++         "\n      var so = mix(sk * sstep + floor(sk / sdiv), sk1 * sstep + floor(sk1 / sdiv), clamp(st - sk, vec3f(0.0), vec3f(1.0)));"
++         "\n      if ((imm.current_pnmtx & 0x20000u) != 0u) {"
++         "\n        let sn = fract(52.9829189 * fract(dot(in.pos.xy, vec2f(0.06711056, 0.00583715))));"
++         "\n        so = so + (sn - 0.5);"
++         "\n      }";
++  if (!rgb565 && !config.efbBlend) {
++    out += "\n      let sa = u32(round(clamp(prev.a, 0.0, 1.0) * 255.0)) >> 2u;"
++           "\n      prev = vec4f(so / 255.0, f32((sa << 2u) | (sa >> 4u)) / 255.0);";
++  } else {
++    out += "\n      prev = vec4f(so / 255.0, prev.a);";
++  }
++  out += "\n    } else {"
++         "\n      let q8 = vec4i(round(clamp(prev, vec4f(0.0), vec4f(1.0)) * 255.0));"
++         "\n      var rgb = q8.rgb;";
+   // Per-channel bit depth: RGBA6 = 6/6/6, RGB565 = 5/6/5.
+   const std::string_view bits = rgb565 ? "vec3u(5u, 6u, 5u)"sv : "vec3u(6u)"sv;
+   out += fmt::format("\n      let bits = {};", bits);

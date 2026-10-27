@@ -1,0 +1,13 @@
+diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
+index 1fec701..0d4fa37 100644
+--- a/lib/gx/gx.cpp
++++ b/lib/gx/gx.cpp
+@@ -205,6 +205,8 @@ wgpu::PrimitiveState to_primitive_state(GXCullMode gx_cullMode) {
+   auto cullMode = wgpu::CullMode::None;
+   switch (gx_cullMode) {
+     DEFAULT_FATAL("unsupported cull mode {}", underlying(gx_cullMode));
++  case GX_CULL_ALL: // triangle draws are dropped before reaching the GPU (push_gx_draw)
++    break;
+   case GX_CULL_FRONT:
+     cullMode = wgpu::CullMode::Front;
+     break;

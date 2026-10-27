@@ -1,0 +1,123 @@
+0237: thread hooks for the host's scheduling policy (issue #18: frame drops on an i9-14900K).
+
+aurora/thread_hooks.h: aurora_set_thread_hooks(start, tick). The start hook runs on each thread
+Aurora names through thread::set_current ("Main thread", "Aurora render worker", "Aurora FIFO
+processor", ...) after Aurora's own options, so the application can set priority, power
+throttling and CPU sets (P-cores on hybrid CPUs). The tick hook runs on the render worker after
+each queue item and on the FIFO processor after each batch (the application samples which kind of
+core the thread runs on). Both are null by default: no change without a host.
+
+diff --git a/include/aurora/thread_hooks.h b/include/aurora/thread_hooks.h
+new file mode 100644
+index 0000000..a5dd552
+--- /dev/null
++++ b/include/aurora/thread_hooks.h
+@@ -0,0 +1,22 @@
++#pragma once
++
++// Hooks for the host application's thread policy (priority, power throttling, CPU sets on hybrid
++// CPUs). Aurora names its long-lived threads ("Main thread", "Aurora render worker", "Aurora FIFO
++// processor", ...); the start hook runs on each such thread right after Aurora applied its own
++// options, so the application can adjust the thread. The tick hook runs on the render worker after
++// each queue item and on the FIFO processor after each batch (cheap: keep it to a few nanoseconds;
++// used to sample which processor the thread runs on).
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef void (*AuroraThreadStartHook)(const char* name);
++typedef void (*AuroraThreadTickHook)(void);
++
++// Set before aurora_initialize (threads started earlier are not reported). Either may be null.
++void aurora_set_thread_hooks(AuroraThreadStartHook start, AuroraThreadTickHook tick);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/lib/gfx/render_worker.cpp b/lib/gfx/render_worker.cpp
+index 213f16b..f28c9a3 100644
+--- a/lib/gfx/render_worker.cpp
++++ b/lib/gfx/render_worker.cpp
+@@ -52,6 +52,7 @@ void worker_main(std::stop_token token) {
+     }
+     complete_sync(item->sync);
+     g_pendingItems.fetch_sub(1, std::memory_order_acq_rel);
++    thread::tick();
+     if (item->type == ItemType::Shutdown) {
+       break;
+     }
+diff --git a/lib/gx/fifo.cpp b/lib/gx/fifo.cpp
+index b3bb29a..aab7f6d 100644
+--- a/lib/gx/fifo.cpp
++++ b/lib/gx/fifo.cpp
+@@ -99,6 +99,7 @@ void worker_main(std::stop_token token) noexcept {
+       }
+       const activity::Scope busy{activity::Thread::Fifo, "processing GX commands"};
+       process_to(published, std::memory_order_release);
++      thread::tick();
+       continue;
+     }
+ 
+diff --git a/lib/thread.cpp b/lib/thread.cpp
+index 348b0ec..0a25ef0 100644
+--- a/lib/thread.cpp
++++ b/lib/thread.cpp
+@@ -1,9 +1,12 @@
+ #include "thread.hpp"
+ 
++#include <aurora/thread_hooks.h>
++
+ #include <SDL3/SDL_thread.h>
+ #include <tracy/Tracy.hpp>
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <charconv>
+ #include <cstdint>
+ #include <fstream>
+@@ -27,6 +30,9 @@
+ 
+ namespace aurora::thread {
+ namespace {
++std::atomic<AuroraThreadStartHook> sStartHook{nullptr};
++std::atomic<AuroraThreadTickHook> sTickHook{nullptr};
++
+ struct Processor {
+   uint16_t group = 0;
+   uint32_t number = 0;
+@@ -293,6 +299,20 @@ void set_current(const Options& options) noexcept {
+   if (options.affinity == Affinity::SharedCache) {
+     pin_shared_cache();
+   }
++  if (const auto hook = sStartHook.load(std::memory_order_acquire)) {
++    hook(options.name.c_str());
++  }
++}
++
++void tick() noexcept {
++  if (const auto hook = sTickHook.load(std::memory_order_relaxed)) {
++    hook();
++  }
+ }
+ 
+ } // namespace aurora::thread
++
++void aurora_set_thread_hooks(AuroraThreadStartHook start, AuroraThreadTickHook tick) {
++  aurora::thread::sStartHook.store(start, std::memory_order_release);
++  aurora::thread::sTickHook.store(tick, std::memory_order_release);
++}
+diff --git a/lib/thread.hpp b/lib/thread.hpp
+index 0c65cc1..97898ce 100644
+--- a/lib/thread.hpp
++++ b/lib/thread.hpp
+@@ -22,6 +22,9 @@ struct Options {
+ // Applies thread options to the current thread
+ void set_current(const Options& options) noexcept;
+ 
++// The host's tick hook (aurora/thread_hooks.h), if any: call from a long-lived thread's loop.
++void tick() noexcept;
++
+ class Thread {
+ public:
+   Thread() noexcept = default;

@@ -30,7 +30,13 @@
 - Timing matters: instantaneous hardware completion breaks game assumptions (DVD/NAND/IPC replies need modelled latency).
 - Paths contain spaces: quote them.
 
+## Build / run (branch bootstrap)
+- `powershell -ExecutionPolicy Bypass -File tools\build.ps1 [-Configure] [-Disc "<US DATA\DATA or image>"] -Target cfrecomp` (also `CityFolkRecomp`). CMake cache `CF_DISC` (default `<repo>/US DATA/DATA`; a worktree must pass `-Disc`), `CF_GAME_ID` (RUUE01). The dev build recompiles main.dol + files/rels/*.rel with config/RUUE01 maps (~80 MB C++, 64 chunks).
+- Run: `build/windows-clang/cfrecomp.exe [--disc <folder or image>] [--input "700:A*8,..."]` with scratch `APPDATA`, `CF_CACHE_DIR`, `CF_CARD_DIR`, `CF_NAND_DIR`, `CF_OFFSCREEN=1 CF_BACKGROUND=1 CF_AUDIO=0`, the SDL_JOYSTICK_* vars above, `CF_QUIT_AFTER=<s>`. Screenshots: `CF_SHOT=<dir>,<first>,<last>,<step>` (+`CF_DUMP_EXIT=1`).
+- Boot debugging: `CF_HLE_MISSING=log` (missing SDK HLE logs once, returns 0), `CF_REL_LOG=1` (module links), `CF_DVD_LOG=1`, `CF_IOS_LOG=1|2`, `CF_AUDIO_LOG=1`, `CF_WATCHDOG=1` (+`CF_TRACE=ring` for recent functions), `CF_TRACE=all CF_TRACE_FRAMES=<first>,<n>`, `py tools/recomp/addr2sym.py <addr>`. LM's other `LM_*` aids are `CF_*`.
+
 ## Status (keep updated)
+- 2026-10-27 (branch bootstrap): engine scaffold from LM builds (cfrecomp, CityFolkRecomp); recompiler translates the DOL and all 187 RELs (relocation-aware; docs/RECOMPILER.md "REL modules"), OSLink HLE links them at run time; Wii memory map (MEM1+MEM2), extracted-folder discs, IOS/IPC, DSP-task and Wii Remote boot stand-ins. Boots through the wrist-strap screen and the title ("Press A") into the new-game bus scene (Rover's dialogue; 3D behind it black, no sound). Details and open items: docs/WII.md "Order of work"; generic changes for LM/SMS: docs/BACKPORT.md.
 - 2026-10-27: project started. Plan in docs/WII.md (engine work for Wii) and docs/ROADMAP.md (phases + enhancements).
 - GitHub: private repo https://github.com/rob646464/city-folk-recompiled (origin). Push main and named branches there.
 - Function tables (branch discovery; docs/DISCOVERY.md): `config/<RUUE01|RUUP01|RUUJ01>/symbols.txt` (DOL, LM format) + `rels/<module>.txt` (187 RELs, section-relative) + `modules.txt`, jump tables and interior entries included, verified against the discs (`tools/discovery/verify.py`). 6149 DOL functions named (SDK, NW4R, EGG, MSL, HBM, GameSpy) from decomp-toolkit signatures + CC0 Wii decomp symbol maps; HLE targets with addresses in docs/SDK_NAMES.md; PAL/Japan names carried by function matching (all USA names matched). Rebuild: `tools/discovery/run_all.py` (needs decomp-toolkit, dev only).

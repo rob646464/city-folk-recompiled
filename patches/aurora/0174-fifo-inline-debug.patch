@@ -1,0 +1,26 @@
+diff --git a/lib/gx/fifo.cpp b/lib/gx/fifo.cpp
+index 3aefba8..78e2d0c 100644
+--- a/lib/gx/fifo.cpp
++++ b/lib/gx/fifo.cpp
+@@ -5,6 +5,7 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <cstdlib>
+ #include <cstring>
+ #include <limits>
+ #include <mutex>
+@@ -24,7 +25,12 @@ thread_local uint32_t sDlWritePos = 0;
+ 
+ namespace {
+ constexpr Module Log{"aurora::gx::fifo"};
+-constexpr auto kProcessingMode = ProcessingMode::Thread;
++// AURORA_FIFO_INLINE=1 (debug): process the FIFO on the thread that publishes it, so every draw
++// reads guest memory (arrays, matrices, textures) at the moment it is issued.
++const ProcessingMode kProcessingMode = [] {
++  const char* e = std::getenv("AURORA_FIFO_INLINE");
++  return e != nullptr && e[0] == '1' ? ProcessingMode::Inline : ProcessingMode::Thread;
++}();
+ constexpr uint32_t kDrawBatchSize = 1;
+ 
+ bool sFrameActive = false;

@@ -1,0 +1,253 @@
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -154,6 +154,12 @@
+ uint64_t g_maskKey = ~0ull;               // light gen / atlas / mask layout of the last mask
+ bool shadow_maps() noexcept;
+ void assign_shadow_slots() noexcept;
++// 0032: ambient occlusion runs forward (mask pass, applied in the opaque world draws);
++// AURORA_ENH_AO_POST=1 restores the former scene-end multiply (A/B).
++const bool g_aoPost = std::getenv("AURORA_ENH_AO_POST") != nullptr;
++// Unlit textured opaque world draws get the enhanced variant too while AO is on (they receive it).
++bool ao_receivers() noexcept { return g_cfg.enabled && g_cfg.ssao && !g_aoPost; }
++bool ao_forward() noexcept { return ao_receivers() && g_cfg.ssaoIntensity > 0.f; }
+ constexpr auto GlowFormat = wgpu::TextureFormat::RGBA16Float;
+ constexpr size_t MaxGlowDraws = 4096;
+ 
+@@ -554,6 +560,52 @@
+   return o;
+ }
+ 
++// 0032: ambient occlusion in the mask pass (third plane, slot 8), from the opaque depth pre-pass,
++// applied inside the opaque world draws (ubuf.enh_flags bit 16) instead of multiplying the whole
++// picture at scene end, which also darkened what is drawn in front of occluded geometry: the
++// ghost layer, the flashlight beam, light effects, particles, glass and water.
++// Hemisphere samples around the reconstructed normal, projected back into the mask; the result
++// is the darkening amount (0 = none). fx.ao: intensity, radius (world units).
++fn mask_ao(mp: vec2f, p: vec3f, nr: vec4f) -> f32 {
++  let radius = fx.ao.y;
++  let n = select(normalize(-p), nr.xyz, nr.w > 0.5);
++  let dims = vec2f(textureDimensions(tdepth));
++  let rot = ign(mp) * 6.2831853;
++  let tg = normalize(cross(n, select(vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), abs(n.y) > 0.9)));
++  let bt = cross(n, tg);
++  let bias = max(2.0, radius * 0.06);
++  var occ = 0.0;
++  for (var k = 0u; k < 12u; k++) {
++    let r = sqrt((f32(k) + 0.5) / 12.0);
++    let a = f32(k) * 2.39996323 + rot;
++    let h = sqrt(max(1.0 - r * r, 0.0));
++    let q = p + (tg * (cos(a) * r) + bt * (sin(a) * r) + n * h) * radius * (0.35 + 0.65 * fract(f32(k) * 0.618 + rot));
++    let w = -q.z;
++    if (w <= 1.0) { continue; }
++    let cx = (fx.proj.x * q.x + fx.proj.z * q.z + fx.projz.z) / w;
++    let cy = (fx.proj.y * q.y + fx.proj.w * q.z + fx.projz.w) / w;
++    let sp = vec2f(fx.vp.x + (cx * 0.5 + 0.5) * fx.vp.z, fx.vp.y + (0.5 - cy * 0.5) * fx.vp.w) / fx.pp.y;
++    if (any(sp < vec2f(0.0)) || any(sp >= dims)) { continue; }
++    let sd = textureLoad(tdepth, vec2i(sp), 0).r;
++    if (sd <= 1e-7) { continue; }
++    let sz = mask_view_pos(sp).z;
++    let diff = sz - q.z;
++    if (diff > bias) {
++      occ = occ + smoothstep(bias, bias * 4.0, diff) * smoothstep(0.0, 1.0, radius / max(abs(p.z - sz), 1e-3));
++    }
++  }
++  let ao = clamp(1.0 - occ / 12.0, 0.0, 1.0);
++  return 1.0 - pow(ao, 1.0 + fx.ao.x * 2.0);
++}
++@fragment
++fn fs_aomask(in: VsOut) -> @location(0) vec4f {
++  let mp = floor(in.pos.xy);
++  let d0 = textureLoad(tdepth, vec2i(mp), 0).r;
++  if (d0 <= 1e-7) { return vec4f(0.0); } // nothing drawn (cleared to far)
++  let p = view_pos((mp + vec2f(0.5)) * fx.pp.y, d0);
++  return vec4f(mask_ao(mp, p, mask_normal(mp, p)), 0.0, 0.0, 0.0);
++}
++
+ // Downsample (13-tap, as above without threshold).
+ @fragment
+ fn fs_down(in: VsOut) -> @location(0) vec4f {
+@@ -781,6 +833,9 @@
+   wgpu::PipelineLayout cubeLayout;
+   wgpu::RenderPipeline cubePipe;
+   wgpu::Sampler cmpSampler;
++  // 0032 forward ambient occlusion (third mask plane)
++  Tex maskAo;
++  wgpu::RenderPipeline aoMaskPipe;
+ };
+ Gpu g_gpu;
+ 
+@@ -1037,6 +1092,8 @@
+   // previous mask (same lights): only the new ones are added (a second EFB pass in a frame
+   // would otherwise render every caster twice).
+   size_t firstNew = 0;
++  // 0032: point = light shadows in this mask (planes 1-2), ao = ambient occlusion (plane 3).
++  bool point = true, ao = false;
+ };
+ 
+ // GPU timing of the light-shadow passes (AURORA_ENH_GPU_TIMING=1, needs TimestampQuery): camera
+@@ -1233,6 +1290,33 @@
+   }
+   tex_copy_conv::snapshot_depth(cmd, g_gpu.maskDepth.view, 1, g_gpu.maskDepthR.view);
+   const wgpu::Extent3D extent{w, h, 1};
++  if (job.ao) {
++    // 0032: ambient occlusion into the third plane.
++    ensure_tex(g_gpu.maskAo, w, h, wgpu::TextureFormat::RGBA8Unorm,
++               wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc | wgpu::TextureUsage::TextureBinding,
++               "Enhanced ambient occlusion mask");
++    if (!g_gpu.aoMaskPipe) {
++      g_gpu.aoMaskPipe = make_pipeline("fs_aomask", wgpu::TextureFormat::RGBA8Unorm, 1, nullptr, wgpu::ColorWriteMask::All);
++    }
++    const wgpu::RenderPassColorAttachment att{
++        .view = g_gpu.maskAo.view, .loadOp = wgpu::LoadOp::Clear, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}};
++    const wgpu::RenderPassDescriptor desc{.label = "Ambient occlusion mask", .colorAttachmentCount = 1, .colorAttachments = &att};
++    const auto pass = cmd.BeginRenderPass(&desc);
++    pass.SetPipeline(g_gpu.aoMaskPipe);
++    pass.SetBindGroup(0, bind(job.uniform, {}, {}, {}, g_gpu.maskDepthR.view));
++    pass.Draw(3);
++    pass.End();
++    const wgpu::TexelCopyTextureInfo src3{.texture = g_gpu.maskAo.texture};
++    const wgpu::TexelCopyBufferInfo dst3{
++        .layout = {.offset = job.maskOffset + uint64_t(job.pitchBytes) * h * 2, .bytesPerRow = job.pitchBytes, .rowsPerImage = h},
++        .buffer = detail::resources().maskBuffer,
++    };
++    cmd.CopyTextureToBuffer(&src3, &dst3, &extent);
++  }
++  if (!job.point) {
++    timing_end(cmd);
++    return;
++  }
+   if (job.cube && init_cube()) {
+     // Shadow maps: all casters from every shadowed light into the atlas, then the lookup.
+     const auto* prevAtlas = g_gpu.atlas.texture.Get();
+@@ -1414,14 +1498,16 @@
+   }
+   std::lock_guard lock{g_cfgMutex};
+   const bool masterChanged = g_cfg.enabled != g_pending.enabled;
++  const bool aoBefore = ao_receivers();
+   g_cfg = g_pending;
+   g_cfgGen = gen;
+   ++g_lightGen;
+   assign_shadow_slots();
+   g_lightRangeValid = false;
+   gx::g_gxState.dirty |= gx::DirtyUniform;
+-  // Only the master switch selects shader variants; the parts are uniforms.
+-  return masterChanged;
++  // Only the master switch selects shader variants; the parts are uniforms. 0032: and ambient
++  // occlusion, which also gives unlit opaque world draws the variant.
++  return masterChanged || aoBefore != ao_receivers();
+ }
+ 
+ const AuroraEnhancedConfig& config() noexcept { return g_cfg; }
+@@ -1444,6 +1530,9 @@
+     textured = textured || st.texMapId != GX_TEXMAP_NULL;
+     want = want || (st.alphaOp.op == GX_TEV_COMP_GR16_GT && st.colorPass.b == GX_CC_TEXC);
+   }
++  // 0032: unlit textured opaque world surfaces (depth-writing, not additive: LM draws most of its
++  // solid geometry with SRCALPHA/INVSRCALPHA blending) receive the forward ambient occlusion.
++  want = want || (ao_receivers() && drawClass == AURORA_DRAW_CLASS_WORLD && gx::g_gxState.depthUpdate);
+   if (!want || !textured) {
+     return 0;
+   }
+@@ -1506,10 +1595,21 @@
+     u.flashSoft = std::clamp(c.flashlightSoftness, 0.f, 1.f);
+     u.flashSpec = std::clamp(c.flashlightSpecular, 0.f, 2.f);
+   }
+-  if (c.extraLights && c.extraShadows && g_shadowCount > 0) {
++  // 0032: forward ambient occlusion in opaque (and alpha-tested) world surfaces only: nothing
++  // translucent or additive in front of occluded geometry gets darker.
++  const auto& gs = gx::g_gxState;
++  const bool aoMask = ao_forward();
++  // Opaque = writes depth and does not add light (the same draws as the depth pre-pass; most
++  // solid geometry is drawn with SRCALPHA/INVSRCALPHA blending and alpha 1).
++  if (aoMask && gs.drawClass == AURORA_DRAW_CLASS_WORLD && gs.projType == GX_PERSPECTIVE && gs.depthUpdate &&
++      !(gs.blendMode == GX_BM_BLEND && gs.blendFacDst == GX_BL_ONE) && !is_offscreen()) {
++    u.flags |= 16u;
++  }
++  if ((c.extraLights && c.extraShadows && g_shadowCount > 0) || aoMask) {
+     if (!g_maskReserved) {
+       // Half resolution (bloom level 0 size), except shadow maps at high quality: full resolution
+-      // (sharp contact edges) up to 1440 lines, within the mask buffer (two planes).
++      // (sharp contact edges) up to 1440 lines, within the mask buffer (two planes; 0032: a
++      // third for ambient occlusion).
+       const auto size = get_render_target_size();
+       uint32_t w, h;
+       if (shadow_maps() && g_cfg.extraShadowQuality >= 2) {
+@@ -1522,7 +1622,7 @@
+       } else {
+         std::tie(w, h) = bloom_base_size(size.x, size.y);
+       }
+-      while (uint64_t(AURORA_ALIGN(w * 4, 256)) * h * 2 > MaskBufferSize) {
++      while (uint64_t(AURORA_ALIGN(w * 4, 256)) * h * (aoMask ? 3 : 2) > MaskBufferSize) {
+         w = std::max(w * 7 / 8, 1u);
+         h = std::max(h * 7 / 8, 1u);
+       }
+@@ -1675,8 +1775,8 @@
+       !is_offscreen()) {
+     note_glow_draw(config, data);
+   }
+-  if (drawClass == AURORA_DRAW_CLASS_WORLD && g_shadowCount > 0 && g_cfg.extraLights && g_cfg.extraShadows &&
+-      config.depthCompare && config.depthUpdate && !(config.blendMode == GX_BM_BLEND && config.blendFacDst == GX_BL_ONE) &&
++  const bool pointShadows = g_shadowCount > 0 && g_cfg.extraLights && g_cfg.extraShadows;
++  if (drawClass == AURORA_DRAW_CLASS_WORLD && (pointShadows || ao_forward()) && config.depthCompare && config.depthUpdate && !(config.blendMode == GX_BM_BLEND && config.blendFacDst == GX_BL_ONE) &&
+       g_depthDraws.size() < MaxGlowDraws && !is_offscreen()) {
+     gx::PipelineConfig dc = config;
+     dc.colorUpdate = false;
+@@ -1701,7 +1801,7 @@
+       sVariants.emplace(data.pipeline, g.data.pipeline);
+     }
+     g.data.dstAlpha = UINT32_MAX;
+-    if (shadow_maps() && config.shaderConfig.lineMode == 0 && config.shaderConfig.zTexOp == 0) {
++    if (pointShadows && shadow_maps() && config.shaderConfig.lineMode == 0 && config.shaderConfig.zTexOp == 0) {
+       static std::unordered_map<PipelineRef, PipelineRef> sCasters;
+       if (const auto it = sCasters.find(data.pipeline); it != sCasters.end()) {
+         g.lightPipe = it->second;
+@@ -1884,7 +1984,12 @@
+   u.pass[2] = float(g_shadowCount);
+   u.pass[3] = g_glowDbg == 9 ? 1.f : g_glowDbg == 10 ? 2.f : 0.f;
+   job.scaleBack = u.pass[1];
+-  if (shadow_maps()) {
++  // 0032: light shadows and/or ambient occlusion in this mask.
++  job.point = g_shadowCount > 0 && g_cfg.extraLights && g_cfg.extraShadows;
++  job.ao = ao_forward();
++  u.ao[0] = std::clamp(g_cfg.ssaoIntensity, 0.f, 2.f);
++  u.ao[1] = std::max(g_cfg.ssaoRadius, 1.f);
++  if (job.point && shadow_maps()) {
+     // Atlas: per light 3x2 faces of S texels, lights in two columns (texture size limit 8192).
+     const uint32_t k = g_shadowCount;
+     const uint32_t cols = k > 1 ? 2 : 1, rows = (k + cols - 1) / cols;
+@@ -2063,7 +2168,7 @@
+   if (c.volumetric && c.volumetricIntensity > 0.f && g_flash.valid) {
+     job.mask |= 2u;
+   }
+-  if (c.ssao && c.ssaoIntensity > 0.f) {
++  if (c.ssao && c.ssaoIntensity > 0.f && g_aoPost) { // 0032: otherwise forward (mask pass)
+     job.mask |= 4u;
+   }
+   if (job.mask == 0) {
+diff --git a/lib/gfx/resources.hpp b/lib/gfx/resources.hpp
+--- a/lib/gfx/resources.hpp
++++ b/lib/gfx/resources.hpp
+@@ -10,7 +10,7 @@
+ inline constexpr uint64_t StorageBufferSize = 67108864; // 64 MiB
+ inline constexpr uint64_t TextureUploadSize = 25165824; // 24 MiB
+ // 0028: enhanced-lighting shadow masks (written on the GPU, read by world shaders; group 0 binding 2)
+-inline constexpr uint64_t MaskBufferSize = 33554432; // 32 MiB
++inline constexpr uint64_t MaskBufferSize = 50331648; // 48 MiB (0032: a third plane for ambient occlusion)
+ 
+ namespace detail {
+ struct Resources {
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -2404,6 +2404,10 @@
+   } else if (!prevAlphaNormalized) {
+     fragmentFn += "\n    prev.a = tev_overflow_f32(prev.a);";
+   }
++  if (enh) {
++    // 0032: forward ambient occlusion (opaque world draws: enh_flags bit 16; mask slot 8).
++    fragmentFn += "\n    if ((ubuf.enh_flags & 16u) != 0u) { prev = vec4f(prev.rgb * (1.0 - enh_mask(in.pos.xy, 8u)), prev.a); }";
++  }
+   if (config.wireframe) {
+     // GX_AURORA_SET_WIREFRAME: edges in the override colour (before alpha compare, so
+     // alpha-tested surfaces keep all their edges).
