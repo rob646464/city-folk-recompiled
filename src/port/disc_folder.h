@@ -26,6 +26,7 @@ struct Entry {
     uint32_t parent = 0;  // directories: parent entry
     uint32_t next = 0;    // directories: first entry after this directory's contents
     uint32_t length = 0;  // files: size in bytes
+    uint32_t offset = 0;  // files: the FST offset field (disc offset; >> 2 on the Wii): unique per file
     std::string name;     // as stored in the FST
     std::string path;     // "/dir/file"
 };

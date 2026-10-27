@@ -402,6 +402,31 @@ HLE(OSGetTime) {
     c.r[4] = u32(t);
 }
 HLE(OSGetTick) { c.r[3] = u32(timeBase()); }
+// OSCalendarTime {sec, min, hour, mday, mon (0-11), year, wday, yday, msec, usec} -> ticks since
+// 2000-01-01 (the inverse of OSTicksToCalendarTime; out-of-range fields carry over).
+HLE(OSCalendarTimeToTicks) {
+    const u32 td = c.r[3];
+    auto f = [&](int i) { return s64(s32(rd32(td + 4 * i))); };
+    s64 year = f(5), mon = f(4);
+    year += mon >= 0 ? mon / 12 : -((11 - mon) / 12);
+    mon = ((mon % 12) + 12) % 12;
+    // Days from 2000-01-01 to the first of the month (proleptic Gregorian).
+    auto daysFromCivil = [](s64 y, s64 m, s64 d) {  // m 1..12
+        y -= m <= 2;
+        const s64 era = (y >= 0 ? y : y - 399) / 400;
+        const s64 yoe = y - era * 400;
+        const s64 doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+        const s64 doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        return era * 146097 + doe - 719468;  // days since 1970-01-01
+    };
+    const s64 days = daysFromCivil(year, mon + 1, 1) - daysFromCivil(2000, 1, 1) + f(3) - 1;
+    const s64 secs = days * 86400 + f(2) * 3600 + f(1) * 60 + f(0);
+    const double ticks = double(secs) * kTimerClock + double(f(8)) * (kTimerClock / 1000.0) +
+                         double(f(9)) * (kTimerClock / 1000000.0);
+    const s64 t = s64(ticks);
+    c.r[3] = u32(u64(t) >> 32);
+    c.r[4] = u32(u64(t));
+}
 HLE(OSTicksToCalendarTime) {
     const s64 ticks = s64(u64(c.r[3]) << 32 | c.r[4]);
     const u32 td = c.r[5];
@@ -432,6 +457,15 @@ HLE(DCZeroRange) { std::memset(hostp(c.r[3] & ~31u), 0, (c.r[4] + 31) & ~31u); }
 HLE(LCEnable) {}
 HLE(LCDisable) {}
 HLE(LCQueueWait) {}
+HLE(LCQueueLength) { c.r[3] = 0; }  // locked-cache DMA completes at once
+HLE(LCStoreData) {                  // (mem dest, lc src, bytes)
+    std::memmove(hostp(c.r[3]), hostp(c.r[4]), (c.r[5] + 31) & ~31u);
+    c.r[3] = (c.r[5] + 4095) / 4096;  // transactions queued
+}
+HLE(LCLoadData) {  // (lc dest, mem src, bytes)
+    std::memmove(hostp(c.r[3]), hostp(c.r[4]), (c.r[5] + 31) & ~31u);
+    c.r[3] = (c.r[5] + 4095) / 4096;
+}
 HLE(LCLoadBlocks) {  // (lc dest, mem src, blocks)
     const u32 n = c.r[5] ? c.r[5] : 128;
     std::memmove(hostp(c.r[3]), hostp(c.r[4]), n * 32);

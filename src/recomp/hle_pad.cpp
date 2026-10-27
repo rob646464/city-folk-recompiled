@@ -166,6 +166,30 @@ HLE(PADControlMotor) {
 HLE(PADSetSamplingRate) {}  // PAL release; sampling is the host's business
 
 // PADStatus (12 bytes): button, stickX/Y, substickX/Y, triggerL/R, analogA/B, err.
+// The host controllers as the game sees them (bindings, menu suppression, --input script, game
+// filters): PADRead below, and the Wii Remote stand-in (hle_wpad.cpp) until the KPAD HLE exists.
+u32 readHostPads(PADStatus* st) {
+    static const bool sInit = [] {  // a Wii game that never calls PADInit (it has no GC pad code)
+        PADInit();
+        return true;
+    }();
+    (void)sInit;
+    controls::beforeRead();
+    const u32 motor = PADRead(st);
+    controls::afterRead(st);
+    logPad(st);
+    if (menu::isOpen()) {
+        for (int i = 0; i < PAD_MAX_CONTROLLERS; i++) {
+            const s8 err = st[i].err;
+            st[i] = PADStatus{};
+            st[i].err = err;
+        }
+    }
+    if (!port::options().inputScript.empty()) applyScript(st);
+    game::filterPad(st, PAD_MAX_CONTROLLERS);
+    return motor;
+}
+
 HLE(PADRead) {
     PADStatus st[PAD_MAX_CONTROLLERS] = {};
     controls::beforeRead();  // port devices (hot-plug) and bindings from F1 > Controls

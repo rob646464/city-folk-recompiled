@@ -3,6 +3,7 @@
 #include "recomp/interp.h"
 #include "recomp/runtime.h"
 #include "recomp/sched.h"
+#include "recomp/game.h"
 #include "port/recovery.h"
 
 #include <dolphin/gx.h>
@@ -136,8 +137,19 @@ void trace_enter(u32 addr, Ctx& c) {
                   size_t(tStackHi - uintptr_t(&probe)) / 1024, c.r[1]);
     }
 #endif
+    // CF_TRACE_FRAMES=<first>,<count> (with CF_TRACE=all): only entries during those guest frames.
+    static const std::pair<u32, u32> sWindow = [] {
+        unsigned a = 0, n = 0;
+        if (const char* v = std::getenv("CF_TRACE_FRAMES")) std::sscanf(v, "%u,%u", &a, &n);
+        return std::pair<u32, u32>{a, n};
+    }();
+    if (sTraceMode == TraceMode::All && sWindow.second) {
+        const u32 f = game::guestFrames();
+        if (f < sWindow.first || f >= sWindow.first + sWindow.second) return;
+    }
     if (sTraceMode == TraceMode::All || (sTraceMode == TraceMode::Set && sTraceSet.count(addr)))
-        log("[trace] %08X lr %08X r3 %08X r4 %08X r5 %08X", addr, c.lr, c.r[3], c.r[4], c.r[5]);
+        log("[trace] %08X lr %08X r3 %08X r4 %08X r5 %08X thread %08X", addr, c.lr, c.r[3], c.r[4], c.r[5],
+            sched::currentGuest());
 }
 
 // CF_WATCH=<hex addr>[,<hex len>[,<hex stride>,<hex offset>]]: report every guest store into the range, with

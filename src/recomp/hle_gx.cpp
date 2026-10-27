@@ -1237,6 +1237,14 @@ GXHLE(GXSetScissorBoxOffset) {
         sLogged = true;
     }
 }
+// Indexed matrix loads (NW4R g3d): the CP reads the matrix from the GX_POS_MTX_ARRAY /
+// GX_NRM_MTX_ARRAY arrays (GXSetArray). Not blended by frame interpolation yet.
+GXHLE(GXLoadPosMtxIndx) { GXLoadPosMtxIndx(u16(c.r[3]), c.r[4]); }
+GXHLE(GXLoadNrmMtxIndx3x3) {
+    rawFifoWrite(GX_LOAD_INDX_B, 1);
+    rawFifoWrite(u16(c.r[3]), 2);
+    rawFifoWrite(((9u - 1) << 12) | (0x400u + c.r[4] * 3), 2);
+}
 GXHLE(GXLoadPosMtxImm) {
     const Mtx<3, 4> m(c.r[3]);
     if (const u32 id = c.r[4]; id % 3 == 0 && id / 3 < 10) {
@@ -1394,6 +1402,25 @@ GXHLE_CPU(GXInitLightAttn) {
     gxAudit("GXInitLightAttn a=%.3f %.3f %.3f k=%.4f %.4f %.6f", farg(c, 1), farg(c, 2), farg(c, 3), farg(c, 4), farg(c, 5), farg(c, 6));
     GXInitLightAttn(light(c.r[3]), farg(c, 1), farg(c, 2), farg(c, 3), farg(c, 4), farg(c, 5), farg(c, 6));
 }
+}  // namespace recomp
+extern "C" void GXGetLightDir(const GXLightObj* light, float* nx, float* ny, float* nz);  // Aurora (GXGet.cpp; not in its header)
+namespace recomp {
+GXHLE_CPU(GXInitLightAttnA) { GXInitLightAttnA(light(c.r[3]), farg(c, 1), farg(c, 2), farg(c, 3)); }
+GXHLE_CPU(GXInitLightAttnK) { GXInitLightAttnK(light(c.r[3]), farg(c, 1), farg(c, 2), farg(c, 3)); }
+GXHLE_CPU(GXGetLightPos) {
+    f32 x = 0, y = 0, z = 0;
+    GXGetLightPos(light(c.r[3]), &x, &y, &z);
+    wrf32(c.r[4], x);
+    wrf32(c.r[5], y);
+    wrf32(c.r[6], z);
+}
+GXHLE_CPU(GXGetLightDir) {
+    f32 x = 0, y = 0, z = 0;
+    GXGetLightDir(light(c.r[3]), &x, &y, &z);
+    wrf32(c.r[4], x);
+    wrf32(c.r[5], y);
+    wrf32(c.r[6], z);
+}
 GXHLE(GXLoadLightObjImm) {
     // Position and direction (view space) are blended by frame interpolation.
     const u32 at = interp::mark();
@@ -1434,7 +1461,58 @@ GXHLE_CPU(GXInitTexObjCI) {
     noteTexImage(c.r[3], c.r[4]);
     diagTexInit("INITCI", c.r[3], c.r[4], c.r[5], c.r[6], c.r[7], c.lr);
 }
+GXHLE_CPU(GXInitTexObjWrapMode) {
+    if (GXTexObj* o = sTex.get(c.r[3], kTexTag)) GXInitTexObjWrapMode(o, GXTexWrapMode(c.r[4]), GXTexWrapMode(c.r[5]));
+}
+// Texture object getters (RVL games, NW4R g3d) and the TLUT binding.
+GXHLE_CPU(GXGetTexObjWidth) {
+    const GXTexObj* o = sTex.get(c.r[3], kTexTag);
+    c.r[3] = o ? GXGetTexObjWidth(o) : 0;
+}
+GXHLE_CPU(GXGetTexObjHeight) {
+    const GXTexObj* o = sTex.get(c.r[3], kTexTag);
+    c.r[3] = o ? GXGetTexObjHeight(o) : 0;
+}
+GXHLE_CPU(GXGetTexObjWrapS) {
+    const GXTexObj* o = sTex.get(c.r[3], kTexTag);
+    c.r[3] = o ? u32(GXGetTexObjWrapS(o)) : 0;
+}
+GXHLE_CPU(GXGetTexObjWrapT) {
+    const GXTexObj* o = sTex.get(c.r[3], kTexTag);
+    c.r[3] = o ? u32(GXGetTexObjWrapT(o)) : 0;
+}
+GXHLE_CPU(GXGetTexObjTlut) {
+    const GXTexObj* o = sTex.get(c.r[3], kTexTag);
+    c.r[3] = o ? GXGetTexObjTlut(o) : 0;
+}
+GXHLE_CPU(GXInitTexObjTlut) {
+    if (GXTexObj* o = sTex.get(c.r[3], kTexTag)) GXInitTexObjTlut(o, c.r[4]);
+}
+// GXGetTexObjLODAll(obj, &minFilt, &magFilt, &minLod, &maxLod, &lodBias, &biasClamp, &edgeLod,
+// &maxAniso): the values of the last GXInitTexObjLOD on that object (GXInitTexObj's defaults
+// otherwise). Aurora keeps them in its own encoding, so they are remembered here.
+namespace {
+struct TexLod {
+    u32 minF = 1, magF = 1;
+    f32 minLod = 0, maxLod = 0, bias = 0;
+    u32 clamp = 0, edge = 0, aniso = 0;
+};
+std::unordered_map<u32, TexLod> sTexLod;
+}  // namespace
+GXHLE_CPU(GXGetTexObjLODAll) {
+    TexLod l;
+    if (auto it = sTexLod.find(c.r[3]); it != sTexLod.end()) l = it->second;
+    wr32(c.r[4], l.minF);  // enums are words, GXBool a byte
+    wr32(c.r[5], l.magF);
+    wrf32(c.r[6], l.minLod);
+    wrf32(c.r[7], l.maxLod);
+    wrf32(c.r[8], l.bias);
+    wr8(c.r[9], l.clamp);
+    wr8(c.r[10], l.edge);
+    wr32(stackArg(c, 0), l.aniso);
+}
 GXHLE_CPU(GXInitTexObjLOD) {
+    sTexLod[c.r[3]] = {c.r[4], c.r[5], farg(c, 1), farg(c, 2), farg(c, 3), c.r[6], c.r[7], c.r[8]};
     gxAudit("GXInitTexObjLOD min=%u mag=%u lod=%.2f..%.2f bias=%.2f clamp=%u edge=%u aniso=%u", c.r[4], c.r[5], farg(c, 1), farg(c, 2), farg(c, 3), c.r[6], c.r[7], c.r[8]);
     if (GXTexObj* o = sTex.get(c.r[3], kTexTag))
         GXInitTexObjLOD(o, GXTexFilter(c.r[4]), GXTexFilter(c.r[5]), farg(c, 1), farg(c, 2), farg(c, 3),

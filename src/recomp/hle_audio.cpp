@@ -253,6 +253,8 @@ void dmaThread() {
 void audio::noteGuestMixed() { sAwaitingMix = false; }
 
 HLE(AIInit) {}
+HLE(AICheckInit) { c.r[3] = 1; }
+HLE(AIGetDMABytesLeft) { c.r[3] = 0; }  // the block in flight counts as played
 HLE(AIInitDMA) {
     sDmaAddr = c.r[3];
     sDmaLength = c.r[4];
@@ -299,7 +301,7 @@ HLE(AIGetStreamTrigger) { c.r[3] = 0; }
 // the AX microcode stand-in exists (docs/WII.md "Audio"): a task added with DSPAddTask gets its
 // init callback at once (the "DSP" is ready), and every command list the CPU hands over (the
 // mail pair 0xBABExxxx + address that AX sends per audio frame) is "finished" a moment later
-// through the task's request callback, so AX's frame loop and the callbacks NW4R's sound system
+// through the task's resume callback, so AX's frame loop and the callbacks NW4R's sound system
 // runs on keep going. No samples are mixed (silence).
 // DSPTaskInfo: +0x00 state, +0x28 init_cb, +0x2C res_cb, +0x30 done_cb, +0x34 req_cb.
 namespace {
@@ -327,13 +329,18 @@ HLE(DSPCheckMailFromDSP) { c.r[3] = 0; }
 HLE(DSPReadMailFromDSP) { c.r[3] = 0; }
 HLE(DSPSendMailToDSP) {
     const u32 mail = c.r[3];
+    static int sLogged = 0;
+    if (sLogged < 4 && std::getenv("CF_AUDIO_LOG")) {
+        sLogged++;
+        log("[dsp] mail %08X (lr %08X)", mail, c.lr);
+    }
     if ((mail >> 16) == 0xBABE) {
         sMailHi = mail;
         return;
     }
     if (sMailHi) {  // second word of a command list: finished at once
         sMailHi = 0;
-        callTaskCb(sDspTask, 0x34);
+        callTaskCb(sDspTask, 0x2C);  // res_cb: the task resumes after its command list
     }
 }
 HLE(DSPAssertInt) {}

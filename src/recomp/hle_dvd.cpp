@@ -42,13 +42,19 @@ bool destOk(u32 dest, u32 size, const char* what, u32 lr) {
 // One open file of the game (keyed by its guest DVDFileInfo).
 struct HostFile {
     s32 overlay = -1;     // game.h overlay entry
-    s32 entry = -1;       // folder disc: FST entry
+    s32 entry = -1;       // FST entry
+    bool folder = false;  // folder disc
     bool aurora = false;  // image disc: Aurora's file info
     DVDFileInfo fi{};
     u32 length = 0;
+    u32 start = 0;  // the disc start address the game sees (+0x30)
 };
 std::mutex sFilesM;
 std::unordered_map<u32, HostFile> sFiles;
+// Files by their disc start address (DVDFileInfo +0x30). Games copy DVDFileInfo structs (NW4R's
+// DvdFileStream keeps its own copy of the archive's) and read through the copy: the copy is
+// recognised by its start address and length.
+std::unordered_map<u32, HostFile> sByStart;
 std::unordered_map<u32, u32> sNames;  // FST entry -> guest copy of its name
 u32 sCwd = 0;                          // DVDChangeDir (folder discs)
 
@@ -71,7 +77,17 @@ double readLatency(u32 bytes) {
 HostFile* hostFile(u32 guest) {
     std::lock_guard lk(sFilesM);
     auto it = sFiles.find(guest);
-    return it == sFiles.end() ? nullptr : &it->second;
+    if (it != sFiles.end()) {
+        if (rd32(guest + 0x30) == it->second.start) return &it->second;
+        sFiles.erase(it);  // the struct now holds another file
+    }
+    const u32 start = rd32(guest + 0x30);
+    auto s = sByStart.find(start);
+    if (s == sByStart.end() || rd32(guest + 0x34) != s->second.length) return nullptr;
+    HostFile copy = s->second;
+    if (copy.aurora) DVDFastOpen(copy.entry, &copy.fi);  // its own Aurora handle
+    if (logOn()) log("[dvd] copied file info %08X -> entry %d", guest, copy.entry);
+    return &(sFiles[guest] = copy);
 }
 
 void syncGuest(u32 guest, const HostFile& f, u32 startAddr) {
@@ -87,33 +103,36 @@ s32 pathToEntry(const char* path) {
 
 bool openEntry(u32 guest, s32 entry, const char* what) {
     HostFile f;
-    u32 start = 0;
+    f.entry = entry;
     if (game::isOverlayEntry(entry)) {
         f.overlay = entry;
         f.length = game::overlayLength(entry);
+        f.start = 0xF0000000u | u32(entry);
     } else if (folder::active()) {
         const folder::Entry* e = folder::entry(entry);
         if (!e || e->isDir) return false;
-        f.entry = entry;
+        f.folder = true;
         f.length = e->length;
+        f.start = e->offset;
     } else {
         if (!DVDFastOpen(entry, &f.fi)) return false;
         f.aurora = true;
         f.length = f.fi.length;
-        start = f.fi.startAddr;
+        f.start = f.fi.startAddr;
     }
     if (logOn()) log("[dvd] open %s -> entry %d (%u bytes)", what, entry, f.length);
     {
         std::lock_guard lk(sFilesM);
         sFiles[guest] = f;
+        sByStart[f.start] = f;
     }
-    syncGuest(guest, f, start);
+    syncGuest(guest, f, f.start);
     return true;
 }
 
 s32 readFile(HostFile& f, void* dst, s32 len, s32 off, s32 prio) {
     if (f.overlay >= 0) return game::overlayRead(f.overlay, dst, len, off);
-    if (f.entry >= 0) return s32(folder::read(f.entry, dst, u32(len), u32(off)));
+    if (f.folder) return s32(folder::read(f.entry, dst, u32(len), u32(off)));
     if (f.aurora) return DVDReadPrio(&f.fi, dst, len, off, prio);
     return -1;
 }
@@ -178,6 +197,7 @@ HLE(DVDReadPrio) {
     });
     while (!flag->load()) sched::sleepOn(done);
     delete flag;
+    if (result < 0) log("[dvd] ERROR: DVDReadPrio(%08X, %08X, %X, %X) failed (lr %08X)", c.r[3], c.r[4], c.r[5], c.r[6], c.lr);
     c.r[3] = u32(result);
 }
 
@@ -185,6 +205,7 @@ HLE(DVDReadAsyncPrio) {
     const u32 guest = c.r[3], cb = c.r[7];
     HostFile* f = hostFile(guest);
     if (!f) {
+        log("[dvd] ERROR: DVDReadAsyncPrio on an unknown file info %08X (lr %08X)", guest, c.lr);
         c.r[3] = 0;
         return;
     }

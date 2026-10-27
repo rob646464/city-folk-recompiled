@@ -87,6 +87,7 @@ bool open(const std::string& utf8Path, std::string& error) {
         } else {
             en.parent = parent;
             en.length = be32(e + 8);
+            en.offset = be32(e + 4);
         }
     }
     std::lock_guard lk(sFilesM);

@@ -102,6 +102,10 @@ HLE(VIGetNextField) { c.r[3] = 1; }
 HLE(VIGetCurrentLine) { c.r[3] = 0; }
 HLE(VIGetTvFormat) { c.r[3] = palGame() ? 1 : 0; }  // VI_PAL / VI_NTSC
 HLE(VIGetDTVStatus) { c.r[3] = 0; }
+// RVL: screen burn-in dimming (the console darkens the picture after minutes without input).
+HLE(VIGetDimmingCount) { c.r[3] = 0; }
+HLE(VIEnableDimming) { c.r[3] = 0; }
+HLE(VIResetDimmingCount) {}
 HLE(VISetPreRetraceCallback) {
     const u32 old = sPreCallback;
     sPreCallback = c.r[3];

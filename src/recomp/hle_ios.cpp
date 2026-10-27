@@ -47,10 +47,14 @@ std::mutex sM;
 std::map<s32, Fd> sFds;
 s32 sNextFd = 3;
 
-bool logAll() {
-    static const bool on = std::getenv("CF_IOS_LOG") != nullptr;
-    return on;
+// CF_IOS_LOG=1: every open and unhandled request (not only the first); 2: every request.
+int logLevel() {
+    static const int level = std::getenv("CF_IOS_LOG") ? std::atoi(std::getenv("CF_IOS_LOG")) : 0;
+    return level;
 }
+bool logAll() { return logLevel() > 0; }
+// A request IOS answers only later (if ever): no reply now, no async callback.
+constexpr s32 kPending = 0x40000000;
 void logOnce(const std::string& what) {
     static std::set<std::string> seen;
     static std::mutex m;
@@ -63,6 +67,9 @@ fs::path nandRoot() {
         fs::path p = std::getenv("CF_NAND_DIR") ? port::envPath("CF_NAND_DIR") : port::dataDir() / "nand";
         std::error_code ec;
         fs::create_directories(p, ec);
+        // What the system menu leaves for an installed disc title: its data folder.
+        for (const char* t : {"title/00010000/52555545/data", "title/00010000/52555550/data", "shared2/sys", "tmp"})
+            fs::create_directories(p / t, ec);
         return p;
     }();
     return root;
@@ -229,11 +236,12 @@ s32 fileIoctl(Fd& f, u32 cmd, u32 out) {
 s32 doIoctl(s32 fd, u32 cmd, u32 in, u32 inLen, u32 out, u32 outLen) {
     Fd* f = fdOf(fd);
     if (!f) return IPC_EINVAL;
+    if (logLevel() >= 2) log("[ios] ioctl %s cmd %u in %08X+%X out %08X+%X", f->path.c_str(), cmd, in, inLen, out, outLen);
     switch (f->dev) {
     case Dev::Fs: return fsIoctl(cmd, in, inLen, out, outLen);
     case Dev::File: return fileIoctl(*f, cmd, out);
     case Dev::Stm:
-        if (cmd == 0x1000) return IPC_OK;  // event hook: never answered on the console either until an event
+        if (cmd == 0x1000) return kPending;  // event hook: answered only when a button event happens (never here)
         logOnce("stm ioctl " + std::to_string(cmd) + " (ok)");
         return IPC_OK;
     default: break;
@@ -248,6 +256,7 @@ s32 doIoctlv(s32 fd, u32 cmd, u32 nin, u32 nout, u32 vec) {
     if (!f) return IPC_EINVAL;
     auto vaddr = [&](u32 i) { return rd32(vec + 8 * i); };
     auto vlen = [&](u32 i) { return rd32(vec + 8 * i + 4); };
+    if (logLevel() >= 2) log("[ios] ioctlv %s cmd %u (%u in, %u out)", f->path.c_str(), cmd, nin, nout);
     if (f->dev == Dev::Es) {
         switch (cmd) {
         case 0x20:  // GetTitleID -> u64
@@ -303,7 +312,7 @@ s32 doIoctlv(s32 fd, u32 cmd, u32 nin, u32 nout, u32 vec) {
 // IOS replies arrive later on the console; async completions come as interrupts after a short
 // delay (game code may rely on the callback not running inside the call).
 void complete(s32 result, u32 cb, u32 arg) {
-    if (!cb) return;
+    if (!cb || result == kPending) return;
     sched::postIrqAfter(0.0002, [result, cb, arg](Ctx& ic) { guestCall(ic, cb, u32(result), arg); });
 }
 
@@ -365,7 +374,12 @@ HLE(IOS_SeekAsync) {
     complete(doSeek(s32(c.r[3]), s32(c.r[4]), s32(c.r[5])), c.r[6], c.r[7]);
     c.r[3] = 0;
 }
-HLE(IOS_Ioctl) { c.r[3] = u32(doIoctl(s32(c.r[3]), c.r[4], c.r[5], c.r[6], c.r[7], c.r[8])); }
+HLE(IOS_Ioctl) {
+    const s32 r = doIoctl(s32(c.r[3]), c.r[4], c.r[5], c.r[6], c.r[7], c.r[8]);
+    if (r == kPending) fatal("IOS_Ioctl on %s cmd %u would never return (a request IOS answers only on an event)",
+                             fdOf(s32(c.r[3]))->path.c_str(), c.r[4]);
+    c.r[3] = u32(r);
+}
 HLE(IOS_IoctlAsync) {
     complete(doIoctl(s32(c.r[3]), c.r[4], c.r[5], c.r[6], c.r[7], c.r[8]), c.r[9], c.r[10]);
     c.r[3] = 0;
