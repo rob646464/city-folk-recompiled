@@ -32,3 +32,4 @@
 
 ## Status (keep updated)
 - 2026-10-27: project started. Plan in docs/WII.md (engine work for Wii) and docs/ROADMAP.md (phases + enhancements).
+- GitHub: private repo https://github.com/rob646464/city-folk-recompiled (origin). Push main and named branches there.
