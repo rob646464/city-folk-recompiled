@@ -790,6 +790,9 @@ struct Session::Impl {
         if (gameId != ident.gameId)
             return reject(from, REJ_VERSION, "The host plays " + ident.gameId + ", you play " + gameId +
                                                  ": towns can only visit within one region");
+        if (portVer != ident.portVersion)
+            return reject(from, REJ_VERSION, "The host runs City Folk Recompiled " + ident.portVersion + ", you run " + portVer +
+                                                 ": both need the same version");
         if (direct && !opt.allowDirect) return reject(from, REJ_NEEDCODE);
         if (!direct) {
             u8 mine[4];

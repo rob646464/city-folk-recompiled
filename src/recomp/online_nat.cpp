@@ -317,11 +317,11 @@ std::vector<LocalAddr> localAddresses() {
     ULONG len = 16 * 1024;
     std::vector<uint8_t> buf(len);
     auto* aa = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data());
-    ULONG rc = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST, nullptr, aa, &len);
+    ULONG rc = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_INCLUDE_GATEWAYS, nullptr, aa, &len);
     if (rc == ERROR_BUFFER_OVERFLOW) {
         buf.resize(len);
         aa = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data());
-        rc = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST, nullptr, aa, &len);
+        rc = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_INCLUDE_GATEWAYS, nullptr, aa, &len);
     }
     if (rc != NO_ERROR) return out;
     for (auto* a = aa; a; a = a->Next) {
