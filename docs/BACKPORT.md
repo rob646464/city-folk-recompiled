@@ -18,8 +18,9 @@ can take. Status: pending = not in LM/SMS yet.
 | 11 | OSCalendarTimeToTicks HLE; RVL OSAlarm size 0x30 (user data) | src/recomp/hle_os.cpp | GC alarm is 0x28 (LM's memset is right there) | n/a for LM |
 | 12 | `cfembed` folder mode (a directory becomes one blob of its .txt files) | tools/recomp/cfembed.cpp | — | optional |
 | 13 | `CF_IRQ_STALL=1` also times every interrupt handler and logs those over 20 ms with their recent functions (`CF_TRACE=ring`): found a frame handoff blocking inside the VI retrace interrupt | src/recomp/sched.cpp runIrqs | test aid (LM_IRQ_STALL) | pending |
+| 15 | Aurora 0320 `aurora::pad::control_value(port, control)`: read game-defined controls bound with set_action_bindings (controls.cpp binds Wii Remote/Nunchuk inputs on `cf.wpad.*` controls) | patches/aurora/0320-pad-control-value.patch | LM/SMS: only if they bind more than PAD inputs (e.g. hotkeys per port) | pending, optional |
 | 14 | AI pacing log: "AI interrupt without the game's mix" says whether the interrupt's callback ran and whether the DSP frame was still in flight; slow AI callbacks (> 20 ms) logged | src/recomp/hle_audio.cpp | test aid | pending |
 
 ## Aurora patch series
-Same files as LM (patches/aurora, LM's 0001-0250 at Aurora 50e5be3); no City Folk patches (0300+)
-yet. Note: upstream Aurora has moved on (WPAD/KPAD implementations); we stay on LM's commit.
+Same files as LM (patches/aurora, LM's 0001-0250 at Aurora 50e5be3); City Folk patches 0300+
+(0320: pad control_value, wpad-1). Note: upstream Aurora has moved on (WPAD/KPAD implementations); we stay on LM's commit.
