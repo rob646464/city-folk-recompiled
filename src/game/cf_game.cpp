@@ -2,6 +2,8 @@
 // yet (boot work, docs/WII.md "Order of work"); these defaults leave the game untouched.
 #include "recomp/game.h"
 
+#include "recomp/distributions.h"
+
 #include <atomic>
 #include <cmath>
 
@@ -14,8 +16,9 @@ namespace {
 std::atomic<u32> sFrames{0};
 }  // namespace
 
-bool onGuestFrame(Ctx&) {
+bool onGuestFrame(Ctx& c) {
     sFrames.fetch_add(1, std::memory_order_relaxed);
+    distrib::onGuestFrame(c);  // Nintendo events (docs/DISTRIBUTIONS.md)
     return false;
 }
 u32 guestFrames() { return sFrames.load(std::memory_order_relaxed); }

@@ -14,3 +14,8 @@
 # Dolby Pro Logic II mode: City Folk's `bl AxManager::SetOutputMode(STEREO)` right after
 # InitSoundSystem (in fn_801CE6B0) becomes a nop. Switched by hle_audio.cpp (SCGetSoundMode).
 patch 30 801CE714 60000000
+
+# Nintendo events (docs/DISTRIBUTIONS.md): the game keeps a Nintendo letter from a WiiConnect24
+# package (save letter slot, letter, item, letter id); src/recomp/distributions.cpp records which
+# distribution the town received and calls the original. USA only.
+fn_8010F194

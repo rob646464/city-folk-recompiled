@@ -14,6 +14,7 @@
 #include "recomp/controls.h"
 #include "recomp/wiimote.h"
 #include "recomp/crt.h"
+#include "recomp/distributions.h"
 #include "recomp/enhanced_lighting.h"
 #include "recomp/frame.h"
 #include "recomp/interp.h"
@@ -86,7 +87,7 @@ constexpr Page kPages[] = {
     {"Visuals", "General"},       {"Visuals", "Rendering"},        {"Visuals", "Enhanced lighting"},
     {"Sound", nullptr},           {"Controls", "Ports"},           {"Controls", "Bindings"},
     {"Controls", "Pointer"},      {"Controls", "Analog"},       {"Controls", "DSU"},             {"Enhancements", "General"},     {"Enhancements", "Gameplay"},
-    {"Enhancements", "Silly"},          {"Enhancements", "Unused content"}, {"Enhancements", "Debug"}, {"Game", nullptr},
+    {"Enhancements", "Silly"},          {"Enhancements", "Unused content"}, {"Enhancements", "Debug"}, {"Online", "Nintendo events"}, {"Game", nullptr},
 };
 constexpr int kPageCount = int(sizeof(kPages) / sizeof(kPages[0]));
 constexpr float kXs[] = {0.05f, 0.3f, 0.6f, 0.88f};
@@ -1944,6 +1945,16 @@ void draw() {
             }
             if (tab("Enhancements")) {
                 enhancementsTab();
+                ImGui::EndTabItem();
+            }
+            if (tab("Online")) {
+                if (ImGui::BeginTabBar("##online")) {
+                    if (ImGui::BeginTabItem("Nintendo events", nullptr, envTab("Nintendo events"))) {
+                        sDirty |= recomp::distrib::drawMenuPage();
+                        ImGui::EndTabItem();
+                    }
+                    ImGui::EndTabBar();
+                }
                 ImGui::EndTabItem();
             }
             if (tab("Game")) {

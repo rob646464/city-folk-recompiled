@@ -71,6 +71,10 @@ add_executable(cf_wiimote_hid_test tools/tests/wiimote_hid_test.cpp src/recomp/w
 target_include_directories(cf_wiimote_hid_test PRIVATE src)
 enable_testing()
 add_test(NAME wiimote_hid COMMAND cf_wiimote_hid_test)
+# Nintendo events: WC24 crypto (SHA-1, AES-OFB, RSA) and VFF volumes (docs/DISTRIBUTIONS.md "Testing").
+add_executable(cf_distrib_test tools/tests/distrib_test.cpp src/recomp/wc24_crypto.cpp src/recomp/vff.cpp)
+target_include_directories(cf_distrib_test PRIVATE src)
+add_test(NAME distrib COMMAND cf_distrib_test)
 
 # Runtime shared by both executables: memory/CPU helpers, scheduler, HLE SDK, frame driver,
 # audio, menu, and the game-specific parts in src/game. module_rt.cpp belongs to the game
@@ -78,7 +82,8 @@ add_test(NAME wiimote_hid COMMAND cf_wiimote_hid_test)
 file(GLOB RECOMP_RUNTIME_SOURCES CONFIGURE_DEPENDS src/recomp/*.cpp src/game/*.cpp)
 list(REMOVE_ITEM RECOMP_RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/src/recomp/module_rt.cpp)
 list(APPEND RECOMP_RUNTIME_SOURCES src/port/crash_handler.cpp src/port/options.cpp src/port/dol.cpp
-    src/port/settings.cpp src/port/install.cpp src/port/update.cpp src/port/recovery.cpp src/port/disc_folder.cpp)
+    src/port/settings.cpp src/port/install.cpp src/port/update.cpp src/port/recovery.cpp src/port/disc_folder.cpp
+    src/port/http_get.cpp)
 set_source_files_properties(src/port/update.cpp PROPERTIES COMPILE_DEFINITIONS "CF_VERSION=\"${PROJECT_VERSION}\"")
 
 function(cf_runtime_target tgt)

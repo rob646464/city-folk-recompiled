@@ -8,13 +8,15 @@
 //   /dev/usb/kbd        the USB keyboard module with no keyboard attached (its event request waits)
 //   /dev/usb/oh0        the USB host with no device (Wii Speak absent)
 //   /dev/net/*          not running (offline: NCD/SO/KD/SSL opens fail, as when the network
-//                       modules are not up); WiiConnect24 and online play come later (docs/ONLINE.md)
+//                       modules are not up), except KD and NCD while a WiiConnect24 feature is on
+//                       (nwc24_dl.cpp: Nintendo events, docs/DISTRIBUTIONS.md); online play: docs/ONLINE.md
 // Written from the public IOS interface documentation, not from another emulator's code.
 #include "recomp/ios.h"
 
 #include "port/install.h"
 #include "recomp/hle.h"
 #include "recomp/menu.h"
+#include "recomp/nwc24_dl.h"
 #include "recomp/runtime.h"
 
 #include <chrono>
@@ -283,6 +285,8 @@ std::unique_ptr<Handle> openDevice(const std::string& path, u32, s32& err, doubl
     if (path == "/dev/sdio/slot0" || path == "/dev/sdio/slot1") return std::make_unique<SdSlot>();
     if (path == "/dev/usb/kbd" && std::getenv("CF_USB_KBD_DEVICE")) return std::make_unique<UsbKeyboard>();
     if (path == "/dev/usb/oh0") return std::make_unique<UsbHost>();
+    if (path.rfind("/dev/net/", 0) == 0)
+        if (auto h = nwc24::openDevice(path, err)) return h;
     logOnce("open " + path + ": no such device");
     err = IPC_ENOENT;
     return nullptr;

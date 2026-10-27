@@ -11,6 +11,7 @@
 #include "port/install.h"
 #include "port/settings.h"
 #include "recomp/ios.h"
+#include "recomp/nwc24_dl.h"
 #include "recomp/menu.h"
 #include "recomp/hle.h"
 #include "recomp/runtime.h"
@@ -236,6 +237,8 @@ void writeSysconf() {
     put(items, "IPL.IDL", SmallArray, {0, 0}, true);  // WiiConnect24 standby off
     put(items, "IPL.CD", Bool, u8v(1), true);         // first-time setup done
     put(items, "IPL.EULA", Bool, u8v(1), true);       // WiiConnect24 user agreement shown
+    // WiiConnect24 on/off (bit 0): on only while a feature that needs it is on (nwc24_dl.h).
+    put(items, "NET.WCFG", Long, u32v(nwc24::sysconfWcFlags()));
     put(items, "BT.DINF", BigArray, std::vector<u8>(0x461, 0), true);  // paired Wii Remotes (none)
     put(items, "BT.CDIF", BigArray, std::vector<u8>(0x205, 0), true);
     writeFile(path, serialize(items));
@@ -308,6 +311,7 @@ void prepareNand() {
     a.groupPerm = 1;
     a.otherPerm = 1;  // read-only for games
     ios::setAttr(settingPath, a);
+    nwc24::provisionNand();  // WiiConnect24's files, only while it is reported on
 }
 
 void writeSettingTxtToLowMemory() {
