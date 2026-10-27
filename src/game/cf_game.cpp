@@ -39,10 +39,10 @@ void enhBeginScene(Ctx&) {}
 bool enhRoomBounds(const float*, float*, float*) { return false; }
 void drawOverlay() {}
 void debugMenu() {}
-s32 overlayEntry(const char*) { return -1; }
-bool isOverlayEntry(s32) { return false; }
-u32 overlayLength(s32) { return 0; }
-s32 overlayRead(s32, void*, s32, s32) { return -1; }
+s32 overlayEntry(const char* path) { return region::overlayEntry(path); }
+bool isOverlayEntry(s32 e) { return region::isOverlayEntry(e); }
+u32 overlayLength(s32 e) { return region::overlayLength(e); }
+s32 overlayRead(s32 e, void* dst, s32 len, s32 off) { return region::overlayRead(e, dst, len, off); }
 void onBoot(Ctx&) {}
 void onFrame() {}
 

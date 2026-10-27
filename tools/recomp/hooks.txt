@@ -27,3 +27,17 @@ fn_800897D0 pal
 fn_80089818 jp
 fn_80089568 jp
 fn_80089738 jp
+fn_8008986C kr
+fn_800895BC kr
+fn_8008978C kr
+# The region getter itself, answered per call site (Nook's seasonal item, event letters).
+fn_801069D0
+fn_80106B30 pal
+fn_80106B64 jp
+fn_80106A50 kr
+# The town's region group (0 JP, 1 USA, 2 Europe, 3 Korea), for the villager house-type data of
+# d_a_str_fieldNP (other regions' houses).
+fn_80169890
+fn_80169540 pal
+fn_80169480 jp
+fn_80169418 kr

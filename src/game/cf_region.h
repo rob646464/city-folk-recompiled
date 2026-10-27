@@ -9,4 +9,11 @@ namespace recomp::region {
 bool menuSection();
 // Once per guest frame (cf_game.cpp onGuestFrame): test aids.
 void onGuestFrame(u32 frame);
+
+// Disc overlay (recomp/game.h overlay*): field structure archives with another region's
+// villager houses.
+s32 overlayEntry(const char* path);
+bool isOverlayEntry(s32 entry);
+u32 overlayLength(s32 entry);
+s32 overlayRead(s32 entry, void* dst, s32 len, s32 off);
 }  // namespace recomp::region

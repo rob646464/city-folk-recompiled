@@ -32,6 +32,7 @@
 #include "recomp/menu.h"
 #include "recomp/runtime.h"
 
+#include "port/disc_folder.h"
 #include "port/settings.h"
 
 #include <imgui.h>
@@ -40,7 +41,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <ostream>
+#include <algorithm>
+#include <cctype>
 #include <initializer_list>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -96,10 +100,30 @@ const char* const kParentName[] = {
     "Korea (Parent's Day May 8 / none)",
 };
 
+// Other on/off options (shop stock, ...).
+enum Flag { kShopNewYear, kShopHina, kShopFestive, kFlagCount };
+struct FlagDef {
+    const char* key;
+    const char* name;
+    const char* tip;
+};
+const FlagDef kFlags[kFlagCount] = {
+    {"shop_new_year_jp", "Japan's New Year decorations at Nook's (Dec 26-31)",
+     "From December 26 to 31 Nook's seasonal item is the kadomatsu or the kagamimochi, as in the "
+     "Japanese game (North America: festive flag / candle; Europe and Korea: none)."},
+    {"shop_hinaningyo", "Hinaningyo at Nook's (March 1-3)",
+     "For Girl's Day Nook sells the hinaningyo doll set from March 1 to 3, as in the Japanese game."},
+    {"shop_festive_flag_candle", "Festive flag and candle at Nook's (December)",
+     "North America's extra December stock: the festive flag or festive candle instead of a festive "
+     "tree on some days from December 1 to 23, and from December 26 to 31."},
+};
+
 struct Config {
     bool event[kEventCount] = {};
+    bool flag[kFlagCount] = {};
     int moon = 0;     // index into kMoonRecord
     int parents = 0;  // index into kParentLang
+    int houses = 0;   // villager house set: 0 the town's own, 1 North America, 2 Europe, 3 Japan/Korea
 };
 Config sCfg;
 
@@ -109,16 +133,22 @@ void loadKey(const std::string& section, const std::string& key, const std::stri
     const bool on = value == "true" || value == "1";
     for (int i = 0; i < kEventCount; i++)
         if (key == kEvents[i].key) sCfg.event[i] = on;
+    for (int i = 0; i < kFlagCount; i++)
+        if (key == kFlags[i].key) sCfg.flag[i] = on;
     if (key == "autumn_moon") sCfg.moon = std::atoi(value.c_str());
     if (key == "parents_days") sCfg.parents = std::atoi(value.c_str());
+    if (key == "villager_houses") sCfg.houses = std::atoi(value.c_str());
+    if (sCfg.houses < 0 || sCfg.houses > 3) sCfg.houses = 0;
     if (sCfg.moon < 0 || sCfg.moon > 3) sCfg.moon = 0;
     if (sCfg.parents < 0 || sCfg.parents > 7) sCfg.parents = 0;
 }
 void saveConfig(std::ostream& out) {
     out << "\n[region]\n";
     for (int i = 0; i < kEventCount; i++) out << kEvents[i].key << " = " << (sCfg.event[i] ? "true" : "false") << "\n";
+    for (int i = 0; i < kFlagCount; i++) out << kFlags[i].key << " = " << (sCfg.flag[i] ? "true" : "false") << "\n";
     out << "autumn_moon = " << sCfg.moon << "\n";
     out << "parents_days = " << sCfg.parents << "\n";
+    out << "villager_houses = " << sCfg.houses << "\n";
 }
 const bool sRegistered = [] {
     port::addSettingsExtension({&resetConfig, &loadKey, &saveConfig});
@@ -141,15 +171,21 @@ const EnvOverride sEnv = [] {
     while (p <= s.size()) {
         const size_t q = s.find(',', p);
         const std::string tok = s.substr(p, q == std::string::npos ? std::string::npos : q - p);
-        if (tok == "all")
+        if (tok == "all") {
             for (bool& b : e.cfg.event) b = true;
+            for (bool& b : e.cfg.flag) b = true;
+        }
         else if (tok.rfind("moon=", 0) == 0)
             e.cfg.moon = std::atoi(tok.c_str() + 5) & 3;
         else if (tok.rfind("parents=", 0) == 0)
             e.cfg.parents = std::atoi(tok.c_str() + 8) & 7;
+        else if (tok.rfind("houses=", 0) == 0)
+            e.cfg.houses = std::atoi(tok.c_str() + 7) & 3;
         else
             for (int i = 0; i < kEventCount; i++)
                 if (tok == kEvents[i].key) e.cfg.event[i] = true;
+        for (int i = 0; i < kFlagCount; i++)
+            if (tok == kFlags[i].key) e.cfg.flag[i] = true;
         if (q == std::string::npos) break;
         p = q + 1;
     }
@@ -167,11 +203,14 @@ const bool sLog = [] {
 struct Addrs {
     u32 table;      // event table
     u32 townData;   // fn returning the town data the event code reads (+0x735C2)
+    u32 shopFn;     // Nook's seasonal item choice (US fn_801456B4); region getter calls at +0x398.. +0x444
+    u32 letterFn;   // event letter templates by region (US fn_800D2084, MAIL_ETC_MotherEvent); getter at +0x20
 };
-// USA RUUE01 / Europe RUUP01 / Japan RUUJ01 rev 1 (config/<id>/us_map.txt).
-constexpr Addrs kAddrUS{0x8046EEF0, 0x8010DD60};
-constexpr Addrs kAddrPAL{0x8046EEF0, 0x8010DA10};
-constexpr Addrs kAddrJPN{0x8046EE30, 0x8010D950};
+// USA RUUE01 / Europe RUUP01 / Japan RUUJ01 / Korea RUUK01 rev 1 (config/<id>/us_map.txt).
+constexpr Addrs kAddrUS{0x8046EEF0, 0x8010DD60, 0x801456B4, 0x800D2084};
+constexpr Addrs kAddrPAL{0x8046EEF0, 0x8010DA10, 0x80145364, 0x800D21E4};
+constexpr Addrs kAddrJPN{0x8046EE30, 0x8010D950, 0x801452A4, 0x800D233C};
+constexpr Addrs kAddrKOR{0x80478870, 0x8010D80C, 0x80145214, 0x800D20EC};
 constexpr u32 kTownLangOffset = 0x735C2;
 constexpr int kTableSize = 47;
 
@@ -181,6 +220,7 @@ const Addrs* addrs() {
         if (!std::strcmp(id, "RUUE01")) return &kAddrUS;
         if (!std::strcmp(id, "RUUP01")) return &kAddrPAL;
         if (!std::strcmp(id, "RUUJ01")) return &kAddrJPN;
+        if (!std::strcmp(id, "RUUK01")) return &kAddrKOR;
         return nullptr;
     }();
     return a;
@@ -292,7 +332,43 @@ void parentsHook(Ctx& c, const char* orig) {
 
 }  // namespace
 
-// USA, Europe, Japan (hooks.txt): fn_80089890 "event runs on date", fn_800895E0 Mother's Day,
+namespace {
+// The region getter (US fn_801069D0: li r3, <region>; blr) answered per call site: only the
+// listed callers see another region, every other caller (save check, online URLs, profanity
+// list, keyboards, ...) the disc's own.
+//   Nook's seasonal item (shopFn): +0x398 "region == USA" for Dec 1-23 (festive flag/candle
+//   or tree), +0x41C "== Japan" Dec 26-31 (kadomatsu/kagamimochi), +0x430 "== USA" Dec 26-31
+//   (flag/candle), +0x444 "== Japan" for the Mar 1-3 hinaningyo check.
+//   Event letters (letterFn +0x20): the region of the Mother's/Father's Day rule chosen above.
+int regionGroupOfLang(int lang) { return lang == 0 ? 0 : lang <= 3 ? 1 : lang <= 8 ? 2 : 3; }
+void getterHook(Ctx& c, const char* orig) {
+    const u32 lr = c.lr;
+    callOriginal(c, orig);
+    const Addrs* a = addrs();
+    if (!a) return;
+    const Config& k = cfg();
+    const u32 own = c.r[3];
+    const u32 site = lr - 4;
+    if (site - a->shopFn < 0x1000) {
+        const u32 off = site - a->shopFn;
+        if ((off == 0x398 || off == 0x430) && k.flag[kShopFestive]) c.r[3] = 1;
+        if (off == 0x41C && k.flag[kShopNewYear]) c.r[3] = 0;
+        if (off == 0x444 && k.flag[kShopHina]) c.r[3] = 0;
+        // Dec 26-31 with both options on a European/Korean town: Japan's item (the game asks
+        // "Japan?" first), as a Japanese game would.
+    } else if (site == a->letterFn + 0x20 && kParentLang[k.parents] >= 0) {
+        c.r[3] = u32(regionGroupOfLang(kParentLang[k.parents]));
+    }
+    if (sLog && c.r[3] != own) log("[region] region getter at %08X: %u instead of %u", site, c.r[3], own);
+}
+}  // namespace
+
+HLE(fn_801069D0) { getterHook(c, "fn_801069D0"); }
+HLE(fn_80106B30) { getterHook(c, "fn_80106B30"); }
+HLE(fn_80106B64) { getterHook(c, "fn_80106B64"); }
+HLE(fn_80106A50) { getterHook(c, "fn_80106A50"); }
+
+// USA, Europe, Japan, Korea (hooks.txt): fn_80089890 "event runs on date", fn_800895E0 Mother's Day,
 // fn_800897B0 Father's Day.
 HLE(fn_80089890) { eventHook(c, "fn_80089890"); }
 HLE(fn_800898B0) { eventHook(c, "fn_800898B0"); }
@@ -303,6 +379,181 @@ HLE(fn_80089568) { parentsHook(c, "fn_80089568"); }
 HLE(fn_800897B0) { parentsHook(c, "fn_800897B0"); }
 HLE(fn_800897D0) { parentsHook(c, "fn_800897D0"); }
 HLE(fn_80089738) { parentsHook(c, "fn_80089738"); }
+HLE(fn_8008986C) { eventHook(c, "fn_8008986C"); }
+HLE(fn_800895BC) { parentsHook(c, "fn_800895BC"); }
+HLE(fn_8008978C) { parentsHook(c, "fn_8008978C"); }
+
+// ---- Villager houses -------------------------------------------------------------------------
+//
+// The town's structures come from one archive per region and language,
+// /Str/Brres/field<Usa|Eur|Jpn|Kor><Eng|Fra|Spa|Ger|Ita|Jpn|Kor>StrBrres<S|W>.arc (fn_80166FC4,
+// region and language from the town's +0x735C2 byte), with the five villager house models
+// TN_obj_house0-4.brres and their textures obj_house_tex.brres; the shops' signs etc. in it are
+// per language. Every disc has every region's archive. The house set is not saved per house: a
+// villager's house style is an index 0-4, and the models behind the indices are the town
+// region's. So "another region's houses" = the town's own archive with those six members taken
+// from the other region's archive, served as a disc overlay (shop signs stay in the town's
+// language), plus the house-type data the field actor (d_a_str_fieldNP fn_102_1E10) picks from
+// obj_npc_common by the town's region group (obj_house_usa / _eur / _jpn): fn_80169890 answers
+// the chosen region for calls from that module. It applies to new and existing towns alike
+// (nothing is written to the save), from the next time the town is loaded.
+
+namespace {
+const char* const kHouseName[] = {"The town's own", "North America (Ornate, Pink and three shared)",
+                                  "Europe (Brick, Log and three shared)", "Japan / Korea (Zen, Farmhouse and three shared)"};
+const char* const kHouseDonor[] = {nullptr, "UsaEng", "EurEng", "JpnJpn"};
+const char* const kHouseRegion[] = {nullptr, "usa", "eur", "jpn"};
+const char* const kHouseMembers[] = {"TN_obj_house0.brres", "TN_obj_house1.brres", "TN_obj_house2.brres",
+                                     "TN_obj_house3.brres", "TN_obj_house4.brres", "obj_house_tex.brres"};
+constexpr s32 kOverlayBase = 0x40000000;
+
+struct Overlay {
+    std::string key;  // lower-case path + option
+    std::vector<u8> data;
+};
+std::mutex sOvM;
+std::vector<Overlay> sOverlays;
+
+std::string lower(const char* s) {
+    std::string r = s;
+    for (char& ch : r) ch = char(std::tolower(u8(ch)));
+    return r;
+}
+
+bool readDiscFile(const std::string& path, std::vector<u8>& out) {
+    if (!port::discfolder::active()) return false;
+    const s32 n = port::discfolder::pathToEntry(path.c_str());
+    const port::discfolder::Entry* e = n >= 0 ? port::discfolder::entry(n) : nullptr;
+    if (!e || e->isDir) return false;
+    out.resize(e->length);
+    return port::discfolder::read(n, out.data(), e->length, 0) == s64(e->length);
+}
+
+u32 be32(const std::vector<u8>& d, size_t o) { return u32(d[o]) << 24 | u32(d[o + 1]) << 16 | u32(d[o + 2]) << 8 | d[o + 3]; }
+void putBe32(std::vector<u8>& d, size_t o, u32 v) {
+    d[o] = u8(v >> 24);
+    d[o + 1] = u8(v >> 16);
+    d[o + 2] = u8(v >> 8);
+    d[o + 3] = u8(v);
+}
+
+struct U8File {
+    std::string name;  // base name
+    u32 node, off, size;
+};
+bool parseU8(const std::vector<u8>& d, std::vector<U8File>& files, u32& dataStart) {
+    if (d.size() < 0x20 || be32(d, 0) != 0x55AA382D) return false;
+    const u32 root = be32(d, 4);
+    dataStart = be32(d, 12);
+    if (root + 12 > d.size()) return false;
+    const u32 n = be32(d, root + 8);
+    const u32 strtab = root + n * 12;
+    if (strtab > d.size()) return false;
+    for (u32 i = 1; i < n; i++) {
+        const u32 o = root + i * 12;
+        if (d[o] != 0) continue;
+        const u32 nameOff = be32(d, o) & 0xFFFFFF;
+        std::string name;
+        for (u32 k = strtab + nameOff; k < d.size() && d[k]; k++) name += char(d[k]);
+        files.push_back({name, o, be32(d, o + 4), be32(d, o + 8)});
+    }
+    return true;
+}
+
+// The town's archive with the house members of `donor`; empty on any problem.
+std::vector<u8> buildHouseArchive(const std::vector<u8>& own, const std::vector<u8>& donor) {
+    std::vector<U8File> of, df;
+    u32 oData = 0, dData = 0;
+    if (!parseU8(own, of, oData) || !parseU8(donor, df, dData)) return {};
+    std::vector<u8> out(own.begin(), own.begin() + oData);
+    int replaced = 0;
+    for (const U8File& f : of) {
+        const u8* src = own.data() + f.off;
+        u32 size = f.size;
+        for (const char* m : kHouseMembers)
+            if (f.name == m)
+                for (const U8File& g : df)
+                    if (g.name == f.name && g.off + g.size <= donor.size()) {
+                        src = donor.data() + g.off;
+                        size = g.size;
+                        replaced++;
+                    }
+        if (f.off + f.size > own.size()) return {};
+        out.resize((out.size() + 31) & ~size_t(31), 0);
+        putBe32(out, f.node + 4, u32(out.size()));
+        putBe32(out, f.node + 8, size);
+        out.insert(out.end(), src, src + size);
+    }
+    if (replaced != 6) return {};
+    out.resize((out.size() + 31) & ~size_t(31), 0);
+    return out;
+}
+
+int housesOption() { return cfg().houses; }
+bool isOverlayEntryLocked(s32 e) { return e >= kOverlayBase && size_t(e - kOverlayBase) < sOverlays.size(); }
+
+}  // namespace
+
+s32 overlayEntry(const char* path) {
+    const int h = housesOption();
+    if (!h || !path) return -1;
+    const std::string p = lower(path);
+    // "/str/brres/field" + region(3) + language(3) + "strbrres" + season + ".arc"
+    static const std::string pre = "/str/brres/field";
+    if (p.size() != pre.size() + 6 + 8 + 1 + 4 || p.compare(0, pre.size(), pre) != 0) return -1;
+    const std::string rgn = p.substr(pre.size(), 3);
+    const char season = path[pre.size() + 6 + 8];
+    if (p.compare(pre.size() + 6, 8, "strbrres") != 0 || p.compare(p.size() - 4, 4, ".arc") != 0) return -1;
+    if (rgn == kHouseRegion[h] || (h == 3 && rgn == "kor")) return -1;  // already that region's houses
+    const std::string key = p + char('0' + h);
+    std::lock_guard lk(sOvM);
+    for (size_t i = 0; i < sOverlays.size(); i++)
+        if (sOverlays[i].key == key) return kOverlayBase + s32(i);
+    std::vector<u8> own, donor;
+    const std::string donorPath = std::string("/Str/Brres/field") + kHouseDonor[h] + "StrBrres" + season + ".arc";
+    if (!readDiscFile(path, own) || !readDiscFile(donorPath, donor)) return -1;
+    std::vector<u8> built = buildHouseArchive(own, donor);
+    if (built.empty()) {
+        log("[region] villager houses: could not combine %s with %s", path, donorPath.c_str());
+        return -1;
+    }
+    log("[region] villager houses: %s served with the houses of %s (%zu bytes)", path, donorPath.c_str(), built.size());
+    sOverlays.push_back({key, std::move(built)});
+    return kOverlayBase + s32(sOverlays.size() - 1);
+}
+bool isOverlayEntry(s32 e) {
+    std::lock_guard lk(sOvM);
+    return isOverlayEntryLocked(e);
+}
+u32 overlayLength(s32 e) {
+    std::lock_guard lk(sOvM);
+    return isOverlayEntryLocked(e) ? u32(sOverlays[size_t(e - kOverlayBase)].data.size()) : 0;
+}
+s32 overlayRead(s32 e, void* dst, s32 len, s32 off) {
+    std::lock_guard lk(sOvM);
+    if (!isOverlayEntryLocked(e) || off < 0 || len < 0) return -1;
+    const std::vector<u8>& d = sOverlays[size_t(e - kOverlayBase)].data;
+    if (size_t(off) >= d.size()) return 0;
+    const size_t n = std::min(size_t(len), d.size() - size_t(off));
+    std::memcpy(dst, d.data() + off, n);
+    return s32(n);
+}
+
+namespace {
+// The house-type data of d_a_str_fieldNP (module 102): its one call of the town region getter.
+void townRegionHook(Ctx& c, const char* orig) {
+    const u32 lr = c.lr;
+    callOriginal(c, orig);
+    const int h = housesOption();
+    if (!h) return;
+    const u32 text = relBase(102, 1);
+    if (text && lr - text < 0x5108) c.r[3] = h == 1 ? 1u : h == 2 ? 2u : 0u;
+}
+}  // namespace
+HLE(fn_80169890) { townRegionHook(c, "fn_80169890"); }
+HLE(fn_80169540) { townRegionHook(c, "fn_80169540"); }
+HLE(fn_80169480) { townRegionHook(c, "fn_80169480"); }
+HLE(fn_80169418) { townRegionHook(c, "fn_80169418"); }
 
 // ---- Test aids -------------------------------------------------------------------------------
 
@@ -360,9 +611,9 @@ std::vector<ActorHit> findActors(std::initializer_list<u32> modules) {
         for (u32 a = lo; a + 0x70 < hi; a += 4) {
             const u32 vt = rd32(a + 0x60);
             for (const Range& r : rs)
-                if (vt >= r.lo && vt < r.hi && rd32(a) < 0x400 && (vt & 3) == 0) {
+                if (vt >= r.lo && vt < r.hi && rd32(a) - 1 < 0x3FF && (vt & 3) == 0) {
                     const float x = rdf32(a + 0x64), z = rdf32(a + 0x6C);
-                    if (x > 0 && x < 20000 && z > 0 && z < 20000) out.push_back({a, r.mod});
+                    if (x > 1 && x < 20000 && z > 1 && z < 20000) out.push_back({a, r.mod});
                 }
         }
     };
@@ -380,9 +631,32 @@ void actorAids(u32 frame) {
         return v ? u32(std::strtoul(v, nullptr, 10)) : 0u;
     }();
     if (every && frame % every == 0) {
-        for (const ActorHit& h : findActors({80, 36}))
-            log("[actor] f%u %s %08X id %X pos %.1f %.1f %.1f", frame, h.module == 80 ? "player" : "tortimer-event",
-                h.addr, rd32(h.addr), rdf32(h.addr + 0x64), rdf32(h.addr + 0x68), rdf32(h.addr + 0x6C));
+        // CF_ACTOR_MODULES=<id>,...: more actor modules to list (default: player 80, holiday
+        // Tortimer 36, Tortimer 35).
+        static const std::vector<u32> mods = [] {
+            std::vector<u32> m = {80, 36, 35};
+            if (const char* v = std::getenv("CF_ACTOR_MODULES"))
+                for (const char* p = v; *p;) {
+                    char* end = nullptr;
+                    m.push_back(u32(std::strtoul(p, &end, 10)));
+                    if (end == p) break;
+                    p = *end == ',' ? end + 1 : end;
+                }
+            return m;
+        }();
+        std::vector<ActorHit> hits;
+        for (u32 m : mods)
+            for (const ActorHit& h : findActors({m})) hits.push_back(h);
+        for (const ActorHit& h : hits)
+            log("[actor] f%u module %u %08X id %X pos %.1f %.1f %.1f", frame, h.module, h.addr, rd32(h.addr),
+                rdf32(h.addr + 0x64), rdf32(h.addr + 0x68), rdf32(h.addr + 0x6C));
+        // Today's event list (fn_80089D3C, USA 0x805855E8: 10 x {event, active}).
+        if (addrs() == &kAddrUS) {
+            std::string s;
+            for (u32 i = 0; i < 10; i++)
+                if (rd32(0x805855E8 + 8 * i + 4)) s += " " + std::to_string(rd32(0x805855E8 + 8 * i));
+            log("[actor] f%u today's events:%s", frame, s.empty() ? " none" : s.c_str());
+        }
     }
     static const char* tp = std::getenv("CF_TELEPORT");
     if (!tp) return;
@@ -415,6 +689,7 @@ void actorAids(u32 frame) {
                         wrf32(h.addr + o + 8, z);
                     }
                     log("[actor] f%u player %08X moved to %.1f %.1f %.1f", frame, h.addr, x, y, z);
+                    break;
                 }
             if (!ok) log("[actor] f%u teleport target not found (%s)", frame, arg);
         }
@@ -471,7 +746,20 @@ bool menuSection() {
     ImGui::SetItemTooltip(
         "Which country's dates the game uses for Mother's Day and Father's Day. The Korean rule "
         "moves Mother's Day to May 8 (Parent's Day) and has no Father's Day (Korea's Teacher's Day "
-        "is a separate event above).");
+        "is a separate event above). The Mother's Day letter from your mom follows the same "
+        "country.");
+    if (ImGui::Combo("Villager house styles", &sCfg.houses, kHouseName, 4)) dirty = true;
+    ImGui::SetItemTooltip(
+        "The five villager house exteriors come in a set per region: North America (two of them "
+        "Ornate and Pink), Europe (Brick and Log), Japan and Korea (Zen and Farmhouse). Every "
+        "villager's house is drawn from the chosen region's set; shop signs stay in your language. "
+        "Not saved in the town: it applies to new and existing towns from the next time the town "
+        "loads, and switching back restores the town's own look.");
+    ImGui::TextUnformatted("Nook's seasonal items:");
+    for (int i = kShopNewYear; i <= kShopFestive; i++) {
+        dirty |= recomp::menu::Checkbox(kFlags[i].name, &sCfg.flag[i]);
+        ImGui::SetItemTooltip("%s", kFlags[i].tip);
+    }
     return dirty;
 }
 
