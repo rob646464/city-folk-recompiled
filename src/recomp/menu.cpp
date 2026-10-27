@@ -2,6 +2,7 @@
 // Drawn with Aurora's Dear ImGui on the host thread between the guest's present
 // and aurora_end_frame. While it is open the game receives neutral pad input.
 #include "recomp/menu.h"
+#include "game/cf_calendar.h"
 #include "recomp/system.h"
 #include "recomp/game.h"
 #include "recomp/gx_bridge.h"
@@ -1649,9 +1650,12 @@ void generalEnhancementsTab() {
     ImGui::SetItemTooltip("The game pauses (and goes quiet) while another window is in front.");
 }
 
-// Game features (docs/ROADMAP.md "Feature list"): none yet; every one will be off / original by
-// default.
-void gameplayTab() { ImGui::TextDisabled("Nothing here yet: the game's own options come later (docs/ROADMAP.md)."); }
+// Game features (docs/ROADMAP.md "Feature list"): every one is off / original by default.
+void gameplayTab() {
+    ImGui::SeparatorText("Seasons and weather");
+    sDirty |= recomp::calendar::drawHemisphereMenu();  // src/game/cf_calendar.cpp
+    sDirty |= recomp::calendar::drawWeatherMenu();     // src/game/cf_weather.cpp
+}
 
 // Debug: the game's debug entries (src/game).
 void debugTab() { recomp::game::debugMenu(); }
