@@ -87,6 +87,11 @@ game calls directly.
 - **Pointer from mouse, right stick or gyro** (SDL sensor API) per port; recentre button; F1 >
   Controls like LM's bindings. Classic Controller (if the game supports it) and GameCube
   controller paths map a normal pad directly.
+- **Real Wii Remotes** (and DolphinBar mode 4): connected over HID with SDL's hidapi, our own
+  report handling (written from public Wii Remote protocol documentation): IR camera setup and
+  dots → pointer, accelerometer, extensions (Nunchuk), rumble, speaker. The KPAD/WPAD HLE takes
+  each port's input from a source: real remote, mouse, right stick, gyro pad. SDL's built-in Wii
+  driver is not enough on its own (no IR pointer), so claim the device before SDL opens it.
 - **Remote speaker** (`WPADSendStreamData`, 4-bit ADPCM): decode and mix into PC output (option:
   separate volume).
 
