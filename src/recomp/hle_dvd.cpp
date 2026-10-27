@@ -1,6 +1,6 @@
-// HLE: DVD file system. The disc is either an image read through Aurora's disc reader (nod:
-// ISO, WBFS, RVZ, ...; Wii images: the game partition) or an extracted disc folder
-// (port/disc_folder.h). Game files may also be served by the game's own code (game.h
+// HLE: DVD file system. The disc (an extracted folder, or an image's game partition read through
+// nod: ISO, WBFS, RVZ, ...) is served by port/disc_folder.h; the Aurora DVD paths below are only
+// a fallback when no disc was opened there. Game files may also be served by the game's own code (game.h
 // overlayEntry). Reads complete on the host with modelled latency; async completions are
 // delivered as interrupts.
 #include "port/disc_folder.h"

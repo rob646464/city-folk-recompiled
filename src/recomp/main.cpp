@@ -367,27 +367,19 @@ int main(int argc, char* argv[]) {
     const char* wantId = port::gameId(launch.version);
 #endif
     port::setPhase("loading the game");
-    // The disc: an extracted folder (sys/, files/: port/disc_folder.h) or an image (Aurora/nod).
-    const u8* dol = nullptr;
-    s32 dolSize = 0;
+    // The disc: an extracted folder (sys/, files/) or an image's game partition (nod), both served
+    // by port/disc_folder.h (hle_dvd.cpp reads every file through it).
     std::string discError;
-    if (!disc.empty() && port::discfolder::isDiscFolder(disc)) {
-        if (!port::discfolder::open(disc, discError)) {
-            std::fprintf(stderr, "Could not open the disc folder %s: %s\n", disc.c_str(), discError.c_str());
-            aurora_shutdown();
-            return 1;
-        }
-        dol = port::discfolder::dol().data();
-        dolSize = s32(port::discfolder::dol().size());
-        port::dol::setDol(dol, size_t(dolSize));
-    } else if (!disc.empty() && aurora_dvd_open(disc.c_str())) {
-        port::dol::load();
-        dol = DVDGetDOLLocation(&dolSize);
-    } else {
-        std::fprintf(stderr, "Could not open an Animal Crossing: City Folk disc. Pass --disc <disc image or extracted folder>.\n");
+    if (disc.empty() || !port::discfolder::open(disc, discError)) {
+        if (disc.empty())
+            std::fprintf(stderr, "Could not open an Animal Crossing: City Folk disc. Pass --disc <disc image or extracted folder>.\n");
+        else
+            std::fprintf(stderr, "Could not open the disc %s: %s\n", disc.c_str(), discError.c_str());
         aurora_shutdown();
         return 1;
     }
+    const u8* dol = port::discfolder::dol().data();
+    port::dol::setDol(dol, port::discfolder::dol().size());
     const char* discId = port::dol::versionId(port::dol::version());
     if (std::strcmp(discId, wantId) != 0) {
         std::fprintf(stderr, "The game was recompiled from Animal Crossing: City Folk %s; the disc is %s.\n", wantId, discId);
