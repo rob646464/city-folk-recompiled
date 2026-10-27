@@ -623,8 +623,9 @@ std::vector<ActorHit> findActors(std::initializer_list<u32> modules) {
 }
 
 // CF_ACTOR_LOG=<every n frames>: player / holiday Tortimer actors and positions.
-// CF_TELEPORT=<frame>:<x>,<y>,<z>|tortimer[;...]: the player moved there (tortimer = 48 units
-// in front of the holiday Tortimer, if one exists).
+// CF_TELEPORT=<frame>:<x>,<y>,<z>|tortimer|mod<N>[:dx,dz][;...]: the player moved there
+// (tortimer = 48 units in front of the holiday Tortimer; mod<N> = next to the (last) actor of
+// module N, e.g. mod13 = the bulletin board's bird).
 void actorAids(u32 frame) {
     static const u32 every = [] {
         const char* v = std::getenv("CF_ACTOR_LOG");
@@ -669,15 +670,28 @@ void actorAids(u32 frame) {
         if (f == frame) {
             float x = 0, y = 0, z = 0;
             bool ok = false;
-            const auto hits = findActors({80, 36});
-            if (!std::strncmp(arg, "tortimer", 8)) {
-                for (const ActorHit& h : hits)
-                    if (h.module == 36) {
-                        x = rdf32(h.addr + 0x64);
+            const auto hits = findActors({80});
+            u32 mod = 0;
+            float dx = 0, dz = 48;
+            if (!std::strncmp(arg, "tortimer", 8)) mod = 36;
+            int pick = -1;
+            if (!std::strncmp(arg, "mod", 3)) {  // mod<N>[#k][:dx,dz]
+                char* e2 = nullptr;
+                mod = u32(std::strtoul(arg + 3, &e2, 10));
+                if (*e2 == '#') pick = int(std::strtol(e2 + 1, &e2, 10));
+                if (*e2 == ':') std::sscanf(e2 + 1, "%f,%f", &dx, &dz);
+            }
+            if (mod) {
+                int k = 0;
+                for (const ActorHit& h : findActors({mod})) {
+                    if (pick < 0 || k++ == pick) {
+                        x = rdf32(h.addr + 0x64) + dx;
                         y = rdf32(h.addr + 0x68);
-                        z = rdf32(h.addr + 0x6C) + 48.0f;
+                        z = rdf32(h.addr + 0x6C) + dz;
                         ok = true;
+                        log("[actor] f%u target %08X id %X type %04X", frame, h.addr, rd32(h.addr), rd32(h.addr + 8) >> 16);
                     }
+                }
             } else {
                 ok = std::sscanf(arg, "%f,%f,%f", &x, &y, &z) == 3;
             }
