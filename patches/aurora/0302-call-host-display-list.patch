@@ -1,0 +1,56 @@
+0302: call a host-memory command list (City Folk; generic)
+
+GX_AURORA_CALL_HOST_DL (u64 pointer, u32 size): processes a command list in host memory in place.
+For display lists recorded in Aurora's encoding that do not fit the game's buffer (Aurora's texture,
+array and draw commands are longer than the console's): the game's buffer holds a 32-byte call to
+the host copy, so the game keeps calling the list through its own buffer (port: hle_gx.cpp).
+
+diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
+index 20335be..ae8cdcd 100644
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -174,6 +174,13 @@ extern "C" {
+  */
+ #define GX_AURORA_PROBE_TAG 0x0068
+ 
++/*
++ * 0302: call a host-memory command list: u64 pointer, u32 size (big-endian). For display lists
++ * recorded in Aurora's encoding that did not fit the game's buffer: the game's buffer then holds
++ * only this call, and the list itself lives in host memory (kept alive by the caller).
++ */
++#define GX_AURORA_CALL_HOST_DL 0x0069
++
+ #define GX2_SET_POLYGON_OFFSET 0x1000
+ 
+ 
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+index 77f5698..ea8dbe9 100644
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -343,6 +343,8 @@ s64 aurora_payload_len(u16 subCmd, const u8* p, size_t avail) noexcept {
+     return fixed(8);
+   case GX_AURORA_LOAD_COPY_DST:
+     return fixed(13);
++  case GX_AURORA_CALL_HOST_DL:
++    return fixed(12);
+   case GX_AURORA_SET_WIREFRAME:
+     return fixed(5);
+   case GX_AURORA_SET_CULL_OVERRIDE:
+@@ -1861,6 +1863,17 @@ void handle_aurora(ByteReader& reader) noexcept {
+     g_gxState.replayMask = reader.read<u8>() != 0;
+   } else if (subCmd == GX_AURORA_PROBE_TAG) {
+     sProbeTag = reader.read<u32>();
++  } else if (subCmd == GX_AURORA_CALL_HOST_DL) {
++    const auto* list = reinterpret_cast<const u8*>(reader.read<u64>());
++    const u32 listSize = reader.read<u32>();
++    static thread_local u32 sHostDlDepth = 0;
++    if (list != nullptr && listSize != 0 && sHostDlDepth < 4) {
++      const u64 savedBase = sBlockBase;
++      ++sHostDlDepth;
++      process(list, listSize, 0);
++      --sHostDlDepth;
++      sBlockBase = savedBase;
++    }
+   } else if (subCmd == GX_AURORA_DRAW_SIZED) {
+     const u8 cmd = reader.read<u8>();
+     const u32 byteLen = reader.read<u32>();

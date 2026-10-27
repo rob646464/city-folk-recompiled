@@ -33,6 +33,8 @@
 #include <cstdlib>
 #include <deque>
 #include <map>
+#include <memory>
+#include <utility>
 #include <mutex>
 #include <string>
 #include <tuple>
@@ -1031,7 +1033,16 @@ GXHLE(GXFlush) { GXFlush(); }
 // The console's GXDrawDone sleeps until the draw-done interrupt, so interrupts and other
 // threads run meanwhile; draining Aurora's FIFO here can take a good part of a frame.
 GXHLE(GXDrawDone) { frame::gxBlockingWait([] { GXDrawDone(); }); }
-GXHLE(GXSetDrawDone) {}
+// Draw-done callback (GXSetDrawDoneCallback): the console raises it when the GPU reaches the
+// GXSetDrawDone token; here the GPU is done as far as the game can tell, so it runs as an
+// interrupt right away.
+static u32 sDrawDoneCb = 0;
+static void drawDoneIrq(Ctx& c) {
+    if (sDrawDoneCb) guestCall(c, sDrawDoneCb);
+}
+GXHLE(GXSetDrawDone) {
+    if (sDrawDoneCb) sched::postIrq(&drawDoneIrq);
+}
 GXHLE(GXWaitDrawDone) {}
 GXHLE(GXPixModeSync) { GXPixModeSync(); }
 GXHLE(GXSetMisc) {}
@@ -1149,27 +1160,77 @@ GXHLE(GXCallDisplayList) {
     if (interp::drawLogActive()) interp::drawLogCaller(guestChain(c));
     if (interp::capturing()) interp::vtxDisplayList(c.r[3], hostp(c.r[3]), c.r[4]);
 }
-static u32 sDlBufSize = 0, sDlBeginLr = 0;
+// Display lists the game records (GXBeginDisplayList/GXEndDisplayList). Aurora's commands are not
+// all the console's size (texture and array loads are longer, draws carry a size), so a list sized
+// for the console can need more room than the game's buffer. Lists are recorded into a host buffer;
+// one that fits is copied into the game's buffer as before. One that does not stays in host memory
+// and the game's buffer gets a 32-byte call to it (Aurora 0302 GX_AURORA_CALL_HOST_DL), so the
+// game calls it through its own buffer as usual. A host list is kept while its game buffer holds
+// the call to it, and for 16 frames after it is replaced (tapes replay recorded frames later).
+namespace {
+u32 sDlBufSize = 0, sDlBeginLr = 0, sDlGuest = 0;
+std::vector<u8> sDlScratch;
+struct HostDl {
+    std::unique_ptr<u8[]> data;
+    u32 size = 0;
+};
+std::unordered_map<u32, HostDl> sHostDls;  // by game buffer address
+std::deque<std::pair<u32, std::unique_ptr<u8[]>>> sRetiredDls;  // (frame retired, data)
+constexpr u32 kHostDlMarker = 32;
+}  // namespace
 GXHLE(GXBeginDisplayList) {
     sInDisplayList = true;
+    sDlGuest = c.r[3];
     sDlBufSize = c.r[4];
     sDlBeginLr = c.lr;
     interp::suspendForDisplayList();
-    GXBeginDisplayList(hostp(c.r[3]), c.r[4]);
+    sDlScratch.resize(std::max<size_t>(size_t(sDlBufSize) * 4, 256 * 1024));
+    GXBeginDisplayList(sDlScratch.data(), u32(sDlScratch.size()));
 }
 GXHLE(GXEndDisplayList) {
     sInDisplayList = false;
-    c.r[3] = GXEndDisplayList();
+    const u32 n = GXEndDisplayList();
     interp::resumeAfterDisplayList();
-    // Aurora's commands are not all the console's size (texture and array loads are longer), so a
-    // list sized for the console could overflow; as on the console its size is then 0 (Aurora 0235;
-    // the old cut-off list desynchronized the FIFO when called).
-    if (c.r[3] == 0 && sDlBufSize) {
+    while (!sRetiredDls.empty() && sDiagFrame - sRetiredDls.front().first > 16) sRetiredDls.pop_front();
+    if (auto it = sHostDls.find(sDlGuest); it != sHostDls.end()) {
+        sRetiredDls.emplace_back(sDiagFrame, std::move(it->second.data));
+        sHostDls.erase(it);
+    }
+    static const bool sDlLog = std::getenv("CF_DL_LOG") != nullptr;
+    if (sDlLog)
+        log("[gx] display list recorded: %u bytes, game buffer %u bytes at %08X (begun at %s)", n, sDlBufSize,
+            sDlGuest, guestSymbolize(sDlBeginLr).c_str());
+    // Test aid CF_DL_FORCE_HOST=1: every list over 32 bytes goes the host-memory way.
+    static const bool sForceHost = std::getenv("CF_DL_FORCE_HOST") != nullptr;
+    if (n <= sDlBufSize && !(sForceHost && n > kHostDlMarker)) {
+        std::memcpy(hostp(sDlGuest), sDlScratch.data(), n);
+        c.r[3] = n;
+        return;
+    }
+    if (sDlBufSize < kHostDlMarker || n == 0) {  // no room even for the call, or the scratch overflowed
         static int sLogged = 0;
         if (sLogged++ < 16)
-            log("[gx] display list overflowed its %u-byte buffer (begun at %s); size 0", sDlBufSize,
+            log("[gx] display list does not fit its %u-byte buffer (begun at %s); size 0", sDlBufSize,
                 guestSymbolize(sDlBeginLr).c_str());
+        c.r[3] = 0;
+        return;
     }
+    HostDl dl{std::make_unique<u8[]>(n), n};
+    std::memcpy(dl.data.get(), sDlScratch.data(), n);
+    u8* m = hostp(sDlGuest);
+    std::memset(m, 0, kHostDlMarker);  // NOPs after the call
+    const u64 p = reinterpret_cast<u64>(dl.data.get());
+    m[0] = GX_AURORA;
+    m[1] = u8(GX_AURORA_CALL_HOST_DL >> 8);
+    m[2] = u8(GX_AURORA_CALL_HOST_DL);
+    for (int i = 0; i < 8; i++) m[3 + i] = u8(p >> (56 - 8 * i));
+    for (int i = 0; i < 4; i++) m[11 + i] = u8(n >> (24 - 8 * i));
+    static int sLogged = 0;
+    if (sLogged++ < 16)
+        log("[gx] display list of %u bytes kept in host memory (game buffer %u bytes at %08X, begun at %s)", n,
+            sDlBufSize, sDlGuest, guestSymbolize(sDlBeginLr).c_str());
+    sHostDls[sDlGuest] = std::move(dl);
+    c.r[3] = kHostDlMarker;
 }
 
 GXHLE(GXDrawSphere1) {
@@ -1309,7 +1370,9 @@ GXHLE(GXSetCurrentMtx) {
 }
 // Records the guest viewport; returns the x/width to send (moved and narrowed like the 2D
 // around it for a partial viewport set by a HUD element, see sVpFollow).
+static f32 sGuestVp[6] = {0, 0, 640, 456, 0, 1};  // the game's own viewport (GXGetViewportv)
 static std::pair<f32, f32> setViewport(const Ctx& c) {
+    for (int i = 0; i < 6; i++) sGuestVp[i] = farg(c, 1 + i);
     sRawCheck = true;
     sVp.left = farg(c, 1);
     sVp.wd = farg(c, 3);
@@ -1915,11 +1978,141 @@ GXHLE(GXSetTexCoordCylWrap) { GXSetTexCoordCylWrap(GXTexCoordID(c.r[3]), GXBool(
 // callback (none) is returned.
 GXHLE(GXSetTexRegionCallback) { c.r[3] = 0; }
 GXHLE(GXSetTlutRegionCallback) { c.r[3] = 0; }
-// GXDraw.c debug primitives (spheres, cubes, ...): not drawn yet.
+// Texture object getters (RVL SDK additions; GXGetTexObjAll: NW4R lyt / the game's own code).
+GXHLE_CPU(GXGetTexObjAll) {
+    // (obj, void** image, u16* width, u16* height, GXTexFmt* fmt, wrapS*, wrapT*, GXBool* mipmap)
+    const GXTexObj* o = sTex.get(c.r[3], kTexTag);
+    const u32 idx = rd32(c.r[3] + 4);
+    const u32 img = o && idx < sTexImage.size() ? sTexImage[idx] : 0;
+    if (c.r[4]) wr32(c.r[4], img ? guestAddrOfOffset(img) : 0);
+    if (c.r[5]) wr16(c.r[5], o ? GXGetTexObjWidth(o) : 0);
+    if (c.r[6]) wr16(c.r[6], o ? GXGetTexObjHeight(o) : 0);
+    if (c.r[7]) wr32(c.r[7], o ? u32(GXGetTexObjFmt(o)) : 0);
+    if (c.r[8]) wr32(c.r[8], o ? u32(GXGetTexObjWrapS(o)) : 0);
+    if (c.r[9]) wr32(c.r[9], o ? u32(GXGetTexObjWrapT(o)) : 0);
+    if (c.r[10]) wr8(c.r[10], o ? u32(GXGetTexObjMipMap(o)) : 0);
+}
+GXHLE_CPU(GXGetTexObjFmt) {
+    const GXTexObj* o = sTex.get(c.r[3], kTexTag);
+    c.r[3] = o ? u32(GXGetTexObjFmt(o)) : 0;
+}
+GXHLE_CPU(GXGetTexObjMipMap) {
+    const GXTexObj* o = sTex.get(c.r[3], kTexTag);
+    c.r[3] = o ? u32(GXGetTexObjMipMap(o)) : 0;
+}
+// User data: kept per object index (the guest object holds only Aurora's tag and index).
+static std::unordered_map<u32, u32> sTexUserData;
+GXHLE_CPU(GXInitTexObjUserData) {
+    if (sTex.get(c.r[3], kTexTag)) sTexUserData[rd32(c.r[3] + 4)] = c.r[4];
+}
+GXHLE_CPU(GXGetTexObjUserData) {
+    const auto it = sTex.get(c.r[3], kTexTag) ? sTexUserData.find(rd32(c.r[3] + 4)) : sTexUserData.end();
+    c.r[3] = it != sTexUserData.end() ? it->second : 0;
+}
+// TMEM is Aurora's business: a preloaded texture loads like any other.
+GXHLE(GXLoadTexObjPreLoaded) {
+    c.r[4] = c.r[5];  // (obj, region, id)
+    hle_GXLoadTexObj(c);
+}
+GXHLE_CPU(GXInitTlutRegion) {}
+// Viewport / scissor / vertex format getters: the game's own values (not the widescreen-adjusted ones).
+GXHLE_CPU(GXGetViewportv) {
+    for (int i = 0; i < 6; i++) wrf32(c.r[3] + 4 * i, sGuestVp[i]);
+}
+GXHLE_CPU(GXGetScissor) {
+    wr32(c.r[3], sScissor.x);
+    wr32(c.r[4], sScissor.y);
+    wr32(c.r[5], sScissor.w);
+    wr32(c.r[6], sScissor.h);
+}
+GXHLE_CPU(GXGetVtxDescv) {
+    // GXVtxDescList[]: {attr, type} words, GX_VA_NULL-terminated; the SDK lists POS_MTX_IDX..TEX7.
+    u32 p = c.r[3];
+    for (u32 a = GX_VA_PNMTXIDX; a <= GX_VA_TEX7; a++) {
+        const int slot = attrSlot(a);
+        wr32(p, a);
+        wr32(p + 4, slot >= 0 ? sDesc[slot] : 0);
+        p += 8;
+    }
+    wr32(p, GX_VA_NULL);
+    wr32(p + 4, 0);
+}
+GXHLE_CPU(GXGetVtxAttrFmt) {
+    // (fmt, attr, GXCompCnt*, GXCompType*, u8* frac)
+    const int slot = attrSlot(c.r[4]);
+    const VatEntry v = slot >= 0 && c.r[3] < GX_MAX_VTXFMT ? sVat[c.r[3]][slot] : VatEntry{};
+    wr32(c.r[5], v.cnt);
+    wr32(c.r[6], v.type);
+    wr8(c.r[7], v.frac);
+}
+GXHLE_CPU(GXGetVtxAttrFmtv) {
+    // GXVtxAttrFmtList[]: {attr, cnt, type, frac (u8 + pad)}, POS..TEX7, then GX_VA_NULL.
+    u32 p = c.r[4];
+    for (u32 a = GX_VA_POS; a <= GX_VA_TEX7; a++) {
+        const int slot = attrSlot(a);
+        const VatEntry v = slot >= 0 && c.r[3] < GX_MAX_VTXFMT ? sVat[c.r[3]][slot] : VatEntry{};
+        wr32(p, a);
+        wr32(p + 4, v.cnt);
+        wr32(p + 8, v.type);
+        wr32(p + 12, u32(v.frac) << 24);
+        p += 16;
+    }
+    wr32(p, GX_VA_NULL);
+}
+// Callbacks and GPU/FIFO management the HLE'd GX has no use for: the previous callback (none) is
+// returned, the FIFO is Aurora's, the GPU always idle.
+GXHLE_CPU(GXSetDrawDoneCallback) {
+    c.r[3] = std::exchange(sDrawDoneCb, c.r[3]);
+}
+GXHLE_CPU(GXSetDrawSyncCallback) { c.r[3] = 0; }
+GXHLE_CPU(GXSetBreakPtCallback) { c.r[3] = 0; }
+static u32 sGxThread = 0;
+GXHLE_CPU(GXSetCurrentGXThread) { c.r[3] = std::exchange(sGxThread, sched::currentGuest()); }
+GXHLE_CPU(GXGetCurrentGXThread) { c.r[3] = sGxThread; }
+GXHLE_CPU(GXGetGPStatus) {
+    // (GXBool* overhi, underlow, readIdle, cmdIdle, brkpt)
+    wr8(c.r[3], 0);
+    wr8(c.r[4], 1);
+    wr8(c.r[5], 1);
+    wr8(c.r[6], 1);
+    wr8(c.r[7], 0);
+}
+GXHLE_CPU(GXGetFifoCount) { c.r[3] = 0; }
+GXHLE_CPU(GXInitFifoBase) {}
+GXHLE_CPU(GXGetCPUFifo) {}
+GXHLE(GXSetCPUFifo) {}
+GXHLE(GXSetGPFifo) {}
+GXHLE_CPU(GXGetFifoWrap) { c.r[3] = 0; }
+GXHLE(GXAbortFrame) {}
+GXHLE(GXClearBoundingBox) {}
+GXHLE(GXSetGPMetric) {}
+GXHLE(GXClearGPMetric) {}
+GXHLE(GXSetFieldMask) {}
+GXHLE(GXSetFieldMode) {}
+GXHLE(GXSetDispCopyFrame2Field) {}
+GXHLE(GXResetWriteGatherPipe) {}
+// GXSetZScaleOffset (RVL): scales and offsets the depth the rasterizer writes. Not modelled yet.
+GXHLE(GXSetZScaleOffset) {
+    if (farg(c, 1) != 1.0f || farg(c, 2) != 0.0f) {
+        static int sLogged = 0;
+        if (sLogged++ < 4) log("[gx] GXSetZScaleOffset(%f, %f) not applied (lr %08X)", farg(c, 1), farg(c, 2), c.lr);
+    }
+}
+// EFB pokes (CPU writes to the EFB): their pixel-engine state; nothing pokes through it here.
+GXHLE_CPU(GXPokeAlphaMode) {}
+GXHLE_CPU(GXPokeAlphaRead) {}
+GXHLE_CPU(GXPokeAlphaUpdate) {}
+GXHLE_CPU(GXPokeBlendMode) {}
+GXHLE_CPU(GXPokeColorUpdate) {}
+GXHLE_CPU(GXPokeDither) {}
+GXHLE_CPU(GXPokeDstAlpha) {}
+GXHLE_CPU(GXPokeZMode) {}
+
+// GXDraw.c sphere (EGG::DrawGX records its sphere display lists with it at start-up).
 GXHLE(GXDrawSphere) {
-    static bool sLogged = false;
-    if (!sLogged) log("[gx] GXDrawSphere not drawn (lr %08X)", c.lr);
-    sLogged = true;
+    if (dropDraw()) return;
+    prepareDraw(drawMode(ProjMode::Scaled));
+    GXDrawSphere(u8(c.r[3]), u8(c.r[4]));
 }
 
 // For the [mem] report (mem_report.cpp): host texture / TLUT object table sizes.
