@@ -72,7 +72,7 @@ const std::vector<std::string> kCompileFlags = {
     "-ffreestanding", "-nostdinc", "-fno-exceptions", "-fno-rtti", "-fno-threadsafe-statics", "-fno-math-errno",
     "-fno-stack-protector", "-ffp-contract=off", "-funwind-tables", "-Wno-unused-label", "-Wno-unused-variable"};
 const std::vector<std::string> kLinkFlags = {"-dylib", "-arch", CF_MODULE_ARCH, "-platform_version", "macos", "13.0",
-                                             "13.0", "-install_name", "@rpath/lm_game_module.dylib",
+                                             "13.0", "-install_name", "@rpath/cf_game_module.dylib",
                                              "-undefined", "error", "-dead_strip", "-O1"};
 constexpr const char* kModuleFile = "module.dylib";
 constexpr const char* kObjExt = ".o";
@@ -90,7 +90,7 @@ const std::vector<std::string> kCompileFlags = {
     "-fno-stack-protector", "-funwind-tables", "-Wno-unused-label", "-Wno-unused-variable"};
 const std::vector<std::string> kLinkFlags = {"-shared", "-nostdlib", "--eh-frame-hdr", "-Bsymbolic",
                                              "-z", "defs", "-z", "noexecstack", "-z", "now", "-O1",
-                                             "--hash-style=both", "-soname", "lm_game_module.so"};
+                                             "--hash-style=both", "-soname", "cf_game_module.so"};
 constexpr const char* kModuleFile = "module.so";
 constexpr const char* kObjExt = ".o";
 constexpr const char* kExeSuffix = "";
@@ -205,8 +205,8 @@ bool toolAtShortPath(std::filesystem::path& tool, std::string& error) {
     if (to.native().size() > kMaxToolPath) {
         error = "The game's folders are too deep for the bundled compiler: " + utf8(tool) + " is " +
                 std::to_string(tool.native().size()) + " characters long (at most " +
-                std::to_string(kMaxToolPath) + "). Move the game to a shorter folder (e.g. C:\\Games\\Luigi's "
-                "Mansion Recompiled) and start it from there.";
+                std::to_string(kMaxToolPath) + "). Move the game to a shorter folder (e.g. C:\\Games\\City Folk "
+                "Recompiled) and start it from there.";
         return false;
     }
     std::error_code ec;
@@ -252,10 +252,13 @@ std::string moduleKey(const Disc& disc) {
     text += std::string("game ") + port::gameId(disc.version()) + " " + disc.dolSha1() + "\n";
     for (auto& f : kCompileFlags) text += f + " ";
     for (auto& f : kLinkFlags) text += f + " ";
-    std::vector<std::string_view> parts{embedded::symbols(), embedded::splits(), embedded::hooks(),
+    // The version's function tables (its modules.txt holds the SHA-1 of every REL, which
+    // Disc::open checked), the hooks and the module's own sources.
+    const embedded::Tables& t = embedded::tables(disc.version());
+    std::vector<std::string_view> parts{t.symbols, t.splits, t.modules, embedded::hooks(),
                                         embedded::ctxHeader(), embedded::moduleAbiHeader(), embedded::moduleRt(),
                                         embedded::recompilerSource()};
-    for (const auto& [name, map] : embedded::relMaps()) {
+    for (const auto& [name, map] : t.relMaps) {
         parts.push_back(name);
         parts.push_back(map);
     }
@@ -371,25 +374,26 @@ bool buildModule(const Disc& disc, const Progress& progress, std::string& error)
     cfrc::Input in;
     in.dol = disc.dol();
     in.version = port::gameId(disc.version());
-    in.symbols = std::string(embedded::symbols());
-    in.splits = std::string(embedded::splits());
+    const embedded::Tables& tables = embedded::tables(disc.version());
+    in.symbols = std::string(tables.symbols);
+    in.splits = std::string(tables.splits);
     in.hooks = std::string(embedded::hooks());
-    // The REL modules (files/rels), one per map the build embedded (docs/RECOMPILER.md "REL modules").
-    for (const auto& [name, map] : embedded::relMaps()) {
+    // The REL modules (files/rels, checked against modules.txt by Disc::open), each with the map
+    // of its config/<id>/rels (docs/RECOMPILER.md "REL modules").
+    for (const auto& [name, data] : disc.rels()) {
         cfrc::RelInput ri;
-        ri.name = std::string(name);
-        ri.map = std::string(map);
-        if (!disc.readFile(("/rels/" + ri.name + ".rel").c_str(), ri.data)) {
-            error = "The disc has no rels/" + ri.name + ".rel.";
-            return false;
-        }
+        ri.name = name;
+        ri.data = data;
+        for (const auto& [stem, map] : tables.relMaps)
+            if (stem == name) ri.map = std::string(map);
         in.rels.push_back(std::move(ri));
     }
     cfrc::Output out;
     if (!cfrc::recompile(in, out, error)) {
-        error = "Recompiling main.dol failed: " + error;
+        error = "Recompiling main.dol and the REL modules failed: " + error;
         return false;
     }
+    const double translateS = std::chrono::duration<double>(std::chrono::steady_clock::now() - buildStart).count();
     std::vector<std::filesystem::path> sources;
     for (auto& [name, text] : out.files) {
         if (!writeText(work / "src" / name, text)) {
@@ -457,6 +461,8 @@ bool buildModule(const Disc& disc, const Progress& progress, std::string& error)
         return false;
     }
 
+    const double compileS = std::chrono::duration<double>(std::chrono::steady_clock::now() - buildStart).count();
+
     // 3. Link.
     report("Linking the game module", 0.96f);
     const auto tmpDll = work / kModuleFile;
@@ -487,8 +493,9 @@ bool buildModule(const Disc& disc, const Progress& progress, std::string& error)
     writeText(dir / "recompiler.log", out.summary + "\n");
     // Generated code is derived from the user's game; keep it only while building.
     if (!std::getenv("CF_KEEP_BUILD")) std::filesystem::remove_all(longPath(work), ec);
-    std::printf("[setup] game module built in %.1f s (%u compile jobs)\n",
-                std::chrono::duration<double>(std::chrono::steady_clock::now() - buildStart).count(), jobs);
+    const double totalS = std::chrono::duration<double>(std::chrono::steady_clock::now() - buildStart).count();
+    std::printf("[setup] %s game module built in %.1f s (translate %.1f s, compile %.1f s with %u jobs, link %.1f s)\n",
+                port::gameId(disc.version()), totalS, translateS, compileS - translateS, jobs, totalS - compileS);
     std::fflush(stdout);
     report("Done", 1.0f);
     return true;

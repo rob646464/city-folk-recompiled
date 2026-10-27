@@ -1719,9 +1719,10 @@ bool recompile(const Input& in, Output& out, std::string& error) {
                 throw std::runtime_error(fmt("%s: module id %u is used twice", ri.name.c_str(), rels.back().id));
         }
         Recompiler rc(dol, rels);
-        // hooks.txt: "<symbol> [us] [pal]". A line applies to the US build unless it lists only
-        // other versions, and to PAL only when tagged "pal".
+        // hooks.txt: "<symbol> [us] [pal] [jp]". A line applies to the US build unless it lists
+        // only other versions, and to PAL / Japan only when tagged "pal" / "jp".
         const bool pal = in.version.size() >= 4 && in.version[3] == 'P';
+        const bool jp = in.version.size() >= 4 && in.version[3] == 'J';
         std::vector<std::pair<u32, std::pair<u32, u32>>> patchList;
         for (std::string_view line : splitLines(in.hooks)) {
             line = trim(line);
@@ -1734,13 +1735,14 @@ bool recompile(const Input& in, Output& out, std::string& error) {
                 if (q > p) words.push_back(line.substr(p, q - p));
                 p = q + 1;
             }
-            bool tagUs = false, tagPal = false;
+            bool tagUs = false, tagPal = false, tagJp = false;
             const bool isPatch = words[0] == "patch";
             for (size_t i = isPatch ? 4 : 1; i < words.size(); i++) {
                 if (words[i] == "us") tagUs = true;
                 else if (words[i] == "pal") tagPal = true;
+                else if (words[i] == "jp") tagJp = true;
             }
-            const bool applies = pal ? tagPal : (tagUs || !tagPal);
+            const bool applies = pal ? tagPal : jp ? tagJp : (tagUs || !(tagPal || tagJp));
             if (!applies) continue;
             if (isPatch) {  // "patch <id> <address> <instruction word> [us] [pal]"
                 u32 addr = 0, word = 0;

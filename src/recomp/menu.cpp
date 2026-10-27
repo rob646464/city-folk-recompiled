@@ -735,25 +735,25 @@ void gameTab() {
         ImGui::Text("Developer build: %s, recompiled at build time.", port::versionName(inst.running));
         ImGui::TextDisabled("CityFolkRecomp manages discs and versions (docs/SETUP.md).");
     } else {
-        auto row = [](const char* label, const std::string& path, bool ready) {
-            ImGui::Text("%s:", label);
+        for (port::GameVersion v : port::kVersions) {
+            ImGui::Text("%s disc:", port::regionName(v));
             ImGui::SameLine();
-            if (ready) ImGui::TextWrapped("%s", path.c_str());
+            if (inst.isReady(v)) ImGui::TextWrapped("%s", inst.discOf(v).c_str());
             else ImGui::TextDisabled("not installed");
-        };
-        row("USA disc", inst.usDisc, inst.usReady);
-        row("Europe disc", inst.palDisc, inst.palReady);
-        ImGui::Text("Playing: %s version", inst.running == port::GameVersion::PAL ? "European" : "USA");
-        if (inst.both()) {
+        }
+        ImGui::Text("Playing: %s version (%s)", port::regionName(inst.running), port::gameId(inst.running));
+        if (inst.readyCount() > 1) {
             int base = int(inst.base);
             ImGui::Text("Version to play:");
-            ImGui::SameLine();
-            bool changed = ImGui::RadioButton("USA", &base, int(port::GameVersion::USA));
-            ImGui::SameLine();
-            changed |= ImGui::RadioButton("Europe", &base, int(port::GameVersion::PAL));
+            bool changed = false;
+            for (port::GameVersion v : port::kVersions) {
+                if (!inst.isReady(v)) continue;
+                ImGui::SameLine();
+                changed |= ImGui::RadioButton(port::regionName(v), &base, int(v));
+            }
             ImGui::SameLine();
             ImGui::TextDisabled("(?)");
-            ImGui::SetItemTooltip("Which installed disc's game runs (both are installed). Takes a restart.");
+            ImGui::SetItemTooltip("Which installed disc's game runs. Takes a restart.");
             if (changed) {
                 inst.base = port::GameVersion(base);
                 port::saveInstall();
@@ -771,7 +771,7 @@ void gameTab() {
             port::saveSettings();
             port::relaunch(true);
         }
-        ImGui::SetItemTooltip("Restarts into the setup screen to add a USA or European disc image or replace one\n"
+        ImGui::SetItemTooltip("Restarts into the setup screen to add a USA, European or Japanese disc or replace one\n"
                               "(unsaved game progress is lost).");
     }
     // The Wii's own settings as the game reads them (SYSCONF; src/recomp/sysconf.cpp, docs/NAND.md).
@@ -1591,24 +1591,32 @@ void soundTab() {
     sDirty |= volumeSlider("Master volume", a.masterVolume);
     ImGui::SetItemTooltip("Everything the game plays.");
     sDirty |= volumeSlider("Music volume", a.musicVolume);
-    ImGui::SetItemTooltip("Background music: the game's music sequences and streamed music.\n"
-                          "Not applied yet: music and effects are not told apart so far.");
+    ImGui::SetItemTooltip("Music: the background music, K.K. Slider's songs and records, jingles and the title\n"
+                          "theme (the game's music players).");
     sDirty |= volumeSlider("Sound effects volume", a.sfxVolume);
-    ImGui::SetItemTooltip("Everything else: sound effects, voices, ambience.\n"
-                          "Not applied yet: music and effects are not told apart so far.");
+    ImGui::SetItemTooltip("Everything else: footsteps, tools, menus, furniture, ambience, insects, the town tune\n"
+                          "chimes, gyroids and the TV.");
+    sDirty |= volumeSlider("Voices volume", a.voiceVolume);
+    ImGui::SetItemTooltip("The villagers' and Rover's speech (Animalese), also while typing.");
+    sDirty |= volumeSlider("Wii Remote speaker volume", a.remoteVolume);
+    ImGui::SetItemTooltip("What the game plays on the Wii Remote's own speaker, played through the PC's speakers\n"
+                          "(in the centre; on the centre speaker with 5.1 / 7.1). Band-limited to 3 kHz like the\n"
+                          "Remote's 6 kHz speaker stream, with a little bass cut for the small speaker. 0%: off.\n"
+                          "(The HOME Menu's Wii Remote speaker volume is already part of what it sends.)");
     ImGui::SeparatorText("Output");
     static const char* kOutputs[] = {"Stereo", "Mono", "Surround (matrix-encoded stereo)", "Surround 5.1 (discrete)",
                                      "Surround 7.1 (discrete)"};
     sDirty |= combo("Output", a.output, kOutputs, 5);
     ImGui::SetItemTooltip(
-            "The game's own sound option (its options menu changes the same setting).\n"
+            "The console's sound setting (Wii Settings), read by the game at start: changes apply\n"
+            "on the next start.\n"
             "Stereo / Mono: the game's stereo or mono mix.\n"
-            "Surround: the game's surround mode as a console outputs it: stereo with the\n"
-            "surround channel matrix-encoded (in phase left, inverted right) for a Dolby\n"
-            "Pro Logic / Pro Logic II decoder.\n"
-            "5.1 / 7.1: the game's surround mode with its centre and surround channels\n"
-            "played on their own speakers instead of matrix-encoded. Needs a device with\n"
-            "6 / 8 channels (else falls back to 5.1 or matrix-encoded stereo).");
+            "Surround: the console set to surround. City Folk itself then mixes in stereo, as on\n"
+            "a Wii, so this sounds like Stereo.\n"
+            "5.1 / 7.1: the game keeps mixing in Dolby Pro Logic II and its surround channels go\n"
+            "to the surround speakers (the game pans nothing to the rear itself: they carry its\n"
+            "reverb returns); the Wii Remote speaker sound goes to the centre speaker. Needs a\n"
+            "device with 6 / 8 channels (else falls back to 5.1 or stereo).");
     {
         const int dev = recomp::audio::outDeviceChannels();
         if (dev > 0) ImGui::TextDisabled("Device: %d channels. Playing: %s", dev, recomp::audio::outStatus());

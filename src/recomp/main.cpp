@@ -33,7 +33,9 @@
 #include "recomp/runtime.h"
 #include "recomp/sched.h"
 #include "recomp/widescreen.h"
+#include "recomp/wiimote.h"
 #ifndef CF_STATIC_MODULE
+#include "setup/disc.h"
 #include "setup/setup.h"
 #endif
 
@@ -207,6 +209,19 @@ int main(int argc, char* argv[]) {
     port::setLaunchArgs(argc, argv);
     std::printf("Animal Crossing City Folk Recompiled %s\n", port::update::buildVersion());
     std::fflush(stdout);
+#ifndef CF_STATIC_MODULE
+    // --check-disc <path>: identify a disc the way setup does (game ID, revision, main.dol and REL
+    // hashes) and exit: 0 = a supported disc. No window, nothing written (docs/SETUP.md).
+    if (const std::string path = argValue(argc, argv, "--check-disc"); !path.empty()) {
+        port::GameVersion v{};
+        std::string err;
+        const bool ok = setup::probeDisc(path, v, err);
+        if (ok) std::printf("OK: %s\n", setup::describe(v).c_str());
+        else std::printf("REFUSED: %s\n", err.c_str());
+        std::fflush(stdout);
+        return ok ? 0 : 3;
+    }
+#endif
     // A game folder too deep for the graphics start-up (docs/SETUP.md "Long paths"): say so
     // instead of stopping without a word.
     if (const std::string p = port::installPathProblem(); !p.empty()) {
@@ -338,21 +353,25 @@ int main(int argc, char* argv[]) {
     // cfrecomp (developer build): the game was recompiled at build time and linked in.
     setGameModule(&kGameModule);
     const char* wantId = kGameModule.gameId;
-    const std::string disc = findDisc(wantId);
+    std::string disc = findDisc(wantId);
+    if (const std::string root = port::discfolder::resolve(disc); !root.empty()) disc = root;  // e.g. "US DATA"
     {
         auto& inst = port::install();
         inst.staticBuild = true;
-        inst.running = std::strcmp(wantId, "RUUP01") == 0 ? port::GameVersion::PAL : port::GameVersion::USA;
-        inst.usReady = inst.running == port::GameVersion::USA;
-        inst.palReady = inst.running == port::GameVersion::PAL;
+        port::versionFromId(wantId, inst.running);
+        inst.ready[int(inst.running)] = true;
     }
 #else
     // CityFolkRecomp: set up from the user's discs (first run, or after changes).
     setup::Options so;
     so.forceUi = hasArg(argc, argv, "--setup");
     so.autoStart = hasArg(argc, argv, "--setup-auto");
-    so.usDisc = argValue(argc, argv, "--us-disc");
-    so.palDisc = argValue(argc, argv, "--pal-disc");
+    // --usa-disc / --pal-disc / --jpn-disc: a region's slot; --disc: any region (docs/SETUP.md).
+    so.disc[int(port::GameVersion::USA)] = argValue(argc, argv, "--usa-disc");
+    if (so.disc[0].empty()) so.disc[0] = argValue(argc, argv, "--us-disc");
+    so.disc[int(port::GameVersion::PAL)] = argValue(argc, argv, "--pal-disc");
+    so.disc[int(port::GameVersion::JPN)] = argValue(argc, argv, "--jpn-disc");
+    so.anyDisc = argValue(argc, argv, "--disc");
     setup::LaunchInfo launch;
     if (!setup::run(so, launch)) {
         port::recovery::onExit();
@@ -363,27 +382,19 @@ int main(int argc, char* argv[]) {
     const char* wantId = port::gameId(launch.version);
 #endif
     port::setPhase("loading the game");
-    // The disc: an extracted folder (sys/, files/: port/disc_folder.h) or an image (Aurora/nod).
-    const u8* dol = nullptr;
-    s32 dolSize = 0;
+    // The disc: an extracted folder (sys/, files/) or an image's game partition (nod), both served
+    // by port/disc_folder.h (hle_dvd.cpp reads every file through it).
     std::string discError;
-    if (!disc.empty() && port::discfolder::isDiscFolder(disc)) {
-        if (!port::discfolder::open(disc, discError)) {
-            std::fprintf(stderr, "Could not open the disc folder %s: %s\n", disc.c_str(), discError.c_str());
-            aurora_shutdown();
-            return 1;
-        }
-        dol = port::discfolder::dol().data();
-        dolSize = s32(port::discfolder::dol().size());
-        port::dol::setDol(dol, size_t(dolSize));
-    } else if (!disc.empty() && aurora_dvd_open(disc.c_str())) {
-        port::dol::load();
-        dol = DVDGetDOLLocation(&dolSize);
-    } else {
-        std::fprintf(stderr, "Could not open an Animal Crossing: City Folk disc. Pass --disc <disc image or extracted folder>.\n");
+    if (disc.empty() || !port::discfolder::open(disc, discError)) {
+        if (disc.empty())
+            std::fprintf(stderr, "Could not open an Animal Crossing: City Folk disc. Pass --disc <disc image or extracted folder>.\n");
+        else
+            std::fprintf(stderr, "Could not open the disc %s: %s\n", disc.c_str(), discError.c_str());
         aurora_shutdown();
         return 1;
     }
+    const u8* dol = port::discfolder::dol().data();
+    port::dol::setDol(dol, port::discfolder::dol().size());
     const char* discId = port::dol::versionId(port::dol::version());
     if (std::strcmp(discId, wantId) != 0) {
         std::fprintf(stderr, "The game was recompiled from Animal Crossing: City Folk %s; the disc is %s.\n", wantId, discId);
@@ -562,6 +573,7 @@ int main(int argc, char* argv[]) {
 
     port::setPhase("shutdown (releasing graphics objects, writing caches)");
     menu::shutdown();
+    wiimote::hidShutdown();  // real Wii Remotes: motor off, devices closed
     vi::requestStop();
     frame::stop();
     vi::stopTimer();

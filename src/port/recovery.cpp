@@ -144,7 +144,7 @@ void resetSettings() {
 
 void rebuildGameData() {
     std::error_code ec;
-    for (const fs::path& p : {dataDir() / "game", hiddenMansionOverlayDir()}) {
+    for (const fs::path& p : {dataDir() / "game"}) {
         if (fs::exists(p, ec)) {
             fs::remove_all(p, ec);
             say("[recovery] removed " + u8(p) + (ec ? " (failed: " + ec.message() + ")" : ""));

@@ -195,22 +195,24 @@ the CPU given up).
   dots → pointer, accelerometer, extensions (Nunchuk), rumble, speaker. The KPAD/WPAD HLE takes
   each port's input from a source: real remote, mouse, right stick, gyro pad. SDL's built-in Wii
   driver is not enough on its own (no IR pointer), so claim the device before SDL opens it.
-- **Remote speaker** (`WPADSendStreamData`, 4-bit ADPCM): decode and mix into PC output (option:
-  separate volume).
+- **Remote speaker** (`WPADSendStreamData`, 4-bit ADPCM): decoded and mixed into the PC output
+  with its own volume (branch audio-2, `src/recomp/audio_remote.cpp`, docs/AUDIO.md).
 - **Done (branch wpad-1, docs/CONTROLS.md)**: `hle_wpad.cpp` answers the WPAD/KPAD calls the game
   makes (KPADRead with 200 Hz report timing, WPADProbe, connection/extension callbacks, battery
   info, motor, LED, DPD, speaker calls accepted, disconnect/reconnect); `wiimote.cpp` builds each
   port's Remote from a Source (emulated today: F1 > Controls bindings + mouse / right stick / gyro
   pointer + shake inputs). `VIGetDimmingCount` reports Remote radio activity (0 = the game's
-  "Communications with the Wii Remote have been interrupted"). Not yet: speaker sound, real Wii
-  Remotes, tilt from a pad's accelerometer, Classic Controller (check whether the game reads it).
-- **Real Wii Remotes, plan**: an `HidSource` (wiimote.h `Source`) per paired Remote: SDL hidapi
-  (`SDL_hid_open` on 057E:0306/0330 before SDL's own Wii driver claims it), report mode 0x37
-  (buttons + acc + 10-byte IR + 6-byte extension), IR camera init sequence, IR dots -> pointer
-  (midpoint of the two brightest dots, sensor bar above/below from SYSCONF, roll from the dot
-  angle), extension identification (Nunchuk), rumble bit in every output report, speaker data
-  (report 0x18, 4-bit ADPCM) from WPADSendStreamData. F1 > Controls > Ports gets "Wii Remote
-  (Bluetooth)" as a device per port.
+  "Communications with the Wii Remote have been interrupted"). Speaker sound on the PC: branch
+  audio-2 (audio_remote.cpp; real Remotes play it themselves, below). Not yet: tilt from a pad's
+  accelerometer, Classic Controller (check whether the game reads it).
+- **Real Wii Remotes (branch hid-remotes, docs/CONTROLS.md "Real Wii Remotes")**: `HidSource`
+  (wiimote_hid.cpp) per port set to "Real Wii Remote" in F1 > Controls > Ports: SDL hidapi on
+  057E:0306/0330 only (SDL's own Wii driver forced off meanwhile), report mode 0x37, the Wii's IR
+  camera sequence with the console's sensitivity, calibration from EEPROM, Nunchuk (unencrypted
+  init, calibration), IR dots -> KPAD pointer (roll-compensated midpoint, sensor bar above/below),
+  rumble, speaker (WPADSendStreamData ADPCM as reports 0x18 at 6 kHz), battery, hot-plug, player
+  LED = port. Protocol in wiimote_proto.cpp, tested against a fake device
+  (`cf_wiimote_hid_test`); not yet tried with a real Remote.
 
 ### Scripted route to the town
 
@@ -237,9 +239,10 @@ Every new game makes a new random town, so screenshots of the town differ betwee
   the DSP task HLE mixes at the list's mail and resumes AX through the task's resume callback.
   NW4R snd, AX and AXFX (reverb/chorus/delay on the aux buses) run unchanged as game code. Only the
   polyphase coefficient ROM is ours. Title stream and bus-scene music/speech play (pitch, levels,
-  stereo checked; the stream bit-exact against an independent decode). Not done: music/SFX split
-  for the volume sliders, discrete surround side data, playing the Wii Remote speaker sound on the
-  PC (the 6 kHz remote buffers are filled; `audio::axRemoteFrame` is the hook).
+  stereo checked; the stream bit-exact against an independent decode). Branch audio-2: volume
+  sliders per NW4R sound player (music / effects / voices), the Wii Remote speaker stream
+  (WPADSendStreamData ADPCM) decoded and played on the PC, discrete 5.1/7.1 from the DPL2 buses
+  (docs/AUDIO.md).
 - AI pacing by the SDL3 audio device as in LM (docs/AUDIO.md there); 0x180-byte (3 ms) AI blocks.
 
 ## Other SDK parts
@@ -290,4 +293,9 @@ Every new game makes a new random town, so screenshots of the town differ betwee
    own first save is still to be seen (no input past the title yet).
 6. AX microcode stand-in → sound.
 7. Enhancements (interpolation, widescreen, F1 menu) and game features (docs/ROADMAP.md).
-8. PAL and Japan bases (function matching), then setup flow + packaging.
+8. PAL and Japan bases (function matching), then setup flow + packaging. **Setup done** (branch
+   setup-1, docs/SETUP.md): CityFolkRecomp identifies USA/Europe/Japan rev 1 discs (ID, revision,
+   main.dol and REL hashes), reads images (ISO encrypted/decrypted, WBFS, RVZ, WIA, CISO, GCZ) and
+   extracted folders through one file system layer (port/disc_folder), builds each module with
+   the bundled clang/lld in about a minute; the European and Japanese games boot through the
+   title into Rover's bus dialogue with their own tables.

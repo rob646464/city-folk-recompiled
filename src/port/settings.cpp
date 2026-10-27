@@ -206,6 +206,8 @@ std::vector<Field> fields() {
         num("audio", "master_volume", a.masterVolume),
         num("audio", "music_volume", a.musicVolume),
         num("audio", "sfx_volume", a.sfxVolume),
+        num("audio", "voice_volume", a.voiceVolume),
+        num("audio", "remote_speaker_volume", a.remoteVolume),
         enm("audio", "output", a.output),
         flag("audio", "swap_channels", a.swapChannels),
         flag("audio", "reverb", a.reverb),

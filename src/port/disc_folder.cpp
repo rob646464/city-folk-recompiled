@@ -1,5 +1,7 @@
 #include "port/disc_folder.h"
 
+#include <nod.h>
+
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -18,6 +20,9 @@ std::string sRoot;
 std::vector<Entry> sEntries;
 std::vector<uint8_t> sDol, sBoot, sBi2;
 bool sActive = false;
+// Image discs: the nod disc and its game partition (else an extracted folder).
+NodHandle* sDisc = nullptr;
+NodHandle* sPart = nullptr;
 
 fs::path u8path(const std::string& s) { return fs::path(std::u8string(s.begin(), s.end())); }
 
@@ -40,29 +45,27 @@ bool ieq(const std::string& a, const std::string& b) {
 // Open host files, by entry (the game reads the same file in many small pieces).
 std::mutex sFilesM;
 std::unordered_map<int32_t, std::ifstream> sFiles;
+std::unordered_map<int32_t, NodHandle*> sNodFiles;  // image discs
 
-}  // namespace
-
-bool isDiscFolder(const std::string& utf8Path) {
-    std::error_code ec;
-    const fs::path p = u8path(utf8Path);
-    return fs::is_directory(p, ec) && fs::is_regular_file(p / "sys" / "fst.bin", ec) && fs::is_directory(p / "files", ec);
+void closeAll() {
+    sFiles.clear();
+    for (auto& [n, h] : sNodFiles) nod_free(h);
+    sNodFiles.clear();
 }
 
-bool open(const std::string& utf8Path, std::string& error) {
-    const fs::path p = u8path(utf8Path);
-    std::vector<uint8_t> fst;
-    if (!readAll(p / "sys" / "fst.bin", fst) || fst.size() < 12) {
-        error = "no sys/fst.bin in " + utf8Path;
+// Entries from fst.bin (the same for a folder and an image).
+bool parseFst(const std::vector<uint8_t>& fst, std::vector<Entry>& entries, std::string& error) {
+    if (fst.size() < 12) {
+        error = "no file system table (fst.bin)";
         return false;
     }
     const uint32_t count = be32(&fst[8]);
     if (count == 0 || size_t(count) * 12 > fst.size()) {
-        error = "sys/fst.bin is damaged";
+        error = "the file system table (fst.bin) is damaged";
         return false;
     }
     const size_t strings = size_t(count) * 12;
-    std::vector<Entry> entries(count);
+    entries.assign(count, Entry{});
     entries[0].isDir = true;
     entries[0].next = count;
     entries[0].path = "";
@@ -90,8 +93,106 @@ bool open(const std::string& utf8Path, std::string& error) {
             en.offset = be32(e + 4);
         }
     }
+    return true;
+}
+
+std::vector<uint8_t> blob(const NodBlob& b) {
+    return b.data ? std::vector<uint8_t>(b.data, b.data + b.size) : std::vector<uint8_t>();
+}
+
+bool openImage(const std::string& utf8Path, std::string& error) {
+    NodDiscOptions opts{};
+    opts.preloader_threads = 1;
+    NodHandle* disc = nullptr;
+    NodHandle* part = nullptr;
+    auto fail = [&](const std::string& why) {
+        const char* msg = nod_error_message();
+        error = why + (msg && *msg ? std::string(": ") + msg : std::string());
+        nod_free(part);
+        nod_free(disc);
+        return false;
+    };
+    if (nod_disc_open(utf8Path.c_str(), &opts, &disc) != NOD_RESULT_OK) return fail("could not read the disc image");
+    if (nod_disc_open_partition_kind(disc, NOD_PARTITION_KIND_DATA, nullptr, &part) != NOD_RESULT_OK)
+        return fail("the disc image has no game partition");
+    NodPartitionMeta meta{};
+    if (nod_partition_meta(part, &meta) != NOD_RESULT_OK) return fail("the game partition could not be read");
+    std::vector<Entry> entries;
+    if (!parseFst(blob(meta.raw_fst), entries, error)) {
+        nod_free(part);
+        nod_free(disc);
+        return false;
+    }
     std::lock_guard lk(sFilesM);
-    sFiles.clear();
+    closeAll();
+    nod_free(sPart);
+    nod_free(sDisc);
+    sDisc = disc;
+    sPart = part;
+    sEntries = std::move(entries);
+    sRoot = utf8Path;
+    sDol = blob(meta.raw_dol);
+    sBoot = blob(meta.raw_boot);
+    sBi2 = blob(meta.raw_bi2);
+    sActive = true;
+    return true;
+}
+
+}  // namespace
+
+bool isDiscFolder(const std::string& utf8Path) {
+    std::error_code ec;
+    const fs::path p = u8path(utf8Path);
+    return fs::is_directory(p, ec) && fs::is_regular_file(p / "sys" / "fst.bin", ec) && fs::is_directory(p / "files", ec);
+}
+
+std::string resolve(const std::string& utf8Path) {
+    if (utf8Path.empty()) return {};
+    std::error_code ec;
+    fs::path p = u8path(utf8Path);
+    auto u8 = [](const fs::path& x) {
+        const auto s = x.u8string();
+        return std::string(s.begin(), s.end());
+    };
+    auto isPart = [&](const fs::path& d) { return isDiscFolder(u8(d)); };
+    if (fs::is_regular_file(p, ec)) {  // a file in <partition>/sys
+        const fs::path sys = p.parent_path();
+        if (ieq(u8(sys.filename()), "sys") && isPart(sys.parent_path())) return u8(sys.parent_path());
+        return {};
+    }
+    if (!fs::is_directory(p, ec)) return {};
+    if (isPart(p)) return u8(p);
+    if (ieq(u8(p.filename()), "sys") && isPart(p.parent_path())) return u8(p.parent_path());
+    // A whole-disc extraction: DATA/ (Dolphin), else the one game-partition-named folder ("P-DATA",
+    // "P0", ...: other tools) that holds sys/ + files/; an arbitrary folder of other games is not searched.
+    if (isPart(p / "DATA")) return u8(p / "DATA");
+    std::string found;
+    int n = 0;
+    for (auto it = fs::directory_iterator(p, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        const std::string name = u8(it->path().filename());
+        const bool partName = (name.size() >= 2 && (name[0] == 'P' || name[0] == 'p') && (name[1] == '-' || std::isdigit(static_cast<unsigned char>(name[1]))));
+        if (!partName || ieq(name, "P-UPDATE") || ieq(name, "P-CHANNEL") || !isPart(it->path())) continue;
+        found = u8(it->path());
+        n++;
+    }
+    return n == 1 ? found : std::string();
+}
+
+bool open(const std::string& utf8Path, std::string& error) {
+    if (!isDiscFolder(utf8Path)) return openImage(utf8Path, error);
+    const fs::path p = u8path(utf8Path);
+    std::vector<uint8_t> fst;
+    std::vector<Entry> entries;
+    if (!readAll(p / "sys" / "fst.bin", fst)) {
+        error = "no sys/fst.bin in " + utf8Path;
+        return false;
+    }
+    if (!parseFst(fst, entries, error)) return false;
+    std::lock_guard lk(sFilesM);
+    closeAll();
+    nod_free(sPart);
+    nod_free(sDisc);
+    sPart = sDisc = nullptr;
     sEntries = std::move(entries);
     sRoot = utf8Path;
     sDol.clear();
@@ -101,6 +202,8 @@ bool open(const std::string& utf8Path, std::string& error) {
     sActive = true;
     return true;
 }
+
+bool isImage() { return sPart != nullptr; }
 
 bool active() { return sActive; }
 const std::string& root() { return sRoot; }
@@ -149,6 +252,32 @@ int64_t read(int32_t n, void* dst, uint32_t len, uint32_t off) {
     if (off >= e->length) return 0;
     if (len > e->length - off) len = e->length - off;
     std::lock_guard lk(sFilesM);
+    if (sPart) {  // image: the partition's file through nod
+        auto it = sNodFiles.find(n);
+        if (it == sNodFiles.end()) {
+            NodHandle* h = nullptr;
+            if (nod_partition_open_file(sPart, uint32_t(n), &h) != NOD_RESULT_OK) return -1;
+            it = sNodFiles.emplace(n, h).first;
+            if (sNodFiles.size() > 64) {
+                for (auto j = sNodFiles.begin(); j != sNodFiles.end();) {
+                    if (j->first == n) ++j;
+                    else {
+                        nod_free(j->second);
+                        j = sNodFiles.erase(j);
+                    }
+                }
+            }
+        }
+        if (nod_seek(it->second, int64_t(off), 0) < 0) return -1;
+        uint32_t done = 0;
+        while (done < len) {
+            const int64_t got = nod_read(it->second, static_cast<uint8_t*>(dst) + done, len - done);
+            if (got < 0) return -1;
+            if (got == 0) break;
+            done += uint32_t(got);
+        }
+        return done;
+    }
     auto it = sFiles.find(n);
     if (it == sFiles.end()) {
         std::ifstream f(u8path(sRoot) / "files" / u8path(e->path.substr(1)), std::ios::binary);
