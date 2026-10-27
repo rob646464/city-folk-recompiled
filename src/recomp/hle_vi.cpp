@@ -155,6 +155,21 @@ HLE(VIConfigure) {
     if (m.fbWidth < 16 || m.fbWidth > 720 || m.efbHeight < 16 || m.efbHeight > 528) return;
     ::VIConfigure(&m);
 }
+// The European game asks the SC library whether the console is set to 60 Hz before it picks its
+// render mode (EGG's video setup, lr 80442ED4 PAL). It asks 0.4 ms after SCInit opened SYSCONF,
+// before the read has come back (the recompiled CPU gets there far sooner than a Wii, where the
+// boot work in between takes long enough), so the SC library found no IPL.E60 and said 0: the PAL
+// game always chose 50 Hz. The SYSCONF the game reads is generated from the same setting
+// (sysconf.cpp: IPL.E60 = European game && eurgb60), so a 0 is answered from that setting.
+// Logged once per value (the VI rate then follows VIConfigure).
+HLE(SCGetEuRgb60Mode) {
+    const u32 lr = c.lr;
+    callOriginal(c, "SCGetEuRgb60Mode");
+    if (c.r[3] == 0 && palGame() && sys::settings().eurgb60) c.r[3] = 1;
+    static u32 sLast = ~0u;
+    if (c.r[3] != sLast) log("[vi] SCGetEuRgb60Mode = %u (lr %08X)", c.r[3], lr);
+    sLast = c.r[3];
+}
 HLE(VIConfigurePan) {}
 HLE(VIFlush) {}
 HLE(VISetBlack) { sBlack = c.r[3] != 0; }
