@@ -1,0 +1,120 @@
+0220: realistic flashlight: no beam without the game's flashlight; bounded glow looking into it
+
+Bug (user video, foyer): Luigi walks into the barrier at the web-covered door; for ~5 frames a huge,
+flat, hard-edged white wedge filled the left of the picture, "detached from the flashlight". The
+barrier shock turns the flashlight off (the game draws no handlight_ef cone mesh) and lights Luigi
+with a white, wide spot light (cos edge 0.766, distance falloff k1 1/1900) pointing back at the
+camera. Without a cone mesh resolve_flash kept the frame's nearest bright spot light, so the
+realistic beam was ray-marched from that light: unshadowed (the game's shadow map is not rendered
+from it), its apex hidden behind the pillar, and doubled by the switch-on flare. Vanilla shows no
+beam in those frames.
+
+- resolve_flash runs before anything reads g_flash; a frame without the cone mesh has no flashlight
+  for the beam (realistic and volumetric) and counts as "off" for the switch-on flare.
+- fs_beam: a view ray that looks into the beam (within the cone's half angle of the way back to the
+  lens) runs lengthwise through its bright part, so the haze it gathers grows like 1/sin(angle).
+  The scattering is scaled by min(sqrt(sin^2(angle) / sin^2(half angle) + 0.36), 1): at most 0.6x
+  straight into the lens, 1 for every ray at a larger angle (side and back views are unchanged).
+  Luigi walking toward the camera now shows a glow centred on the lens instead of a full-screen
+  yellow wash.
+- AURORA_BEAM_SHOW=3: heat map of the scattering amount v (red 0..2, green 2..6, blue 8..16).
+
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -793,7 +793,7 @@
+ //   7    cone edge cosine (GX cutoff), anchor valid, time (s), flare
+ //   8-10 world anchor: view positions of a world point and of points 256 units along world X / Y
+ //   11   reflector rings, lens radius^2, reference distance^2, world size of a pixel at distance 1
+-//   12   map height, quality, 0, 0
++//   12   map height, quality, heat-map debug (0220), 0
+ fn beam_key(t: vec4f, sr: u32, sg: u32) -> f32 {
+   let v = round(clamp(t, vec4f(0.0), vec4f(1.0)) * 255.0);
+   return v[sg] * 256.0 + v[sr];
+@@ -994,7 +994,22 @@
+     let haze = mix(hz[hi], hz[hi + 1u], hf - f32(hi));
+     acc = acc + li * phase * haze * exp(-fx.beam[6].x * 0.04 * t);
+   }
+-  let scatter = acc * dt * fx.beam[6].x;
++  // 0220: looking into the beam (the view ray within the cone's angle of the way back to the lens)
++  // the ray runs lengthwise through the bright part near the lens, so its path through the beam,
++  // and the haze it gathers, grows like 1 / sin(angle to the axis): from inside the cone the glow
++  // washed the whole picture. Scaled by sin(angle) / sin(cone half angle), floored, so the glow
++  // stays bounded and centred on the lens; rays at larger angles (every side and back view of the
++  // beam) are unchanged.
++  var along = 1.0;
++  {
++    let c = -dot(dir, a);
++    let sc = sin(thc);
++    if (c > cos(thc) && sc > 1e-3) {
++      let s2 = max(1.0 - c * c, 0.0);
++      along = min(sqrt(s2 / (sc * sc) + 0.36), 1.0);
++    }
++  }
++  let scatter = acc * dt * fx.beam[6].x * along;
+   // Dust motes: one possible mote per 32-unit world cell (periodic hash), walked with a 3D DDA
+   // along the lit part of the ray near the lens; each is a tiny glint lit only by the beam (and
+   // its shadows).
+@@ -1193,6 +1208,8 @@
+     // (No glare sprite at the lens: enhanced lighting never draws a halo or orb at a light's
+     // position, which showed as a ball behind Luigi's head when the lens was hidden. The flash
+     // brightens the beam itself; the game's own lens sprite glows through the glow buffer.)
++    // 0220: AURORA_BEAM_SHOW=3: the scattering amount v as a heat map (red 0..2, + green 2..6, + blue 8..16)
++    if (fx.beam[12].z > 0.5) { return vec4f(clamp(vec3f(v / 2.0, v / 4.0 - 0.5, v / 8.0 - 1.0), vec3f(0.0), vec3f(1.0)), 0.0); }
+     if ((mask & 64u) != 0u) { return vec4f(col * (1.0 - exp(-v)), 0.0); } // AURORA_BEAM_SHOW: the beam alone
+   } else if ((mask & 2u) != 0u) {
+     add = add + textureSampleLevel(t1, samp, in.uv, 0.0).rgb;
+@@ -2870,10 +2887,19 @@
+   if (sNoCone == 2) {
+     Log.info("beam: scene {} {}", g_sceneEnds, skip ? "nearest spot light (first version)" : "cone mesh");
+   }
+-  if (!g_cone.valid || skip) {
+-    if (skip) {
+-      g_coneLit = true;
+-    }
++  if (skip) {
++    g_coneLit = true;
++    return;
++  }
++  if (!g_cone.valid) {
++    // 0220: no cone mesh = no flashlight beam this frame (the flashlight is off: Luigi shocked by
++    // the foyer's barrier, A pressed, scripted scenes). The game shows no beam then, so neither does
++    // the realistic one. The nearest bright spot light used before is some other light: when the
++    // barrier shocks Luigi the game turns the flashlight off and lights him with a white, wide spot
++    // light (cos 0.766, distance falloff) pointing back at the camera, and the beam drawn from it
++    // filled the screen with a flat white wedge emerging from behind the pillar, unshadowed (the
++    // game's shadow map is not rendered from it) and boosted by the switch-on flare.
++    g_flash.valid = false;
+     return;
+   }
+   const auto& m = g_cone.m;
+@@ -3477,6 +3503,8 @@
+   const float vpH = std::max(g_camera.vp.height, 1.f) * float(bh) / float(std::max(height, 1u));
+   u.beam[11][3] = 2.f / (std::max(std::abs(g_camera.p11), 1e-3f) * vpH);
+   u.beam[12][1] = q == 1 ? 24.f : q == 2 ? 40.f : 64.f;
++  static const bool sShowV = [] { const char* v = std::getenv("AURORA_BEAM_SHOW"); return v != nullptr && std::atoi(v) == 3; }();
++  u.beam[12][2] = sShowV ? 1.f : 0.f; // 0220: AURORA_BEAM_SHOW=3 heat map of the scattering
+   static const bool sBeamLog = std::getenv("AURORA_BEAM_LOG") != nullptr; // every scene end
+   if (sBeamLog) {
+     Log.info("beam: col {} {} {} {} cos {} {} {} dist {} {} {} cut {} flare {} level {} shadow {}", f.color.x(), f.color.y(),
+@@ -3513,6 +3541,11 @@
+     job.mask |= 1u;
+     job.bloomLevels = MaxBloomLevels;
+   }
++  // 0220: resolved before anything reads g_flash: a frame without the game's cone mesh has no
++  // flashlight (no beam of either kind, and it counts as off for the switch-on flare).
++  if (beam_on()) {
++    resolve_flash();
++  }
+   if (c.volumetric && c.volumetricIntensity > 0.f && g_flash.valid) {
+     job.mask |= 2u;
+   }
+@@ -3530,9 +3563,6 @@
+     g_flashOffTime += dt;
+   }
+   static const bool sNoPass = std::getenv("AURORA_BEAM_NOPASS") != nullptr; // debug: no scattering pass
+-  if (beam_on()) {
+-    resolve_flash();
+-  }
+   const bool realistic = beam_on() && g_flash.valid && !sNoPass;
+   if (realistic) {
+     job.mask = (job.mask & ~2u) | 32u;

@@ -1,0 +1,260 @@
+diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
+index d1728d4..044714f 100644
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -140,6 +140,8 @@ extern "C" {
+ #define GX_AURORA_ACCURACY_INT_TEV 0x0001
+ /** Pixel output quantized to the EFB pixel format (RGBA6 / RGB565) with the PE's ordered dither. */
+ #define GX_AURORA_ACCURACY_EFB_DEPTH 0x0002
++/** Color texture copies (GXCopyTex) apply the vertical copy filter set by GXSetCopyFilter (BP 0x53/0x54). */
++#define GX_AURORA_ACCURACY_COPY_FILTER 0x0004
+ 
+ void GXSetAuroraAccuracy(u32 flags);
+ u32 GXGetAuroraAccuracy();
+diff --git a/lib/dolphin/gx/GXFrameBuffer.cpp b/lib/dolphin/gx/GXFrameBuffer.cpp
+index 18ee339..7ee6035 100644
+--- a/lib/dolphin/gx/GXFrameBuffer.cpp
++++ b/lib/dolphin/gx/GXFrameBuffer.cpp
+@@ -176,7 +176,14 @@ void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
+ }
+ 
+ // TODO GXSetDispCopyFrame2Field
+-// TODO GXSetCopyClamp
++// Clamp of the copy filter at the source rectangle's top / bottom line (copy trigger register
++// bits 0-1; Aurora uses it for texture copies).
++void GXSetCopyClamp(GXFBClamp clamp) {
++  const bool top = (clamp & GX_CLAMP_TOP) != 0;
++  const bool bottom = (clamp & GX_CLAMP_BOTTOM) != 0;
++  SET_REG_FIELD(0, __gx->cpTex, 1, 0, top);
++  SET_REG_FIELD(0, __gx->cpTex, 1, 1, bottom);
++}
+ 
+ u32 GXSetDispCopyYScale(f32 vscale) { return 0; }
+ 
+@@ -203,7 +210,29 @@ void GXSetCopyClear(GXColor color, u32 depth) {
+   __gx->bpSent = 1;
+ }
+ 
+-void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]) {}
++void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]) {
++  (void)aa;
++  (void)sample_pattern;
++  // Vertical copy filter (BP 0x53/0x54, 6-bit taps). With vf off the hardware gets the
++  // pass-through taps {0, 0, 21, 22, 21, 0, 0}. Aurora applies it to color texture copies
++  // (GXCopyTex, GX_AURORA_ACCURACY_COPY_FILTER); the display copy is the host's business.
++  static constexpr u8 kPassThrough[7] = {0, 0, 21, 22, 21, 0, 0};
++  const u8* taps = vf && vfilter != nullptr ? vfilter : kPassThrough;
++  u32 reg0 = 0;
++  u32 reg1 = 0;
++  SET_REG_FIELD(0, reg0, 6, 0, taps[0] & 0x3F);
++  SET_REG_FIELD(0, reg0, 6, 6, taps[1] & 0x3F);
++  SET_REG_FIELD(0, reg0, 6, 12, taps[2] & 0x3F);
++  SET_REG_FIELD(0, reg0, 6, 18, taps[3] & 0x3F);
++  SET_REG_FIELD(0, reg0, 8, 24, 0x53);
++  SET_REG_FIELD(0, reg1, 6, 0, taps[4] & 0x3F);
++  SET_REG_FIELD(0, reg1, 6, 6, taps[5] & 0x3F);
++  SET_REG_FIELD(0, reg1, 6, 12, taps[6] & 0x3F);
++  SET_REG_FIELD(0, reg1, 8, 24, 0x54);
++  GX_WRITE_RAS_REG(reg0);
++  GX_WRITE_RAS_REG(reg1);
++  __gx->bpSent = 1;
++}
+ 
+ void GXSetDispCopyGamma(GXGamma gamma) {}
+ 
+diff --git a/lib/gfx/encoding.cpp b/lib/gfx/encoding.cpp
+index 2c6c028..d523d60 100644
+--- a/lib/gfx/encoding.cpp
++++ b/lib/gfx/encoding.cpp
+@@ -278,7 +278,7 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
+         passInfo.resolveTarget->format == passInfo.colorAttachments[SceneColorAttachmentIndex].format;
+     if (needsConversion) {
+       tex_copy_conv::run(cmd, convReq);
+-    } else if (needsScaling || needsOpaqueAlpha || !sameFormat) {
++    } else if (needsScaling || needsOpaqueAlpha || !sameFormat || passInfo.resolveFiltered) {
+       tex_copy_conv::blit(cmd, convReq);
+     } else {
+       const webgpu::gpu_prof::Zone zone{cmd, "EFB copy"};
+diff --git a/lib/gfx/frame_packet.hpp b/lib/gfx/frame_packet.hpp
+index 0d38a4e..1bec932 100644
+--- a/lib/gfx/frame_packet.hpp
++++ b/lib/gfx/frame_packet.hpp
+@@ -91,6 +91,7 @@ struct RenderPass {
+   GXPixelFmt resolveSourceFormat = GX_PF_RGBA6_Z24;
+   ClipRect resolveRect;
+   Range resolveUniformRange;
++  bool resolveFiltered = false; // the copy applies the vertical copy filter (needs the shader path)
+   wgpu::Texture snapshotColorDst;
+   wgpu::TextureView snapshotDepthDst;
+   wgpu::Texture snapshotNormalDst;
+diff --git a/lib/gfx/recording.cpp b/lib/gfx/recording.cpp
+index 43d7488..bc2d85d 100644
+--- a/lib/gfx/recording.cpp
++++ b/lib/gfx/recording.cpp
+@@ -847,6 +847,23 @@ PipelineRef pipeline_ref(const clear::PipelineConfig& config) {
+   return find_pipeline(config, get_render_target_layout());
+ }
+ 
++// Copy filter weights for tex_copy_conv::Uniforms::filterTaps: line above (taps 0+1), this line
++// (2+3+4), line below (5+6), one byte each; 0 when the filter is off (accuracy option) or the
++// taps are the pass-through ones (0, 64, 0).
++static uint32_t copy_filter_taps() {
++  if ((gx::g_accuracyFlags.load(std::memory_order_relaxed) & GX_AURORA_ACCURACY_COPY_FILTER) == 0) {
++    return 0;
++  }
++  const auto& t = gx::g_gxState.copyVFilter;
++  const uint32_t above = t[0] + t[1];
++  const uint32_t center = t[2] + t[3] + t[4];
++  const uint32_t below = t[5] + t[6];
++  if (above == 0 && below == 0 && center == 64) {
++    return 0;
++  }
++  return above | (center << 8) | (below << 16);
++}
++
+ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
+                        Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat,
+                        GXPixelFmt sourceFormat) {
+@@ -861,12 +878,20 @@ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bo
+   prevPass.resolveSourceFormat = sourceFormat;
+   const auto srcW = static_cast<float>(prevPass.colorAttachments[SceneColorAttachmentIndex].size.width);
+   const auto srcH = static_cast<float>(prevPass.colorAttachments[SceneColorAttachmentIndex].size.height);
++  // One row of the copy source (the filter's neighbour spacing) and the copy clamp bits.
++  const float rowStep = 1.f / std::max(srcH, 1.f);
++  const u32 clamp = gx::g_gxState.copyClamp;
+   const tex_copy_conv::Uniforms uniforms{
+       .offset = {static_cast<float>(rect.x) / srcW, static_cast<float>(rect.y) / srcH},
+       .scale = {static_cast<float>(rect.width) / srcW, static_cast<float>(rect.height) / srcH},
+       .opaqueAlpha = !gx::efb_has_alpha(sourceFormat),
+       .quantize = (gx::g_accuracyFlags.load(std::memory_order_relaxed) & GX_AURORA_ACCURACY_EFB_DEPTH) != 0,
++      .lineStep = rowStep,
++      .filterTaps = gx::is_depth_format(resolveFormat) ? 0u : copy_filter_taps(),
++      .clampTop = (clamp & 1) != 0 ? static_cast<float>(rect.y) / srcH + 0.5f * rowStep : -1.f,
++      .clampBottom = (clamp & 2) != 0 ? static_cast<float>(rect.y + rect.height) / srcH - 0.5f * rowStep : 2.f,
+   };
++  prevPass.resolveFiltered = uniforms.filterTaps != 0;
+   prevPass.resolveUniformRange = push_uniform(uniforms);
+   if (g_nextResolveOp) {
+     prevPass.ramPostOps.push_back(std::move(g_nextResolveOp));
+diff --git a/lib/gfx/tex_copy_conv.cpp b/lib/gfx/tex_copy_conv.cpp
+index d474775..77c852a 100644
+--- a/lib/gfx/tex_copy_conv.cpp
++++ b/lib/gfx/tex_copy_conv.cpp
+@@ -29,6 +29,10 @@ struct Uniforms {
+     scale: vec2f,
+     opaqueAlpha: u32,
+     quantize: u32,
++    lineStep: f32,
++    filterTaps: u32,
++    clampTop: f32,
++    clampBottom: f32,
+ };
+ @group(0) @binding(2) var<uniform> ubuf: Uniforms;
+ 
+@@ -56,7 +60,24 @@ var<private> uvs: array<vec2f, 3> = array(
+ }
+ 
+ fn sample_efb(uv: vec2f) -> vec4f {
+-    let c = textureSample(src, src_samp, uv);
++    var c = textureSampleLevel(src, src_samp, uv, 0.0);
++    // Vertical copy filter (GXSetCopyFilter): weighted sum (taps out of 64) of the line above,
++    // this line and the line below, saturating at 1, before the format conversion; RGB only
++    // (alpha is copied from this line). With GXSetCopyClamp the neighbour lines of the source
++    // rectangle's first / last line are that line itself.
++    // The neighbour taps are one row of the copy source away: exactly the hardware's lines at
++    // native resolution. Above it, taps one EFB line (several rows) apart would add sharp copies
++    // of the image a few pixels above and below (ghost outlines); one row keeps the filter's
++    // softening at the render resolution, as everything else scales.
++    if (ubuf.filterTaps != 0u) {
++        let rowStep = 1.0 / f32(textureDimensions(src).y);
++        let wa = f32(ubuf.filterTaps & 0xffu);
++        let wc = f32((ubuf.filterTaps >> 8u) & 0xffu);
++        let wb = f32((ubuf.filterTaps >> 16u) & 0xffu);
++        let above = textureSampleLevel(src, src_samp, vec2f(uv.x, max(uv.y - rowStep, ubuf.clampTop)), 0.0).rgb;
++        let below = textureSampleLevel(src, src_samp, vec2f(uv.x, min(uv.y + rowStep, ubuf.clampBottom)), 0.0).rgb;
++        c = vec4f(min((above * wa + c.rgb * wc + below * wb) / 64.0, vec3f(1.0)), c.a);
++    }
+     return vec4f(c.rgb, select(c.a, 1.0, ubuf.opaqueAlpha != 0u));
+ }
+ 
+diff --git a/lib/gfx/tex_copy_conv.hpp b/lib/gfx/tex_copy_conv.hpp
+index 45367ac..de4c448 100644
+--- a/lib/gfx/tex_copy_conv.hpp
++++ b/lib/gfx/tex_copy_conv.hpp
+@@ -18,9 +18,17 @@ struct alignas(16) Uniforms {
+   Vec2<float> scale{1.f, 1.f};
+   uint32_t opaqueAlpha = 0;
+   uint32_t quantize = 0; // RGB565/RGB5A3 copies: store the format's precision (GX_AURORA_ACCURACY_EFB_DEPTH)
+-  std::array<uint32_t, 2> _pad{};
++  // Vertical copy filter (GXSetCopyFilter, GX_AURORA_ACCURACY_COPY_FILTER): one source row in uv
++  // units (the shader derives it from the source texture; one EFB line at native resolution), and the weights (out of 64) of the line above (taps 0+1), the line itself (2+3+4)
++  // and the line below (5+6) in bytes 0-2. 0 = no filter (pass-through taps, or a depth copy).
++  float lineStep = 0.f;
++  uint32_t filterTaps = 0;
++  // GXSetCopyClamp: the lines the filter reads above / below the source rectangle repeat its
++  // top / bottom line (uv range of the row centers it may sample; unbounded when not clamped).
++  float clampTop = -1.f;
++  float clampBottom = 2.f;
+ };
+-static_assert(sizeof(Uniforms) == 32);
++static_assert(sizeof(Uniforms) == 48);
+ 
+ struct ConvRequest {
+   GXTexFmt fmt;
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+index a327bbe..71bf91c 100644
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -308,6 +308,10 @@ inline bool operator==(const AttrArray& lhs, const AttrArray& rhs) {
+ inline bool operator!=(const AttrArray& lhs, const AttrArray& rhs) { return !(lhs == rhs); }
+ 
+ struct GXState {
++  // Vertical copy filter taps (BP 0x53/0x54), applied to color texture copies.
++  std::array<u8, 7> copyVFilter{0, 0, 21, 22, 21, 0, 0};
++  // GXSetCopyClamp bits of the copy (BP 0x52 bits 0-1: top, bottom), for the copy filter.
++  u8 copyClamp = 0;
+   struct CopyTextureRef {
+     gfx::TextureHandle handle;
+     u32 revision = 0;
+diff --git a/lib/gx/regs.cpp b/lib/gx/regs.cpp
+index aedc027..28a5658 100644
+--- a/lib/gx/regs.cpp
++++ b/lib/gx/regs.cpp
+@@ -272,6 +272,7 @@ void bp_clear_depth(u8, u32 value) noexcept { g_gxState.clearDepth = reg_get(val
+ // EFB copy trigger (0x52)
+ void bp_efb_copy(u8, u32 value) noexcept {
+   const bool clear = reg_get(value, 1, 11) != 0;
++  g_gxState.copyClamp = static_cast<u8>(reg_get(value, 2, 0));
+   if (reg_get(value, 1, 14) != 0) {
+     Log.warn("STUB: display copy is not implemented");
+   } else {
+@@ -509,6 +510,20 @@ void bp_tex(u8 reg, u32 value) noexcept {
+   }
+ }
+ 
++// Copy filter taps (0x53: taps 0-3, 0x54: taps 4-6; 6 bits each).
++void bp_copy_filter(u8 reg, u32 value) noexcept {
++  auto& t = g_gxState.copyVFilter;
++  if (reg == 0x53) {
++    for (u32 i = 0; i < 4; ++i) {
++      t[i] = static_cast<u8>(reg_get(value, 6, i * 6));
++    }
++  } else {
++    for (u32 i = 0; i < 3; ++i) {
++      t[4 + i] = static_cast<u8>(reg_get(value, 6, i * 6));
++    }
++  }
++}
++
+ void bp_unhandled(u8 reg, u32 value) noexcept {
+ #ifndef NDEBUG
+   Log.debug("Unhandled BP register 0x{:02X} (value 0x{:06X})", reg, value & 0xFFFFFF);
+@@ -551,6 +566,8 @@ constexpr auto kBpRegs = [] {
+   regs[0x50] = {bp_clear_bg};
+   regs[0x51] = {bp_clear_depth};
+   regs[0x52] = {bp_efb_copy, 0, /* alwaysHandle */ true};
++  regs[0x53] = {bp_copy_filter};
++  regs[0x54] = {bp_copy_filter};
+   regs[0x64] = {}; // TLUT load address; bp_tlut_load reads from shadow
+   regs[0x65] = {bp_tlut_load, DirtyTextures, /* alwaysHandle */ true};
+   for (u32 base : {0x80u, 0xA0u}) {

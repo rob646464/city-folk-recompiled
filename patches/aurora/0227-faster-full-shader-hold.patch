@@ -1,0 +1,577 @@
+0227: a faster complete shader hold
+
+The game starts only once every shader is compiled or loaded (the user's requirement); with a warm
+cache that hold is CPU bound (about 1 ms per cached pipeline). Made faster without dropping any:
+- Boost workers: up to all hardware threads but one, at most 16, created at startup and asleep
+  unless aurora_pipeline_cache_set_boost(true) (the application boosts while the game is held for
+  a batch that has not missed the cache; a compiling batch keeps the default count, the shader
+  compiler needs much memory per thread). Cached pipelines stop scaling at 12-16 threads (Dawn's
+  device lock).
+- Dawn cache lookups on a read connection per thread (WAL readers do not block each other);
+  writes, deletions and resets stay on the main connection under the mutex, readers reopen when
+  its generation changes. The size-query entry is kept per thread.
+- GX shader modules reused within a session (key: shader config, alpha mode, normal attachment):
+  pipelines that differ only in blend/depth/cull/target share one WGSL generation and Tint parse.
+
+diff --git a/include/aurora/pipeline_cache.h b/include/aurora/pipeline_cache.h
+index 401d962..3a0f0e5 100644
+--- a/include/aurora/pipeline_cache.h
++++ b/include/aurora/pipeline_cache.h
+@@ -55,6 +55,7 @@ typedef struct AuroraPipelineStats {
+   // first launch with this cache file).
+   uint32_t blobEntriesAtOpen;
+   uint32_t blobSession;
++  uint32_t modulesReused;  // 0227: GX pipelines that reused a shader module of this session
+ } AuroraPipelineStats;
+ 
+ /** Adds the pipeline configs in a precache list file (format below) to the known set; they
+@@ -80,6 +81,10 @@ void aurora_pipeline_cache_set_wait(bool enabled);
+ /** Worker threads compiling pipelines (default: half the hardware threads, 1..8). Takes effect
+  *  at initialization; call before aurora_initialize. */
+ void aurora_pipeline_cache_set_threads(uint32_t threads);
++/** 0227: true lets all hardware threads but one create pipelines (default count otherwise), e.g.
++ *  while the application waits for a batch that loads from the shader cache (CPU bound, nothing
++ *  else running). The stats' workerThreads is the number currently taking work. */
++void aurora_pipeline_cache_set_boost(bool enabled);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
+index 07b1793..eaabbcc 100644
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -81,6 +81,12 @@ static absl::flat_hash_set<PipelineRef> g_skipWarned;
+ static absl::flat_hash_map<PipelineRef, std::string> g_missDetails; // under g_pipelineMutex
+ static uint32_t g_requestedThreads = 0;
+ static uint32_t g_workerThreadCount = 0;
++// 0227: extra workers (up to all hardware threads but one, at most 16) that only take work while the
++// application boosts creation, e.g. while the game is held for a batch that loads from the cache
++// (CPU bound, nothing else runs). g_activeWorkers of the g_pipelineThreads take work.
++static std::atomic<uint32_t> g_activeWorkers{0};
++static uint32_t g_boostWorkers = 0;
++static std::condition_variable g_boostCv;
+ static std::optional<uint32_t> g_rebuildAccuracy; // GX accuracy flags the known set was last built for
+ // 0217: enhanced-lighting variant bits (enhanced::precache_bits) the known set was last built for,
+ // and the pipelines a rebuild queued that are not built yet (the application holds the game
+@@ -102,6 +108,8 @@ static std::atomic<uint64_t> g_createNs[static_cast<size_t>(CreateStage::Count)]
+ void add_create_time(CreateStage stage, uint64_t ns) noexcept {
+   g_createNs[static_cast<size_t>(stage)].fetch_add(ns, std::memory_order_relaxed);
+ }
++static std::atomic<uint32_t> g_moduleReuse{0};
++void note_module_reuse() noexcept { g_moduleReuse.fetch_add(1, std::memory_order_relaxed); }
+ 
+ // 2: every row is validated on load (stored hash = xxh3 of the config bytes seeded by type,
+ // i.e. a per-entry checksum, plus field ranges) and pipeline_bad records configs whose creation
+@@ -1623,7 +1631,7 @@ static CompiledPipeline create_pending(PendingPipeline& pending) {
+   return result;
+ }
+ 
+-static void pipeline_worker() {
++static void pipeline_worker(uint32_t index) {
+ #ifdef TRACY_ENABLE
+   tracy::SetThreadName("Pipeline compilation thread");
+ #endif
+@@ -1633,10 +1641,22 @@ static void pipeline_worker() {
+     {
+       std::unique_lock lock{g_pipelineMutex};
+       if (g_hasPipelineThread) {
++        // 0227: a boost worker sleeps while not boosted. If it was woken for work after the boost
++        // ended, it passes the wake-up on to a worker that is active.
++        if (index >= g_activeWorkers.load(std::memory_order_relaxed)) {
++          g_pipelineQueueCv.notify_one();
++          g_boostCv.wait(lock, [index] {
++            return index < g_activeWorkers.load(std::memory_order_relaxed) || g_pipelineThreadEnd;
++          });
++        }
+         // Several workers share the queues: always re-check under the lock.
+-        g_pipelineQueueCv.wait(lock, [] {
+-          return !g_pipelineQueue.empty() || !g_backgroundPipelineQueue.empty() || g_pipelineThreadEnd;
++        g_pipelineQueueCv.wait(lock, [index] {
++          return !g_pipelineQueue.empty() || !g_backgroundPipelineQueue.empty() || g_pipelineThreadEnd ||
++                 index >= g_activeWorkers.load(std::memory_order_relaxed);
+         });
++        if (!g_pipelineThreadEnd && index >= g_activeWorkers.load(std::memory_order_relaxed)) {
++          continue;
++        }
+       } else if (g_pipelineQueue.empty() && g_backgroundPipelineQueue.empty()) {
+         return;
+       }
+@@ -2067,8 +2087,15 @@ void initialize_pipeline_cache() {
+       threads = std::clamp(std::thread::hardware_concurrency() / 2, 1u, 8u);
+     }
+     g_workerThreadCount = threads;
+-    for (uint32_t i = 0; i < threads; ++i) {
+-      g_pipelineThreads.emplace_back(pipeline_worker);
++    // 0227: boost workers up to all hardware threads but one, at most 16 (they sleep unless
++    // boosted). Cached pipelines stop scaling at about 12-16 threads (Dawn's device lock, taken by
++    // every creation call): 10076 cached pipelines took 2.1 s with 6 threads, 1.8 with 8, 1.7 with 12,
++    // 1.4-1.6 with 16 and 1.7-1.9 with 23 (i9-12900KS).
++    g_boostWorkers =
++        std::max(threads, std::min(std::max(std::thread::hardware_concurrency(), 2u) - 1, 16u));
++    g_activeWorkers = threads;
++    for (uint32_t i = 0; i < g_boostWorkers; ++i) {
++      g_pipelineThreads.emplace_back(pipeline_worker, i);
+     }
+   }
+ 
+@@ -2096,6 +2123,7 @@ void shutdown_pipeline_cache() {
+     }
+     g_pipelineQueueCv.notify_all();
+     g_pipelineReadyCv.notify_all();
++    g_boostCv.notify_all();
+     for (auto& thread : g_pipelineThreads) {
+       thread.join();
+     }
+@@ -2113,6 +2141,7 @@ void shutdown_pipeline_cache() {
+   g_rebuildEnhBits.reset();
+   g_rebuildPending = 0;
+   g_pipelines.clear();
++  gx::clear_shader_module_cache(); // 0227
+   g_knownPipelines.clear();
+   g_pipelineLayoutKey.reset();
+   g_pipelineQueue.clear();
+@@ -2145,7 +2174,7 @@ void begin_pipeline_frame() {
+ 
+ void end_pipeline_frame() {
+   if (!g_hasPipelineThread) {
+-    pipeline_worker();
++    pipeline_worker(0);
+   }
+ }
+ 
+@@ -2717,7 +2746,7 @@ void aurora_pipeline_cache_get_stats(AuroraPipelineStats* out) {
+   out->stalledDraws = g_stalledDraws.load(std::memory_order_relaxed);
+   out->stallNs = g_stallNs.load(std::memory_order_relaxed);
+   out->maxStallNs = g_maxStallNs.load(std::memory_order_relaxed);
+-  out->workerThreads = g_workerThreadCount;
++  out->workerThreads = aurora::gfx::g_activeWorkers.load(std::memory_order_relaxed);
+   out->seeded = g_seeded.load(std::memory_order_relaxed);
+   out->droppedDraws = g_droppedDraws.load(std::memory_order_relaxed);
+   out->rebuildPending = g_rebuildPending.load(std::memory_order_relaxed);
+@@ -2733,6 +2762,7 @@ void aurora_pipeline_cache_get_stats(AuroraPipelineStats* out) {
+   out->blobSession = cache.session;
+   out->rebuildCount = aurora::gfx::g_rebuildCount.load(std::memory_order_relaxed);
+   out->prewarmPending = aurora::gfx::g_prewarmPending.load(std::memory_order_relaxed) ? 1 : 0;
++  out->modulesReused = aurora::gfx::g_moduleReuse.load(std::memory_order_relaxed);
+   out->wgslNs = aurora::gfx::g_createNs[static_cast<size_t>(aurora::gfx::CreateStage::Wgsl)].load(std::memory_order_relaxed);
+   out->moduleNs = aurora::gfx::g_createNs[static_cast<size_t>(aurora::gfx::CreateStage::Module)].load(std::memory_order_relaxed);
+   out->pipelineNs = aurora::gfx::g_createNs[static_cast<size_t>(aurora::gfx::CreateStage::Pipeline)].load(std::memory_order_relaxed);
+@@ -2743,3 +2773,20 @@ void aurora_pipeline_cache_set_log(bool enabled) { g_pipelineLog = enabled; }
+ void aurora_pipeline_cache_set_wait(bool enabled) { g_waitForPipelines = enabled; }
+ 
+ void aurora_pipeline_cache_set_threads(uint32_t threads) { g_requestedThreads = std::min(threads, 32u); }
++
++void aurora_pipeline_cache_set_boost(bool enabled) {
++  using namespace aurora::gfx;
++  if (!g_hasPipelineThread) {
++    return;
++  }
++  const uint32_t want = enabled ? g_boostWorkers : g_workerThreadCount;
++  {
++    std::lock_guard lock{g_pipelineMutex};
++    if (g_activeWorkers.load(std::memory_order_relaxed) == want) {
++      return;
++    }
++    g_activeWorkers = want;
++  }
++  g_boostCv.notify_all();
++  g_pipelineQueueCv.notify_all();
++}
+diff --git a/lib/gfx/pipeline_cache.hpp b/lib/gfx/pipeline_cache.hpp
+index e9fb9dc..cd3996a 100644
+--- a/lib/gfx/pipeline_cache.hpp
++++ b/lib/gfx/pipeline_cache.hpp
+@@ -55,6 +55,7 @@ bool pop_shader_error_scope(const char* what);
+ // cache lookups, shader compile on a miss, D3D12/Vulkan pipeline creation).
+ enum class CreateStage : uint8_t { Wgsl, Module, Pipeline, Count };
+ void add_create_time(CreateStage stage, uint64_t ns) noexcept;
++void note_module_reuse() noexcept; // 0227: a pipeline reused a shader module
+ uint64_t now_ns() noexcept;
+ 
+ } // namespace aurora::gfx
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+index 5544e7f..b2a0ecc 100644
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -598,6 +598,11 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+                                 uint32_t normalAttachment = UINT32_MAX) noexcept;
+ wgpu::ShaderModule build_shader(const ShaderConfig& config, const gfx::RenderTargetLayout& layout,
+                                 DstAlphaMode dstAlphaMode) noexcept;
++// 0227: what build_shader's module depends on (pipelines that differ only in blend, depth, cull or
++// render target share one module), and the session's modules by that key (create_pipeline).
++HashType shader_module_key(const ShaderConfig& config, const gfx::RenderTargetLayout& layout,
++                           DstAlphaMode dstAlphaMode) noexcept;
++void clear_shader_module_cache() noexcept;
+ GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept;
+ 
+ u8 comp_type_size(GXAttr attr, GXCompType type) noexcept;
+diff --git a/lib/gx/pipeline.cpp b/lib/gx/pipeline.cpp
+index 6a762a4..f0da697 100644
+--- a/lib/gx/pipeline.cpp
++++ b/lib/gx/pipeline.cpp
+@@ -8,20 +8,49 @@
+ #include "gx_fmt.hpp"
+ #include "shader_info.hpp"
+ 
++#include <absl/container/flat_hash_map.h>
+ #include <tracy/Tracy.hpp>
+ 
++#include <mutex>
++
+ namespace aurora::gx {
+ 
++// 0227: shader modules of this session by shader_module_key. A module costs WGSL generation and a
++// Tint parse/validation (about a quarter of a cached pipeline's creation time); the pipelines of
++// one shader for other blend/depth/cull states, render targets and the alpha pre-pass reuse it.
++// Only modules that compiled are kept. The pipelines hold their modules anyway.
++static std::mutex g_moduleMutex;
++static absl::flat_hash_map<HashType, wgpu::ShaderModule> g_modules;
++
++void clear_shader_module_cache() noexcept {
++  std::lock_guard lock{g_moduleMutex};
++  g_modules.clear();
++}
++
+ gfx::CompiledPipeline create_pipeline(const PipelineConfig& config, const gfx::RenderTargetLayout& layout) {
+   ZoneScoped;
+   const auto hash = xxh3_hash(layout.key, xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX)));
+   const auto create = [&](const PipelineOptions& options, const char* passName) {
+     // Dawn throws (terminating the process) when a pipeline is created from a shader module that
+     // failed to compile, e.g. one generated from a damaged cached config: check the module first.
+-    gfx::push_shader_error_scope();
+-    const auto shader = build_shader(config.shaderConfig, layout, options.dstAlphaMode);
+-    if (!gfx::pop_shader_error_scope("GX shader")) {
+-      return wgpu::RenderPipeline{};
++    const auto moduleKey = shader_module_key(config.shaderConfig, layout, options.dstAlphaMode);
++    wgpu::ShaderModule shader;
++    {
++      std::lock_guard lock{g_moduleMutex};
++      if (const auto it = g_modules.find(moduleKey); it != g_modules.end()) {
++        shader = it->second;
++      }
++    }
++    if (shader) {
++      gfx::note_module_reuse();
++    } else {
++      gfx::push_shader_error_scope();
++      shader = build_shader(config.shaderConfig, layout, options.dstAlphaMode);
++      if (!gfx::pop_shader_error_scope("GX shader")) {
++        return wgpu::RenderPipeline{};
++      }
++      std::lock_guard lock{g_moduleMutex};
++      g_modules.try_emplace(moduleKey, shader);
+     }
+     const auto label = fmt::format("GX Pipeline {:x} {}", hash, passName);
+     const uint64_t t0 = gfx::now_ns(); // 0226
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index 6a66fb5..e5187dc 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -3150,6 +3150,21 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}{11}
+   return shaderSource;
+ }
+ 
++static uint32_t normal_attachment(const gfx::RenderTargetLayout& layout) noexcept {
++  uint32_t normalAttachment = UINT32_MAX;
++  for (uint32_t i = 0; i < layout.colorAttachmentCount; ++i) {
++    if (layout.colorAttachments[i].semantic == gfx::ColorAttachmentSemantic::Normal) {
++      normalAttachment = i;
++    }
++  }
++  return normalAttachment;
++}
++
++HashType shader_module_key(const ShaderConfig& config, const gfx::RenderTargetLayout& layout,
++                           DstAlphaMode dstAlphaMode) noexcept {
++  return xxh3_hash(dstAlphaMode, xxh3_hash(normal_attachment(layout), xxh3_hash(config)));
++}
++
+ wgpu::ShaderModule build_shader(const ShaderConfig& config, const gfx::RenderTargetLayout& layout,
+                                 DstAlphaMode dstAlphaMode) noexcept {
+   ZoneScoped;
+diff --git a/lib/webgpu/gpu_cache.cpp b/lib/webgpu/gpu_cache.cpp
+index 01524a5..db5e247 100644
+--- a/lib/webgpu/gpu_cache.cpp
++++ b/lib/webgpu/gpu_cache.cpp
+@@ -32,6 +32,7 @@ static sqlite3_stmt* load_stmt;
+ static sqlite3_stmt* store_stmt;
+ static bool cache_broken;
+ static std::mutex cache_mutex;
++static uint64_t db_generation = 1; // 0227: under cache_mutex
+ static std::vector<XXH128_hash_t> cache_keys_used;
+ #if defined(AURORA_CACHE_USE_ZSTD)
+ static std::vector<uint8_t> compress_buffer;
+@@ -85,14 +86,11 @@ static std::filesystem::path cache_path() {
+ void (*g_cacheOpenHook)() = nullptr;
+ bool g_cacheVerifyOnOpen = true;
+ 
+-// Value of the last entry verified by a size query (Dawn asks for the size, then the data).
+-static XXH128_hash_t verified_key{};
+-static std::vector<uint8_t> verified_value;
+-static bool verified_valid = false;
+ // Set when SQLite reports a damaged file; acted on once no transaction is open.
+ static bool reset_pending = false;
+ 
+ static void close_db() {
++  ++db_generation; // 0227: per-thread readers reopen
+   if (load_stmt != nullptr) {
+     sqlite3_finalize(load_stmt);
+     load_stmt = nullptr;
+@@ -134,7 +132,6 @@ static void reset_corrupt_db() {
+   close_db();
+   delete_db_files();
+   cache_keys_used.clear();
+-  verified_valid = false;
+ }
+ 
+ static int check(int ret) {
+@@ -422,29 +419,27 @@ static bool cache_init() {
+   return true;
+ }
+ 
+-// Reads, decompresses and verifies one entry. Returns false for a miss or a damaged entry (which
+-// is deleted, so Dawn sees a miss and rebuilds it).
+-static bool read_verified_entry(const XXH128_hash_t& keyHash, std::vector<uint8_t>& out) {
+-  check(sqlite3_bind_blob(load_stmt, 1, &keyHash, sizeof(keyHash), SQLITE_TRANSIENT));
+-  const auto ret = sqlite3_step(load_stmt);
++// Reads, decompresses and verifies one entry with the given connection and lookup statement.
++enum class ReadResult { Miss, Hit, Damaged, Corrupt };
++static ReadResult read_verified_entry(sqlite3* conn, sqlite3_stmt* stmt, const XXH128_hash_t& keyHash,
++                                      std::vector<uint8_t>& out) {
++  sqlite3_bind_blob(stmt, 1, &keyHash, sizeof(keyHash), SQLITE_TRANSIENT);
++  const auto ret = sqlite3_step(stmt);
+   if (ret == SQLITE_DONE) {
+-    sqlite3_reset(load_stmt);
+-    return false;
++    sqlite3_reset(stmt);
++    return ReadResult::Miss;
+   }
+   if (ret != SQLITE_ROW) {
+-    Log.error("Looking up cache key failed: {}", sqlite3_errmsg(db));
+-    sqlite3_reset(load_stmt);
+-    if (is_corruption(ret)) {
+-      reset_pending = true;
+-    }
+-    return false;
++    Log.error("Looking up cache key failed: {}", sqlite3_errmsg(conn));
++    sqlite3_reset(stmt);
++    return is_corruption(ret) ? ReadResult::Corrupt : ReadResult::Miss;
+   }
+ 
+-  const auto* foundPtr = static_cast<const uint8_t*>(sqlite3_column_blob(load_stmt, 0));
+-  const auto storedSize = sqlite3_column_bytes(load_stmt, 0);
+-  const auto size = sqlite3_column_int64(load_stmt, 1);
+-  const bool compressed = sqlite3_column_int(load_stmt, 2) != 0;
+-  const auto checksum = static_cast<uint64_t>(sqlite3_column_int64(load_stmt, 3));
++  const auto* foundPtr = static_cast<const uint8_t*>(sqlite3_column_blob(stmt, 0));
++  const auto storedSize = sqlite3_column_bytes(stmt, 0);
++  const auto size = sqlite3_column_int64(stmt, 1);
++  const bool compressed = sqlite3_column_int(stmt, 2) != 0;
++  const auto checksum = static_cast<uint64_t>(sqlite3_column_int64(stmt, 3));
+   const char* problem = nullptr;
+   if (size <= 0 || size > (int64_t{1} << 30) || (storedSize > 0 && foundPtr == nullptr)) {
+     problem = "bad size";
+@@ -466,77 +461,147 @@ static bool read_verified_entry(const XXH128_hash_t& keyHash, std::vector<uint8_
+   if (problem == nullptr && XXH3_64bits(out.data(), out.size()) != checksum) {
+     problem = "checksum mismatch";
+   }
+-  sqlite3_reset(load_stmt);
+-
++  sqlite3_reset(stmt);
+   if (problem != nullptr) {
+     Log.warn("Dawn cache entry damaged ({}); deleting it", problem);
+-    sqlite3_stmt* del = nullptr;
+-    if (sqlite3_prepare_v3(db, "DELETE FROM cache WHERE key = ?", -1, 0, &del, nullptr) == SQLITE_OK) {
+-      sqlite3_bind_blob(del, 1, &keyHash, sizeof(keyHash), SQLITE_TRANSIENT);
+-      sqlite3_step(del);
+-    }
+-    sqlite3_finalize(del);
+     out.clear();
++    return ReadResult::Damaged;
++  }
++  return ReadResult::Hit;
++}
++
++// Deletes a damaged entry (main connection, cache_mutex held), so Dawn sees a miss and rebuilds it.
++static void delete_entry(const XXH128_hash_t& keyHash) {
++  if (db == nullptr) {
++    return;
++  }
++  sqlite3_stmt* del = nullptr;
++  if (sqlite3_prepare_v3(db, "DELETE FROM cache WHERE key = ?", -1, 0, &del, nullptr) == SQLITE_OK) {
++    sqlite3_bind_blob(del, 1, &keyHash, sizeof(keyHash), SQLITE_TRANSIENT);
++    sqlite3_step(del);
++  }
++  sqlite3_finalize(del);
++}
++
++// 0227: lookups run on a read connection of their own thread (WAL readers do not block each
++// other): with one connection behind cache_mutex, the pipeline threads spent most of their lookup
++// time waiting for each other. Writes, deletions and resets stay on the main connection under the
++// mutex; a reader whose generation is out of date (main database closed or reset) reopens.
++namespace {
++struct Reader {
++  sqlite3* conn = nullptr;
++  sqlite3_stmt* stmt = nullptr;
++  uint64_t generation = 0;
++  bool failed = false; // could not be opened for this generation: use the main connection
++  void close() {
++    if (stmt != nullptr) {
++      sqlite3_finalize(stmt);
++      stmt = nullptr;
++    }
++    if (conn != nullptr) {
++      sqlite3_close(conn);
++      conn = nullptr;
++    }
++  }
++  ~Reader() { close(); }
++};
++thread_local Reader t_reader;
++// Dawn first asks for the size (value == nullptr), then reads: the entry verified on the size
++// query is kept per thread for the read.
++thread_local XXH128_hash_t t_verified_key{};
++thread_local std::vector<uint8_t> t_verified_value;
++thread_local bool t_verified_valid = false;
++} // namespace
++
++static bool open_reader(uint64_t generation) {
++  t_reader.close();
++  t_reader.generation = generation;
++  t_reader.failed = true;
++  const std::string file = io::fs_path_to_string(cache_path());
++  if (sqlite3_open_v2(file.c_str(), &t_reader.conn, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, nullptr) !=
++      SQLITE_OK) {
++    t_reader.close();
++    return false;
++  }
++  sqlite3_busy_timeout(t_reader.conn, 2000);
++  if (sqlite3_prepare_v3(t_reader.conn, "SELECT value, size, compressed, checksum FROM cache WHERE key = ?", -1,
++                         SQLITE_PREPARE_PERSISTENT, &t_reader.stmt, nullptr) != SQLITE_OK) {
++    t_reader.close();
+     return false;
+   }
++  t_reader.failed = false;
+   return true;
+ }
+ 
+-size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valueSize, void*) {
+-  const StatTimer timer{stat_load_ns};
+-  std::lock_guard lock(cache_mutex);
+-
+-  if (!cache_init()) {
+-    return 0;
++static void note_hit(const XXH128_hash_t& keyHash) {
++  {
++    std::lock_guard lock(cache_mutex);
++    cache_keys_used.push_back(keyHash);
+   }
++  stat_hits.fetch_add(1, std::memory_order_relaxed);
++}
+ 
+-  // Dawn first asks for the size (value == nullptr), then reads. The entry is verified on the
+-  // size query so a damaged one is reported as a miss up front; the read is served from it.
++size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valueSize, void*) {
++  const StatTimer timer{stat_load_ns};
+   const auto keyHash = XXH128(key, keySize, 0);
+-  if (value != nullptr && verified_valid && XXH128_isEqual(verified_key, keyHash)) {
+-    verified_valid = false;
+-    if (valueSize != verified_value.size()) {
++  if (value != nullptr && t_verified_valid && XXH128_isEqual(t_verified_key, keyHash)) {
++    t_verified_valid = false;
++    if (valueSize != t_verified_value.size()) {
+       return 0;
+     }
+-    std::memcpy(value, verified_value.data(), valueSize);
+-    cache_keys_used.push_back(keyHash);
+-    stat_hits.fetch_add(1, std::memory_order_relaxed);
++    std::memcpy(value, t_verified_value.data(), valueSize);
++    note_hit(keyHash);
+     return valueSize;
+   }
+ 
+-  std::vector<uint8_t> entry;
+-  bool found = false;
++  uint64_t generation;
+   {
+-    sqlite::Transaction tx(db, Log);
+-    if (!tx) {
+-      Log.error("Failed to open load transaction");
++    std::lock_guard lock(cache_mutex);
++    if (!cache_init()) {
+       return 0;
+     }
+-    found = read_verified_entry(keyHash, entry);
+-    if (!reset_pending) {
+-      tx.commit(); // keeps the deletion of a damaged entry
++    generation = db_generation;
++  }
++  if (t_reader.generation != generation) {
++    open_reader(generation);
++  }
++
++  std::vector<uint8_t> entry;
++  ReadResult result;
++  if (!t_reader.failed) {
++    result = read_verified_entry(t_reader.conn, t_reader.stmt, keyHash, entry);
++  } else {
++    std::lock_guard lock(cache_mutex);
++    if (!cache_init()) {
++      return 0;
+     }
++    result = read_verified_entry(db, load_stmt, keyHash, entry);
+   }
+-  if (reset_pending) {
+-    reset_pending = false;
+-    reset_corrupt_db();
++  if (result == ReadResult::Damaged || result == ReadResult::Corrupt) {
++    std::lock_guard lock(cache_mutex);
++    if (result == ReadResult::Damaged) {
++      delete_entry(keyHash);
++    } else {
++      t_reader.close();
++      t_reader.generation = 0;
++      reset_corrupt_db();
++    }
+   }
+-  if (!found) {
++  if (result != ReadResult::Hit) {
+     stat_misses.fetch_add(1, std::memory_order_relaxed);
+     return 0;
+   }
+   if (value == nullptr) {
+-    verified_key = keyHash;
+-    verified_value = std::move(entry);
+-    verified_valid = true;
+-    return verified_value.size();
++    t_verified_key = keyHash;
++    t_verified_value = std::move(entry);
++    t_verified_valid = true;
++    return t_verified_value.size();
+   }
+   if (valueSize != entry.size()) {
+     return entry.size();
+   }
+   std::memcpy(value, entry.data(), valueSize);
+-  cache_keys_used.push_back(keyHash);
+-  stat_hits.fetch_add(1, std::memory_order_relaxed);
++  note_hit(keyHash);
+   return valueSize;
+ }
+ 
+@@ -709,13 +774,13 @@ void cache_shutdown() {
+   {
+     std::lock_guard lock(cache_mutex);
+     mark_late_used_keys();
++    ++db_generation; // 0227: readers of other threads reopen (or stay closed)
++    t_reader.close();
+   }
+ #if defined(AURORA_CACHE_USE_ZSTD)
+   compress_buffer.clear();
+ #endif
+   cache_keys_used.clear();
+-  verified_value.clear();
+-  verified_valid = false;
+   if (load_stmt != nullptr) {
+     check(sqlite3_finalize(load_stmt));
+     load_stmt = nullptr;

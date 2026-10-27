@@ -1,0 +1,1655 @@
+diff --git a/include/aurora/pipeline_cache.h b/include/aurora/pipeline_cache.h
+index 3da63c4..d6c1dd2 100644
+--- a/include/aurora/pipeline_cache.h
++++ b/include/aurora/pipeline_cache.h
+@@ -34,11 +34,13 @@ typedef struct AuroraPipelineStats {
+ /** Adds the pipeline configs in a precache list file (format below) to the known set; they
+  *  are compiled in the background with the rest. Call after aurora_initialize and before the
+  *  first frame. Returns the number of configs accepted (rows for another config version or
+- *  struct size are ignored).
++ *  struct size are ignored; damaged or invalid rows are skipped with a log line). Ignored after
++ *  repeated startup crashes (crash journal, lib/gfx/pipeline_cache.cpp).
+  *
+- *  File: "AUPC" magic, u32 format (1), u32 flags (bit 0: payload zstd-compressed), u32 row
+- *  count, u64 raw payload size, then the payload: rows of
+- *  { u8 type (0 clear, 1 GX), u32 configVersion, u32 configSize, u32 firstFrameUsed, bytes }.
++ *  File: "AUPC" magic, u32 format (2), u32 flags (bit 0: payload zstd-compressed), u32 row
++ *  count, u64 raw payload size, u32 CRC-32 of the raw payload, u32 reserved, then the payload:
++ *  rows of { u8 type (0 clear, 1 GX), u32 configVersion, u32 configSize, u32 firstFrameUsed,
++ *  u32 CRC-32 of the config, bytes }. Format 1 (no CRCs) is still read.
+  *  All little-endian. tools/pipelines/pipelines.py writes it from pipeline_cache.db files. */
+ uint32_t aurora_pipeline_cache_seed(const char* path);
+ /** Writes every known pipeline config in the format above (uncompressed). */
+diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
+index 54fa60c..eb1a4cf 100644
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -39,8 +39,24 @@
+ 
+ #include <chrono>
+ #include <cstdio>
++#include <cstring>
++#include <system_error>
+ #include <vector>
+ 
++#ifdef _WIN32
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <windows.h>
++#else
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <unistd.h>
++#endif
++
+ namespace aurora::gfx {
+ static Module Log("aurora::gfx::pipeline_cache");
+ 
+@@ -65,7 +81,10 @@ static uint64_t now_ns() {
+           .count());
+ }
+ 
+-constexpr int PipelineCacheSchema = 1;
++// 2: every row is validated on load (stored hash = xxh3 of the config bytes seeded by type,
++// i.e. a per-entry checksum, plus field ranges) and pipeline_bad records configs whose creation
++// failed or crashed (patch 0017). Older caches are dropped.
++constexpr int PipelineCacheSchema = 2;
+ constexpr const char* InitialPipelineCacheName = "initial_pipeline_cache.db";
+ constexpr const char* SdlVfsName = "aurora_pipeline_cache_sdl_vfs";
+ 
+@@ -77,14 +96,51 @@ struct PendingPipeline {
+   bool precache = false; // queued by background precaching (rebuild_pipeline_cache)
+ };
+ 
++enum class CacheWriteOp : uint8_t {
++  Upsert,   // remember a config (pipeline_cache row)
++  MarkBad,  // record a failed/crashed config (pipeline_bad row; Invalid also drops its pipeline_cache row)
++  ClearBad, // a quarantined config was created fine after all
++};
++
+ struct PipelineCacheWrite {
+   ShaderType type;
+   PipelineRef hash;
+   uint32_t configVersion;
+   ByteBuffer config;
+   uint32_t firstFrameUsed = UINT32_MAX;
++  CacheWriteOp op = CacheWriteOp::Upsert;
++  uint32_t badReason = 0;
++  uint32_t badCrashes = 0;
+ };
+ 
++// ---- Robustness (patch 0017): bad configs, crash journal ------------------------------------
++// A cached config that fails validation is skipped and deleted; one whose pipeline creation
++// fails (WGSL compile / Dawn validation error) is recorded as Invalid and never built again; one
++// that was being created when the process died (crash journal below) is a CrashSuspect: it is not
++// precached any more, may still be built on demand (which lifts the quarantine when it works) and
++// is refused after a second crash. Keyed by the config's cache key (xxh3 of the config, seeded by
++// its shader type), the same value as pipeline_cache.hash.
++enum class BadReason : uint32_t {
++  Invalid = 1,
++  CrashSuspect = 2,
++};
++struct BadPipeline {
++  ShaderType type;
++  BadReason reason;
++  uint32_t crashes;
++};
++static std::mutex g_badMutex;
++static absl::flat_hash_map<HashType, BadPipeline> g_badPipelines;
++// Crash suspects found by the journal at startup, recorded once the database is open.
++static std::vector<std::pair<ShaderType, HashType>> g_journalSuspects;
++static bool g_safeMode = false; // repeated startup crashes: ignore the shipped precache list
++static void mark_pipeline_bad(ShaderType type, HashType cacheKey, BadReason reason, const char* why);
++static void journal_begin(ShaderType type, HashType cacheKey);
++static void journal_end();
++static void journal_update_phase();
++static void journal_close();
++void check_crash_journal();
++
+ using SavedPipelineConfig = std::variant<gx::PipelineConfig, clear::PipelineConfig
+ #ifdef AURORA_ENABLE_RMLUI
+                                          ,
+@@ -571,25 +627,376 @@ static PipelineRef find_pipeline_impl(PipelineRef runtimeKey, NewPipelineCallbac
+   return runtimeKey;
+ }
+ 
++// ---- Config validation (patch 0017) --------------------------------------------------------
++// Configs read back from pipeline_cache.db or a precache list are checked before they reach the
++// shader generator, whose switches abort (FATAL) on values it does not know and which indexes
++// fixed-size arrays with stage/texcoord/texmap ids. A corrupt or stale entry is skipped instead.
++// The checks mirror lib/gx/shader.cpp, shader_info.cpp and gx.cpp (build_pipeline); anything
++// they miss is still caught by the crash journal.
++namespace {
++template <typename T>
++bool raw_bool_ok(const T& value) {
++  static_assert(sizeof(T) == 1);
++  uint8_t raw;
++  std::memcpy(&raw, &value, 1);
++  return raw <= 1;
++}
++
++bool tev_op_ok(const gx::TevOp& op) {
++  const auto o = static_cast<uint32_t>(op.op);
++  if (!(o == GX_TEV_ADD || o == GX_TEV_SUB || (o >= GX_TEV_COMP_R8_GT && o <= GX_TEV_COMP_RGB8_EQ))) {
++    return false;
++  }
++  return static_cast<uint32_t>(op.bias) < GX_MAX_TEVBIAS && static_cast<uint32_t>(op.scale) < GX_MAX_TEVSCALE &&
++         static_cast<uint32_t>(op.outReg) < GX_MAX_TEVREG && raw_bool_ok(op.clamp) && op._p1 == 0 && op._p2 == 0 &&
++         op._p3 == 0;
++}
++
++bool tex_mtx_ok(uint32_t m) { return m >= GX_TEXMTX0 && m <= GX_IDENTITY && (m - GX_TEXMTX0) % 3 == 0; }
++bool pt_tex_mtx_ok(uint32_t m) {
++  return m == GX_PTIDENTITY || (m >= GX_PTTEXMTX0 && m <= GX_PTTEXMTX19 && (m - GX_PTTEXMTX0) % 3 == 0);
++}
++
++bool uses_tex_arg(const gx::TevStage& stage) {
++  const auto& c = stage.colorPass;
++  const auto& a = stage.alphaPass;
++  const auto tc = [](GXTevColorArg arg) { return arg == GX_CC_TEXC || arg == GX_CC_TEXA; };
++  return tc(c.a) || tc(c.b) || tc(c.c) || tc(c.d) || a.a == GX_CA_TEXA || a.b == GX_CA_TEXA || a.c == GX_CA_TEXA ||
++         a.d == GX_CA_TEXA;
++}
++
++// Returns nullptr when the config is safe to hand to the shader generator, else the reason.
++const char* validate_config(const gx::PipelineConfig& c) {
++  using namespace aurora::gx;
++  if (c.version != GXPipelineConfigVersion) {
++    return "config version";
++  }
++  if (static_cast<uint32_t>(c.depthFunc) > GX_ALWAYS || static_cast<uint32_t>(c.cullMode) > GX_CULL_ALL ||
++      static_cast<uint32_t>(c.blendMode) >= GX_MAX_BLENDMODE ||
++      static_cast<uint32_t>(c.blendFacSrc) > GX_BL_INVDSTALPHA ||
++      static_cast<uint32_t>(c.blendFacDst) > GX_BL_INVDSTALPHA || static_cast<uint32_t>(c.blendOp) > GX_LO_SET) {
++    return "depth/cull/blend state";
++  }
++  if (!raw_bool_ok(c.depthCompare) || !raw_bool_ok(c.depthUpdate) || !raw_bool_ok(c.alphaUpdate) ||
++      !raw_bool_ok(c.colorUpdate)) {
++    return "update flags";
++  }
++  const auto& s = c.shaderConfig;
++  switch (s.fogType) {
++  case GX_FOG_NONE:
++  case GX_FOG_PERSP_LIN:
++  case GX_FOG_PERSP_EXP:
++  case GX_FOG_PERSP_EXP2:
++  case GX_FOG_PERSP_REVEXP:
++  case GX_FOG_PERSP_REVEXP2:
++  case GX_FOG_ORTHO_LIN:
++  case GX_FOG_ORTHO_EXP:
++  case GX_FOG_ORTHO_EXP2:
++  case GX_FOG_ORTHO_REVEXP:
++  case GX_FOG_ORTHO_REVEXP2:
++    break;
++  default:
++    return "fog type";
++  }
++  if (s.zTexOp > GX_ZT_REPLACE || s.zTexFmt > 2 || s.efbFmt > 2) {
++    return "z texture / EFB format";
++  }
++  if (s.tevStageCount < 1 || s.tevStageCount > MaxTevStages) {
++    return "TEV stage count";
++  }
++  if (s.numIndStages > MaxIndStages) {
++    return "indirect stage count";
++  }
++  for (const auto& swap : s.tevSwapTable) {
++    if (swap.red > GX_CH_ALPHA || swap.green > GX_CH_ALPHA || swap.blue > GX_CH_ALPHA || swap.alpha > GX_CH_ALPHA) {
++      return "TEV swap table";
++    }
++  }
++  for (uint32_t attr = 0; attr < s.attrs.size(); ++attr) {
++    const auto& a = s.attrs[attr];
++    if (a.attrType > GX_INDEX16 || !raw_bool_ok(a.le) || !raw_bool_ok(a.nbt3)) {
++      return "vertex attribute";
++    }
++    const bool fetched = attr == GX_VA_POS || attr == GX_VA_NRM || attr == GX_VA_CLR0 || attr == GX_VA_CLR1 ||
++                         (attr >= GX_VA_TEX0 && attr <= GX_VA_TEX7);
++    if (a.attrType != GX_NONE && fetched && a.compType > GX_RGBA8) {
++      return "vertex component type";
++    }
++  }
++  if (s.attrs[GX_VA_POS].attrType == GX_NONE) {
++    return "no position attribute";
++  }
++  const auto& nrm = s.attrs[GX_VA_NRM];
++  const bool hasNbt = nrm.attrType != GX_NONE && nrm.cnt == 9 && nrm.compType <= GX_F32;
++  for (const auto& cc : s.colorChannels) {
++    if (cc.matSrc > GX_SRC_VTX || cc.ambSrc > GX_SRC_VTX || cc.diffFn > GX_DF_CLAMP || cc.attnFn > GX_AF_NONE ||
++        !raw_bool_ok(cc.lightingEnabled) || cc._p1 != 0 || cc._p2 != 0 || cc._p3 != 0) {
++      return "color channel";
++    }
++  }
++  uint32_t sampledCoords = 0;
++  for (uint32_t i = 0; i < s.tevStageCount; ++i) {
++    const auto& st = s.tevStages[i];
++    const auto& cp = st.colorPass;
++    const auto& ap = st.alphaPass;
++    if (cp.a > GX_CC_ZERO || cp.b > GX_CC_ZERO || cp.c > GX_CC_ZERO || cp.d > GX_CC_ZERO || ap.a > GX_CA_ZERO ||
++        ap.b > GX_CA_ZERO || ap.c > GX_CA_ZERO || ap.d > GX_CA_ZERO) {
++      return "TEV argument";
++    }
++    if (!tev_op_ok(st.colorOp) || !tev_op_ok(st.alphaOp)) {
++      return "TEV operation";
++    }
++    const auto kc = static_cast<uint32_t>(st.kcSel);
++    const auto ka = static_cast<uint32_t>(st.kaSel);
++    if (!(kc <= GX_TEV_KCSEL_1_8 || (kc >= GX_TEV_KCSEL_K0 && kc <= GX_TEV_KCSEL_K3_A)) ||
++        !(ka <= GX_TEV_KASEL_1_8 || (ka >= GX_TEV_KASEL_K0_R && ka <= GX_TEV_KASEL_K3_A))) {
++      return "TEV konst selection";
++    }
++    if ((st.texCoordId != GX_TEXCOORD_NULL && st.texCoordId >= MaxTexCoord) ||
++        (st.texMapId != GX_TEXMAP_NULL && st.texMapId >= MaxTextures) ||
++        (st.channelId != GX_COLOR_NULL && st.channelId > GX_ALPHA_BUMPN)) {
++      return "TEV order";
++    }
++    if (st.tevSwapRas >= GX_MAX_TEVSWAP || st.tevSwapTex >= GX_MAX_TEVSWAP) {
++      return "TEV swap selection";
++    }
++    const auto mtx = static_cast<uint32_t>(st.indTexMtxId);
++    if (st.indTexStage >= MaxIndStages || st.indTexFormat >= GX_MAX_ITFORMAT || st.indTexBiasSel >= GX_MAX_ITBIAS ||
++        st.indTexAlphaSel > GX_ITBA_U || !(mtx <= GX_ITM_2 || (mtx >= GX_ITM_S0 && mtx <= GX_ITM_S2) ||
++                                            (mtx >= GX_ITM_T0 && mtx <= GX_ITM_T2)) ||
++        st.indTexWrapS >= GX_MAX_ITWRAP || st.indTexWrapT >= GX_MAX_ITWRAP || !raw_bool_ok(st.indTexUseOrigLOD) ||
++        !raw_bool_ok(st.indTexAddPrev) || st._p1 != 0 || st._p2 != 0) {
++      return "TEV indirect state";
++    }
++    // Texcoords the shader reads (as lib/gx/shader_info.cpp derives them).
++    if (st.texMapId != GX_TEXMAP_NULL && uses_tex_arg(st)) {
++      if (st.texCoordId == GX_TEXCOORD_NULL) {
++        return "texture without texcoord";
++      }
++      sampledCoords |= 1u << st.texCoordId;
++    }
++    if (st.indTexStage < s.numIndStages) {
++      const bool usesTevTexCoord = st.indTexMtxId != GX_ITM_OFF || st.indTexWrapS != GX_ITW_OFF ||
++                                   st.indTexWrapT != GX_ITW_OFF || st.indTexAddPrev;
++      if (usesTevTexCoord && st.texCoordId != GX_TEXCOORD_NULL) {
++        sampledCoords |= 1u << st.texCoordId;
++      }
++      if (st.indTexMtxId != GX_ITM_OFF || st.channelId == GX_ALPHA_BUMP || st.channelId == GX_ALPHA_BUMPN) {
++        const auto& ind = s.indStages[st.indTexStage];
++        if (ind.texCoordId >= MaxTexCoord || ind.texMapId >= MaxTextures || ind.scaleS >= GX_MAX_ITSCALE ||
++            ind.scaleT >= GX_MAX_ITSCALE) {
++          return "indirect stage";
++        }
++        sampledCoords |= 1u << ind.texCoordId;
++      }
++    }
++  }
++  if (s.zTexOp != 0) {
++    const auto& last = s.tevStages[s.tevStageCount - 1];
++    if (last.texCoordId == GX_TEXCOORD_NULL || last.texMapId == GX_TEXMAP_NULL) {
++      return "z texture without texture";
++    }
++    sampledCoords |= 1u << last.texCoordId;
++  }
++  // Texgens of texcoords the shader can read (emboss adds its source coordinate).
++  for (uint32_t pass = 0; pass < 2; ++pass) {
++    for (uint32_t i = 0; i < MaxTexCoord; ++i) {
++      if ((sampledCoords & (1u << i)) == 0) {
++        continue;
++      }
++      const auto& tcg = s.tcgs[i];
++      if (tcg.type > GX_TG_SRTG || tcg.src > GX_MAX_TEXGENSRC || !tex_mtx_ok(tcg.mtx) ||
++          !pt_tex_mtx_ok(tcg.postMtx) || !raw_bool_ok(tcg.normalize) || tcg._p2 != 0 || tcg._p3 != 0) {
++        return "texgen";
++      }
++      if (tcg.type >= GX_TG_BUMP0 && tcg.type <= GX_TG_BUMP7) {
++        if (tcg.embossSrc >= MaxTexCoord || !hasNbt) {
++          return "emboss texgen";
++        }
++        sampledCoords |= 1u << tcg.embossSrc;
++      } else if (tcg.type != GX_TG_SRTG) {
++        if (tcg.src >= GX_TG_TEXCOORD0 && tcg.src <= GX_TG_TEXCOORD6) {
++          return "texgen source";
++        }
++        if (tcg.src >= GX_TG_TEX0 && tcg.src <= GX_TG_TEX7 &&
++            s.attrs[GX_VA_TEX0 + (tcg.src - GX_TG_TEX0)].attrType == GX_NONE) {
++          return "texgen source attribute";
++        }
++        if ((tcg.src == GX_TG_BINRM || tcg.src == GX_TG_TANGENT) && !hasNbt) {
++          return "texgen source attribute";
++        }
++      }
++    }
++  }
++  const auto& ac = s.alphaCompare;
++  if (static_cast<uint32_t>(ac.comp0) > GX_ALWAYS || static_cast<uint32_t>(ac.comp1) > GX_ALWAYS ||
++      static_cast<uint32_t>(ac.op) >= GX_MAX_ALPHAOP || ac.ref0 > 255 || ac.ref1 > 255) {
++    return "alpha compare";
++  }
++  return nullptr;
++}
++
++const char* validate_config(const clear::PipelineConfig& c) {
++  if (c.version != clear::ClearPipelineConfigVersion) {
++    return "config version";
++  }
++  if (!raw_bool_ok(c.clearColor) || !raw_bool_ok(c.clearAlpha) || !raw_bool_ok(c.clearDepth) || c._pad != 0) {
++    return "clear flags";
++  }
++  return nullptr;
++}
++
++#ifdef AURORA_ENABLE_RMLUI
++const char* validate_config(const rmlui::PipelineConfig& c) {
++  return c.version == rmlui::RmlPipelineConfigVersion ? nullptr : "config version";
++}
++#endif
++} // namespace
++
++// Validates a config read back from disk: the stored key must be the xxh3 of the bytes (the
++// per-entry checksum), then the field ranges.
++template <typename Config>
++static const char* validate_cached_config(ShaderType type, const Config& config, HashType storedKey) {
++  if (xxh3_hash(config, static_cast<HashType>(type)) != storedKey) {
++    return "checksum mismatch";
++  }
++  return validate_config(config);
++}
++
++static bool is_quarantined(HashType cacheKey) {
++  std::lock_guard lock{g_badMutex};
++  return g_badPipelines.contains(cacheKey);
++}
++
++#if defined(WEBGPU_DAWN)
++static wgpu::ErrorType pop_error_scope(std::string& message) {
++  wgpu::ErrorType result = wgpu::ErrorType::NoError;
++  const auto future = webgpu::g_device.PopErrorScope(
++      wgpu::CallbackMode::WaitAnyOnly,
++      [&](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type, wgpu::StringView msg) {
++        if (status == wgpu::PopErrorScopeStatus::Success && type != wgpu::ErrorType::NoError) {
++          result = type;
++          message.assign(msg.data, msg.length);
++        }
++      });
++  webgpu::g_instance.WaitAny(future, UINT64_MAX);
++  return result;
++}
++#endif
++
++void push_shader_error_scope() {
++#if defined(WEBGPU_DAWN)
++  webgpu::g_device.PushErrorScope(wgpu::ErrorFilter::Validation);
++#endif
++}
++
++bool pop_shader_error_scope(const char* what) {
++#if defined(WEBGPU_DAWN)
++  std::string message;
++  if (pop_error_scope(message) != wgpu::ErrorType::NoError) {
++    Log.error("{} failed to compile: {}", what, message);
++    return false;
++  }
++#endif
++  return true;
++}
++
++// Every pipeline is created through here: refuses configs recorded as bad, marks the config in
++// the crash journal while it is being built, and turns a Dawn error (WGSL compile error, device
++// validation error) into a failed pipeline (draws using it are skipped) instead of a fatal
++// uncaptured error. Error scopes are per thread in Dawn, so worker threads do not see each
++// other's errors.
++static CompiledPipeline guarded_create(ShaderType type, HashType cacheKey, const NewPipelineCallback& create) {
++  bool wasSuspect = false;
++  {
++    std::lock_guard lock{g_badMutex};
++    if (const auto it = g_badPipelines.find(cacheKey); it != g_badPipelines.end()) {
++      if (it->second.reason == BadReason::Invalid || it->second.crashes >= 2) {
++        return {};
++      }
++      wasSuspect = true;
++    }
++  }
++  journal_begin(type, cacheKey);
++#if defined(WEBGPU_DAWN)
++  webgpu::g_device.PushErrorScope(wgpu::ErrorFilter::OutOfMemory);
++  webgpu::g_device.PushErrorScope(wgpu::ErrorFilter::Internal);
++  webgpu::g_device.PushErrorScope(wgpu::ErrorFilter::Validation);
++#endif
++  auto result = create();
++#if defined(WEBGPU_DAWN)
++  std::string validationMsg, internalMsg, oomMsg;
++  const auto validation = pop_error_scope(validationMsg);
++  const auto internal = pop_error_scope(internalMsg);
++  const auto oom = pop_error_scope(oomMsg);
++#endif
++  journal_end();
++#if defined(WEBGPU_DAWN)
++  if (validation != wgpu::ErrorType::NoError) {
++    Log.error("pipeline config {:016x} (type {}): creation failed, recorded as bad: {}", cacheKey, underlying(type),
++              validationMsg);
++    mark_pipeline_bad(type, cacheKey, BadReason::Invalid, "creation failed");
++    return {};
++  }
++  if (internal != wgpu::ErrorType::NoError || oom != wgpu::ErrorType::NoError) {
++    // Possibly transient (driver/memory): fail this attempt without recording the config.
++    Log.error("pipeline config {:016x} (type {}): creation failed: {}", cacheKey, underlying(type),
++              internal != wgpu::ErrorType::NoError ? internalMsg : oomMsg);
++    return {};
++  }
++#endif
++  if (!result.main) {
++    // The generated shader did not compile (pop_shader_error_scope logged why).
++    mark_pipeline_bad(type, cacheKey, BadReason::Invalid, "shader compilation failed");
++    return {};
++  }
++  if (wasSuspect) {
++    {
++      std::lock_guard lock{g_badMutex};
++      g_badPipelines.erase(cacheKey);
++    }
++    Log.info("pipeline config {:016x}: built fine after a crash, quarantine lifted", cacheKey);
++    PipelineCacheWrite write{.type = type, .hash = cacheKey, .configVersion = 0, .op = CacheWriteOp::ClearBad};
++    enqueue_pipeline_cache_write(std::move(write));
++  }
++  return result;
++}
++
+ static PipelineRef resolve_pipeline(ShaderType type, const gx::PipelineConfig& config, const RenderTargetLayout& layout,
+                                     PipelinePriority priority) {
+-  const auto runtimeKey = xxh3_hash(layout.key, xxh3_hash(config, static_cast<HashType>(type)));
+-  return find_pipeline_impl(runtimeKey, [config, layout] { return create_pipeline(config, layout); }, priority);
++  const auto cacheKey = xxh3_hash(config, static_cast<HashType>(type));
++  const auto runtimeKey = xxh3_hash(layout.key, cacheKey);
++  return find_pipeline_impl(
++      runtimeKey,
++      [type, cacheKey, config, layout] {
++        return guarded_create(type, cacheKey, [&] { return create_pipeline(config, layout); });
++      },
++      priority);
+ }
+ 
+ static PipelineRef resolve_pipeline(ShaderType type, const clear::PipelineConfig& config,
+                                     const RenderTargetLayout& layout, PipelinePriority priority) {
+-  const auto runtimeKey = xxh3_hash(layout.key, xxh3_hash(config, static_cast<HashType>(type)));
++  const auto cacheKey = xxh3_hash(config, static_cast<HashType>(type));
++  const auto runtimeKey = xxh3_hash(layout.key, cacheKey);
+   return find_pipeline_impl(
+-      runtimeKey, [config, layout] { return CompiledPipeline{.main = create_pipeline(config, layout)}; }, priority);
++      runtimeKey,
++      [type, cacheKey, config, layout] {
++        return guarded_create(type, cacheKey,
++                              [&] { return CompiledPipeline{.main = create_pipeline(config, layout)}; });
++      },
++      priority);
+ }
+ 
+ #ifdef AURORA_ENABLE_RMLUI
+ static PipelineRef resolve_pipeline(ShaderType type, const rmlui::PipelineConfig& config, const RenderTargetLayout&,
+                                     PipelinePriority priority) {
++  const auto cacheKey = xxh3_hash(config, static_cast<HashType>(type));
+   return find_pipeline_impl(
+-      xxh3_hash(config, static_cast<HashType>(type)),
+-      [config] { return CompiledPipeline{.main = rmlui::create_pipeline(config)}; }, priority);
++      cacheKey,
++      [type, cacheKey, config] {
++        return guarded_create(type, cacheKey, [&] { return CompiledPipeline{.main = rmlui::create_pipeline(config)}; });
++      },
++      priority);
+ }
+ #endif
+ 
+@@ -757,6 +1164,22 @@ static void seed_pipeline_cache() {
+   }
+ }
+ 
++static std::filesystem::path pipeline_cache_db_path() {
++  return io::fs_path_from_string(g_config.cachePath) / "pipeline_cache.db";
++}
++
++// Deletes an SQLite database with its WAL/SHM side files (corrupt or crash-suspect cache).
++static void delete_sqlite_files(const std::filesystem::path& path) {
++  for (const char* suffix : {"", "-wal", "-shm", "-journal"}) {
++    auto p = path;
++    p += suffix;
++    std::error_code ec;
++    std::filesystem::remove(p, ec);
++  }
++}
++
++static bool open_pipeline_cache_db_once();
++
+ static bool prepare_pipeline_cache_db() {
+   if (g_pipelineCacheBroken) {
+     return false;
+@@ -765,18 +1188,80 @@ static bool prepare_pipeline_cache_db() {
+     return true;
+   }
+ 
+-  const auto path = io::fs_path_to_string(io::fs_path_from_string(g_config.cachePath) / "pipeline_cache.db");
++  if (!open_pipeline_cache_db_once()) {
++    // Unreadable (not a database, corrupt pages, truncated): start over with an empty cache
++    // instead of running without one (or crashing on it).
++    Log.warn("Pipeline cache database '{}' is unusable; deleting and recreating it",
++             io::fs_path_to_string(pipeline_cache_db_path()));
++    pipeline_cache_abort();
++    delete_sqlite_files(pipeline_cache_db_path());
++    g_pipelineCacheBroken = false;
++    if (!open_pipeline_cache_db_once()) {
++      pipeline_cache_abort();
++      return false;
++    }
++  }
++
++  // Configs recorded as bad by earlier runs, then crash suspects found by the journal.
++  {
++    sqlite3_stmt* stmt = nullptr;
++    if (sqlite3_prepare_v3(g_pipelineCacheDb, "SELECT type, hash, reason, crashes FROM pipeline_bad", -1, 0, &stmt,
++                           nullptr) == SQLITE_OK) {
++      std::lock_guard lock{g_badMutex};
++      while (sqlite3_step(stmt) == SQLITE_ROW) {
++        const auto type = sqlite3_column_int(stmt, 0);
++        const auto reason = sqlite3_column_int(stmt, 2);
++        if (type < 0 || type > 255 || (reason != 1 && reason != 2)) {
++          continue;
++        }
++        g_badPipelines[static_cast<HashType>(sqlite3_column_int64(stmt, 1))] =
++            BadPipeline{static_cast<ShaderType>(type), static_cast<BadReason>(reason),
++                        static_cast<uint32_t>(std::max(0, sqlite3_column_int(stmt, 3)))};
++      }
++    }
++    sqlite3_finalize(stmt);
++  }
++  for (const auto& [type, key] : g_journalSuspects) {
++    mark_pipeline_bad(type, key, BadReason::CrashSuspect, "the previous run ended while it was being created");
++  }
++  g_journalSuspects.clear();
++
++  seed_pipeline_cache();
++  if (g_pipelineCacheBroken) {
++    return false;
++  }
++
++  return true;
++}
++
++static bool open_pipeline_cache_db_once() {
++  const auto path = io::fs_path_to_string(pipeline_cache_db_path());
+   auto ret = sqlite3_open(path.c_str(), &g_pipelineCacheDb);
+   if (ret != SQLITE_OK) {
+     Log.error("Failed to open pipeline cache database: {}", sqlite3_errmsg(g_pipelineCacheDb));
+-    pipeline_cache_abort();
+     return false;
+   }
+ 
+   ret = sqlite::exec(g_pipelineCacheDb, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+   if (ret != SQLITE_OK) {
+     Log.error("Failed to set pipeline cache pragmas: {}", sqlite3_errmsg(g_pipelineCacheDb));
+-    pipeline_cache_abort();
++    return false;
++  }
++
++  // The file is small (a few MB at most): check every page so a damaged file is replaced now
++  // rather than failing half way through loading.
++  bool integrityOk = false;
++  std::string integrityResult;
++  ret = sqlite::exec(g_pipelineCacheDb, "PRAGMA quick_check;", [&integrityOk, &integrityResult](int argc, char** argv, char**) {
++    if (argc > 0 && argv[0] != nullptr && std::strcmp(argv[0], "ok") == 0) {
++      integrityOk = true;
++    } else if (argc > 0 && argv[0] != nullptr && integrityResult.empty()) {
++      integrityResult = argv[0];
++    }
++  });
++  if (ret != SQLITE_OK || !integrityOk) {
++    Log.error("Pipeline cache integrity check failed: {}",
++              ret != SQLITE_OK ? sqlite3_errmsg(g_pipelineCacheDb) : integrityResult.c_str());
+     return false;
+   }
+ 
+@@ -808,6 +1293,7 @@ static bool prepare_pipeline_cache_db() {
+     if (!schemaFailed && !schemaMatch) {
+       const auto schemaSql = fmt::format(
+           R"(DROP TABLE IF EXISTS pipeline_cache;
++DROP TABLE IF EXISTS pipeline_bad;
+ CREATE TABLE pipeline_cache (
+   type INTEGER NOT NULL,
+   hash INTEGER NOT NULL,
+@@ -829,6 +1315,20 @@ INSERT INTO aurora_schema VALUES ({});)",
+       }
+     }
+ 
++    if (!schemaFailed) {
++      ret = sqlite::exec(g_pipelineCacheDb, R"(CREATE TABLE IF NOT EXISTS pipeline_bad (
++  type INTEGER NOT NULL,
++  hash INTEGER NOT NULL,
++  reason INTEGER NOT NULL,
++  crashes INTEGER NOT NULL,
++  PRIMARY KEY (type, hash)
++);)");
++      if (ret != SQLITE_OK) {
++        Log.error("Failed to create pipeline_bad table: {}", sqlite3_errmsg(g_pipelineCacheDb));
++        schemaFailed = true;
++      }
++    }
++
+     if (!schemaFailed) {
+       tx.commit();
+     }
+@@ -840,7 +1340,7 @@ INSERT INTO aurora_schema VALUES ({});)",
+   }
+ 
+   ret = sqlite3_prepare_v3(g_pipelineCacheDb,
+-                           "SELECT config, first_frame_used FROM pipeline_cache "
++                           "SELECT hash, config, first_frame_used FROM pipeline_cache "
+                            "WHERE type = ? AND config_version = ? "
+                            "ORDER BY first_frame_used ASC, rowid ASC",
+                            -1, SQLITE_PREPARE_PERSISTENT, &g_pipelineCacheLoadStmt, nullptr);
+@@ -866,11 +1366,6 @@ INSERT INTO aurora_schema VALUES ({});)",
+     return false;
+   }
+ 
+-  seed_pipeline_cache();
+-  if (g_pipelineCacheBroken) {
+-    return false;
+-  }
+-
+   return true;
+ }
+ 
+@@ -908,7 +1403,30 @@ static void prune_old_pipeline_cache_versions() {
+ #endif
+ }
+ 
++static bool write_bad_record(const PipelineCacheWrite& write) {
++  const auto hash = static_cast<int64_t>(write.hash);
++  std::string sql;
++  if (write.op == CacheWriteOp::ClearBad) {
++    sql = fmt::format("DELETE FROM pipeline_bad WHERE type = {} AND hash = {};", underlying(write.type), hash);
++  } else {
++    sql = fmt::format("INSERT INTO pipeline_bad (type, hash, reason, crashes) VALUES ({0}, {1}, {2}, {3}) "
++                      "ON CONFLICT(type, hash) DO UPDATE SET reason = excluded.reason, crashes = excluded.crashes;",
++                      underlying(write.type), hash, write.badReason, write.badCrashes);
++    if (write.badReason == underlying(BadReason::Invalid)) {
++      sql += fmt::format("DELETE FROM pipeline_cache WHERE type = {} AND hash = {};", underlying(write.type), hash);
++    }
++  }
++  if (sqlite::exec(g_pipelineCacheDb, sql.c_str()) != SQLITE_OK) {
++    Log.error("Failed to record bad pipeline: {}", sqlite3_errmsg(g_pipelineCacheDb));
++    return false;
++  }
++  return true;
++}
++
+ static bool write_pipeline_cache_record(const PipelineCacheWrite& write) {
++  if (write.op != CacheWriteOp::Upsert) {
++    return write_bad_record(write);
++  }
+   const auto fail = [&]() {
+     sqlite3_reset(g_pipelineCacheUpsertStmt);
+     sqlite3_clear_bindings(g_pipelineCacheUpsertStmt);
+@@ -1127,31 +1645,71 @@ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersio
+   }
+ 
+   size_t acceptedRows = 0;
++  std::vector<int64_t> invalidRows;
+   while ((ret = sqlite3_step(g_pipelineCacheLoadStmt)) == SQLITE_ROW) {
+-    const auto* configBlob = static_cast<const uint8_t*>(sqlite3_column_blob(g_pipelineCacheLoadStmt, 0));
+-    const auto configSize = sqlite3_column_bytes(g_pipelineCacheLoadStmt, 0);
+-    const auto firstFrameUsed = static_cast<uint32_t>(sqlite3_column_int64(g_pipelineCacheLoadStmt, 1));
+-    if (configSize != static_cast<int>(sizeof(PipelineConfig)) || (configSize != 0 && configBlob == nullptr)) {
+-      continue;
++    const auto storedKey = static_cast<HashType>(sqlite3_column_int64(g_pipelineCacheLoadStmt, 0));
++    const auto* configBlob = static_cast<const uint8_t*>(sqlite3_column_blob(g_pipelineCacheLoadStmt, 1));
++    const auto configSize = sqlite3_column_bytes(g_pipelineCacheLoadStmt, 1);
++    const auto firstFrameRaw = sqlite3_column_int64(g_pipelineCacheLoadStmt, 2);
++    const char* reason = nullptr;
++    PipelineConfig config{};
++    if (configSize != static_cast<int>(sizeof(PipelineConfig)) || configBlob == nullptr) {
++      reason = "size mismatch";
++    } else if (firstFrameRaw < 0 || firstFrameRaw > std::numeric_limits<uint32_t>::max()) {
++      reason = "first frame out of range";
++    } else {
++      std::memcpy(&config, configBlob, sizeof(config));
++      reason = validate_cached_config(type, config, storedKey);
+     }
+-
+-    PipelineConfig config;
+-    std::memcpy(&config, configBlob, sizeof(config));
+-    if (config.version != configVersion) {
++    if (reason == nullptr) {
++      std::lock_guard lock{g_badMutex};
++      if (const auto it = g_badPipelines.find(storedKey); it != g_badPipelines.end() &&
++                                                         it->second.reason == BadReason::Invalid) {
++        reason = "recorded as bad";
++      }
++    }
++    if (reason != nullptr) {
++      if (invalidRows.size() < 16) {
++        Log.warn("pipeline cache: skipping invalid entry {:016x} (type {}): {}", storedKey, underlying(type), reason);
++      }
++      invalidRows.push_back(static_cast<int64_t>(storedKey));
+       continue;
+     }
+ 
+-    remember_pipeline_config(type, config, firstFrameUsed, false);
++    remember_pipeline_config(type, config, static_cast<uint32_t>(firstFrameRaw), false);
+     ++acceptedRows;
+   }
+ 
+-  if (ret != SQLITE_DONE) {
++  const bool readFailed = ret != SQLITE_DONE;
++  if (readFailed) {
+     Log.error("Failed to read pipeline cache rows: {}", sqlite3_errmsg(g_pipelineCacheDb));
+-    pipeline_cache_abort();
+   }
+ 
+   sqlite3_reset(g_pipelineCacheLoadStmt);
+   sqlite3_clear_bindings(g_pipelineCacheLoadStmt);
++
++  if (!invalidRows.empty() && !readFailed) {
++    Log.warn("pipeline cache: deleted {} invalid entries of type {}", invalidRows.size(), underlying(type));
++    sqlite::Transaction tx(g_pipelineCacheDb, Log, true);
++    bool ok = static_cast<bool>(tx);
++    for (const auto hash : invalidRows) {
++      if (!ok) {
++        break;
++      }
++      const auto sql =
++          fmt::format("DELETE FROM pipeline_cache WHERE type = {} AND hash = {};", underlying(type), hash);
++      ok = sqlite::exec(g_pipelineCacheDb, sql.c_str()) == SQLITE_OK;
++    }
++    if (ok) {
++      tx.commit();
++    }
++  }
++  if (readFailed) {
++    // Damaged pages: drop the file so the next launch starts clean; this run keeps what it read.
++    Log.warn("pipeline cache: database damaged, it will be recreated");
++    pipeline_cache_abort();
++    delete_sqlite_files(pipeline_cache_db_path());
++  }
+   return acceptedRows;
+ }
+ 
+@@ -1257,6 +1815,11 @@ void rebuild_pipeline_cache() {
+     std::visit(
+         [&](const auto& config) {
+           const auto adjusted = adjust(config);
++          // Bad or crash-suspect configs are not precached (a suspect may still be built when a
++          // draw needs it, see guarded_create).
++          if (is_quarantined(xxh3_hash(adjusted, static_cast<HashType>(pipeline.type)))) {
++            return;
++          }
+           resolve_pipeline(pipeline.type, adjusted, scene, PipelinePriority::Background);
+           if (offscreen.key != scene.key) {
+             resolve_pipeline(pipeline.type, adjusted, offscreen, PipelinePriority::Background);
+@@ -1272,6 +1835,8 @@ void rebuild_pipeline_cache() {
+ }
+ 
+ void initialize_pipeline_cache() {
++  // Before either cache database is opened (normally already done by the Dawn cache's first use).
++  check_crash_journal();
+   g_pipelineCacheBroken = false;
+   g_pipelineCacheWriterStop = false;
+   g_pipelineThreadEnd = false;
+@@ -1337,12 +1902,18 @@ void shutdown_pipeline_cache() {
+ 
+   queuedPipelines = 0;
+   createdPipelines = 0;
++  {
++    std::lock_guard lock{g_badMutex};
++    g_badPipelines.clear();
++  }
++  journal_close(); // clean exit
+ }
+ 
+ void begin_pipeline_frame() {
+   if (!g_hasPipelineThread) {
+     g_pipelinesPerFrame = 0;
+   }
++  journal_update_phase();
+   if (g_pipelineLayoutKey != scene_render_target_layout().key ||
+       g_rebuildAccuracy != gx::g_accuracyFlags.load(std::memory_order_relaxed)) {
+     rebuild_pipeline_cache();
+@@ -1380,14 +1951,279 @@ bool get_pipeline(PipelineRef ref, CompiledPipeline& pipeline) {
+   return true;
+ }
+ 
++// ---- Bad configs and the crash journal (patch 0017) ------------------------------------------
++
++static void mark_pipeline_bad(ShaderType type, HashType cacheKey, BadReason reason, const char* why) {
++  uint32_t crashes = 0;
++  {
++    std::lock_guard lock{g_badMutex};
++    auto [it, inserted] = g_badPipelines.try_emplace(cacheKey, BadPipeline{type, reason, 0});
++    auto& entry = it->second;
++    if (reason == BadReason::CrashSuspect) {
++      if (!inserted && entry.reason == BadReason::Invalid) {
++        return; // already refused for good
++      }
++      entry.crashes += 1;
++    }
++    entry.type = type;
++    entry.reason = reason;
++    crashes = entry.crashes;
++  }
++  Log.warn("pipeline config {:016x} (type {}) recorded as {}: {}{}", cacheKey, underlying(type),
++           reason == BadReason::Invalid ? "bad" : "crash suspect", why,
++           reason == BadReason::CrashSuspect && crashes >= 2 ? " (repeatedly; it will not be built any more)" : "");
++  PipelineCacheWrite write{
++      .type = type,
++      .hash = cacheKey,
++      .configVersion = 0,
++      .op = CacheWriteOp::MarkBad,
++      .badReason = underlying(reason),
++      .badCrashes = crashes,
++  };
++  enqueue_pipeline_cache_write(std::move(write));
++}
++
++// The journal is a small memory-mapped file next to the caches. Each thread that creates a
++// pipeline writes the config's key into its slot before and clears it after; the session phase
++// says whether the process is starting up (precaching), running, or exited cleanly. Stores to a
++// shared file mapping survive a crash of the process (the OS writes the pages back), so the next
++// launch knows exactly which configs were being built when it died, and whether it died during
++// startup. That breaks crash-on-startup loops a bad cache entry would otherwise cause:
++//   - configs in an active slot become crash suspects (not precached any more; see above);
++//   - a startup crash with no config in flight (e.g. a damaged Dawn cache blob) deletes both
++//     caches; a second consecutive startup crash also ignores the shipped precache list.
++namespace {
++constexpr uint32_t JournalMagic = 0x4E4A5541; // "AUJN"
++constexpr uint32_t JournalVersion = 1;
++constexpr uint32_t JournalSlots = 64;
++constexpr size_t JournalSize = 4096;
++enum JournalPhase : uint32_t {
++  PhaseClean = 0,   // exited through shutdown_pipeline_cache
++  PhaseStartup = 1, // from launch until the startup precache finished
++  PhaseRunning = 2,
++};
++struct JournalSlot {
++  std::atomic<uint64_t> key;
++  std::atomic<uint32_t> type;
++  std::atomic<uint32_t> active;
++};
++struct JournalData {
++  uint32_t magic;
++  uint32_t version;
++  std::atomic<uint32_t> phase;
++  uint32_t startupCrashes; // consecutive launches that died during startup
++  JournalSlot slots[JournalSlots];
++};
++static_assert(sizeof(JournalData) <= JournalSize);
++static_assert(std::atomic<uint64_t>::is_always_lock_free && std::atomic<uint32_t>::is_always_lock_free);
++
++JournalData* g_journal = nullptr;
++#ifdef _WIN32
++HANDLE g_journalFile = INVALID_HANDLE_VALUE;
++HANDLE g_journalMapping = nullptr;
++#else
++int g_journalFd = -1;
++#endif
++std::atomic<uint32_t> g_journalNextSlot{0};
++thread_local int t_journalSlot = -1;
++uint32_t g_journalFrames = 0;
++std::once_flag g_journalOnce;
++
++void* journal_map(const std::filesystem::path& path) {
++#ifdef _WIN32
++  g_journalFile = CreateFileW(path.wstring().c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
++                              nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
++  if (g_journalFile == INVALID_HANDLE_VALUE) {
++    return nullptr;
++  }
++  g_journalMapping = CreateFileMappingW(g_journalFile, nullptr, PAGE_READWRITE, 0, JournalSize, nullptr);
++  if (g_journalMapping == nullptr) {
++    CloseHandle(g_journalFile);
++    g_journalFile = INVALID_HANDLE_VALUE;
++    return nullptr;
++  }
++  void* view = MapViewOfFile(g_journalMapping, FILE_MAP_ALL_ACCESS, 0, 0, JournalSize);
++  if (view == nullptr) {
++    CloseHandle(g_journalMapping);
++    CloseHandle(g_journalFile);
++    g_journalMapping = nullptr;
++    g_journalFile = INVALID_HANDLE_VALUE;
++  }
++  return view;
++#else
++  g_journalFd = open(path.c_str(), O_RDWR | O_CREAT, 0644);
++  if (g_journalFd < 0) {
++    return nullptr;
++  }
++  if (ftruncate(g_journalFd, JournalSize) != 0) {
++    close(g_journalFd);
++    g_journalFd = -1;
++    return nullptr;
++  }
++  void* view = mmap(nullptr, JournalSize, PROT_READ | PROT_WRITE, MAP_SHARED, g_journalFd, 0);
++  if (view == MAP_FAILED) {
++    close(g_journalFd);
++    g_journalFd = -1;
++    return nullptr;
++  }
++  return view;
++#endif
++}
++
++void reset_caches_after_crash(const char* why) {
++  Log.warn("{}: deleting the pipeline cache and the Dawn shader cache (they are rebuilt)", why);
++  delete_sqlite_files(pipeline_cache_db_path());
++  webgpu::cache_delete_files();
++}
++
++void check_crash_journal_once() {
++  if (g_config.cachePath == nullptr) {
++    return;
++  }
++  const auto path = io::fs_path_from_string(g_config.cachePath) / "pipeline_cache.journal";
++  auto* data = static_cast<JournalData*>(journal_map(path));
++  if (data == nullptr) {
++    Log.warn("Could not open the pipeline crash journal '{}'; crash recovery disabled", io::fs_path_to_string(path));
++    return;
++  }
++  g_journal = data;
++  if (data->magic != JournalMagic || data->version != JournalVersion) {
++    std::memset(static_cast<void*>(data), 0, JournalSize);
++    data->magic = JournalMagic;
++    data->version = JournalVersion;
++  }
++
++  const uint32_t prevPhase = data->phase.load();
++  uint32_t suspects = 0;
++  for (auto& slot : data->slots) {
++    if (prevPhase != PhaseClean && slot.active.load() != 0) {
++      const auto type = slot.type.load();
++      if (type <= 255) {
++        g_journalSuspects.emplace_back(static_cast<ShaderType>(type), static_cast<HashType>(slot.key.load()));
++        ++suspects;
++      }
++    }
++    slot.active.store(0);
++  }
++  if (prevPhase == PhaseClean || prevPhase == PhaseRunning) {
++    // Clean exit, or a crash after startup (only its in-flight configs are suspect).
++    data->startupCrashes = 0;
++    if (prevPhase == PhaseRunning && suspects > 0) {
++      Log.warn("The previous run ended while creating {} pipeline(s)", suspects);
++    }
++  } else {
++    data->startupCrashes = std::min(data->startupCrashes + 1, 100u);
++    Log.warn("The previous run ended during startup ({} time(s) in a row, {} pipeline(s) in flight)",
++             data->startupCrashes, suspects);
++    if (suspects == 0 || data->startupCrashes >= 2) {
++      reset_caches_after_crash("Startup crash");
++    }
++    if (data->startupCrashes >= 3) {
++      Log.warn("Repeated startup crashes: ignoring the shipped pipeline precache list for this run");
++      g_safeMode = true;
++    }
++  }
++  data->phase.store(PhaseStartup);
++  g_journalFrames = 0;
++}
++} // namespace
++
++void check_crash_journal() { std::call_once(g_journalOnce, check_crash_journal_once); }
++
++static void journal_begin(ShaderType type, HashType cacheKey) {
++  if (g_journal == nullptr) {
++    return;
++  }
++  if (t_journalSlot < 0) {
++    t_journalSlot = static_cast<int>(g_journalNextSlot.fetch_add(1) % JournalSlots);
++  }
++  auto& slot = g_journal->slots[t_journalSlot];
++  slot.key.store(static_cast<uint64_t>(cacheKey), std::memory_order_relaxed);
++  slot.type.store(underlying(type), std::memory_order_relaxed);
++  slot.active.store(1, std::memory_order_release);
++}
++
++static void journal_end() {
++  if (g_journal == nullptr || t_journalSlot < 0) {
++    return;
++  }
++  g_journal->slots[t_journalSlot].active.store(0, std::memory_order_release);
++}
++
++// Startup ends once the first precache pass has finished (and at least a few seconds of frames
++// were shown): a crash after that is not a startup loop.
++static void journal_update_phase() {
++  if (g_journal == nullptr || g_journal->phase.load(std::memory_order_relaxed) != PhaseStartup) {
++    return;
++  }
++  if (++g_journalFrames < 300) {
++    return;
++  }
++  bool idle;
++  {
++    std::lock_guard lock{g_pipelineMutex};
++    idle = g_pendingPipelines.empty();
++  }
++  if (idle && g_precacheDone.load() >= g_precacheTotal.load()) {
++    g_journal->startupCrashes = 0;
++    g_journal->phase.store(PhaseRunning);
++    Log.info("Pipeline startup finished; crash journal now in running phase");
++  }
++}
++
++static void journal_close() {
++  if (g_journal == nullptr) {
++    return;
++  }
++  for (auto& slot : g_journal->slots) {
++    slot.active.store(0);
++  }
++  g_journal->phase.store(PhaseClean);
++  // The view stays mapped until the process exits (late pipeline creations on other threads may
++  // still touch their slot); only flush it.
++#ifdef _WIN32
++  FlushViewOfFile(g_journal, JournalSize);
++#else
++  msync(g_journal, JournalSize, MS_ASYNC);
++#endif
++}
++
++// The Dawn cache opens lazily (possibly while the device is created, before
++// initialize_pipeline_cache): run the journal check before it opens.
++static const bool g_journalHookInstalled = [] {
++  webgpu::g_cacheOpenHook = &check_crash_journal;
++  return true;
++}();
++
+ // ---- Precache list files (include/aurora/pipeline_cache.h) ----------------------------------
+ 
+ namespace {
+ constexpr uint32_t PrecacheMagic = 0x43505541; // "AUPC"
+-constexpr uint32_t PrecacheFormat = 1;
++// Format 2 (patch 0017) adds a CRC-32 of the raw payload to the header and one per row; format 1
++// lists are still read (rows validated by field ranges only).
++constexpr uint32_t PrecacheFormat = 2;
+ constexpr uint32_t PrecacheFlagZstd = 1;
+ constexpr size_t PrecacheHeaderSize = 4 + 4 + 4 + 4 + 8;
+ 
++uint32_t crc32(const uint8_t* data, size_t size) {
++  static const auto table = [] {
++    std::array<uint32_t, 256> t{};
++    for (uint32_t i = 0; i < 256; ++i) {
++      uint32_t c = i;
++      for (int k = 0; k < 8; ++k) {
++        c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
++      }
++      t[i] = c;
++    }
++    return t;
++  }();
++  uint32_t crc = 0xFFFFFFFFu;
++  for (size_t i = 0; i < size; ++i) {
++    crc = table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
++  }
++  return crc ^ 0xFFFFFFFFu;
++}
++
+ template <typename T>
+ bool read_le(const uint8_t*& p, const uint8_t* end, T& out) {
+   if (static_cast<size_t>(end - p) < sizeof(T)) {
+@@ -1421,18 +2257,25 @@ std::vector<uint8_t> read_file(const char* path) {
+   return data;
+ }
+ 
++// nullptr = accepted; "version" = for another Aurora version (silently skipped); else the reason.
+ template <typename Config>
+-bool seed_row(ShaderType type, uint32_t version, const uint8_t* bytes, uint32_t size, uint32_t firstFrame) {
++const char* seed_row(ShaderType type, uint32_t version, const uint8_t* bytes, uint32_t size, uint32_t firstFrame) {
+   if (size != sizeof(Config) || version != Config{}.version) {
+-    return false;
++    return "version";
+   }
+   Config config;
+   std::memcpy(&config, bytes, sizeof(config));
+-  if (config.version != version) {
+-    return false;
++  if (const char* reason = validate_config(config)) {
++    return reason;
++  }
++  if (const auto key = xxh3_hash(config, static_cast<HashType>(type)); is_quarantined(key)) {
++    std::lock_guard lock{g_badMutex};
++    if (g_badPipelines[key].reason == BadReason::Invalid) {
++      return "recorded as bad";
++    }
+   }
+   remember_pipeline_config(type, config, firstFrame, false);
+-  return true;
++  return nullptr;
+ }
+ } // namespace
+ 
+@@ -1441,6 +2284,10 @@ bool seed_row(ShaderType type, uint32_t version, const uint8_t* bytes, uint32_t
+ using namespace aurora::gfx;
+ 
+ uint32_t aurora_pipeline_cache_seed(const char* path) {
++  if (g_safeMode) {
++    Log.warn("Pipeline precache list '{}' ignored after repeated startup crashes", path);
++    return 0;
++  }
+   const auto file = read_file(path);
+   if (file.size() < PrecacheHeaderSize) {
+     Log.info("No pipeline precache list at '{}'", path);
+@@ -1448,17 +2295,21 @@ uint32_t aurora_pipeline_cache_seed(const char* path) {
+   }
+   const uint8_t* p = file.data();
+   const uint8_t* end = p + file.size();
+-  uint32_t magic = 0, format = 0, flags = 0, count = 0;
++  uint32_t magic = 0, format = 0, flags = 0, count = 0, payloadCrc = 0, reserved = 0;
+   uint64_t rawSize = 0;
+   read_le(p, end, magic);
+   read_le(p, end, format);
+   read_le(p, end, flags);
+   read_le(p, end, count);
+   read_le(p, end, rawSize);
+-  if (magic != PrecacheMagic || format != PrecacheFormat || rawSize > (1ull << 31)) {
++  if (magic != PrecacheMagic || (format != 1 && format != 2) || rawSize > (64ull << 20)) {
+     Log.warn("Pipeline precache list '{}' has an unknown format", path);
+     return 0;
+   }
++  if (format >= 2 && (!read_le(p, end, payloadCrc) || !read_le(p, end, reserved))) {
++    Log.warn("Pipeline precache list '{}' is truncated", path);
++    return 0;
++  }
+   std::vector<uint8_t> payload;
+   if ((flags & PrecacheFlagZstd) != 0) {
+ #if defined(AURORA_CACHE_USE_ZSTD)
+@@ -1475,34 +2326,52 @@ uint32_t aurora_pipeline_cache_seed(const char* path) {
+   } else {
+     payload.assign(p, end);
+   }
++  if (format >= 2 && crc32(payload.data(), payload.size()) != payloadCrc) {
++    // Keep going: every row carries its own CRC, damaged rows are skipped below.
++    Log.warn("Pipeline precache list '{}' fails its checksum; checking each row", path);
++  }
+   p = payload.data();
+   end = p + payload.size();
+-  uint32_t accepted = 0, skipped = 0;
++  uint32_t accepted = 0, otherVersion = 0, rejected = 0;
+   for (uint32_t i = 0; i < count; ++i) {
+     uint8_t type = 0;
+-    uint32_t version = 0, size = 0, firstFrame = 0;
++    uint32_t version = 0, size = 0, firstFrame = 0, rowCrc = 0;
+     if (!read_le(p, end, type) || !read_le(p, end, version) || !read_le(p, end, size) ||
+-        !read_le(p, end, firstFrame) || static_cast<size_t>(end - p) < size) {
++        !read_le(p, end, firstFrame) || (format >= 2 && !read_le(p, end, rowCrc)) ||
++        static_cast<size_t>(end - p) < size) {
+       Log.warn("Pipeline precache list '{}' is truncated", path);
+       break;
+     }
+-    bool ok = false;
+-    switch (static_cast<ShaderType>(type)) {
+-    case ShaderType::Clear:
+-      ok = seed_row<clear::PipelineConfig>(ShaderType::Clear, version, p, size, firstFrame);
+-      break;
+-    case ShaderType::GX:
+-      ok = seed_row<aurora::gx::PipelineConfig>(ShaderType::GX, version, p, size, firstFrame);
+-      break;
+-    default:
+-      break;
++    const char* reason = "unknown type";
++    if (format >= 2 && crc32(p, size) != rowCrc) {
++      reason = "checksum mismatch";
++    } else {
++      switch (static_cast<ShaderType>(type)) {
++      case ShaderType::Clear:
++        reason = seed_row<clear::PipelineConfig>(ShaderType::Clear, version, p, size, firstFrame);
++        break;
++      case ShaderType::GX:
++        reason = seed_row<aurora::gx::PipelineConfig>(ShaderType::GX, version, p, size, firstFrame);
++        break;
++      default:
++        break;
++      }
+     }
+     p += size;
+-    ok ? ++accepted : ++skipped;
++    if (reason == nullptr) {
++      ++accepted;
++    } else if (std::strcmp(reason, "version") == 0) {
++      ++otherVersion;
++    } else {
++      if (rejected < 16) {
++        Log.warn("Pipeline precache list '{}': row {} rejected: {}", path, i, reason);
++      }
++      ++rejected;
++    }
+   }
+   g_seeded += accepted;
+-  Log.info("Pipeline precache list '{}': {} configs ({} for another Aurora version skipped)", path, accepted,
+-           skipped);
++  Log.info("Pipeline precache list '{}': {} configs ({} for another Aurora version skipped, {} invalid)", path,
++           accepted, otherVersion, rejected);
+   return accepted;
+ }
+ 
+@@ -1523,6 +2392,7 @@ bool aurora_pipeline_cache_export(const char* path) {
+               write_le<uint32_t>(payload, sizeof(Config));
+               write_le<uint32_t>(payload, known.firstFrameUsed);
+               const auto* b = reinterpret_cast<const uint8_t*>(&config);
++              write_le<uint32_t>(payload, crc32(b, sizeof(Config)));
+               payload.insert(payload.end(), b, b + sizeof(Config));
+               ++count;
+             }
+@@ -1536,6 +2406,8 @@ bool aurora_pipeline_cache_export(const char* path) {
+   write_le<uint32_t>(file, 0);
+   write_le<uint32_t>(file, count);
+   write_le<uint64_t>(file, payload.size());
++  write_le<uint32_t>(file, crc32(payload.data(), payload.size()));
++  write_le<uint32_t>(file, 0);
+   file.insert(file.end(), payload.begin(), payload.end());
+   SDL_IOStream* io = SDL_IOFromFile(path, "wb");
+   if (io == nullptr) {
+diff --git a/lib/gfx/pipeline_cache.hpp b/lib/gfx/pipeline_cache.hpp
+index 0801a22..bfcf9e7 100644
+--- a/lib/gfx/pipeline_cache.hpp
++++ b/lib/gfx/pipeline_cache.hpp
+@@ -43,4 +43,9 @@ PipelineRef find_pipeline(const rmlui::PipelineConfig& config);
+ 
+ bool get_pipeline(PipelineRef ref, CompiledPipeline& pipeline);
+ 
++// Around shader module creation: false when the module failed to compile (logged). A pipeline
++// must not be created from such a module (patch 0017).
++void push_shader_error_scope();
++bool pop_shader_error_scope(const char* what);
++
+ } // namespace aurora::gfx
+diff --git a/lib/gx/pipeline.cpp b/lib/gx/pipeline.cpp
+index aaf7c60..c03edfc 100644
+--- a/lib/gx/pipeline.cpp
++++ b/lib/gx/pipeline.cpp
+@@ -16,7 +16,13 @@ gfx::CompiledPipeline create_pipeline(const PipelineConfig& config, const gfx::R
+   ZoneScoped;
+   const auto hash = xxh3_hash(layout.key, xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX)));
+   const auto create = [&](const PipelineOptions& options, const char* passName) {
++    // Dawn throws (terminating the process) when a pipeline is created from a shader module that
++    // failed to compile, e.g. one generated from a damaged cached config: check the module first.
++    gfx::push_shader_error_scope();
+     const auto shader = build_shader(config.shaderConfig, layout, options.dstAlphaMode);
++    if (!gfx::pop_shader_error_scope("GX shader")) {
++      return wgpu::RenderPipeline{};
++    }
+     const auto label = fmt::format("GX Pipeline {:x} {}", hash, passName);
+     return build_pipeline(config, layout, options, {}, shader, label.c_str());
+   };
+diff --git a/lib/webgpu/gpu.hpp b/lib/webgpu/gpu.hpp
+index a1ce5c0..be134a7 100644
+--- a/lib/webgpu/gpu.hpp
++++ b/lib/webgpu/gpu.hpp
+@@ -83,5 +83,9 @@ size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valu
+ void store_to_cache(void const* key, size_t keySize, void const* value, size_t valueSize, void* userdata);
+ void cache_prune();
+ void cache_shutdown();
++// Deletes dawn_cache.db (crash recovery). Only valid before the cache was first opened.
++void cache_delete_files();
++// Called once before the Dawn cache is first opened (the pipeline crash journal check).
++extern void (*g_cacheOpenHook)();
+ 
+ } // namespace aurora::webgpu
+diff --git a/lib/webgpu/gpu_cache.cpp b/lib/webgpu/gpu_cache.cpp
+index 6ef44ea..3c93ec5 100644
+--- a/lib/webgpu/gpu_cache.cpp
++++ b/lib/webgpu/gpu_cache.cpp
+@@ -31,7 +31,8 @@ static std::vector<XXH128_hash_t> cache_keys_used;
+ static std::vector<uint8_t> compress_buffer;
+ #endif
+ 
+-constexpr int CACHE_SCHEMA = 2;
++// 3: per-entry checksum (XXH3 of the uncompressed value), verified on every load (patch 0017).
++constexpr int CACHE_SCHEMA = 3;
+ // % of rows pruned to trigger a full VACUUM
+ constexpr uint64_t VacuumPrunePercentThreshold = 25;
+ 
+@@ -39,10 +40,58 @@ static std::filesystem::path cache_path() {
+   return io::fs_path_from_string(g_config.cachePath) / "dawn_cache.db";
+ }
+ 
++void (*g_cacheOpenHook)() = nullptr;
++
++// Value of the last entry verified by a size query (Dawn asks for the size, then the data).
++static XXH128_hash_t verified_key{};
++static std::vector<uint8_t> verified_value;
++static bool verified_valid = false;
++// Set when SQLite reports a damaged file; acted on once no transaction is open.
++static bool reset_pending = false;
++
++static void close_db() {
++  if (load_stmt != nullptr) {
++    sqlite3_finalize(load_stmt);
++    load_stmt = nullptr;
++  }
++  if (store_stmt != nullptr) {
++    sqlite3_finalize(store_stmt);
++    store_stmt = nullptr;
++  }
++  if (db != nullptr) {
++    sqlite3_close(db);
++    db = nullptr;
++  }
++}
++
+ static void init_abort() {
+   cache_broken = true;
+-  sqlite3_close(db);
+-  db = nullptr;
++  close_db();
++}
++
++static void delete_db_files() {
++  for (const char* suffix : {"", "-wal", "-shm", "-journal"}) {
++    auto path = cache_path();
++    path += suffix;
++    std::error_code ec;
++    std::filesystem::remove(path, ec);
++  }
++}
++
++void cache_delete_files() { delete_db_files(); }
++
++static bool is_corruption(int ret) {
++  const int primary = ret & 0xFF;
++  return primary == SQLITE_CORRUPT || primary == SQLITE_NOTADB;
++}
++
++// A damaged file found while running: drop it, the next cache access recreates it.
++static void reset_corrupt_db() {
++  Log.warn("Dawn cache database is damaged; deleting and recreating it");
++  close_db();
++  delete_db_files();
++  cache_keys_used.clear();
++  verified_valid = false;
+ }
+ 
+ static int check(int ret) {
+@@ -84,7 +133,8 @@ CREATE TABLE cache (
+   key BLOB PRIMARY KEY NOT NULL,
+   value BLOB NOT NULL,
+   size INTEGER NOT NULL,
+-  compressed INTEGER NOT NULL
++  compressed INTEGER NOT NULL,
++  checksum INTEGER NOT NULL
+ );
+ DELETE FROM aurora_schema;
+ INSERT INTO aurora_schema VALUES ({});)",
+@@ -117,20 +167,37 @@ static bool cache_init_core() {
+     return false;
+   }
+ 
++  // Structural check of every page (a truncated or overwritten file fails here instead of
++  // somewhere in the middle of loading; the per-entry checksums catch damaged values).
++  bool integrityOk = false;
++  std::string integrityResult;
++  ret = sqlite::exec(db, "PRAGMA quick_check;", [&integrityOk, &integrityResult](int argc, char** argv, char**) {
++    if (argc > 0 && argv[0] != nullptr && std::strcmp(argv[0], "ok") == 0) {
++      integrityOk = true;
++    } else if (argc > 0 && argv[0] != nullptr && integrityResult.empty()) {
++      integrityResult = argv[0];
++    }
++  });
++  if (ret != SQLITE_OK || !integrityOk) {
++    Log.error("Dawn cache integrity check failed: {}",
++              ret != SQLITE_OK ? sqlite3_errmsg(db) : integrityResult.c_str());
++    return false;
++  }
++
+   if (!ensure_schema_up_to_date()) {
+     Log.error("Failed to validate schema");
+     return false;
+   }
+ 
+-  ret = sqlite3_prepare_v3(db, "SELECT value, size, compressed FROM cache WHERE key = ?", -1, SQLITE_PREPARE_PERSISTENT,
+-                           &load_stmt, nullptr);
++  ret = sqlite3_prepare_v3(db, "SELECT value, size, compressed, checksum FROM cache WHERE key = ?", -1,
++                           SQLITE_PREPARE_PERSISTENT, &load_stmt, nullptr);
+   if (ret != SQLITE_OK) {
+     Log.error("Failed to prepare statement: {}", sqlite3_errmsg(db));
+     return false;
+   }
+ 
+-  ret = sqlite3_prepare_v3(db, "REPLACE INTO cache (key, value, size, compressed) VALUES (?, ?, ?, ?)", -1,
+-                           SQLITE_PREPARE_PERSISTENT, &store_stmt, nullptr);
++  ret = sqlite3_prepare_v3(db, "REPLACE INTO cache (key, value, size, compressed, checksum) VALUES (?, ?, ?, ?, ?)",
++                           -1, SQLITE_PREPARE_PERSISTENT, &store_stmt, nullptr);
+   if (ret != SQLITE_OK) {
+     Log.error("Failed to prepare statement: {}", sqlite3_errmsg(db));
+     return false;
+@@ -205,14 +272,33 @@ static bool cache_init() {
+     return false;
+   }
+ 
++  if (reset_pending) {
++    reset_pending = false;
++    reset_corrupt_db();
++  }
++
+   if (db) {
+     return true;
+   }
+ 
++  static bool hookCalled = false;
++  if (!hookCalled) {
++    hookCalled = true;
++    if (g_cacheOpenHook != nullptr) {
++      g_cacheOpenHook(); // may delete the cache files after a crash at startup
++    }
++  }
++
+   if (!cache_init_core()) {
+-    Log.error("SQLite DB init failed");
+-    init_abort();
+-    return false;
++    // Not a database / damaged / wrong layout: recreate it rather than running without a cache.
++    Log.warn("Dawn cache database is unusable; deleting and recreating it");
++    close_db();
++    delete_db_files();
++    if (!cache_init_core()) {
++      Log.error("SQLite DB init failed");
++      init_abort();
++      return false;
++    }
+   }
+ 
+   Log.debug("SQLite cache init succeeded");
+@@ -220,76 +306,118 @@ static bool cache_init() {
+   return true;
+ }
+ 
+-size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valueSize, void*) {
+-  std::lock_guard lock(cache_mutex);
+-
+-  if (!cache_init()) {
+-    return 0;
++// Reads, decompresses and verifies one entry. Returns false for a miss or a damaged entry (which
++// is deleted, so Dawn sees a miss and rebuilds it).
++static bool read_verified_entry(const XXH128_hash_t& keyHash, std::vector<uint8_t>& out) {
++  check(sqlite3_bind_blob(load_stmt, 1, &keyHash, sizeof(keyHash), SQLITE_TRANSIENT));
++  const auto ret = sqlite3_step(load_stmt);
++  if (ret == SQLITE_DONE) {
++    sqlite3_reset(load_stmt);
++    return false;
+   }
+-
+-  sqlite::Transaction tx(db, Log);
+-  if (!tx) {
+-    Log.error("Failed to open load transaction");
+-    return 0;
++  if (ret != SQLITE_ROW) {
++    Log.error("Looking up cache key failed: {}", sqlite3_errmsg(db));
++    sqlite3_reset(load_stmt);
++    if (is_corruption(ret)) {
++      reset_pending = true;
++    }
++    return false;
+   }
+ 
+-  const auto keyHash = XXH128(key, keySize, 0);
+-  check(sqlite3_bind_blob(load_stmt, 1, &keyHash, sizeof(keyHash), SQLITE_TRANSIENT));
+-
+-  const auto ret = sqlite3_step(load_stmt);
+-  size_t foundSize;
+-  bool loadSucceeded = false;
+-  if (ret == SQLITE_ROW) {
+-    // Hit
+-    const auto foundPtr = sqlite3_column_blob(load_stmt, 0);
+-    foundSize = sqlite3_column_int64(load_stmt, 1);
+-    const bool compressed = sqlite3_column_int(load_stmt, 2) != 0;
+-
+-    if (value && valueSize == foundSize) {
+-      loadSucceeded = true;
+-      if (compressed) {
++  const auto* foundPtr = static_cast<const uint8_t*>(sqlite3_column_blob(load_stmt, 0));
++  const auto storedSize = sqlite3_column_bytes(load_stmt, 0);
++  const auto size = sqlite3_column_int64(load_stmt, 1);
++  const bool compressed = sqlite3_column_int(load_stmt, 2) != 0;
++  const auto checksum = static_cast<uint64_t>(sqlite3_column_int64(load_stmt, 3));
++  const char* problem = nullptr;
++  if (size <= 0 || size > (int64_t{1} << 30) || (storedSize > 0 && foundPtr == nullptr)) {
++    problem = "bad size";
++  } else if (compressed) {
+ #if defined(AURORA_CACHE_USE_ZSTD)
+-        const auto compSize = sqlite3_column_bytes(load_stmt, 0);
+-        const auto zstdRet = ZSTD_decompress(value, valueSize, foundPtr, compSize);
+-        if (ZSTD_isError(zstdRet)) {
+-          Log.error("zstd decompression error: {}", ZSTD_getErrorName(zstdRet));
+-          foundSize = 0;
+-          loadSucceeded = false;
+-        } else if (zstdRet != foundSize) {
+-          Log.error("zstd decompression size mismatch: expected {}, got {}", foundSize, zstdRet);
+-          foundSize = 0;
+-          loadSucceeded = false;
+-        }
++    out.resize(static_cast<size_t>(size));
++    const auto zstdRet = ZSTD_decompress(out.data(), out.size(), foundPtr, static_cast<size_t>(storedSize));
++    if (ZSTD_isError(zstdRet) || zstdRet != out.size()) {
++      problem = "decompression failed";
++    }
+ #else
+-        Log.error("Cache entry is zstd-compressed but zstd support is disabled");
+-        foundSize = 0;
+-        loadSucceeded = false;
++    problem = "zstd-compressed but zstd support is disabled";
+ #endif
+-      } else {
+-        if (foundSize != 0 && !foundPtr) {
+-          Log.error("Cache entry is missing raw value data");
+-          foundSize = 0;
+-          loadSucceeded = false;
+-        } else if (foundSize != 0) {
+-          std::memcpy(value, foundPtr, foundSize);
+-        }
+-      }
+-    }
+-  } else if (ret == SQLITE_DONE) {
+-    // Miss
+-    foundSize = 0;
++  } else if (storedSize != size) {
++    problem = "size mismatch";
+   } else {
+-    Log.error("Looking up cache key failed: {}", sqlite3_errmsg(db));
+-    return 0;
++    out.assign(foundPtr, foundPtr + storedSize);
++  }
++  if (problem == nullptr && XXH3_64bits(out.data(), out.size()) != checksum) {
++    problem = "checksum mismatch";
+   }
++  sqlite3_reset(load_stmt);
++
++  if (problem != nullptr) {
++    Log.warn("Dawn cache entry damaged ({}); deleting it", problem);
++    sqlite3_stmt* del = nullptr;
++    if (sqlite3_prepare_v3(db, "DELETE FROM cache WHERE key = ?", -1, 0, &del, nullptr) == SQLITE_OK) {
++      sqlite3_bind_blob(del, 1, &keyHash, sizeof(keyHash), SQLITE_TRANSIENT);
++      sqlite3_step(del);
++    }
++    sqlite3_finalize(del);
++    out.clear();
++    return false;
++  }
++  return true;
++}
+ 
+-  check(sqlite3_reset(load_stmt));
++size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valueSize, void*) {
++  std::lock_guard lock(cache_mutex);
+ 
+-  if (loadSucceeded) {
++  if (!cache_init()) {
++    return 0;
++  }
++
++  // Dawn first asks for the size (value == nullptr), then reads. The entry is verified on the
++  // size query so a damaged one is reported as a miss up front; the read is served from it.
++  const auto keyHash = XXH128(key, keySize, 0);
++  if (value != nullptr && verified_valid && XXH128_isEqual(verified_key, keyHash)) {
++    verified_valid = false;
++    if (valueSize != verified_value.size()) {
++      return 0;
++    }
++    std::memcpy(value, verified_value.data(), valueSize);
+     cache_keys_used.push_back(keyHash);
++    return valueSize;
+   }
+ 
+-  return foundSize;
++  std::vector<uint8_t> entry;
++  bool found = false;
++  {
++    sqlite::Transaction tx(db, Log);
++    if (!tx) {
++      Log.error("Failed to open load transaction");
++      return 0;
++    }
++    found = read_verified_entry(keyHash, entry);
++    if (!reset_pending) {
++      tx.commit(); // keeps the deletion of a damaged entry
++    }
++  }
++  if (reset_pending) {
++    reset_pending = false;
++    reset_corrupt_db();
++  }
++  if (!found) {
++    return 0;
++  }
++  if (value == nullptr) {
++    verified_key = keyHash;
++    verified_value = std::move(entry);
++    verified_valid = true;
++    return verified_value.size();
++  }
++  if (valueSize != entry.size()) {
++    return entry.size();
++  }
++  std::memcpy(value, entry.data(), valueSize);
++  cache_keys_used.push_back(keyHash);
++  return valueSize;
+ }
+ 
+ void store_to_cache(void const* key, size_t keySize, void const* value, size_t valueSize, void*) {
+@@ -338,11 +466,16 @@ void store_to_cache(void const* key, size_t keySize, void const* value, size_t v
+       sqlite3_bind_blob64(store_stmt, 2, storedValue, storedValueSize, compressed ? SQLITE_STATIC : SQLITE_TRANSIENT));
+   check(sqlite3_bind_int64(store_stmt, 3, static_cast<sqlite3_int64>(valueSize)));
+   check(sqlite3_bind_int(store_stmt, 4, compressed));
++  check(sqlite3_bind_int64(store_stmt, 5, static_cast<sqlite3_int64>(XXH3_64bits(value, valueSize))));
+ 
+   const auto ret = sqlite3_step(store_stmt);
+   if (ret != SQLITE_DONE) {
+     // Error or something
+     Log.error("Failed to insert row: {}", sqlite3_errmsg(db));
++    sqlite3_reset(store_stmt);
++    if (is_corruption(ret)) {
++      reset_pending = true;
++    }
+     return;
+   }
+ 
+@@ -422,6 +555,8 @@ void cache_shutdown() {
+   compress_buffer.clear();
+ #endif
+   cache_keys_used.clear();
++  verified_value.clear();
++  verified_valid = false;
+   if (load_stmt != nullptr) {
+     check(sqlite3_finalize(load_stmt));
+     load_stmt = nullptr;

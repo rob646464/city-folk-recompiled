@@ -1,0 +1,46 @@
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+index 62c7ba5..c2d9eaf 100644
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -69,15 +69,37 @@ float g_flashDist2 = 0.f;
+ // Vibrance: push a light color away from its gray (luma) by `sat`, keeping its brightest channel,
+ // so every provider (ghost lights, test lights) gets one consistent saturated look.
+ std::array<float, 3> vivid(const float c[3], float sat) noexcept {
++  // Vibrance of the colored lights. The linear boost (each channel pushed away from the luminance by
++  // `sat`) gives the contrasty look; where a channel would go below 0 the old code clamped it (a hue
++  // shift: orange fire turned red) and 0025 stopped the boost early (saturated lights lost their
++  // punch). 0026: take the boosted color's saturation (HSV, capped at full) and rebuild the color
++  // with the original hue and brightness, so lights can reach full saturation without a hue shift.
++  // Debug: AURORA_VIVID_MODE=0 (clamp, before 0025), 1 (0025 early stop), 2 (default).
++  static const int sMode = [] {
++    const char* v = std::getenv("AURORA_VIVID_MODE");
++    return v ? std::atoi(v) : 2;
++  }();
+   const float l = 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
+   const float mx = std::max({c[0], c[1], c[2]});
+-  // Hue-preserving (0025): the boost stops where the weakest channel reaches 0. Clamping a
+-  // channel that would go negative shifts the hue (orange fire turned pure red, a gold ghost red).
+   const float mn = std::min({c[0], c[1], c[2]});
+-  if (mn < l && sat > 1.f) {
++  std::array<float, 3> o{};
++  if (sMode == 2 && mx > 1e-5f && mx - mn > 1e-5f) {
++    float bmx = -1e9f, bmn = 1e9f;
++    for (int i = 0; i < 3; ++i) {
++      const float v = l + (c[i] - l) * sat;
++      bmx = std::max(bmx, v);
++      bmn = std::min(bmn, v);
++    }
++    const float s = bmx > 1e-5f ? std::clamp((bmx - bmn) / bmx, 0.f, 1.f) : 1.f;
++    for (int i = 0; i < 3; ++i) {
++      const float f = (c[i] - mn) / (mx - mn);  // hue: where the channel sits between min and max
++      o[i] = mx * (1.f - s) + mx * s * f;
++    }
++    return o;
++  }
++  if (sMode == 1 && mn < l && sat > 1.f) {
+     sat = std::min(sat, l / (l - mn));
+   }
+-  std::array<float, 3> o{};
+   float omx = 0.f;
+   for (int i = 0; i < 3; ++i) {
+     o[i] = std::max(l + (c[i] - l) * sat, 0.f);

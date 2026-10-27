@@ -1,0 +1,626 @@
+diff --git a/cmake/aurora_gx.cmake b/cmake/aurora_gx.cmake
+--- a/cmake/aurora_gx.cmake
++++ b/cmake/aurora_gx.cmake
+@@ -11,6 +11,7 @@
+         lib/gfx/tex_copy_conv.cpp
+         lib/gfx/tex_palette_conv.cpp
+         lib/gfx/efb_ram.cpp
++        lib/gfx/efb_blend6.cpp
+         lib/gfx/enhanced.cpp
+         lib/gfx/texture.cpp
+         lib/gfx/texture_format.cpp
+diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -180,6 +180,12 @@
+ #define GX_AURORA_ACCURACY_EFB_DEPTH 0x0002
+ /** Color texture copies (GXCopyTex) apply the vertical copy filter set by GXSetCopyFilter (BP 0x53/0x54). */
+ #define GX_AURORA_ACCURACY_COPY_FILTER 0x0004
++/**
++ * With GX_AURORA_ACCURACY_EFB_DEPTH: blended draws into an RGBA6 EFB are stored the way the PE stores
++ * them, the blend result dithered and truncated to 6 bits (the color target is quantized after each
++ * pass that has such draws; costs a full-target pass per affected EFB pass).
++ */
++#define GX_AURORA_ACCURACY_EFB_BLEND 0x0008
+ 
+ void GXSetAuroraAccuracy(u32 flags);
+ u32 GXGetAuroraAccuracy();
+diff --git a/lib/gfx/efb_blend6.cpp b/lib/gfx/efb_blend6.cpp
+new file mode 100644
+--- /dev/null
++++ b/lib/gfx/efb_blend6.cpp
+@@ -0,0 +1,342 @@
++#include "efb_blend6.hpp"
++
++#include "frame_packet.hpp"
++#include "../webgpu/gpu.hpp"
++#include "../webgpu/gpu_prof.hpp"
++#include "../logging.hpp"
++
++#include <absl/container/flat_hash_map.h>
++#include <fmt/format.h>
++
++#include <array>
++#include <atomic>
++#include <chrono>
++#include <cstdlib>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <vector>
++
++namespace aurora::gfx::efb_blend6 {
++namespace {
++using webgpu::g_device;
++Module Log("aurora::gfx::efb_blend6");
++
++// A single-sampled target is copied into a scratch texture and quantized back in one full-screen
++// pass. A multisampled one is quantized per sample into the scratch, then copied back by a second
++// pass that also redoes the MSAA resolve.
++//
++// Quantization per channel, as the EFB stores an RGBA6 pixel after blending: the 8-bit result,
++// dithered with the 2x2 ordered matrix (RGB only, when the pass's blended draws dither; the same
++// formula as the in-shader quantization of unblended draws, Aurora 0010), truncated to 6 bits and
++// widened back ((v << 2) | (v >> 4)). A channel that already holds a widened 6-bit value is a
++// stored pixel (unblended draws are quantized in their shader; earlier passes were resolved) and is
++// kept: re-dithering it could move it by one step. Alpha is truncated (never dithered).
++std::string shader_source(bool multisampled, bool dither, bool quantize) {
++  std::string s;
++  s += multisampled ? "@group(0) @binding(0) var src: texture_multisampled_2d<f32>;\n"
++                    : "@group(0) @binding(0) var src: texture_2d<f32>;\n";
++  s += "@vertex fn vs_main(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {\n"
++       "  let uv = vec2f(f32((i << 1u) & 2u), f32(i & 2u));\n"
++       "  return vec4f(uv * 2.0 - 1.0, 0.0, 1.0);\n"
++       "}\n";
++  s += multisampled ? "@fragment fn fs_main(@builtin(position) pos: vec4f, @builtin(sample_index) si: u32) -> "
++                      "@location(0) vec4f {\n  let c = textureLoad(src, vec2i(pos.xy), i32(si));\n"
++                    : "@fragment fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {\n"
++                      "  let c = textureLoad(src, vec2i(pos.xy), 0);\n";
++  if (!quantize) {
++    s += "  return c;\n}\n";
++    return s;
++  }
++  s += "  let q8 = vec4i(round(clamp(c, vec4f(0.0), vec4f(1.0)) * 255.0));\n"
++       "  let hi = q8 >> vec4u(2u);\n"
++       "  let wid = (hi << vec4u(2u)) | (hi >> vec4u(4u));\n"
++       "  var rgb = q8.rgb;\n";
++  if (dither) {
++    s += "  let dp = vec2u(pos.xy) & vec2u(1u);\n"
++         "  let dq = i32(select(select(0u, 2u, dp.x == 1u), select(3u, 1u, dp.x == 1u), dp.y == 1u));\n"
++         "  rgb = select(rgb - (rgb >> vec3u(6u)) + vec3i(dq), rgb, q8.rgb == wid.rgb);\n";
++  }
++  s += "  let qn = rgb >> vec3u(2u);\n"
++       "  let out = (qn << vec3u(2u)) | (qn >> vec3u(4u));\n"
++       "  return vec4f(vec4i(out, wid.a)) / 255.0;\n"
++       "}\n";
++  return s;
++}
++
++struct PipelineKey {
++  wgpu::TextureFormat format;
++  uint32_t samples;
++  uint8_t mode; // 0 copy back, 1 quantize, 2 quantize + dither
++
++  bool operator==(const PipelineKey& rhs) const {
++    return format == rhs.format && samples == rhs.samples && mode == rhs.mode;
++  }
++  template <typename H>
++  friend H AbslHashValue(H h, const PipelineKey& k) {
++    return H::combine(std::move(h), static_cast<uint32_t>(k.format), k.samples, k.mode);
++  }
++};
++struct Pipeline {
++  wgpu::RenderPipeline pipeline;
++  wgpu::BindGroupLayout layout;
++};
++absl::flat_hash_map<PipelineKey, Pipeline> g_pipelines;
++
++const Pipeline& pipeline_for(const PipelineKey& key) {
++  auto it = g_pipelines.find(key);
++  if (it != g_pipelines.end()) {
++    return it->second;
++  }
++  const bool ms = key.samples > 1;
++  const auto src = shader_source(ms, key.mode == 2, key.mode != 0);
++  const wgpu::ShaderSourceWGSL wgsl{wgpu::ShaderSourceWGSL::Init{.code = src.c_str()}};
++  const wgpu::ShaderModuleDescriptor modDesc{.nextInChain = &wgsl, .label = "EFB blend6 resolve"};
++  const auto module = g_device.CreateShaderModule(&modDesc);
++  const wgpu::BindGroupLayoutEntry entry{
++      .binding = 0,
++      .visibility = wgpu::ShaderStage::Fragment,
++      .texture =
++          {
++              .sampleType = wgpu::TextureSampleType::UnfilterableFloat,
++              .viewDimension = wgpu::TextureViewDimension::e2D,
++              .multisampled = ms,
++          },
++  };
++  const wgpu::BindGroupLayoutDescriptor layoutDesc{.label = "EFB blend6 resolve", .entryCount = 1, .entries = &entry};
++  Pipeline p;
++  p.layout = g_device.CreateBindGroupLayout(&layoutDesc);
++  const wgpu::PipelineLayoutDescriptor plDesc{.bindGroupLayoutCount = 1, .bindGroupLayouts = &p.layout};
++  const std::array targets{wgpu::ColorTargetState{.format = key.format}};
++  const wgpu::FragmentState fragment{
++      .module = module, .entryPoint = "fs_main", .targetCount = targets.size(), .targets = targets.data()};
++  const wgpu::RenderPipelineDescriptor desc{
++      .label = "EFB blend6 resolve",
++      .layout = g_device.CreatePipelineLayout(&plDesc),
++      .vertex = {.module = module, .entryPoint = "vs_main"},
++      .primitive = {.topology = wgpu::PrimitiveTopology::TriangleList},
++      .multisample = {.count = key.samples},
++      .fragment = &fragment,
++  };
++  p.pipeline = g_device.CreateRenderPipeline(&desc);
++  return g_pipelines.emplace(key, std::move(p)).first->second;
++}
++
++struct Scratch {
++  wgpu::Texture texture;
++  wgpu::TextureView view;
++  wgpu::Extent3D size;
++  wgpu::TextureFormat format = wgpu::TextureFormat::Undefined;
++  uint32_t samples = 0;
++};
++Scratch g_scratch;
++
++const Scratch& scratch_for(const wgpu::Extent3D& size, wgpu::TextureFormat format, uint32_t samples) {
++  if (!g_scratch.texture || g_scratch.size.width != size.width || g_scratch.size.height != size.height ||
++      g_scratch.format != format || g_scratch.samples != samples) {
++    const wgpu::TextureDescriptor desc{
++        .label = "EFB blend6 scratch",
++        .usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding |
++                 (samples == 1 ? wgpu::TextureUsage::CopyDst : wgpu::TextureUsage::None),
++        .dimension = wgpu::TextureDimension::e2D,
++        .size = {size.width, size.height, 1},
++        .format = format,
++        .mipLevelCount = 1,
++        .sampleCount = samples,
++    };
++    g_scratch.texture = g_device.CreateTexture(&desc);
++    g_scratch.view = g_scratch.texture.CreateView();
++    g_scratch.size = {size.width, size.height, 1};
++    g_scratch.format = format;
++    g_scratch.samples = samples;
++  }
++  return g_scratch;
++}
++
++// AURORA_EFB_BLEND6_TIMING=1 (needs TimestampQuery): GPU time of the resolves, logged as the
++// average per resolve and per frame-equivalent every ~600 resolves.
++struct TimingReadback {
++  wgpu::QuerySet querySet;
++  wgpu::Buffer resolve;
++  wgpu::Buffer readback;
++};
++std::mutex g_timingMutex;
++std::vector<std::shared_ptr<TimingReadback>> g_timingPool;
++std::atomic<uint64_t> g_timingNs{0};
++std::atomic<uint32_t> g_timingCount{0};
++std::atomic<uint64_t> g_resolvedPixels{0};
++std::atomic<uint32_t> g_mixedDither{0}; // resolves whose pass mixed dithered and undithered blends
++
++bool timing_on() {
++  static const bool on = std::getenv("AURORA_EFB_BLEND6_TIMING") != nullptr &&
++                         g_device.HasFeature(wgpu::FeatureName::TimestampQuery);
++  return on;
++}
++
++std::shared_ptr<TimingReadback> acquire_timing() {
++  {
++    std::lock_guard lock{g_timingMutex};
++    if (!g_timingPool.empty()) {
++      auto t = std::move(g_timingPool.back());
++      g_timingPool.pop_back();
++      return t;
++    }
++  }
++  auto t = std::make_shared<TimingReadback>();
++  const wgpu::QuerySetDescriptor qd{.label = "EFB blend6 timing", .type = wgpu::QueryType::Timestamp, .count = 2};
++  t->querySet = g_device.CreateQuerySet(&qd);
++  const wgpu::BufferDescriptor rd{.usage = wgpu::BufferUsage::QueryResolve | wgpu::BufferUsage::CopySrc, .size = 16};
++  t->resolve = g_device.CreateBuffer(&rd);
++  const wgpu::BufferDescriptor bd{.usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst, .size = 16};
++  t->readback = g_device.CreateBuffer(&bd);
++  return t;
++}
++
++void finish_timing(const wgpu::CommandEncoder& cmd, detail::FramePacket& frame, std::shared_ptr<TimingReadback> t) {
++  cmd.ResolveQuerySet(t->querySet, 0, 2, t->resolve, 0);
++  cmd.CopyBufferToBuffer(t->resolve, 0, t->readback, 0, 16);
++  // Mapped once this frame's commands are submitted.
++  frame.afterSubmitCallbacks.emplace_back([t] {
++    t->readback.MapAsync(wgpu::MapMode::Read, 0, 16, wgpu::CallbackMode::AllowSpontaneous,
++                         [t](wgpu::MapAsyncStatus status, wgpu::StringView) {
++      if (status == wgpu::MapAsyncStatus::Success) {
++        const auto* ts = static_cast<const uint64_t*>(t->readback.GetConstMappedRange(0, 16));
++        if (ts != nullptr && ts[1] > ts[0]) {
++          g_timingNs += ts[1] - ts[0];
++          const uint32_t n = ++g_timingCount;
++          if (n % 600 == 0) {
++            const double ms = static_cast<double>(g_timingNs.exchange(0)) / 1e6;
++            const uint64_t px = g_resolvedPixels.exchange(0);
++            g_timingCount = 0;
++            Log.info("[efb-blend6] {} resolves: {:.4f} ms each ({:.2f} Mpx each, {} with mixed dither)", n, ms / n,
++                     static_cast<double>(px) / n / 1e6, g_mixedDither.exchange(0));
++          }
++        }
++        t->readback.Unmap();
++      }
++      std::lock_guard lock{g_timingMutex};
++      g_timingPool.push_back(t);
++    });
++  });
++}
++
++wgpu::BindGroup bind_group(const Pipeline& p, const wgpu::TextureView& view) {
++  const wgpu::BindGroupEntry entry{.binding = 0, .textureView = view};
++  const wgpu::BindGroupDescriptor desc{.label = "EFB blend6 resolve", .layout = p.layout, .entryCount = 1, .entries = &entry};
++  return g_device.CreateBindGroup(&desc);
++}
++
++// Flags carried past a pass that ended in a tiny copy (EFB peek probes) to the next pass on the
++// same target.
++struct Pending {
++  WGPUTextureView view = nullptr;
++  uint8_t flags = 0;
++};
++Pending g_pending;
++} // namespace
++
++void after_pass(const wgpu::CommandEncoder& cmd, detail::FramePacket& frame, const detail::RenderPass& pass) {
++  if (pass.colorAttachmentCount == 0) {
++    return;
++  }
++  const auto& color = pass.colorAttachments[SceneColorAttachmentIndex];
++  uint8_t flags = pass.efbBlend6;
++  if (g_pending.flags != 0 && g_pending.view == color.view.Get()) {
++    flags |= g_pending.flags;
++    g_pending = {};
++  }
++  if (flags == 0) {
++    return;
++  }
++  if (!color.view || (color.format != wgpu::TextureFormat::RGBA8Unorm && color.format != wgpu::TextureFormat::BGRA8Unorm)) {
++    return;
++  }
++  // A pass ended by a copy of a few pixels (GXPeekARGB's 4x4 probe) is not quantized: peek answers
++  // are converted to the EFB format by the caller anyway. The next pass on this target takes its
++  // flags over and quantizes everything when it ends.
++  if (pass.resolveTarget && !pass.snapshotColorDst && pass.resolveRect.width * pass.resolveRect.height <= 64) {
++    g_pending = {color.view.Get(), flags};
++    return;
++  }
++  const uint32_t samples = std::max(pass.msaaSamples, 1u);
++  const auto& scratch = scratch_for(color.size, color.format, samples);
++  const Pipeline quantize = pipeline_for({color.format, samples, static_cast<uint8_t>((flags & 2) != 0 ? 2 : 1)});
++  const Pipeline copyBack = pipeline_for({color.format, samples, 0});
++
++  std::shared_ptr<TimingReadback> timing;
++  std::array<wgpu::PassTimestampWrites, 2> tw{};
++  if (timing_on()) {
++    timing = acquire_timing();
++    tw[0] = {.querySet = timing->querySet, .beginningOfPassWriteIndex = 0};
++    tw[1] = {.querySet = timing->querySet, .endOfPassWriteIndex = 1};
++    tw[0].endOfPassWriteIndex = wgpu::kQuerySetIndexUndefined;
++    tw[1].beginningOfPassWriteIndex = wgpu::kQuerySetIndexUndefined;
++    g_resolvedPixels += static_cast<uint64_t>(color.size.width) * color.size.height;
++    if (flags == 3) {
++      ++g_mixedDither;
++    }
++  }
++
++  const auto runPass = [&](const char* label, const wgpu::TextureView& target, const wgpu::TextureView& resolveTarget,
++                           const Pipeline& p, const wgpu::TextureView& src, const wgpu::PassTimestampWrites* writes) {
++    const wgpu::RenderPassColorAttachment att{
++        .view = target,
++        .resolveTarget = resolveTarget,
++        .loadOp = wgpu::LoadOp::Load,
++        .storeOp = wgpu::StoreOp::Store,
++    };
++    const wgpu::RenderPassDescriptor desc{
++        .label = label,
++        .colorAttachmentCount = 1,
++        .colorAttachments = &att,
++        .timestampWrites = writes,
++    };
++    const auto rp = cmd.BeginRenderPass(&desc);
++    rp.SetPipeline(p.pipeline);
++    rp.SetBindGroup(0, bind_group(p, src));
++    rp.Draw(3);
++    rp.End();
++  };
++  if (samples == 1 && pass.copySourceTexture && pass.copySourceView.Get() == color.view.Get()) {
++    // Single-sampled target: a plain texture copy into the scratch, then one quantizing pass back.
++    const wgpu::TexelCopyTextureInfo src{.texture = pass.copySourceTexture};
++    const wgpu::TexelCopyTextureInfo dst{.texture = scratch.texture};
++    const wgpu::Extent3D size{color.size.width, color.size.height, 1};
++    cmd.CopyTextureToTexture(&src, &dst, &size);
++    if (timing) {
++      tw[0].endOfPassWriteIndex = 1;
++    }
++    runPass("EFB blend6 quantize", color.view, {}, quantize, scratch.view, timing ? &tw[0] : nullptr);
++  } else {
++    // Multisampled: quantize every sample into the scratch, then copy it back (and resolve).
++    runPass("EFB blend6 quantize", scratch.view, {}, quantize, color.view, timing ? &tw[0] : nullptr);
++    runPass("EFB blend6 store", color.view, color.resolveView, copyBack, scratch.view, timing ? &tw[1] : nullptr);
++  }
++  if (timing) {
++    finish_timing(cmd, frame, std::move(timing));
++  }
++}
++
++void initialize() {
++  // Built up front: creating them at the first resolve, on the render worker, held the device
++  // while the pipeline-cache workers waited and draws timed out (~260 dropped draws once).
++  const auto format = webgpu::g_graphicsConfig.surfaceConfiguration.format;
++  if (format != wgpu::TextureFormat::RGBA8Unorm && format != wgpu::TextureFormat::BGRA8Unorm) {
++    return;
++  }
++  const uint32_t msaa = std::max(webgpu::g_graphicsConfig.msaaSamples, 1u);
++  for (const uint32_t samples : {1u, msaa}) {
++    for (uint8_t mode = 0; mode < 3; ++mode) {
++      pipeline_for({format, samples, mode});
++    }
++  }
++}
++
++void shutdown() {
++  g_pipelines.clear();
++  g_scratch = {};
++  std::lock_guard lock{g_timingMutex};
++  g_timingPool.clear();
++}
++
++} // namespace aurora::gfx::efb_blend6
+diff --git a/lib/gfx/efb_blend6.hpp b/lib/gfx/efb_blend6.hpp
+new file mode 100644
+--- /dev/null
++++ b/lib/gfx/efb_blend6.hpp
+@@ -0,0 +1,27 @@
++#pragma once
++
++#include <webgpu/webgpu_cpp.h>
++
++namespace aurora::gfx::detail {
++struct RenderPass;
++struct FramePacket;
++}
++
++namespace aurora::gfx::efb_blend6 {
++
++// RGBA6 EFB blending (GX_AURORA_ACCURACY_EFB_BLEND). On the console the blend unit mixes the TEV's
++// 8-bit output with the stored pixel and stores the result dithered (when the draw dithers) and
++// truncated to 6 bits per channel. A WebGPU fragment shader never sees the destination, so blended
++// RGBA6 draws output their 8-bit color and the pass's color target is quantized once the pass has
++// ended, before anything reads the EFB (texture copies, peeks, the next pass's blends, the display
++// copy). Pixels already holding a 6-bit value (unblended draws, already quantized in their shader)
++// keep it, so only blended results change. Approximations: blends inside one pass read the
++// unquantized result of earlier blends of that pass (the console truncates after each one), the
++// GPU blend rounds where the PE truncates. The quantization dithers per pass: an EFB pass is split
++// where the blended draws switch dither state. A pass ended by a copy of at most 64 pixels (peek probes) hands its flags to the
++// next pass on the same target. Called after every encoded pass; render worker only.
++void after_pass(const wgpu::CommandEncoder& cmd, detail::FramePacket& frame, const detail::RenderPass& pass);
++void initialize();
++void shutdown();
++
++} // namespace aurora::gfx::efb_blend6
+diff --git a/lib/gfx/encoding.cpp b/lib/gfx/encoding.cpp
+--- a/lib/gfx/encoding.cpp
++++ b/lib/gfx/encoding.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include "clear.hpp"
+ #include "depth_peek.hpp"
++#include "efb_blend6.hpp"
+ #include "pipeline_cache.hpp"
+ #include "tex_copy_conv.hpp"
+ #include "tex_palette_conv.hpp"
+@@ -251,6 +252,9 @@
+   auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
+   render_pass(pass, frame, passInfo);
+   pass.End();
++
++  // 0176: RGBA6 blend results stored as 6-bit values before anything reads the target.
++  efb_blend6::after_pass(cmd, frame, passInfo);
+ 
+   if (passInfo.captureDepthSnapshot) {
+     depth_peek::encode_frame_snapshot(cmd, passInfo.copySourceDepthView,
+diff --git a/lib/gfx/frame.cpp b/lib/gfx/frame.cpp
+--- a/lib/gfx/frame.cpp
++++ b/lib/gfx/frame.cpp
+@@ -1,6 +1,7 @@
+ #include "frame.hpp"
+ 
+ #include "depth_peek.hpp"
++#include "efb_blend6.hpp"
+ #include "enhanced.hpp"
+ #include "pipeline_cache.hpp"
+ #include "recording.hpp"
+@@ -404,6 +405,7 @@
+   tex_copy_conv::initialize();
+   tex_palette_conv::initialize();
+   efb_ram::initialize();
++  efb_blend6::initialize();
+ 
+   // For uniform & storage buffer offset alignments
+   g_device.GetLimits(&g_resources.limits);
+@@ -560,6 +562,7 @@
+   tex_copy_conv::shutdown();
+   tex_palette_conv::shutdown();
+   efb_ram::shutdown();
++  efb_blend6::shutdown();
+   texture_replacement::shutdown();
+   gx::shutdown();
+ #ifdef AURORA_ENABLE_RMLUI
+diff --git a/lib/gfx/frame_packet.hpp b/lib/gfx/frame_packet.hpp
+--- a/lib/gfx/frame_packet.hpp
++++ b/lib/gfx/frame_packet.hpp
+@@ -109,6 +109,9 @@
+   bool discardable = false;
+   bool captureDepthSnapshot = false;
+   bool sealed = false;
++  // 0176: blended RGBA6 draws in this pass (bit 0 without dither, bit 1 with): the color target is
++  // quantized after the pass (efb_blend6::resolve)
++  uint8_t efbBlend6 = 0;
+   std::vector<tex_palette_conv::ConvRequest> paletteConvs;
+   std::vector<efb_ram::PassOp> ramPreOps;  // before the pass (EFB copy RAM decodes)
+   std::vector<efb_ram::PassOp> ramPostOps; // after the resolve (EFB copy RAM encode/readback)
+diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -1808,6 +1808,19 @@
+         adjusted.shaderConfig.efbFmt = 0;
+         adjusted.shaderConfig.dither = false;
+         adjusted.shaderConfig.efbBlend = false;
++      } else if ((accuracy & GX_AURORA_ACCURACY_EFB_BLEND) != 0 && adjusted.shaderConfig.efbFmt == 1 &&
++                 adjusted.shaderConfig.efbBlend) {
++        // 0176: a blended RGBA6 draw is built without the in-shader quantization (as
++        // populate_pipeline_config does), so lists recorded without 6-bit blending cover it.
++        const bool replace =
++            (adjusted.blendMode == GX_BM_BLEND && adjusted.blendFacSrc == GX_BL_ONE &&
++             adjusted.blendFacDst == GX_BL_ZERO) ||
++            (adjusted.blendMode == GX_BM_LOGIC && adjusted.blendOp == GX_LO_COPY);
++        if (!replace) {
++          adjusted.shaderConfig.efbFmt = 0;
++          adjusted.shaderConfig.dither = false;
++          adjusted.shaderConfig.efbBlend = false;
++        }
+       }
+       return adjusted;
+     } else {
+diff --git a/lib/gfx/recording.cpp b/lib/gfx/recording.cpp
+--- a/lib/gfx/recording.cpp
++++ b/lib/gfx/recording.cpp
+@@ -1242,6 +1242,22 @@
+   return true;
+ }
+ 
++void note_efb_blend6(bool dither) noexcept {
++  if (!g_recorder.active() || g_recorder.currentRenderPass >= g_recorder.passes().size()) {
++    return;
++  }
++  const uint8_t bit = dither ? 2 : 1;
++  auto* pass = &g_recorder.passes()[g_recorder.currentRenderPass];
++  // The quantization after the pass dithers or not as a whole: when the dither state of the blended
++  // draws changes, the EFB pass is split so each part is quantized with its own.
++  if (pass->efbBlend6 != 0 && (pass->efbBlend6 & bit) == 0 && !g_recorder.inOffscreen && !pass->sealed) {
++    enqueue_pass(current_frame_packet(), g_recorder.currentRenderPass);
++    resume_efb_pass_loading(current_render_passes()[g_recorder.currentRenderPass]);
++    pass = &g_recorder.passes()[g_recorder.currentRenderPass];
++  }
++  pass->efbBlend6 |= bit;
++}
++
+ template <>
+ void push_draw_command(gx::DrawData data) {
+   push_draw_command(make_draw_command<gx::render>(data));
+diff --git a/lib/gfx/recording.hpp b/lib/gfx/recording.hpp
+--- a/lib/gfx/recording.hpp
++++ b/lib/gfx/recording.hpp
+@@ -62,6 +62,9 @@
+ void queue_texture_copy(wgpu::TexelCopyTextureInfo src, wgpu::TexelCopyTextureInfo dst, wgpu::Extent3D size);
+ void begin_offscreen(uint32_t width, uint32_t height);
+ void end_offscreen();
++// 0176: the current pass has a blended RGBA6 draw (GX_AURORA_ACCURACY_EFB_BLEND): its color target
++// is quantized once the pass ends (efb_blend6::resolve).
++void note_efb_blend6(bool dither) noexcept;
+ bool has_normal_attachment() noexcept;
+ RenderTargetLayout get_render_target_layout() noexcept;
+ void clear_caches() noexcept;
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -171,6 +171,7 @@
+   FogRangeLutKey fogRangeKey{};
+   bool hasFogRange = false;
+   GXVtxFmt lastDrawFmt = GX_MAX_VTXFMT;
++  u8 efbBlend6 = 0; // g_drawEfbBlend6 of the cached pipeline
+ };
+ DrawCache sDrawCache;
+ 
+@@ -812,6 +813,7 @@
+     const auto prevSampledTextures = cache.shaderInfo.sampledTextures;
+     const auto prevSampledIndTextures = cache.shaderInfo.sampledIndTextures;
+     populate_pipeline_config(cache.config, prim, fmt);
++    cache.efbBlend6 = g_drawEfbBlend6;
+     audit_pipeline(cache.config, prim);
+     cache.shaderInfo = build_shader_info(cache.config.shaderConfig);
+     cache.pipelineRef = gfx::pipeline_ref(cache.config);
+@@ -880,6 +882,9 @@
+   };
+   if (draw_debug_note(cache.config, prim, vtxCount)) [[unlikely]] {
+     return;
++  }
++  if (cache.efbBlend6 != 0 && (cache.config.colorUpdate || cache.config.alphaUpdate)) {
++    gfx::note_efb_blend6(cache.efbBlend6 == 3);
+   }
+   if (gfx::enhanced::config().enabled) {
+     if (gfx::enhanced::note_draw(cache.config, state.drawClass, vtxCount, drawData)) {
+diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
+--- a/lib/gx/gx.cpp
++++ b/lib/gx/gx.cpp
+@@ -32,6 +32,7 @@
+ 
+ GXState g_gxState{};
+ std::atomic<u32> g_accuracyFlags{GX_AURORA_ACCURACY_INT_TEV | GX_AURORA_ACCURACY_EFB_DEPTH};
++u8 g_drawEfbBlend6 = 0;
+ std::atomic<u32> g_texGenBeyondCount{GX_AURORA_TEXGEN_BEYOND_GENERATE};
+ wgpu::BindGroup g_emptyTextureBindGroup;
+ 
+@@ -431,6 +432,7 @@
+   config.shaderConfig = {};
+   config.shaderConfig.fogType = g_gxState.fog.type;
+   config.shaderConfig.fogRangeEnabled = g_gxState.fog.rangeEnabled;
++  g_drawEfbBlend6 = 0;
+   {
+     const u32 accuracy = g_accuracyFlags.load(std::memory_order_relaxed);
+     config.shaderConfig.intTev = (accuracy & GX_AURORA_ACCURACY_INT_TEV) != 0;
+@@ -439,6 +441,22 @@
+       config.shaderConfig.efbFmt = efbFmt;
+       config.shaderConfig.dither = efbFmt != 0 && g_gxState.dither;
+       config.shaderConfig.efbBlend = efbFmt != 0 && g_gxState.blendMode != GX_BM_NONE;
++      // 0176 (GX_AURORA_ACCURACY_EFB_BLEND): the PE blends the TEV's 8-bit output with the stored
++      // pixel, then dithers and truncates the result to RGBA6. The shader cannot see the
++      // destination, so such a draw outputs its 8-bit color like an RGB8 one (no quantization in
++      // the shader) and its pass's color target is quantized after the pass (gfx::efb_blend6).
++      // A blend that only replaces (src * ONE + dst * ZERO, logic COPY) stores the shader's
++      // already quantized color as is and is left alone.
++      const bool replace = (g_gxState.blendMode == GX_BM_BLEND && g_gxState.blendFacSrc == GX_BL_ONE &&
++                            g_gxState.blendFacDst == GX_BL_ZERO) ||
++                           (g_gxState.blendMode == GX_BM_LOGIC && g_gxState.blendOp == GX_LO_COPY);
++      if ((accuracy & GX_AURORA_ACCURACY_EFB_BLEND) != 0 && efbFmt == 1 && config.shaderConfig.efbBlend &&
++          !replace) {
++        g_drawEfbBlend6 = config.shaderConfig.dither ? 3 : 1;
++        config.shaderConfig.efbFmt = 0;
++        config.shaderConfig.dither = false;
++        config.shaderConfig.efbBlend = false;
++      }
+     }
+   }
+   u8 vtxOffset = 0;
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -456,6 +456,8 @@
+ extern GXState g_gxState;
+ extern std::atomic<u32> g_accuracyFlags; // GX_AURORA_ACCURACY_*
+ extern std::atomic<u32> g_texGenBeyondCount; // GX_AURORA_TEXGEN_BEYOND_*
++// 0176: set by populate_pipeline_config: 1 = blended RGBA6 draw quantized after its pass (efb_blend6), 3 = and it dithers
++extern u8 g_drawEfbBlend6;
+ struct ShaderInfo;
+ 
+ void initialize() noexcept;
+diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
+--- a/lib/webgpu/gpu.cpp
++++ b/lib/webgpu/gpu.cpp
+@@ -959,7 +959,9 @@
+       }
+ #ifndef TRACY_ENABLE
+       // 0028: AURORA_ENH_GPU_TIMING=1 times the enhanced-lighting shadow passes on the GPU.
+-      if (feature == wgpu::FeatureName::TimestampQuery && std::getenv("AURORA_ENH_GPU_TIMING") != nullptr) {
++      // 0176: AURORA_EFB_BLEND6_TIMING=1 times the RGBA6 blend resolves.
++      if (feature == wgpu::FeatureName::TimestampQuery && (std::getenv("AURORA_ENH_GPU_TIMING") != nullptr ||
++                                                           std::getenv("AURORA_EFB_BLEND6_TIMING") != nullptr)) {
+         requiredFeatures.push_back(feature);
+       }
+ #endif

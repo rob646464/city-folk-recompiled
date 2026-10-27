@@ -1,0 +1,250 @@
+0215: GPU keep-warm, texture creation log
+
+A light frame (a menu over a still picture: ~0.5 ms of GPU work) lets the GPU drop its clocks
+within half a second (RTX 3090 Ti, nvidia-smi: P0 1995/10501 MHz core/memory -> P3 ~1000/5001 ->
+P5/P8 345-450/405-810 MHz); the first frames of the full scene after it then took 30-60 ms
+instead of 6 (4K, enhanced lighting) until the clocks came back: a stutter every time the pause
+screen or the Game Boy Horror closed. aurora_set_gpu_keep_warm(units) adds filler work after the
+frame's own commands: a compute pass streaming through a 64 MiB buffer (one unit = one read pass,
+about 0.06 ms at full clocks; at most 400). ALU-only filler kept the core busy, but the driver
+still lowered the memory clock (P3) and the scene is bandwidth-bound at 4K. The application sizes
+it by feedback from the frame's GPU time (LM: src/recomp/pacing.cpp, docs/INTERPOLATION.md
+"Pass 5").
+
+Debug aids for hitch hunting (off unless set): AURORA_TEX_LOG=1 logs every texture Aurora's
+texture/render-texture/copy/pass-snapshot/offscreen paths create; AURORA_ENH_TEX_LOG=1 every
+enhanced-lighting render target (re)creation.
+
+diff --git a/include/aurora/present_timing.h b/include/aurora/present_timing.h
+--- a/include/aurora/present_timing.h
++++ b/include/aurora/present_timing.h
+@@ -24,6 +24,9 @@
+ size_t aurora_present_timings(AuroraPresentTiming* out, size_t max);
+ // Blocks until the GPU finished every frame up to `frame` or `timeoutNs` passed; true if finished.
+ bool aurora_wait_frame_done(uint64_t frame, int64_t timeoutNs);
++// 0215: filler GPU work per frame (0 = none, at most 400; one unit is one read pass over a 64 MiB
++// buffer, about 0.06 ms on a fast GPU at full clocks), so a light frame does not let the GPU clock down.
++void aurora_set_gpu_keep_warm(uint32_t units);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/lib/aurora.cpp b/lib/aurora.cpp
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -2,6 +2,7 @@
+ #include <aurora/time.hpp>
+ #include <aurora/present_timing.h>
+ 
++#include <algorithm>
+ #include <atomic>
+ #include <chrono>
+ #include <condition_variable>
+@@ -323,6 +324,80 @@
+   g_cv.notify_all();
+ }
+ 
++// 0215: GPU keep-warm. A light frame (a menu over a still picture) lets the GPU drop its clocks
++// within half a second (RTX 3090 Ti, measured with nvidia-smi: P0 1995/10501 MHz core/memory ->
++// P3 ~1000/5001 -> P5/P8 345-450/405-810); the first frames of the full scene after it then took
++// 30-60 ms instead of 6 (4K, enhanced lighting) until the clocks came back. The application asks
++// for `units` of filler work per frame, sized by its own feedback so the GPU stays about as busy
++// as in play (src/recomp/pacing.cpp in LM). The filler streams through a 64 MiB buffer (one unit =
++// one read pass): ALU-only filler kept the core busy but the driver still lowered the memory
++// clock (P3), and the scene is bandwidth-bound at 4K.
++std::atomic<uint32_t> g_warmUnits{0};
++struct Warm {
++  wgpu::ComputePipeline pipeline;
++  wgpu::Buffer data, params;
++  wgpu::BindGroup bindGroup;
++  bool failed = false;
++} g_warm;
++constexpr uint32_t WarmElems = 4u << 20, WarmGroupSize = 256; // 4 Mi vec4f = 64 MiB
++
++void encode_keep_warm(wgpu::CommandEncoder& encoder) {
++  const uint32_t units = std::min(g_warmUnits.load(std::memory_order_relaxed), 400u);
++  if (units == 0 || g_warm.failed) {
++    return;
++  }
++  if (!g_warm.pipeline) {
++    static constexpr char Source[] = R"(
++struct Params { iters: u32, mask: u32, p1: u32, p2: u32 };
++@group(0) @binding(0) var<storage, read_write> data: array<vec4f>;
++@group(0) @binding(1) var<uniform> params: Params;
++@compute @workgroup_size(256)
++fn cs_main(@builtin(global_invocation_id) id: vec3u) {
++  var v = vec4f(0.0);
++  for (var i = 0u; i < params.iters; i++) {
++    v = v * 0.5 + data[(id.x + i * 1048573u) & params.mask] * 0.25;
++  }
++  data[id.x] = v;
++}
++)";
++    const wgpu::ShaderSourceWGSL wgsl{wgpu::ShaderSourceWGSL::Init{.code = Source}};
++    const wgpu::ShaderModuleDescriptor md{.nextInChain = &wgsl, .label = "GPU keep-warm"};
++    const auto module = g_device.CreateShaderModule(&md);
++    const wgpu::ComputePipelineDescriptor pd{.label = "GPU keep-warm",
++                                             .compute = wgpu::ComputeState{.module = module, .entryPoint = "cs_main"}};
++    g_warm.pipeline = g_device.CreateComputePipeline(&pd);
++    const wgpu::BufferDescriptor bd{.label = "GPU keep-warm data",
++                                    .usage = wgpu::BufferUsage::Storage,
++                                    .size = uint64_t(WarmElems) * 16};
++    g_warm.data = g_device.CreateBuffer(&bd);
++    const wgpu::BufferDescriptor pb{.label = "GPU keep-warm params",
++                                    .usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst,
++                                    .size = 16};
++    g_warm.params = g_device.CreateBuffer(&pb);
++    if (!g_warm.pipeline || !g_warm.data || !g_warm.params) {
++      g_warm.failed = true;
++      return;
++    }
++    const std::array entries{
++        wgpu::BindGroupEntry{.binding = 0, .buffer = g_warm.data, .size = bd.size},
++        wgpu::BindGroupEntry{.binding = 1, .buffer = g_warm.params, .size = 16},
++    };
++    const wgpu::BindGroupDescriptor bgd{.label = "GPU keep-warm",
++                                        .layout = g_warm.pipeline.GetBindGroupLayout(0),
++                                        .entryCount = entries.size(),
++                                        .entries = entries.data()};
++    g_warm.bindGroup = g_device.CreateBindGroup(&bgd);
++  }
++  const uint32_t params[4] = {units, WarmElems - 1, 0, 0};
++  g_queue.WriteBuffer(g_warm.params, 0, params, sizeof(params));
++  const wgpu::ComputePassDescriptor cpd{.label = "GPU keep-warm"};
++  auto pass = encoder.BeginComputePass(&cpd);
++  pass.SetPipeline(g_warm.pipeline);
++  pass.SetBindGroup(0, g_warm.bindGroup);
++  pass.DispatchWorkgroups(WarmElems / WarmGroupSize);
++  pass.End();
++}
++
+ void shutdown() {
+   {
+     std::lock_guard lk(g_mutex);
+@@ -399,6 +474,7 @@
+     // every readback of the frame by that long; the present blit goes in a second command buffer.
+     // AURORA_LATE_SUBMIT=1: the previous single submission after the acquire (A/B).
+     static const bool sLateSubmit = std::getenv("AURORA_LATE_SUBMIT") != nullptr;
++    present_timing::encode_keep_warm(encoder);  // 0215: after the frame's own work
+     if (!sLateSubmit) {
+       ZoneScopedN("Frame Submit");
+       const wgpu::CommandBufferDescriptor frameBufDescriptor{.label = "Frame command buffer"};
+@@ -588,6 +664,7 @@
+ bool aurora_begin_frame() { return aurora::begin_frame(); }
+ #ifdef AURORA_ENABLE_GX
+ void aurora_present_timing_enable(bool enable) { aurora::present_timing::g_enabled.store(enable, std::memory_order_release); }
++void aurora_set_gpu_keep_warm(uint32_t units) { aurora::present_timing::g_warmUnits.store(units, std::memory_order_relaxed); }
+ uint64_t aurora_frame_counter() { return aurora::present_timing::g_counter.load(std::memory_order_acquire); }
+ size_t aurora_present_timings(AuroraPresentTiming* out, size_t max) {
+   std::lock_guard lk(aurora::present_timing::g_mutex);
+diff --git a/lib/gfx/texture.cpp b/lib/gfx/texture.cpp
+--- a/lib/gfx/texture.cpp
++++ b/lib/gfx/texture.cpp
+@@ -23,6 +23,11 @@
+ 
+ namespace {
+ constexpr Module Log{"aurora::gfx"};
++// Debug aid AURORA_TEX_LOG=1: every texture Aurora creates while running (hitch hunting).
++bool tex_log() noexcept {
++  static const bool on = std::getenv("AURORA_TEX_LOG") != nullptr;
++  return on;
++}
+ 
+ wgpu::Extent3D physical_size(wgpu::Extent3D size, TextureFormatInfo info) {
+   const uint32_t width = ((size.width + info.blockWidth - 1) / info.blockWidth) * info.blockWidth;
+@@ -174,6 +179,9 @@
+       .sampleCount = 1,
+   };
+   auto texture = g_device.CreateTexture(&textureDescriptor);
++  if (tex_log()) {
++    Log.info("texture '{}' {}x{} created", label, size.width, size.height);
++  }
+   const auto viewLabel = fmt::format("{} view", label);
+   wgpu::TextureViewDescriptor textureViewDescriptor{
+       .label = viewLabel.c_str(),
+@@ -209,6 +217,9 @@
+       .sampleCount = 1,
+   };
+   auto texture = g_device.CreateTexture(&textureDescriptor);
++  if (tex_log()) {
++    Log.info("texture '{}' {}x{} created", label, size.width, size.height);
++  }
+ 
+   // Create texture view for color attachments
+   const auto viewLabel = fmt::format("{} view", label);
+@@ -242,6 +253,9 @@
+       .sampleCount = 1,
+   };
+   auto texture = g_device.CreateTexture(&textureDescriptor);
++  if (tex_log()) {
++    Log.info("texture '{}' {}x{} created", label, size.width, size.height);
++  }
+ 
+   // Create texture view for color attachments
+   const auto viewLabel = fmt::format("{} view", label);
+diff --git a/lib/gfx/recording.cpp b/lib/gfx/recording.cpp
+--- a/lib/gfx/recording.cpp
++++ b/lib/gfx/recording.cpp
+@@ -180,6 +180,9 @@
+         .sampleCount = 1,
+     };
+     auto texture = webgpu::g_device.CreateTexture(&desc);
++    if (std::getenv("AURORA_TEX_LOG") != nullptr) {
++      Log.info("texture '{}' {}x{} created", desc.label.data ? std::string_view(desc.label.data, desc.label.length == SIZE_MAX ? std::strlen(desc.label.data) : desc.label.length) : std::string_view(), desc.size.width, desc.size.height);
++    }
+     auto view = texture.CreateView();
+     entry.color = webgpu::TextureWithSampler{
+         .texture = std::move(texture),
+@@ -199,6 +202,9 @@
+         .sampleCount = 1,
+     };
+     auto texture = webgpu::g_device.CreateTexture(&desc);
++    if (std::getenv("AURORA_TEX_LOG") != nullptr) {
++      Log.info("texture '{}' {}x{} created", desc.label.data ? std::string_view(desc.label.data, desc.label.length == SIZE_MAX ? std::strlen(desc.label.data) : desc.label.length) : std::string_view(), desc.size.width, desc.size.height);
++    }
+     auto view = texture.CreateView();
+     entry.depth = webgpu::TextureWithSampler{
+         .texture = std::move(texture),
+@@ -218,6 +224,9 @@
+         .sampleCount = 1,
+     };
+     auto texture = webgpu::g_device.CreateTexture(&desc);
++    if (std::getenv("AURORA_TEX_LOG") != nullptr) {
++      Log.info("texture '{}' {}x{} created", desc.label.data ? std::string_view(desc.label.data, desc.label.length == SIZE_MAX ? std::strlen(desc.label.data) : desc.label.length) : std::string_view(), desc.size.width, desc.size.height);
++    }
+     auto view = texture.CreateView();
+     entry.normal = webgpu::TextureWithSampler{
+         .texture = std::move(texture),
+@@ -390,6 +399,9 @@
+       .sampleCount = 1,
+   };
+   auto colorTexture = webgpu::g_device.CreateTexture(&colorDesc);
++  if (std::getenv("AURORA_TEX_LOG") != nullptr) {
++    Log.info("texture '{}' {}x{} created", colorDesc.label.data ? std::string_view(colorDesc.label.data, colorDesc.label.length == SIZE_MAX ? std::strlen(colorDesc.label.data) : colorDesc.label.length) : std::string_view(), colorDesc.size.width, colorDesc.size.height);
++  }
+   auto colorView = colorTexture.CreateView();
+   webgpu::TextureWithSampler color{
+       .texture = std::move(colorTexture),
+@@ -408,6 +420,9 @@
+       .sampleCount = 1,
+   };
+   auto depthTexture = webgpu::g_device.CreateTexture(&depthDesc);
++  if (std::getenv("AURORA_TEX_LOG") != nullptr) {
++    Log.info("texture '{}' {}x{} created", depthDesc.label.data ? std::string_view(depthDesc.label.data, depthDesc.label.length == SIZE_MAX ? std::strlen(depthDesc.label.data) : depthDesc.label.length) : std::string_view(), depthDesc.size.width, depthDesc.size.height);
++  }
+   auto depthView = depthTexture.CreateView();
+   webgpu::TextureWithSampler depth{
+       .texture = std::move(depthTexture),
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -1295,6 +1295,10 @@
+       .mipLevelCount = 1,
+       .sampleCount = 1,
+   };
++  static const bool sLog = std::getenv("AURORA_ENH_TEX_LOG") != nullptr; // debug aid: every (re)creation
++  if (sLog) {
++    Log.info("texture '{}' {}x{} (was {}x{}) scene {}", label, w, h, t.width, t.height, g_sceneEnds);
++  }
+   t.texture = webgpu::g_device.CreateTexture(&desc);
+   t.view = t.texture.CreateView();
+   t.width = w;

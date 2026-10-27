@@ -1,0 +1,573 @@
+0226: warm starts from the shader cache (issue #6: "Preparing shaders" on every start)
+
+- Statistics for the startup hold (aurora_pipeline_cache_get_stats): Dawn blob cache hits, misses,
+  stores, time in lookups/stores, entries at open, session count, whether the file is unusable;
+  GX pipeline creation time by stage (WGSL generation, shader module, render pipeline); the
+  rebuild count and whether the enhanced-lighting prewarm still runs. The application uses them
+  to start the game once a sample of the startup batch loaded without a single compile, and to
+  say whether shaders are loaded or compiled.
+- Age-based prune of dawn_cache.db: entries are dropped after 5 launches unused (session counter
+  table aurora_session, column last_used added to existing caches), not at the first launch that
+  did not need them. Switching graphics settings deleted every blob of the other settings, and
+  blobs first read after the prune (late pipelines) were deleted at every launch.
+- PRAGMA quick_check on dawn_cache.db / pipeline_cache.db only after an unclean exit (crash
+  journal): it read the whole 60-250 MB file before the first pipeline, 2.2 s for 244 MB from an
+  NVMe SSD after a reboot. Instead the file is read sequentially on a background thread into the
+  OS file cache (237 ms), so the random blob lookups do not each wait for the disk.
+
+diff --git a/include/aurora/pipeline_cache.h b/include/aurora/pipeline_cache.h
+index 4f260ac..401d962 100644
+--- a/include/aurora/pipeline_cache.h
++++ b/include/aurora/pipeline_cache.h
+@@ -33,6 +33,28 @@ typedef struct AuroraPipelineStats {
+   uint32_t droppedDraws;    // draws skipped: pipeline creation failed, or not ready with waiting disabled
+   uint32_t rebuildPending;  // 0217: pipelines the last rebuilds of the known set (startup, settings
+                             // or render target changes) queued that are not built yet
++  // 0226: the Dawn blob cache (dawn_cache.db) this session: entries read, lookups that missed
++  // (Dawn compiled), entries written, time spent in lookups / stores (lock waits included), and
++  // whether the database could not be used at all.
++  uint32_t blobHits;
++  uint32_t blobMisses;
++  uint32_t blobStores;
++  uint32_t blobCacheBroken;
++  uint64_t blobLoadNs;
++  uint64_t blobStoreNs;
++  // 0226: GX pipeline creation time summed over all threads: WGSL generation, shader module
++  // creation, render pipeline creation.
++  uint64_t wgslNs;
++  uint64_t moduleNs;
++  uint64_t pipelineNs;
++  // 0226: rebuilds of the known set so far (each queues a batch counted in rebuildPending), and
++  // whether the enhanced-lighting pass prewarm of the last one is still running.
++  uint32_t rebuildCount;
++  uint32_t prewarmPending;
++  // 0226: entries dawn_cache.db had when this session opened it, and its session count (1 = the
++  // first launch with this cache file).
++  uint32_t blobEntriesAtOpen;
++  uint32_t blobSession;
+ } AuroraPipelineStats;
+ 
+ /** Adds the pipeline configs in a precache list file (format below) to the known set; they
+diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
+index 39c804a..07b1793 100644
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -87,14 +87,22 @@ static std::optional<uint32_t> g_rebuildAccuracy; // GX accuracy flags the known
+ // while they compile: aurora_pipeline_cache_get_stats rebuildPending).
+ static std::optional<uint32_t> g_rebuildEnhBits;
+ static std::atomic<uint32_t> g_rebuildPending{0};
++static std::atomic<uint32_t> g_rebuildCount{0};    // 0226: rebuilds so far (a new batch for the hold)
++static std::atomic<bool> g_prewarmPending{false};  // 0226: enhanced::start_prewarm still running
+ static thread_local bool g_inRebuild = false; // set while rebuild_pipeline_cache queues (its thread)
+ 
+-static uint64_t now_ns() {
++uint64_t now_ns() noexcept {
+   return static_cast<uint64_t>(
+       std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+           .count());
+ }
+ 
++// 0226: GX pipeline creation time by stage (aurora_pipeline_cache_get_stats).
++static std::atomic<uint64_t> g_createNs[static_cast<size_t>(CreateStage::Count)]{};
++void add_create_time(CreateStage stage, uint64_t ns) noexcept {
++  g_createNs[static_cast<size_t>(stage)].fetch_add(ns, std::memory_order_relaxed);
++}
++
+ // 2: every row is validated on load (stored hash = xxh3 of the config bytes seeded by type,
+ // i.e. a per-entry checksum, plus field ranges) and pipeline_bad records configs whose creation
+ // failed or crashed (patch 0017). Older caches are dropped.
+@@ -1329,9 +1337,10 @@ static bool open_pipeline_cache_db_once() {
+ 
+   // The file is small (a few MB at most): check every page so a damaged file is replaced now
+   // rather than failing half way through loading.
+-  bool integrityOk = false;
++  bool integrityOk = !webgpu::g_cacheVerifyOnOpen; // 0226: only after an unclean exit
+   std::string integrityResult;
+-  ret = sqlite::exec(g_pipelineCacheDb, "PRAGMA quick_check;", [&integrityOk, &integrityResult](int argc, char** argv, char**) {
++  ret = !webgpu::g_cacheVerifyOnOpen ? SQLITE_OK
++                                     : sqlite::exec(g_pipelineCacheDb, "PRAGMA quick_check;", [&integrityOk, &integrityResult](int argc, char** argv, char**) {
+     if (argc > 0 && argv[0] != nullptr && std::strcmp(argv[0], "ok") == 0) {
+       integrityOk = true;
+     } else if (argc > 0 && argv[0] != nullptr && integrityResult.empty()) {
+@@ -2022,9 +2031,15 @@ void rebuild_pipeline_cache() {
+   // 0223: enhanced lighting's own passes (not GX pipelines) are built alongside; the startup hold
+   // (rebuildPending) waits for them too.
+   ++g_rebuildPending;
+-  if (!enhanced::start_prewarm([] { --g_rebuildPending; })) {
++  g_prewarmPending = true;
++  if (!enhanced::start_prewarm([] {
++        g_prewarmPending = false;
++        --g_rebuildPending;
++      })) {
++    g_prewarmPending = false;
+     --g_rebuildPending;
+   }
++  ++g_rebuildCount;
+   Log.info("Pipeline precache: {} known configs -> {} configs for accuracy {:#x} enhanced {:#x}, {} new pipelines queued",
+            known.size(), seen.size(), accuracy, enhBits, g_precacheTotal.load() - before);
+   if (g_gpuCachePruneArmed) {
+@@ -2360,6 +2375,8 @@ void check_crash_journal_once() {
+   }
+ 
+   const uint32_t prevPhase = data->phase.load();
++  // 0226: verify the cache databases on open only after a session that did not exit cleanly.
++  webgpu::g_cacheVerifyOnOpen = prevPhase != PhaseClean;
+   uint32_t suspects = 0;
+   for (auto& slot : data->slots) {
+     if (prevPhase != PhaseClean && slot.active.load() != 0) {
+@@ -2704,6 +2721,21 @@ void aurora_pipeline_cache_get_stats(AuroraPipelineStats* out) {
+   out->seeded = g_seeded.load(std::memory_order_relaxed);
+   out->droppedDraws = g_droppedDraws.load(std::memory_order_relaxed);
+   out->rebuildPending = g_rebuildPending.load(std::memory_order_relaxed);
++  // 0226
++  const auto cache = aurora::webgpu::cache_stats();
++  out->blobHits = cache.hits;
++  out->blobMisses = cache.misses;
++  out->blobStores = cache.stores;
++  out->blobLoadNs = cache.loadNs;
++  out->blobStoreNs = cache.storeNs;
++  out->blobCacheBroken = cache.broken ? 1 : 0;
++  out->blobEntriesAtOpen = cache.entriesAtOpen;
++  out->blobSession = cache.session;
++  out->rebuildCount = aurora::gfx::g_rebuildCount.load(std::memory_order_relaxed);
++  out->prewarmPending = aurora::gfx::g_prewarmPending.load(std::memory_order_relaxed) ? 1 : 0;
++  out->wgslNs = aurora::gfx::g_createNs[static_cast<size_t>(aurora::gfx::CreateStage::Wgsl)].load(std::memory_order_relaxed);
++  out->moduleNs = aurora::gfx::g_createNs[static_cast<size_t>(aurora::gfx::CreateStage::Module)].load(std::memory_order_relaxed);
++  out->pipelineNs = aurora::gfx::g_createNs[static_cast<size_t>(aurora::gfx::CreateStage::Pipeline)].load(std::memory_order_relaxed);
+ }
+ 
+ void aurora_pipeline_cache_set_log(bool enabled) { g_pipelineLog = enabled; }
+diff --git a/lib/gfx/pipeline_cache.hpp b/lib/gfx/pipeline_cache.hpp
+index 488a627..e9fb9dc 100644
+--- a/lib/gfx/pipeline_cache.hpp
++++ b/lib/gfx/pipeline_cache.hpp
+@@ -50,4 +50,11 @@ bool try_get_pipeline(PipelineRef ref, CompiledPipeline& pipeline);
+ void push_shader_error_scope();
+ bool pop_shader_error_scope(const char* what);
+ 
++// 0226: where GX pipeline creation spends its time (summed over all threads; startup diagnostics):
++// WGSL generation, shader module creation (Tint parse/validate), render pipeline creation (Dawn:
++// cache lookups, shader compile on a miss, D3D12/Vulkan pipeline creation).
++enum class CreateStage : uint8_t { Wgsl, Module, Pipeline, Count };
++void add_create_time(CreateStage stage, uint64_t ns) noexcept;
++uint64_t now_ns() noexcept;
++
+ } // namespace aurora::gfx
+diff --git a/lib/gx/pipeline.cpp b/lib/gx/pipeline.cpp
+index c03edfc..6a762a4 100644
+--- a/lib/gx/pipeline.cpp
++++ b/lib/gx/pipeline.cpp
+@@ -24,7 +24,10 @@ gfx::CompiledPipeline create_pipeline(const PipelineConfig& config, const gfx::R
+       return wgpu::RenderPipeline{};
+     }
+     const auto label = fmt::format("GX Pipeline {:x} {}", hash, passName);
+-    return build_pipeline(config, layout, options, {}, shader, label.c_str());
++    const uint64_t t0 = gfx::now_ns(); // 0226
++    auto pipeline = build_pipeline(config, layout, options, {}, shader, label.c_str());
++    gfx::add_create_time(gfx::CreateStage::Pipeline, gfx::now_ns() - t0);
++    return pipeline;
+   };
+ 
+   PipelineOptions options{
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index 0b49e05..6a66fb5 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1,5 +1,6 @@
+ #include "../gfx/beam_profile.hpp"
+ #include "../gfx/hash.hpp"
++#include "../gfx/pipeline_cache.hpp"
+ #include "../gfx/types.hpp"
+ 
+ #include "../internal.hpp"
+@@ -3158,7 +3159,10 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config, const gfx::RenderTar
+       normalAttachment = i;
+     }
+   }
++  const uint64_t t0 = gfx::now_ns(); // 0226
+   const auto shaderSource = build_shader_source(config, dstAlphaMode, normalAttachment);
++  const uint64_t t1 = gfx::now_ns();
++  gfx::add_create_time(gfx::CreateStage::Wgsl, t1 - t0);
+   const auto hash = xxh3_hash(dstAlphaMode, xxh3_hash(normalAttachment, xxh3_hash(config)));
+   wgpu::ShaderSourceWGSL wgslDescriptor{};
+   wgslDescriptor.code = shaderSource.c_str();
+@@ -3167,6 +3171,8 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config, const gfx::RenderTar
+       .nextInChain = &wgslDescriptor,
+       .label = label.c_str(),
+   };
+-  return webgpu::g_device.CreateShaderModule(&shaderDescriptor);
++  auto module = webgpu::g_device.CreateShaderModule(&shaderDescriptor);
++  gfx::add_create_time(gfx::CreateStage::Module, gfx::now_ns() - t1);
++  return module;
+ }
+ } // namespace aurora::gx
+diff --git a/lib/webgpu/gpu.hpp b/lib/webgpu/gpu.hpp
+index 073eada..875e8c5 100644
+--- a/lib/webgpu/gpu.hpp
++++ b/lib/webgpu/gpu.hpp
+@@ -84,10 +84,27 @@ size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valu
+ void store_to_cache(void const* key, size_t keySize, void const* value, size_t valueSize, void* userdata);
+ void cache_prune();
+ void cache_shutdown();
++// 0226: what the Dawn blob cache did this session (startup diagnostics: loaded vs compiled).
++struct CacheStats {
++  uint32_t hits;      // entries Dawn read (compiled shaders, pipeline state blobs)
++  uint32_t misses;    // lookups that found nothing (Dawn then compiles)
++  uint32_t stores;    // entries Dawn wrote (something was compiled)
++  uint64_t loadNs;    // time in lookups, lock waits included
++  uint64_t storeNs;   // time in stores, lock waits included
++  bool broken;        // the database could not be opened: no cache this session
++  uint32_t entriesAtOpen;  // entries the database had when this session opened it
++  uint32_t session;        // launches counted in this database (1 = first)
++};
++CacheStats cache_stats();
+ // Deletes dawn_cache.db (crash recovery). Only valid before the cache was first opened.
+ void cache_delete_files();
+ // Called once before the Dawn cache is first opened (the pipeline crash journal check).
+ extern void (*g_cacheOpenHook)();
++// 0226: run PRAGMA quick_check on the cache databases when they are opened. It reads the whole
++// file (dawn_cache.db: 60-250 MB; 2.2 s for 244 MB from an NVMe SSD after a reboot, far more from
++// a hard disk), so it only runs when the previous session did not exit cleanly (crash journal);
++// damaged entries are still caught by the per-entry checksums and SQLITE_CORRUPT handling.
++extern bool g_cacheVerifyOnOpen;
+ 
+ // 0223: AURORA_CREATE_LOG=1 (debug aid): every synchronous pipeline / large texture creation that
+ // took over 0.5 ms, with what it was and the thread (first-use hitches, e.g. the first foyer frame).
+diff --git a/lib/webgpu/gpu_cache.cpp b/lib/webgpu/gpu_cache.cpp
+index 52e0c4b..01524a5 100644
+--- a/lib/webgpu/gpu_cache.cpp
++++ b/lib/webgpu/gpu_cache.cpp
+@@ -1,12 +1,18 @@
++#include <atomic>
++#include <chrono>
++#include <cstdlib>
+ #include <cstring>
+ #include <cstdint>
+ #include <mutex>
+ #include <optional>
+ #include <string>
+ #include <filesystem>
++#include <fstream>
++#include <thread>
+ #include <vector>
+ 
+ #include "../internal.hpp"
++#include "gpu.hpp"
+ #include "../io.hpp"
+ #include "../sqlite_utils.hpp"
+ 
+@@ -31,16 +37,53 @@ static std::vector<XXH128_hash_t> cache_keys_used;
+ static std::vector<uint8_t> compress_buffer;
+ #endif
+ 
++// 0226: this launch's session number (aurora_session table), entries at open, statistics (cache_stats).
++static int64_t cache_session = 0;
++static uint64_t entries_at_open = 0;
++
++static std::atomic<uint32_t> stat_hits{0}, stat_misses{0}, stat_stores{0};
++static std::atomic<uint64_t> stat_load_ns{0}, stat_store_ns{0};
++static int64_t stat_now_ns() {
++  return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
++      .count();
++}
++struct StatTimer {
++  std::atomic<uint64_t>& total;
++  int64_t t0 = stat_now_ns();
++  ~StatTimer() { total.fetch_add(static_cast<uint64_t>(stat_now_ns() - t0), std::memory_order_relaxed); }
++};
++
++CacheStats cache_stats() {
++  return CacheStats{
++      .hits = stat_hits.load(std::memory_order_relaxed),
++      .misses = stat_misses.load(std::memory_order_relaxed),
++      .stores = stat_stores.load(std::memory_order_relaxed),
++      .loadNs = stat_load_ns.load(std::memory_order_relaxed),
++      .storeNs = stat_store_ns.load(std::memory_order_relaxed),
++      .broken = cache_broken,
++      .entriesAtOpen = static_cast<uint32_t>(entries_at_open),
++      .session = static_cast<uint32_t>(cache_session),
++  };
++}
++
+ // 3: per-entry checksum (XXH3 of the uncompressed value), verified on every load (patch 0017).
+ constexpr int CACHE_SCHEMA = 3;
+ // % of rows pruned to trigger a full VACUUM
+ constexpr uint64_t VacuumPrunePercentThreshold = 25;
++// 0226: an entry is pruned once it went unused for this many sessions (launches) in a row, not at
++// the first session that did not need it: switching graphics settings (Enhanced lighting on/off,
++// MSAA, accuracy toggles) used to delete every blob of the other settings at once, so switching
++// back compiled all of them again; and blobs first read after the prune ran (pipelines created
++// later in a session) were deleted at every launch and compiled again at the next.
++constexpr int64_t PruneUnusedSessions = 5;
++static size_t keys_marked_used = 0;  // cache_keys_used[0, n) already written to last_used
+ 
+ static std::filesystem::path cache_path() {
+   return io::fs_path_from_string(g_config.cachePath) / "dawn_cache.db";
+ }
+ 
+ void (*g_cacheOpenHook)() = nullptr;
++bool g_cacheVerifyOnOpen = true;
+ 
+ // Value of the last entry verified by a size query (Dawn asks for the size, then the data).
+ static XXH128_hash_t verified_key{};
+@@ -124,6 +167,24 @@ static bool ensure_schema_up_to_date() {
+   }
+ 
+   if (match) {
++    // 0226: caches written before the session counter get the last_used column (rows start at 0:
++    // the next prune keeps whatever that session reads and ages out the rest).
++    bool hasLastUsed = false;
++    ret = sqlite::exec(db, "PRAGMA table_info(cache);", [&hasLastUsed](int argc, char** argv, char**) {
++      if (argc > 1 && argv[1] != nullptr && std::strcmp(argv[1], "last_used") == 0) {
++        hasLastUsed = true;
++      }
++    });
++    if (ret != SQLITE_OK) {
++      Log.error("Failed to read the cache table layout: {}", sqlite3_errmsg(db));
++      return false;
++    }
++    if (!hasLastUsed &&
++        sqlite::exec(db, "ALTER TABLE cache ADD COLUMN last_used INTEGER NOT NULL DEFAULT 0;") != SQLITE_OK) {
++      Log.error("Failed to add the last_used column: {}", sqlite3_errmsg(db));
++      return false;
++    }
++    tx.commit();
+     return true;
+   }
+ 
+@@ -134,7 +195,8 @@ CREATE TABLE cache (
+   value BLOB NOT NULL,
+   size INTEGER NOT NULL,
+   compressed INTEGER NOT NULL,
+-  checksum INTEGER NOT NULL
++  checksum INTEGER NOT NULL,
++  last_used INTEGER NOT NULL DEFAULT 0
+ );
+ DELETE FROM aurora_schema;
+ INSERT INTO aurora_schema VALUES ({});)",
+@@ -169,9 +231,10 @@ static bool cache_init_core() {
+ 
+   // Structural check of every page (a truncated or overwritten file fails here instead of
+   // somewhere in the middle of loading; the per-entry checksums catch damaged values).
+-  bool integrityOk = false;
++  bool integrityOk = !g_cacheVerifyOnOpen; // 0226: only after an unclean exit
+   std::string integrityResult;
+-  ret = sqlite::exec(db, "PRAGMA quick_check;", [&integrityOk, &integrityResult](int argc, char** argv, char**) {
++  ret = !g_cacheVerifyOnOpen ? SQLITE_OK
++                             : sqlite::exec(db, "PRAGMA quick_check;", [&integrityOk, &integrityResult](int argc, char** argv, char**) {
+     if (argc > 0 && argv[0] != nullptr && std::strcmp(argv[0], "ok") == 0) {
+       integrityOk = true;
+     } else if (argc > 0 && argv[0] != nullptr && integrityResult.empty()) {
+@@ -189,6 +252,35 @@ static bool cache_init_core() {
+     return false;
+   }
+ 
++  // 0226: count launches (sessions) for the age-based prune.
++  {
++    sqlite::Transaction tx(db, Log, true);
++    if (!tx) {
++      return false;
++    }
++    int64_t last = 0;
++    ret = sqlite::exec(db,
++                       "CREATE TABLE IF NOT EXISTS aurora_session(value INTEGER);"
++                       "SELECT value FROM aurora_session LIMIT 1;",
++                       [&last](int argc, char** argv, char**) {
++                         if (argc > 0 && argv[0] != nullptr) {
++                           last = std::strtoll(argv[0], nullptr, 10);
++                         }
++                       });
++    if (ret != SQLITE_OK) {
++      Log.error("Failed to read the cache session counter: {}", sqlite3_errmsg(db));
++      return false;
++    }
++    cache_session = last + 1;
++    const auto cmd = fmt::format("DELETE FROM aurora_session; INSERT INTO aurora_session VALUES ({});", cache_session);
++    if (sqlite::exec(db, cmd.c_str()) != SQLITE_OK) {
++      Log.error("Failed to write the cache session counter: {}", sqlite3_errmsg(db));
++      return false;
++    }
++    tx.commit();
++  }
++  keys_marked_used = 0;
++
+   ret = sqlite3_prepare_v3(db, "SELECT value, size, compressed, checksum FROM cache WHERE key = ?", -1,
+                            SQLITE_PREPARE_PERSISTENT, &load_stmt, nullptr);
+   if (ret != SQLITE_OK) {
+@@ -196,7 +288,9 @@ static bool cache_init_core() {
+     return false;
+   }
+ 
+-  ret = sqlite3_prepare_v3(db, "REPLACE INTO cache (key, value, size, compressed, checksum) VALUES (?, ?, ?, ?, ?)",
++  ret = sqlite3_prepare_v3(db,
++                           "REPLACE INTO cache (key, value, size, compressed, checksum, last_used) "
++                           "VALUES (?, ?, ?, ?, ?, ?)",
+                            -1, SQLITE_PREPARE_PERSISTENT, &store_stmt, nullptr);
+   if (ret != SQLITE_OK) {
+     Log.error("Failed to prepare statement: {}", sqlite3_errmsg(db));
+@@ -267,6 +361,23 @@ static bool fill_used_key_table(const std::vector<XXH128_hash_t>& usedKeys) {
+   return true;
+ }
+ 
++// 0226: the first start after a reboot reads the blobs from disk in random order, one at a time
++// (cache_mutex): 244 MB took 6.5 s from an NVMe SSD with Enhanced lighting. A sequential read of
++// the whole file on a background thread puts it in the OS file cache first (0.2-0.5 s from an SSD,
++// a few seconds from a hard disk); the lookups then find it there.
++static void prefetch_file(const std::filesystem::path& path) {
++  std::thread([path] {
++    const int64_t t0 = stat_now_ns();
++    std::ifstream in(path, std::ios::binary);
++    std::vector<char> buf(size_t{4} << 20);
++    uint64_t total = 0;
++    while (in.read(buf.data(), static_cast<std::streamsize>(buf.size())) || in.gcount() > 0) {
++      total += static_cast<uint64_t>(in.gcount());
++    }
++    Log.info("Dawn shader cache prefetched ({} MB in {:.0f} ms)", total >> 20, (stat_now_ns() - t0) / 1e6);
++  }).detach();
++}
++
+ static bool cache_init() {
+   if (cache_broken) {
+     return false;
+@@ -301,7 +412,12 @@ static bool cache_init() {
+     }
+   }
+ 
+-  Log.debug("SQLite cache init succeeded");
++  entries_at_open = select_uint64("SELECT COUNT(*) FROM cache").value_or(0);
++  Log.info("Dawn shader cache {} opened (session {}, {} entries)", io::fs_path_to_string(cache_path()), cache_session,
++           entries_at_open);
++  if (entries_at_open > 0 && !g_cacheVerifyOnOpen) {
++    prefetch_file(cache_path());
++  }
+ 
+   return true;
+ }
+@@ -367,6 +483,7 @@ static bool read_verified_entry(const XXH128_hash_t& keyHash, std::vector<uint8_
+ }
+ 
+ size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valueSize, void*) {
++  const StatTimer timer{stat_load_ns};
+   std::lock_guard lock(cache_mutex);
+ 
+   if (!cache_init()) {
+@@ -383,6 +500,7 @@ size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valu
+     }
+     std::memcpy(value, verified_value.data(), valueSize);
+     cache_keys_used.push_back(keyHash);
++    stat_hits.fetch_add(1, std::memory_order_relaxed);
+     return valueSize;
+   }
+ 
+@@ -404,6 +522,7 @@ size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valu
+     reset_corrupt_db();
+   }
+   if (!found) {
++    stat_misses.fetch_add(1, std::memory_order_relaxed);
+     return 0;
+   }
+   if (value == nullptr) {
+@@ -417,10 +536,12 @@ size_t load_from_cache(void const* key, size_t keySize, void* value, size_t valu
+   }
+   std::memcpy(value, entry.data(), valueSize);
+   cache_keys_used.push_back(keyHash);
++  stat_hits.fetch_add(1, std::memory_order_relaxed);
+   return valueSize;
+ }
+ 
+ void store_to_cache(void const* key, size_t keySize, void const* value, size_t valueSize, void*) {
++  const StatTimer timer{stat_store_ns};
+   std::lock_guard lock(cache_mutex);
+ 
+   if (!cache_init()) {
+@@ -467,6 +588,7 @@ void store_to_cache(void const* key, size_t keySize, void const* value, size_t v
+   check(sqlite3_bind_int64(store_stmt, 3, static_cast<sqlite3_int64>(valueSize)));
+   check(sqlite3_bind_int(store_stmt, 4, compressed));
+   check(sqlite3_bind_int64(store_stmt, 5, static_cast<sqlite3_int64>(XXH3_64bits(value, valueSize))));
++  check(sqlite3_bind_int64(store_stmt, 6, cache_session));
+ 
+   const auto ret = sqlite3_step(store_stmt);
+   if (ret != SQLITE_DONE) {
+@@ -485,6 +607,7 @@ void store_to_cache(void const* key, size_t keySize, void const* value, size_t v
+ 
+   tx.commit();
+   cache_keys_used.push_back(keyHash);
++  stat_stores.fetch_add(1, std::memory_order_relaxed);
+ }
+ 
+ void cache_prune() {
+@@ -516,16 +639,22 @@ void cache_prune() {
+     }
+     totalRows = *totalRowsResult;
+ 
+-    const auto ret = sqlite::exec(db,
+-                                  "DELETE FROM cache "
+-                                  "WHERE NOT EXISTS ("
+-                                  "  SELECT 1 FROM cache_keys_used WHERE cache_keys_used.key = cache.key"
+-                                  ")");
++    // 0226: mark what this session used so far, then drop only rows unused for several sessions.
++    const auto mark = fmt::format("UPDATE cache SET last_used = {} WHERE key IN (SELECT key FROM cache_keys_used)",
++                                  cache_session);
++    if (sqlite::exec(db, mark.c_str()) != SQLITE_OK) {
++      Log.error("Failed to mark used dawn cache rows: {}", sqlite3_errmsg(db));
++      return;
++    }
++    const auto prune =
++        fmt::format("DELETE FROM cache WHERE last_used <= {}", cache_session - PruneUnusedSessions);
++    const auto ret = sqlite::exec(db, prune.c_str());
+     if (ret != SQLITE_OK) {
+       Log.error("Failed to prune dawn cache rows: {}", sqlite3_errmsg(db));
+       return;
+     }
+     deletedRows = sqlite3_changes64(db);
++    keys_marked_used = cache_keys_used.size();
+ 
+     tx.commit();
+   }
+@@ -535,7 +664,7 @@ void cache_prune() {
+     return;
+   }
+ 
+-  Log.info("Pruned {} stale Dawn cache entries", deletedRows);
++  Log.info("Pruned {} Dawn cache entries unused for {} sessions", deletedRows, PruneUnusedSessions);
+ 
+   // VACUUM if we removed at least 25% of the rows
+   if (totalRows != 0 && static_cast<uint64_t>(deletedRows) * 100ull >= totalRows * VacuumPrunePercentThreshold) {
+@@ -550,7 +679,37 @@ void cache_prune() {
+   }
+ }
+ 
++// 0226: entries read or written after the prune (or in a session without one) are marked used at
++// shutdown, so the age-based prune never drops something a session needed.
++static void mark_late_used_keys() {
++  if (db == nullptr || cache_broken || keys_marked_used >= cache_keys_used.size()) {
++    return;
++  }
++  sqlite::Transaction tx(db, Log, true);
++  if (!tx) {
++    return;
++  }
++  sqlite3_stmt* stmt = nullptr;
++  if (sqlite3_prepare_v3(db, "UPDATE cache SET last_used = ? WHERE key = ?", -1, 0, &stmt, nullptr) != SQLITE_OK) {
++    Log.warn("Failed to prepare dawn cache usage update: {}", sqlite3_errmsg(db));
++    return;
++  }
++  for (size_t i = keys_marked_used; i < cache_keys_used.size(); ++i) {
++    sqlite3_bind_int64(stmt, 1, cache_session);
++    sqlite3_bind_blob(stmt, 2, &cache_keys_used[i], sizeof(XXH128_hash_t), SQLITE_TRANSIENT);
++    sqlite3_step(stmt);
++    sqlite3_reset(stmt);
++  }
++  sqlite3_finalize(stmt);
++  tx.commit();
++  keys_marked_used = cache_keys_used.size();
++}
++
+ void cache_shutdown() {
++  {
++    std::lock_guard lock(cache_mutex);
++    mark_late_used_keys();
++  }
+ #if defined(AURORA_CACHE_USE_ZSTD)
+   compress_buffer.clear();
+ #endif

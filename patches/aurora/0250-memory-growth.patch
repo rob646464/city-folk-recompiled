@@ -1,0 +1,611 @@
+0250: memory growth over a session (LM issue #34): cache sizes, dead EFB copy destinations, shader modules
+
+* aurora_mem_stats() (include/aurora/mem_stats.h): live textures (count and bytes, every
+  TextureRef), texture object/content/TLUT caches, EFB copy textures and the copy-texture cache
+  (with bytes), bind groups, samplers, pipelines, shader modules, EFB copy-to-RAM entries and byte
+  buffers. The port logs them in its [mem] lines.
+* EFB copy textures of destinations the game no longer uses. Each new copy destination (a map's
+  buffers land elsewhere in the heap after a map change) kept its copy textures, one per (size,
+  format, replay generation) at render resolution, for good: GPU memory grew with every map
+  visited. Every 64 frames, with the FIFO drained (gx::texture::end_frame): copies whose memory the
+  CPU has overwritten lose their copy textures (efb_ram::sweep; also while frame interpolation
+  replays tapes, and the replay state slots lose the destination too), copy-texture cache entries
+  not copied into for 1800 frames are dropped, and beyond 128 destinations the least recently
+  copied go. Byte buffers no tracked copy uses are released.
+* Shader modules: Dawn keeps a module's parsed shader program (Tint, ~1 MB for a GX shader) while
+  anything outside Dawn references the module, and only builds it for a shader it compiles (not
+  for one loaded from its cache). 0227's session-long module cache so kept every module compiled
+  on a cache miss: a cold start held 2.1 GB (default settings) to 8 GB (Enhanced lighting at 120
+  fps), slowed the compile down and made the exit take minutes. The cache keeps the
+  latest 384 modules and is released whenever no pipeline is left to build.
+
+diff --git a/include/aurora/mem_stats.h b/include/aurora/mem_stats.h
+new file mode 100644
+index 0000000..15e83b6
+--- /dev/null
++++ b/include/aurora/mem_stats.h
+@@ -0,0 +1,29 @@
++#pragma once
++// Sizes of Aurora's host/GPU caches, for memory reports (LM 0250: issue #34, memory growing over
++// time). Counts are entries, bytes are the GPU (or host) bytes the entries hold, estimated from
++// their sizes and formats. Safe to call from any thread.
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct AuroraMemStats {
++  uint64_t textures, textureBytes;               // live Aurora textures (every TextureRef)
++  uint64_t texObjects;                           // texture object cache (GXTexObj -> texture)
++  uint64_t texContentEntries, texContentBytes;   // content-hash texture cache (budgeted)
++  uint64_t tlutCaches;                           // TLUT object caches
++  uint64_t copyTextures;                         // EFB copy destinations with a live copy texture
++  uint64_t copyCacheEntries, copyCacheBytes;     // EFB copy textures by (dest, size, format, generation)
++  uint64_t bindGroups, samplers;                 // bind group / sampler caches
++  uint64_t pipelines, shaderModules;             // compiled render pipelines, shader modules
++  uint64_t efbEntries;                           // EFB copies to RAM tracked
++  uint64_t efbPoolBuffers, efbPoolBytes;         // EFB copy-to-RAM byte buffers by destination
++  uint64_t efbDecoded, efbWritten, efbGuestCopies;
++} AuroraMemStats;
++
++void aurora_mem_stats(AuroraMemStats* out);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/lib/dolphin/gx/GXFrameBuffer.cpp b/lib/dolphin/gx/GXFrameBuffer.cpp
+index 34fa8e5..e53dfa7 100644
+--- a/lib/dolphin/gx/GXFrameBuffer.cpp
++++ b/lib/dolphin/gx/GXFrameBuffer.cpp
+@@ -2,6 +2,7 @@
+ #include "__gx.h"
+ 
+ #include "../../gfx/efb_ram.hpp"
++#include "../../gfx/frame.hpp"
+ #include "../../gfx/tex_copy_conv.hpp"
+ #include "../../gfx/texture.hpp"
+ #include "../../gfx/recording.hpp"
+@@ -67,6 +68,7 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
+   gfx::resolve_pass_into(handle.handle, rect, clearColor, clearAlpha, clearDepth, g_gxState.clearColor,
+                          clear_depth_value(), texCopyFmt, g_gxState.pixelFmt);
+   ++handle.revision;
++  handle.lastCopyFrame = gfx::current_frame();  // 0250: copy textures not copied into for long are dropped
+   g_gxState.copyTextures[dest] = handle;
+   texture::invalidate_bindings();
+ }
+diff --git a/lib/gfx/efb_ram.cpp b/lib/gfx/efb_ram.cpp
+index ac9bfd5..4b892d4 100644
+--- a/lib/gfx/efb_ram.cpp
++++ b/lib/gfx/efb_ram.cpp
+@@ -14,6 +14,7 @@
+ #include "frame.hpp"
+ 
+ #include <aurora/efb_ram.h>
++#include <aurora/mem_stats.h>
+ 
+ #include <absl/container/flat_hash_map.h>
+ #include <magic_enum.hpp>
+@@ -1020,6 +1021,60 @@ void restore_slot(uint8_t slot) {
+   }
+ }
+ 
++void sweep(std::vector<const void*>& evict) {
++  // Released after g_mutex (lock order: no Dawn object is released under it).
++  std::vector<Entry> dropped;
++  std::vector<LazyBufferRef> buffers;
++  {
++    std::lock_guard lock{g_mutex};
++    const uint32_t frame = current_frame();
++    if (!g_enabled.load(std::memory_order_relaxed)) {
++      return;
++    }
++    // (Unlike resolve_texture, also while frame interpolation replays tapes: those restore their
++    // copies from the replay slots, which lose an evicted destination too. The memory is checked
++    // as the game has it now, ahead of the replays; a copy the game still uses is not written by
++    // the CPU.)
++    for (auto it = g_entries.begin(); it != g_entries.end();) {
++      if (it->verifiedFrame == frame || hash_range(it->dest, it->size) == it->ramHash) {
++        it->verifiedFrame = frame;
++        ++it;
++        continue;
++      }
++      ++g_stats.cpuOverwrites;
++      const uint8_t* dest = it->dest;
++      dropped.push_back(std::move(*it));
++      it = g_entries.erase(it);
++      if (std::none_of(g_entries.begin(), g_entries.end(), [&](const Entry& e) { return e.dest == dest; })) {
++        evict.push_back(dest);
++        g_written.erase(dest);
++      }
++    }
++    for (auto& slot : g_entrySlots) {
++      if (!slot) {
++        continue;
++      }
++      for (auto it = slot->begin(); it != slot->end();) {
++        if (std::find(evict.begin(), evict.end(), it->dest) != evict.end()) {
++          dropped.push_back(std::move(*it));
++          it = slot->erase(it);
++        } else {
++          ++it;
++        }
++      }
++    }
++    // A byte buffer only the pool holds belongs to no tracked copy (nor a replay slot's).
++    for (auto it = g_bytePool.begin(); it != g_bytePool.end();) {
++      if (it->second.use_count() == 1) {
++        buffers.push_back(std::move(it->second));
++        g_bytePool.erase(it++);
++      } else {
++        ++it;
++      }
++    }
++  }
++}
++
+ } // namespace aurora::gfx::efb_ram
+ 
+ using namespace aurora::gfx::efb_ram;
+@@ -1155,3 +1210,21 @@ void aurora_efb_ram_get_stats(AuroraEfbRamStats* out) {
+   std::lock_guard lock{g_mutex};
+   *out = g_stats;
+ }
++
++// 0250: cache sizes for aurora_mem_stats.
++namespace aurora::gfx::efb_ram {
++void mem_stats(AuroraMemStats& out) {
++  std::lock_guard lock{g_mutex};
++  out.efbEntries = g_entries.size();
++  out.efbPoolBuffers = g_bytePool.size();
++  out.efbPoolBytes = 0;
++  for (const auto& [_, buf] : g_bytePool) {
++    if (buf && buf->buffer) {
++      out.efbPoolBytes += buf->size;
++    }
++  }
++  out.efbDecoded = g_decoded.size();
++  out.efbWritten = g_written.size();
++  out.efbGuestCopies = g_guestCopies.size();
++}
++} // namespace aurora::gfx::efb_ram
+diff --git a/lib/gfx/efb_ram.hpp b/lib/gfx/efb_ram.hpp
+index 5d0aa2f..8b990f9 100644
+--- a/lib/gfx/efb_ram.hpp
++++ b/lib/gfx/efb_ram.hpp
+@@ -21,6 +21,7 @@
+ #include <dolphin/gx/GXEnum.h>
+ 
+ #include <functional>
++#include <vector>
+ 
+ struct GXTexObj_;
+ 
+@@ -58,4 +59,12 @@ void set_generation(uint8_t generation, bool replaying, bool noReadback);
+ void save_slot(uint8_t slot);
+ void restore_slot(uint8_t slot);
+ 
++// 0250 (memory growing over a session, LM issue #34): called every 64 frames with the FIFO drained
++// (gx::texture::end_frame); the tracked copies are checked against memory as resolve_texture does
++// when a texture reads them: a copy whose memory the CPU or DMA has overwritten (the game freed
++// and reused it, e.g. the previous map's shadow-map buffer) is dropped and Aurora's copy texture
++// for it evicted, even if no texture ever reads that memory again. Byte buffers no tracked copy
++// uses any more are released. Returns the destinations to evict (the caller evicts them).
++void sweep(std::vector<const void*>& evict);
++
+ } // namespace aurora::gfx::efb_ram
+diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
+index 96667e1..ad23825 100644
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -14,6 +14,8 @@
+ #include "../sqlite_utils.hpp"
+ #include "../webgpu/gpu.hpp"
+ 
++#include <aurora/mem_stats.h>
++
+ #include <algorithm>
+ #include <atomic>
+ #include <condition_variable>
+@@ -211,6 +213,11 @@ static std::condition_variable g_pipelineReadyCv;
+ static absl::flat_hash_map<PipelineRef, CompiledPipeline> g_pipelines;
+ static absl::flat_hash_map<HashType, KnownPipeline> g_knownPipelines;
+ static std::optional<uint64_t> g_pipelineLayoutKey;
++// 0250: for aurora_mem_stats.
++void pipeline_mem_stats(AuroraMemStats& out) noexcept {
++  std::lock_guard lock{g_pipelineMutex};
++  out.pipelines = g_pipelines.size();
++}
+ static std::deque<PendingPipeline> g_pipelineQueue;
+ static std::deque<PendingPipeline> g_backgroundPipelineQueue;
+ static absl::flat_hash_set<PipelineRef> g_pendingPipelines;
+@@ -2223,6 +2230,18 @@ void begin_pipeline_frame() {
+     g_pipelinesPerFrame = 0;
+   }
+   journal_update_phase();
++  // 0250 (LM issue #34): with no pipeline left to build, the shader module cache is released
++  // (gx/pipeline.cpp: each module compiled on a cache miss kept its shader program in Dawn).
++  {
++    bool idle;
++    {
++      std::lock_guard lock{g_pipelineMutex};
++      idle = g_pendingPipelines.empty() && g_pipelineQueue.empty() && g_backgroundPipelineQueue.empty();
++    }
++    if (idle) {
++      gx::release_shader_module_cache();
++    }
++  }
+   if (g_pipelineLayoutKey != scene_render_target_layout().key ||
+       g_rebuildAccuracy != gx::g_accuracyFlags.load(std::memory_order_relaxed) ||
+       g_rebuildEnhBits != enhanced::precache_bits()) {
+diff --git a/lib/gfx/resource_cache.cpp b/lib/gfx/resource_cache.cpp
+index 8c131ab..eb523ef 100644
+--- a/lib/gfx/resource_cache.cpp
++++ b/lib/gfx/resource_cache.cpp
+@@ -3,6 +3,9 @@
+ #include "frame.hpp"
+ #include "hash.hpp"
+ #include "../webgpu/gpu.hpp"
++#include "texture.hpp"
++
++#include <aurora/mem_stats.h>
+ 
+ #include <cstddef>
+ #include <cstdint>
+@@ -104,6 +107,8 @@ wgpu::BindGroup find_bind_group(BindGroupRef id) {
+   return it->second.bindGroup;
+ }
+ 
++std::atomic<uint64_t> TextureMemCounter::s_count{0}, TextureMemCounter::s_bytes{0};
++
+ wgpu::Sampler sampler_ref(const wgpu::SamplerDescriptor& descriptor) {
+   const auto id = xxh3_hash(descriptor);
+   std::lock_guard lock{g_samplerCacheMutex};
+@@ -114,4 +119,35 @@ wgpu::Sampler sampler_ref(const wgpu::SamplerDescriptor& descriptor) {
+   return it->second;
+ }
+ 
++void pipeline_mem_stats(AuroraMemStats& out) noexcept;
+ } // namespace aurora::gfx
++
++namespace aurora::gfx::efb_ram {
++void mem_stats(AuroraMemStats& out);
++}
++namespace aurora::gx {
++void shader_module_mem_stats(AuroraMemStats& out) noexcept;
++namespace texture {
++void mem_stats(AuroraMemStats& out) noexcept;
++}
++} // namespace aurora::gx
++
++// 0250: cache sizes for memory reports.
++void aurora_mem_stats(AuroraMemStats* out) {
++  using namespace aurora::gfx;
++  *out = {};
++  out->textures = TextureMemCounter::s_count.load(std::memory_order_relaxed);
++  out->textureBytes = TextureMemCounter::s_bytes.load(std::memory_order_relaxed);
++  {
++    std::lock_guard lock{g_bindGroupCacheMutex};
++    out->bindGroups = g_cachedBindGroups.size();
++  }
++  {
++    std::lock_guard lock{g_samplerCacheMutex};
++    out->samplers = g_cachedSamplers.size();
++  }
++  aurora::gx::texture::mem_stats(*out);
++  efb_ram::mem_stats(*out);
++  pipeline_mem_stats(*out);
++  aurora::gx::shader_module_mem_stats(*out);
++}
+diff --git a/lib/gfx/texture.hpp b/lib/gfx/texture.hpp
+index 2cff180..55bccad 100644
+--- a/lib/gfx/texture.hpp
++++ b/lib/gfx/texture.hpp
+@@ -1,6 +1,9 @@
+ #pragma once
+ #include <dolphin/gx.h>
+ 
++#include <algorithm>
++#include <atomic>
++#include <cstdint>
+ #include <utility>
+ 
+ #include "types.hpp"
+@@ -33,6 +36,29 @@ uint64_t calc_texture_size(wgpu::TextureFormat format, uint32_t width, uint32_t
+ bool is_block_aligned(wgpu::TextureFormat format, uint32_t width, uint32_t height) noexcept;
+ 
+ constexpr u32 InvalidTextureFormat = -1;
++// 0250: live texture count/bytes for memory reports (aurora_mem_stats).
++struct TextureMemCounter {
++  static std::atomic<uint64_t> s_count, s_bytes;
++  uint64_t bytes;
++  explicit TextureMemCounter(uint64_t b) noexcept : bytes(b) { add(); }
++  TextureMemCounter(const TextureMemCounter& o) noexcept : bytes(o.bytes) { add(); }
++  TextureMemCounter& operator=(const TextureMemCounter& o) noexcept {
++    sub();
++    bytes = o.bytes;
++    add();
++    return *this;
++  }
++  ~TextureMemCounter() { sub(); }
++  void add() noexcept {
++    s_count.fetch_add(1, std::memory_order_relaxed);
++    s_bytes.fetch_add(bytes, std::memory_order_relaxed);
++  }
++  void sub() noexcept {
++    s_count.fetch_sub(1, std::memory_order_relaxed);
++    s_bytes.fetch_sub(bytes, std::memory_order_relaxed);
++  }
++};
++
+ struct TextureRef {
+   wgpu::Texture texture;
+   wgpu::TextureView sampleTextureView;
+@@ -43,6 +69,7 @@ struct TextureRef {
+   u32 gxFormat;
+   bool hasArbitraryMips = false;
+   bool isReplacement = false;
++  TextureMemCounter memCounter;
+ 
+   TextureRef(wgpu::Texture texture, wgpu::TextureView sampleTextureView, wgpu::TextureView attachmentTextureView,
+              wgpu::Extent3D size, wgpu::TextureFormat format, uint32_t mipCount, u32 gxFormat)
+@@ -52,7 +79,9 @@ struct TextureRef {
+   , size(size)
+   , format(format)
+   , mipCount(mipCount)
+-  , gxFormat(gxFormat) {}
++  , gxFormat(gxFormat)
++  , memCounter(calc_texture_size(format, size.width, size.height, mipCount) *
++               std::max<uint32_t>(size.depthOrArrayLayers, 1)) {}
+ };
+ 
+ TextureHandle new_static_texture_2d(uint32_t width, uint32_t height, uint32_t mips, u32 gxFormat,
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+index efec2a1..daee721 100644
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -256,6 +256,20 @@ u8 line_mode_for_prim(GXPrimitive prim) noexcept {
+ 
+ static void handle_draw(u8 cmd, ByteReader& reader) noexcept;
+ static void handle_aurora(ByteReader& reader) noexcept;
++
++// Replay state slots: the copy textures each slot's frame ended with (by generation, so they stay
++// as they were). FIFO thread (or with the FIFO drained).
++static std::array<std::optional<decltype(GXState::copyTextures)>, 4> sCopySlots;
++
++// 0250: a destination evicted from the live copy textures goes from the slots too, or the next
++// replay would restore it.
++void evict_copy_slots(const void* dest) noexcept {
++  for (auto& slot : sCopySlots) {
++    if (slot) {
++      slot->erase(dest);
++    }
++  }
++}
+ static u32 calc_vtx_size(GXVtxFmt fmt) noexcept;
+ 
+ // ---- Malformed FIFO data (0235) -----------------------------------------------------------------
+@@ -1889,8 +1903,6 @@ void handle_aurora(ByteReader& reader) noexcept {
+     // and the per-frame cache state (array upload ranges, texture binds), which is rebuilt.
+     // Slots 4..7 (GX_AURORA_SET_REPLAY_MASK passes) hold the GX state only.
+     static std::array<std::unique_ptr<GXState>, 8> sSlots;
+-    // The copy textures each slot's frame ended with (by generation, so they stay as they were).
+-    static std::array<std::optional<decltype(GXState::copyTextures)>, 4> sCopySlots;
+     const u8 slot = reader.read<u8>() & 7;
+     auto& state = g_gxState;
+     const u8 generation = state.copyGeneration;
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+index b2a0ecc..28775c7 100644
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -315,6 +315,7 @@ struct GXState {
+   struct CopyTextureRef {
+     gfx::TextureHandle handle;
+     u32 revision = 0;
++    u32 lastCopyFrame = 0;  // 0250: gfx::current_frame() of the newest copy into it
+ 
+     operator bool() const noexcept { return handle.operator bool(); }
+   };
+@@ -467,6 +468,9 @@ void set_viewport_policy(AuroraViewportPolicy policy) noexcept;
+ void clear_static_texture_cache() noexcept;
+ void clear_copy_texture_cache() noexcept;
+ void evict_copy_texture(const void* dest) noexcept;
++namespace fifo {
++void evict_copy_slots(const void* dest) noexcept;  // 0250 (command_processor.cpp)
++}
+ void evict_texture_object(u32 texObjId) noexcept;
+ void evict_tlut_object(u32 tlutObjId) noexcept;
+ Vec2<uint32_t> logical_fb_size() noexcept;
+@@ -603,6 +607,7 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config, const gfx::RenderTar
+ HashType shader_module_key(const ShaderConfig& config, const gfx::RenderTargetLayout& layout,
+                            DstAlphaMode dstAlphaMode) noexcept;
+ void clear_shader_module_cache() noexcept;
++void release_shader_module_cache() noexcept;  // 0250: with no pipeline left to build
+ GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept;
+ 
+ u8 comp_type_size(GXAttr attr, GXCompType type) noexcept;
+diff --git a/lib/gx/pipeline.cpp b/lib/gx/pipeline.cpp
+index dac2a9c..376deda 100644
+--- a/lib/gx/pipeline.cpp
++++ b/lib/gx/pipeline.cpp
+@@ -9,10 +9,12 @@
+ #include "shader_info.hpp"
+ 
+ #include <absl/container/flat_hash_map.h>
++#include <aurora/mem_stats.h>
+ #include <tracy/Tracy.hpp>
+ 
+ #include <array>
+ #include <cstring>
++#include <deque>
+ #include <mutex>
+ 
+ namespace aurora::gx {
+@@ -21,12 +23,41 @@ namespace aurora::gx {
+ // Tint parse/validation (about a quarter of a cached pipeline's creation time); the pipelines of
+ // one shader for other blend/depth/cull states, render targets and the alpha pre-pass reuse it.
+ // Only modules that compiled are kept. The pipelines hold their modules anyway.
++//
++// 0250 (LM issue #34): Dawn keeps a module's parsed shader program (Tint, ~1 MB for a GX shader)
++// while anything outside Dawn references the module, and creates it only for a shader it has to
++// compile (not for one loaded from its cache). Kept for the whole session, a cold start's modules
++// held 2.1 GB (default settings) and more with Enhanced lighting's variants. The cache now keeps
++// the most recent MaxCachedModules modules (a shader's variants are queued together) and is
++// released whenever no pipeline is left to build.
++constexpr size_t MaxCachedModules = 384;
+ static std::mutex g_moduleMutex;
+ static absl::flat_hash_map<HashType, wgpu::ShaderModule> g_modules;
++static std::deque<HashType> g_moduleOrder; // insertion order (oldest first)
+ 
+ void clear_shader_module_cache() noexcept {
+   std::lock_guard lock{g_moduleMutex};
+   g_modules.clear();
++  g_moduleOrder.clear();
++}
++
++// 0250: drops the cached modules (released outside the lock), when there are any.
++void release_shader_module_cache() noexcept {
++  absl::flat_hash_map<HashType, wgpu::ShaderModule> old;
++  {
++    std::lock_guard lock{g_moduleMutex};
++    if (g_modules.empty()) {
++      return;
++    }
++    old.swap(g_modules);
++    g_moduleOrder.clear();
++  }
++}
++
++// 0250: for aurora_mem_stats.
++void shader_module_mem_stats(AuroraMemStats& out) noexcept {
++  std::lock_guard lock{g_moduleMutex};
++  out.shaderModules = g_modules.size();
+ }
+ 
+ gfx::CompiledPipeline create_pipeline(const PipelineConfig& config, const gfx::RenderTargetLayout& layout) {
+@@ -51,8 +82,18 @@ gfx::CompiledPipeline create_pipeline(const PipelineConfig& config, const gfx::R
+       if (!gfx::pop_shader_error_scope("GX shader")) {
+         return wgpu::RenderPipeline{};
+       }
++      wgpu::ShaderModule evicted; // released after the lock
+       std::lock_guard lock{g_moduleMutex};
+-      g_modules.try_emplace(moduleKey, shader);
++      if (g_modules.try_emplace(moduleKey, shader).second) {
++        g_moduleOrder.push_back(moduleKey);
++        if (g_moduleOrder.size() > MaxCachedModules) {
++          if (const auto it = g_modules.find(g_moduleOrder.front()); it != g_modules.end()) {
++            evicted = std::move(it->second);
++            g_modules.erase(it);
++          }
++          g_moduleOrder.pop_front();
++        }
++      }
+     }
+     const auto label = fmt::format("GX Pipeline {:x} {}", hash, passName);
+     const uint64_t t0 = gfx::now_ns(); // 0226
+diff --git a/lib/gx/texture.cpp b/lib/gx/texture.cpp
+index 69db264..09d46b0 100644
+--- a/lib/gx/texture.cpp
++++ b/lib/gx/texture.cpp
+@@ -1,5 +1,7 @@
+ #include "texture.hpp"
+ 
++#include "../gfx/efb_ram.hpp"
++#include "../gfx/frame.hpp"
+ #include "../gfx/recording.hpp"
+ #include "../gfx/tex_palette_conv.hpp"
+ #include "../gfx/texture_convert.hpp"
+@@ -10,6 +12,7 @@
+ #include <absl/container/flat_hash_set.h>
+ #include <tracy/Tracy.hpp>
+ #include <xxhash.h>
++#include <aurora/mem_stats.h>
+ 
+ #include <algorithm>
+ #include <atomic>
+@@ -698,7 +701,77 @@ gfx::TextureHandle resolve_static_palette_texture(const GXTexObj_& obj, const GX
+   return handle;
+ }
+ 
++// 0250: cache sizes for aurora_mem_stats, published by the thread that owns the caches.
++static std::atomic<uint64_t> s_memTexObjects, s_memContentEntries, s_memContentBytes, s_memTluts, s_memCopyTextures,
++    s_memCopyCacheEntries, s_memCopyCacheBytes;
++
++void mem_stats(AuroraMemStats& out) noexcept {
++  out.texObjects = s_memTexObjects.load(std::memory_order_relaxed);
++  out.texContentEntries = s_memContentEntries.load(std::memory_order_relaxed);
++  out.texContentBytes = s_memContentBytes.load(std::memory_order_relaxed);
++  out.tlutCaches = s_memTluts.load(std::memory_order_relaxed);
++  out.copyTextures = s_memCopyTextures.load(std::memory_order_relaxed);
++  out.copyCacheEntries = s_memCopyCacheEntries.load(std::memory_order_relaxed);
++  out.copyCacheBytes = s_memCopyCacheBytes.load(std::memory_order_relaxed);
++}
++
++// 0250 (LM issue #34): EFB copy textures of destinations the game no longer uses. Each new copy
++// destination (a map's buffers land elsewhere in the heap after a map change) kept its copy
++// textures, one per (size, format, replay generation), at render resolution, for good: GPU
++// memory grew with every map visited. With the FIFO drained (the caller), every 64 frames:
++//  * copies whose memory the CPU has overwritten (efb_ram::sweep) lose their copy textures;
++//  * copy-texture cache entries not copied into for CopyCacheIdleFrames are dropped (a texture a
++//    destination still shows stays alive through copyTextures; only its reuse slot goes);
++//  * beyond MaxCopyDestinations destinations, the least recently copied ones are evicted (the
++//    bound when copies to RAM are off and nothing is checked; LM uses about 20).
++constexpr uint32_t CopyCacheIdleFrames = 1800;
++constexpr size_t MaxCopyDestinations = 128;
++
++void sweep_copy_textures() noexcept {
++  static uint32_t s_last = 0;
++  const uint32_t frame = gfx::current_frame();
++  if (frame - s_last < 64) {
++    return;
++  }
++  s_last = frame;
++  std::vector<const void*> evict;
++  gfx::efb_ram::sweep(evict);
++  for (const void* dest : evict) {
++    evict_copy_texture(dest);
++  }
++  for (auto it = g_gxState.copyTextureCache.begin(); it != g_gxState.copyTextureCache.end();) {
++    if (frame - it->second.lastCopyFrame > CopyCacheIdleFrames) {
++      g_gxState.copyTextureCache.erase(it++);
++    } else {
++      ++it;
++    }
++  }
++  while (g_gxState.copyTextures.size() > MaxCopyDestinations) {
++    auto oldest = g_gxState.copyTextures.begin();
++    for (auto it = g_gxState.copyTextures.begin(); it != g_gxState.copyTextures.end(); ++it) {
++      if (frame - it->second.lastCopyFrame > frame - oldest->second.lastCopyFrame) {
++        oldest = it;
++      }
++    }
++    evict_copy_texture(oldest->first);
++  }
++}
++
+ void end_frame() noexcept {
++  sweep_copy_textures();
++  if ((s_frameCount & 31) == 0) {
++    s_memTexObjects.store(s_textureObjectCaches.size(), std::memory_order_relaxed);
++    s_memContentEntries.store(s_contentCache.size(), std::memory_order_relaxed);
++    s_memContentBytes.store(s_contentCacheBytes, std::memory_order_relaxed);
++    s_memTluts.store(s_tlutObjectCaches.size(), std::memory_order_relaxed);
++    s_memCopyTextures.store(g_gxState.copyTextures.size(), std::memory_order_relaxed);
++    s_memCopyCacheEntries.store(g_gxState.copyTextureCache.size(), std::memory_order_relaxed);
++    uint64_t copyBytes = 0;
++    for (const auto& [_, ref] : g_gxState.copyTextureCache) {
++      copyBytes += texture_handle_size(ref.handle);
++    }
++    s_memCopyCacheBytes.store(copyBytes, std::memory_order_relaxed);
++  }
+   const auto streamingStats = gfx::texture_replacement::process_streaming();
+   s_stats.pendingLoads = streamingStats.pendingLoads;
+   s_stats.publishes = streamingStats.publishes;
+@@ -801,6 +874,7 @@ void clear_copy_texture_cache() noexcept {
+ void clear_static_texture_cache() noexcept { s_pendingCacheClears.fetch_add(1, std::memory_order_release); }
+ 
+ void evict_copy_texture(const void* dest) noexcept {
++  fifo::evict_copy_slots(dest);
+   absl::flat_hash_set<const void*> sourceIdentities;
+   if (const auto it = g_gxState.copyTextures.find(dest); it != g_gxState.copyTextures.end()) {
+     if (it->second.handle) {

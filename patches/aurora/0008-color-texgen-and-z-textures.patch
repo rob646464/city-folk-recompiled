@@ -1,0 +1,352 @@
+diff --git a/lib/dolphin/gx/GXTev.cpp b/lib/dolphin/gx/GXTev.cpp
+--- a/lib/dolphin/gx/GXTev.cpp
++++ b/lib/dolphin/gx/GXTev.cpp
+@@ -169,7 +169,31 @@
+ }
+ 
+ void GXSetZTexture(GXZTexOp op, GXTexFmt fmt, u32 bias) {
+-  // TODO
++  u32 zfmt;
++  switch (fmt) {
++  case GX_TF_Z8:
++    zfmt = 0;
++    break;
++  case GX_TF_Z16:
++    zfmt = 1;
++    break;
++  case GX_TF_Z24X8:
++    zfmt = 2;
++    break;
++  default: // invalid; the SDK asserts and falls back to Z24X8
++    zfmt = 2;
++    break;
++  }
++  u32 reg0 = 0;
++  SET_REG_FIELD(0, reg0, 24, 0, bias);
++  SET_REG_FIELD(0, reg0, 8, 24, 0xF4);
++  u32 reg1 = 0;
++  SET_REG_FIELD(0, reg1, 2, 0, zfmt);
++  SET_REG_FIELD(0, reg1, 2, 2, op);
++  SET_REG_FIELD(0, reg1, 8, 24, 0xF5);
++  GX_WRITE_RAS_REG(reg0);
++  GX_WRITE_RAS_REG(reg1);
++  __gx->bpSent = 1;
+ }
+ 
+ void GXSetNumTevStages(u8 num) {
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -683,7 +683,22 @@
+     const auto newData = reinterpret_cast<const void*>(reader.read<u64>());
+     const u32 newWidth = reader.read<u32>();
+     const u32 newHeight = reader.read<u32>();
+-    const auto newFormat = static_cast<GXTexFmt>(reader.read<u32>());
++    auto newFormat = static_cast<GXTexFmt>(reader.read<u32>());
++    // Z texture formats only exist on the CPU side: the texture unit reads Z8/Z16/Z24X8 data as
++    // I8/IA8/RGBA8 (the hardware format field is the low 4 bits); GXSetZTexture interprets it.
++    switch (newFormat) {
++    case GX_TF_Z8:
++      newFormat = GX_TF_I8;
++      break;
++    case GX_TF_Z16:
++      newFormat = GX_TF_IA8;
++      break;
++    case GX_TF_Z24X8:
++      newFormat = GX_TF_RGBA8;
++      break;
++    default:
++      break;
++    }
+     const auto newTlut = static_cast<GXTlut>(reader.read<u32>());
+     u8 newFlags = slot.flags & ~0x80u; // Reset no-cache flag
+     if (reader.read<u8>() != 0) {
+diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
+--- a/lib/gx/gx.cpp
++++ b/lib/gx/gx.cpp
+@@ -465,6 +465,19 @@
+   if (g_gxState.alphaCompare) {
+     config.shaderConfig.alphaCompare = g_gxState.alphaCompare;
+   }
++  // Z texture: the depth comes from (or is offset by) the texel of the last TEV stage's texture
++  // lookup. Without a texture in that stage there is nothing to read; leave depth alone.
++  config.shaderConfig.zTexOp = 0;
++  config.shaderConfig.zTexFmt = 0;
++  if (g_gxState.zTexOp == GX_ZT_ADD || g_gxState.zTexOp == GX_ZT_REPLACE) {
++    if (g_gxState.numTevStages > 0) {
++      const auto& last = g_gxState.tevStages[g_gxState.numTevStages - 1];
++      if (last.texMapId != GX_TEXMAP_NULL && last.texCoordId != GX_TEXCOORD_NULL) {
++        config.shaderConfig.zTexOp = g_gxState.zTexOp;
++        config.shaderConfig.zTexFmt = g_gxState.zTexFmt > 2 ? 2 : g_gxState.zTexFmt;
++      }
++    }
++  }
+   const auto cullMode = config.shaderConfig.lineMode == 0 ? g_gxState.cullMode : GX_CULL_NONE;
+   const auto [polygonOffset, polygonOffsetScale] = polygon_offset_for_cull_mode(cullMode);
+   const bool hasAlpha = efb_has_alpha(g_gxState.pixelFmt);
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -351,6 +351,10 @@
+   GXPixelFmt pixelFmt = GX_PF_RGB8_Z24;
+   GXZFmt16 zFmt = GX_ZC_LINEAR;
+   bool zCompLocBeforeTex = false;
++  // Z texture (BP 0xF4/0xF5, GXSetZTexture): depth from the texel sampled by the last TEV stage
++  u8 zTexOp = 0;   // 0 = disable, 1 = add, 2 = replace (GXZTexOp)
++  u8 zTexFmt = 2;  // 0 = Z8 (u8), 1 = Z16 (u16), 2 = Z24X8 (u24)
++  u32 zTexBias = 0; // 24-bit
+   u32 dstAlpha; // u8; UINT32_MAX = disabled
+   AlphaCompare alphaCompare;
+   std::array<Vec4<float>, MaxTevRegs> colorRegs;
+@@ -495,7 +499,9 @@
+   u8 lineMode : 2 = 0; // 1 = GX_LINES, 2 = GX_LINESTRIP, 3 = GX_POINTS
+   u8 fogRangeEnabled : 1 = false;
+   u8 pad1 : 5 = 0;
+-  u8 pad2 = 0;
++  u8 zTexOp : 2 = 0;  // GXZTexOp; non-zero only when the last TEV stage samples a texture
++  u8 zTexFmt : 2 = 0; // 0 = Z8, 1 = Z16, 2 = Z24X8
++  u8 pad2 : 4 = 0;
+   std::array<AttrConfig, MaxVtxAttr> attrs;
+   std::array<TevSwap, MaxTevSwap> tevSwapTable;
+   std::array<TevStage, MaxTevStages> tevStages;
+@@ -532,6 +538,7 @@
+   u32 uniformSize = 0;
+   bool usesFog : 1 = false;
+   bool lightingEnabled : 1 = false;
++  bool usesZTex : 1 = false;
+   u8 lineMode : 2 = 0;
+ };
+ struct BindGroupRanges {
+diff --git a/lib/gx/regs.cpp b/lib/gx/regs.cpp
+--- a/lib/gx/regs.cpp
++++ b/lib/gx/regs.cpp
+@@ -447,6 +447,15 @@
+   g_gxState.alphaCompare.op = static_cast<GXAlphaOp>(reg_get(value, 2, 22));
+ }
+ 
++// Z texture bias (0xF4)
++void bp_ztex0(u8, u32 value) noexcept { g_gxState.zTexBias = reg_get(value, 24, 0); }
++
++// Z texture format/op (0xF5)
++void bp_ztex1(u8, u32 value) noexcept {
++  g_gxState.zTexFmt = static_cast<u8>(reg_get(value, 2, 0));
++  g_gxState.zTexOp = static_cast<u8>(reg_get(value, 2, 2));
++}
++
+ // TEV K select (0xF6-0xFD)
+ void bp_ksel(u8 reg, u32 value) noexcept {
+   u32 kselIdx = reg - 0xF6;
+@@ -571,6 +580,8 @@
+   regs[0xF1] = {bp_fog3, DirtyPipeline | DirtyUniform}; // fog.type affects shader
+   regs[0xF2] = {bp_fog_color, DirtyUniform};
+   regs[0xF3] = {bp_alpha_compare, DirtyPipeline};
++  regs[0xF4] = {bp_ztex0, DirtyUniform};
++  regs[0xF5] = {bp_ztex1, DirtyPipeline | DirtyUniform};
+   for (u8 r = 0xF6; r <= 0xFD; ++r) {
+     regs[r] = {bp_ksel, DirtyPipeline};
+   }
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -566,7 +566,12 @@
+       return "vec3f(1.0, 0.0, 0.0)"s;
+     }
+     if (attr == GX_VA_CLR0 || attr == GX_VA_CLR1) {
+-      return "vec4f(0.0, 0.0, 0.0, 0.0)"s;
++      // No color in the vertex but a channel takes its material/ambient color from it. On
++      // hardware the color of the last vertex that had one lingers; that history is not tracked,
++      // so use white (the common emulator choice). Black made such materials vanish, e.g. the
++      // core of Luigi's Mansion's flashlight beam (lit COLOR0 from a material without vertex
++      // colors feeding a GX_TG_SRTG lookup).
++      return "vec4f(1.0, 1.0, 1.0, 1.0)"s;
+     }
+     UNLIKELY FATAL("unmapped vtx attr {}", underlying(attr));
+   }
+@@ -1243,7 +1248,20 @@
+       fragmentFnPre += fmt::format("\n    var tex{0}_uv = in.tex{0}_uv.xy;", i);
+       continue;
+     }
+-    if (tcg.src >= GX_TG_TEX0 && tcg.src <= GX_TG_TEX7) {
++    if (tcg.type == GX_TG_SRTG) {
++      // Color texgen (XF texgen type 2/3, GX_TG_SRTG): s,t = R,G of the color channel's
++      // *lighting result* (COLOR0 or COLOR1), not the raw vertex color. Used for lookups indexed
++      // by light intensity (e.g. Luigi's Mansion's flashlight cone, which samples a gradient with
++      // the output of a spot light). The texture matrix, post-transform matrix and normalization
++      // only apply to regular texgens.
++      const u32 chan = tcg.src == GX_TG_COLOR1 ? 1 : 0;
++      if (UsePerPixelLighting) {
++        vtxXfrAttrs += fmt::format("\n    out.tex{0}_uv = vec2f(0.0);", i);
++        fragmentFnPre += fmt::format("\n    var tex{0}_uv = rast{1}.rg;", i, chan);
++        continue;
++      }
++      vtxXfrAttrs += fmt::format("\n    var tc{0}_proj = vec3f(out.cc{1}.rg, 1.0);", i, chan);
++    } else if (tcg.src >= GX_TG_TEX0 && tcg.src <= GX_TG_TEX7) {
+       vtxXfrAttrs += fmt::format("\n    var tc{} = vec4f({}, 1.0, 1.0);", i,
+                                  vtx_attr(config, GXAttr(GX_VA_TEX0 + (tcg.src - GX_TG_TEX0))));
+     } else if (tcg.src == GX_TG_POS) {
+@@ -1281,13 +1299,13 @@
+       if (tcg.type == GX_TG_MTX2x4) {
+         vtxXfrAttrs += fmt::format("\n    tc{0}_tmp.z = 1.0f;", i);
+       }
+-    } else if (tcg.type == GX_TG_SRTG) {
+-      vtxXfrAttrs += fmt::format("\n    var tc{0}_tmp = vec3f(tc{0}.xy, 1.0f);", i);
+     }
+-    if (tcg.normalize) {
++    if (tcg.type != GX_TG_SRTG && tcg.normalize) {
+       vtxXfrAttrs += fmt::format("\n    tc{0}_tmp = normalize(tc{0}_tmp);", i);
+     }
+-    if (tcg.postMtx == GX_PTIDENTITY) {
++    if (tcg.type == GX_TG_SRTG) {
++      // tc{i}_proj was set from the color channel above
++    } else if (tcg.postMtx == GX_PTIDENTITY) {
+       vtxXfrAttrs += fmt::format("\n    var tc{0}_proj = tc{0}_tmp;", i);
+     } else {
+       u32 postMtxIdx = (tcg.postMtx - GX_PTTEXMTX0) / 3;
+@@ -1373,7 +1391,9 @@
+     const bool hasIndirectStage = stage.indTexStage < config.numIndStages;
+     const bool needsTevTexCoord =
+         needsIndirectCoord || stage.indTexWrapS != GX_ITW_OFF || stage.indTexWrapT != GX_ITW_OFF || stage.indTexAddPrev;
+-    const bool needsTextureSample = uses_texture_sample(stage);
++    // The Z texture is the last stage's texel, whether or not the TEV uses it
++    const bool needsTextureSample =
++        uses_texture_sample(stage) || (info.usesZTex && i == static_cast<int>(config.tevStageCount) - 1);
+     if (!needsTevTexCoord && !needsTextureSample) {
+       continue;
+     }
+@@ -1613,6 +1633,9 @@
+         "var tex{0}_samp: sampler;",
+         i, i * 2, i * 2 + 1);
+   }
++  if (info.usesZTex) {
++    uniBufAttrs += "\n    ztex_bias: vec4u,";
++  }
+   if (!prevColorNormalized && !prevAlphaNormalized) {
+     fragmentFn += "\n    prev = tev_overflow_vec4f(prev);";
+   } else if (!prevColorNormalized) {
+@@ -1653,6 +1676,37 @@
+     fragmentFn += "\n    prev = vec4f(in.nrm, prev.a);";
+   }
+ 
++  if (info.usesZTex) {
++    // Z texture (GXSetZTexture): the texel of the last TEV stage's lookup, read as an unsigned
++    // depth value (Z8 = I8 texel, Z16 = IA8 texel with A as the high byte, Z24X8 = RGBA8 texel
++    // with R,G,B from high to low), plus the 24-bit bias, either replaces the rasterized depth or
++    // is added to it. The sum wraps at 24 bits.
++    const u32 lastStage = config.tevStageCount - 1;
++    fragmentFn += fmt::format(
++        "\n    // Z texture"
++        "\n    let ztex_t = vec4u(round(clamp(sampled{}, vec4f(0.0), vec4f(1.0)) * 255.0));",
++        lastStage);
++    switch (config.zTexFmt) {
++    case 0:
++      fragmentFn += "\n    var ztex_z = ztex_t.r;";
++      break;
++    case 1:
++      fragmentFn += "\n    var ztex_z = (ztex_t.a << 8u) | ztex_t.r;";
++      break;
++    default:
++      fragmentFn += "\n    var ztex_z = (ztex_t.r << 16u) | (ztex_t.g << 8u) | ztex_t.b;";
++      break;
++    }
++    fragmentFn += "\n    ztex_z = ztex_z + ubuf.ztex_bias.x;";
++    if (config.zTexOp == GX_ZT_ADD) {
++      fragmentFn += fmt::format("\n    ztex_z = ztex_z + u32(round(clamp({}, 0.0, 1.0) * 16777215.0));",
++                                UseReversedZ ? "1.0 - in.pos.z"sv : "in.pos.z"sv);
++    }
++    fragmentFn += "\n    ztex_z = ztex_z & 0xFFFFFFu;";
++    fragmentFn += fmt::format("\n    let ztex_depth = {};",
++                              UseReversedZ ? "1.0 - f32(ztex_z) / 16777215.0"sv : "f32(ztex_z) / 16777215.0"sv);
++  }
++
+   if (dstAlphaMode == DstAlphaMode::Replace) {
+     // GX destination alpha is set via the blend constant
+     fragmentFn += "\n    prev.a = 1.0;";
+@@ -1691,6 +1745,37 @@
+     fragmentReturn = "\n    return FragmentOutput(vec4f(prev.rgb, 1.0), prev);";
+   }
+ 
++  if (info.usesZTex) {
++    // Add the depth output to whichever output form was chosen above.
++    if (dstAlphaMode == DstAlphaMode::DualSource) {
++      fragmentOutput =
++          "\nstruct FragmentOutput {\n"
++          "    @location(0) @blend_src(0) color: vec4f,\n"
++          "    @location(0) @blend_src(1) blend: vec4f,\n"
++          "    @builtin(frag_depth) depth: f32,\n"
++          "};\n";
++      fragmentReturn = "\n    return FragmentOutput(vec4f(prev.rgb, 1.0), prev, ztex_depth);";
++    } else if (normalAttachment != UINT32_MAX) {
++      fragmentOutput = fmt::format(
++          "\nstruct FragmentOutput {{\n"
++          "    @location(0) color: vec4f,\n"
++          "    @location({}) normal: vec4f,\n"
++          "    @builtin(frag_depth) depth: f32,\n"
++          "}};\n",
++          normalAttachment);
++      const auto ret = fragmentReturn.rfind("\n    return out;");
++      fragmentReturn.insert(ret, "\n    out.depth = ztex_depth;");
++    } else {
++      fragmentOutput =
++          "\nstruct FragmentOutput {\n"
++          "    @location(0) color: vec4f,\n"
++          "    @builtin(frag_depth) depth: f32,\n"
++          "};\n";
++      fragmentReturn = "\n    return FragmentOutput(prev, ztex_depth);";
++    }
++    fragmentOutputType = "FragmentOutput"sv;
++  }
++
+   auto shaderSource =
+       fmt::format(R"""(
+ fn bswap32(v: u32, le: bool) -> u32 {{
+diff --git a/lib/gx/shader_info.cpp b/lib/gx/shader_info.cpp
+--- a/lib/gx/shader_info.cpp
++++ b/lib/gx/shader_info.cpp
+@@ -295,6 +295,14 @@
+     }
+   }
+ 
++  // Z texture reads the texel of the last TEV stage's lookup
++  if (config.zTexOp != 0 && config.tevStageCount > 0) {
++    const auto& last = config.tevStages[config.tevStageCount - 1];
++    info.usesZTex = true;
++    info.sampledTexCoords.set(last.texCoordId);
++    info.sampledTextures.set(last.texMapId);
++  }
++
+   // Emboss bump needs its source texcoord generated and a light enabled
+   for (int i = 0; i < info.sampledTexCoords.size(); ++i) {
+     if (!info.sampledTexCoords.test(i)) {
+@@ -304,6 +312,9 @@
+     if (tcg.type >= GX_TG_BUMP0 && tcg.type <= GX_TG_BUMP7) {
+       info.sampledTexCoords.set(tcg.embossSrc);
+       info.lightingEnabled = true;
++    } else if (tcg.type == GX_TG_SRTG) {
++      // Color texgen reads the lit output of color channel 0 or 1
++      info.sampledColorChannels.set(tcg.src == GX_TG_COLOR1 ? 1 : 0);
+     }
+   }
+ 
+@@ -362,6 +373,9 @@
+     info.uniformSize += MaxIndTexMtxs * sizeof(Mat2x4<float>);
+   }
+   info.uniformSize += info.sampledTextures.count() * sizeof(Vec4<float>);
++  if (info.usesZTex) {
++    info.uniformSize += 16; // ztex_bias: vec4u
++  }
+   info.uniformSize = gfx::align_uniform(info.uniformSize);
+   if (info.uniformSize > MaxUniformSize) {
+     Log.fatal("Uniform size exceeds maximum: {} > {}", info.uniformSize, MaxUniformSize);
+@@ -490,6 +504,12 @@
+     }
+     buf.append(texture_size_bias(get_texture(static_cast<GXTexMapID>(i))));
+   }
++  if (info.usesZTex) {
++    buf.append<u32>(g_gxState.zTexBias & 0xFFFFFF);
++    buf.append<u32>(0);
++    buf.append<u32>(0);
++    buf.append<u32>(0);
++  }
+ }
+ 
+ gfx::Range build_uniform(const ShaderInfo& info) noexcept {

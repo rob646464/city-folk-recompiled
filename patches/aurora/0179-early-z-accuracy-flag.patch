@@ -1,0 +1,48 @@
+diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -186,6 +186,12 @@
+  * pass that has such draws; costs a full-target pass per affected EFB pass).
+  */
+ #define GX_AURORA_ACCURACY_EFB_BLEND 0x0008
++/**
++ * Z compare before texturing (GXSetZCompLoc(GX_TRUE)) also writes the depth of pixels the alpha
++ * test rejects, as the hardware updates Z before the TEV (Aurora 0170 splits such draws into a
++ * depth-only pass and the colour pass). AURORA_EARLY_Z_SPLIT overrides it (0 off, 1 on, ab).
++ */
++#define GX_AURORA_ACCURACY_EARLY_Z 0x0010
+ 
+ void GXSetAuroraAccuracy(u32 flags);
+ u32 GXGetAuroraAccuracy();
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -715,11 +715,14 @@
+ }
+ static bool early_z_alpha_split(const PipelineConfig& pc) noexcept {
+   // AURORA_EARLY_Z_SPLIT=0 off, =ab only in odd frames (A/B within one run)
++  // 0179: unset, the application's GX_AURORA_ACCURACY_EARLY_Z flag decides (=1 forces it on).
+   static const int mode = [] {
+     const char* e = std::getenv("AURORA_EARLY_Z_SPLIT");
+-    return e == nullptr ? 1 : e[0] == '0' ? 0 : e[0] == 'a' ? 2 : 1;
++    return e == nullptr ? 3 : e[0] == '0' ? 0 : e[0] == 'a' ? 2 : 1;
+   }();
+-  const bool enabled = mode == 1 || (mode == 2 && (sDbgFrame.load(std::memory_order_relaxed) & 1) != 0);
++  const bool enabled =
++      mode == 1 || (mode == 2 && (sDbgFrame.load(std::memory_order_relaxed) & 1) != 0) ||
++      (mode == 3 && (g_accuracyFlags.load(std::memory_order_relaxed) & GX_AURORA_ACCURACY_EARLY_Z) != 0);
+   if (!enabled || !g_gxState.zCompLocBeforeTex || !pc.depthCompare || !pc.depthUpdate ||
+       !pc.shaderConfig.alphaCompare || pc.shaderConfig.lineMode != 0 || pc.shaderConfig.wireframe) {
+     return false;
+@@ -754,6 +757,11 @@
+   DrawData first = data;
+   first.pipeline = gfx::pipeline_ref(depthOnly);
+   first.dstAlpha = UINT32_MAX;
++  // 0179: the next draw must not be merged into one half of the split (draw_prim extends the last
++  // draw command with the following draw when the GX state is unchanged): merged geometry then
++  // got only the colour pass without a depth write, or only the depth pass without colour.
++  // With the cache's format reset, the next draw is pushed on its own (and split again).
++  sDrawCache.lastDrawFmt = GX_MAX_VTXFMT;
+   gfx::push_draw_command(first);
+ 
+   PipelineConfig color = cache.config;

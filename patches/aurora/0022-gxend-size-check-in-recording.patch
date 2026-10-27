@@ -1,0 +1,37 @@
+diff --git a/lib/dolphin/gx/GXVert.cpp b/lib/dolphin/gx/GXVert.cpp
+index 789ed14..775e504 100644
+--- a/lib/dolphin/gx/GXVert.cpp
++++ b/lib/dolphin/gx/GXVert.cpp
+@@ -11,6 +11,14 @@ bool sInBegin = false;
+ u32 sBeginSizeOffset = 0;
+ bool sBeginAuto = false;
+ 
++// Where the calling thread's commands go: its display-list (or capture) recording, or the FIFO.
++// While a thread records, the FIFO's size belongs to whoever submits to it (another thread may
++// be replaying captured frames into it), so the draw's byte count is measured in the recording.
++u32 write_pos() {
++  return aurora::gx::fifo::in_display_list() ? aurora::gx::fifo::display_list_pos()
++                                             : aurora::gx::fifo::get_buffer_size();
++}
++
+ void pre_begin() {
+   CHECK(!sInBegin, "GXBegin: called without matching GXEnd");
+ 
+@@ -27,7 +35,7 @@ void pre_begin() {
+ 
+ void post_begin(u16 nVerts) {
+   sBeginNVerts = nVerts;
+-  sBeginFifoSize = aurora::gx::fifo::get_buffer_size();
++  sBeginFifoSize = write_pos();
+   sInBegin = true;
+ }
+ } // namespace
+@@ -75,7 +83,7 @@ void GXBeginIndexed(GXVtxFmt vtxFmt, u16 nVerts, const u16* indices, u32 nIndice
+ 
+ void GXEnd() {
+   if (sInBegin) {
+-    u32 bytesWritten = aurora::gx::fifo::get_buffer_size() - sBeginFifoSize;
++    u32 bytesWritten = write_pos() - sBeginFifoSize;
+     if (sBeginAuto) {
+       aurora::gx::fifo::patch_u32(sBeginSizeOffset, bytesWritten);
+       sBeginAuto = false;

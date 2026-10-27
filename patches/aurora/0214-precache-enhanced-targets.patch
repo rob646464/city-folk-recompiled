@@ -1,0 +1,112 @@
+0214: precache enhanced lighting's own render targets
+
+The pipeline cache records configs without the render target they are drawn into, and the
+precache built every known config for the scene and offscreen layouts only. The variants enhanced
+lighting derives for its passes (the depth pre-pass and the light shadow-map casters:
+ShaderConfig::depthOnly / lightDepth, drawn into a depth-only target; the glow buffer: additive
+draws without depth and alpha writes, drawn into the RGBA16F glow target) were therefore compiled
+on first use in play: 100-600 ms frames (LM: docs/INTERPOLATION.md "Pass 5"). Such configs are now
+also built for those layouts (the depth variants only for theirs).
+
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -2452,6 +2452,38 @@
+   return layout;
+ }
+ 
++// The depth pre-pass and the light shadow maps (depth only).
++RenderTargetLayout depth_layout() noexcept {
++  RenderTargetLayout l{
++      .colorAttachmentCount = 0,
++      .depthStencilFormat = webgpu::g_graphicsConfig.depthFormat,
++      .sampleCount = 1,
++  };
++  detail::finalize_render_target_layout(l);
++  return l;
++}
++
++// 0214: the render targets a known pipeline config is drawn into besides the scene. The pipeline
++// cache records configs without their target, and the precache built every config for the scene
++// (and the offscreen) layout only, so the variants enhanced lighting derives for its own passes
++// (the depth pre-pass and light shadow-map casters: depthOnly / lightDepth; the glow buffer: the
++// additive draws re-drawn without depth and alpha writes) were compiled on first use: 100-600 ms
++// frames in play (pipeline compiles hold Dawn's device lock, which also stalls the game thread).
++size_t precache_layouts(const gx::PipelineConfig& c, RenderTargetLayout* out, bool& sceneToo) noexcept {
++  size_t n = 0;
++  sceneToo = true;
++  if (c.shaderConfig.depthOnly || c.shaderConfig.lightDepth) {
++    static const RenderTargetLayout depth = depth_layout();
++    out[n++] = depth;
++    sceneToo = false; // only ever drawn into the depth targets
++  } else if (c.colorUpdate && !c.alphaUpdate && !c.depthUpdate && c.dstAlpha == UINT32_MAX &&
++             c.blendMode == GX_BM_BLEND && c.blendFacDst == GX_BL_ONE) {
++    static const RenderTargetLayout glow = glow_layout();
++    out[n++] = glow; // (an additive scene draw of the same shape is also built for the scene)
++  }
++  return n;
++}
++
+ // Additive draws: what they add to the picture is light (glows, sparkles, lens/beam sprites,
+ // fire, lightning effects).
+ bool is_emissive(const gx::PipelineConfig& c) noexcept {
+@@ -2775,15 +2807,7 @@
+     dc.alphaUpdate = false;
+     dc.dstAlpha = UINT32_MAX;
+     dc.shaderConfig.depthOnly = 1; // the enhanced shading of the copy would be wasted (depth only)
+-    static const RenderTargetLayout layout = [] {
+-      RenderTargetLayout l{
+-          .colorAttachmentCount = 0,
+-          .depthStencilFormat = webgpu::g_graphicsConfig.depthFormat,
+-          .sampleCount = 1,
+-      };
+-      detail::finalize_render_target_layout(l);
+-      return l;
+-    }();
++    static const RenderTargetLayout layout = depth_layout();
+     GlowDraw g{.data = data, .viewport = current_viewport(), .scissor = current_scissor()};
+     static std::unordered_map<PipelineRef, PipelineRef> sVariants;
+     if (const auto it = sVariants.find(data.pipeline); it != sVariants.end()) {
+diff --git a/lib/gfx/enhanced.hpp b/lib/gfx/enhanced.hpp
+--- a/lib/gfx/enhanced.hpp
++++ b/lib/gfx/enhanced.hpp
+@@ -68,4 +68,9 @@
+ // 0028: a frame's command buffer was submitted (GPU timing readback, AURORA_ENH_GPU_TIMING=1).
+ void after_submit() noexcept;
+ 
++// --- pipeline precache (any thread) ---
++// 0214: the enhanced passes' render targets a known config is drawn into (written to `out`, at most
++// 2; returns the count); `sceneToo` false when the config is never drawn into the scene.
++size_t precache_layouts(const gx::PipelineConfig& c, RenderTargetLayout* out, bool& sceneToo) noexcept;
++
+ } // namespace aurora::gfx::enhanced
+diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -1,6 +1,7 @@
+ #include "pipeline_cache.hpp"
+ 
+ #include "clear.hpp"
++#include "enhanced.hpp"
+ #include "frame_packet.hpp"
+ #include "resources.hpp"
+ #include "hash.hpp"
+@@ -1835,6 +1836,18 @@
+           // draw needs it, see guarded_create).
+           if (is_quarantined(xxh3_hash(adjusted, static_cast<HashType>(pipeline.type)))) {
+             return;
++          }
++          if constexpr (std::is_same_v<std::decay_t<decltype(adjusted)>, gx::PipelineConfig>) {
++            // 0214: also (or only) the enhanced-lighting targets the config is drawn into.
++            RenderTargetLayout extra[2];
++            bool sceneToo = true;
++            const size_t n = enhanced::precache_layouts(adjusted, extra, sceneToo);
++            for (size_t i = 0; i < n; ++i) {
++              resolve_pipeline(pipeline.type, adjusted, extra[i], PipelinePriority::Background);
++            }
++            if (!sceneToo) {
++              return;
++            }
+           }
+           resolve_pipeline(pipeline.type, adjusted, scene, PipelinePriority::Background);
+           if (offscreen.key != scene.key) {

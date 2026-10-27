@@ -1,0 +1,203 @@
+GX draw encoding without redundant state calls (render_seq). Each recorded GX draw used to set all
+of its pass state (SetImmediates, the uniform and texture bind groups, SetIndexBuffer bound to the
+draw's range, the blend constant) before its pipeline and draw. At the original frame rate the
+early-Z split (0170/0179) runs per draw, unmerged, so every GX draw becomes a depth-only and a colour
+command with identical state: about 40,000 commands per frame in LM's opening forest and the Parlor,
+50-90 ms of render-worker time per game frame, and the game (lockstep) fell to 18-23 fps.
+render_pass now encodes runs of GX draws with gx::render_seq: a state call is issued only when it
+differs from what the previous GX draw set, and the whole index buffer stays bound with firstIndex
+selecting the draw's range. The GPU receives the same state for every draw (frame dumps
+byte-identical). Any other command type resets the tracked state. AURORA_GX_SEQ=0: the old path.
+
+diff --git a/lib/gfx/recording.hpp b/lib/gfx/recording.hpp
+--- a/lib/gfx/recording.hpp
++++ b/lib/gfx/recording.hpp
+@@ -14,6 +14,7 @@
+ namespace aurora::gfx::detail {
+ 
+ struct FramePacket;
++struct DrawCommand;
+ 
+ struct RecordedFrame {
+   FramePacket* packet;
+@@ -131,6 +132,9 @@
+ // (its final state: later draws may have been merged into it). Enhanced lighting glow.
+ std::pair<uint32_t, uint32_t> next_command_position() noexcept;
+ const gx::DrawData* gx_draw_at(uint32_t pass, uint32_t index) noexcept;
++// The GX draw recorded in `cmd`, or null for any other draw type (0229: pass encoding skips the
++// state a GX draw shares with the GX draw encoded before it).
++const gx::DrawData* gx_draw_payload(const detail::DrawCommand& cmd) noexcept;
+ // The viewport / scissor the next recorded draw uses (target pixels).
+ Viewport current_viewport() noexcept;
+ ClipRect current_scissor() noexcept;
+diff --git a/lib/gfx/recording.cpp b/lib/gfx/recording.cpp
+--- a/lib/gfx/recording.cpp
++++ b/lib/gfx/recording.cpp
+@@ -841,6 +841,13 @@
+     return nullptr;
+   }
+   return &inline_payload<gx::DrawData>(const_cast<std::byte*>(cmd.data.draw.payload.data()));
++}
++
++const gx::DrawData* gx_draw_payload(const detail::DrawCommand& cmd) noexcept {
++  if (cmd.encoder != encode_draw<gx::render, gx::DrawData>) {
++    return nullptr;
++  }
++  return &inline_payload<gx::DrawData>(const_cast<std::byte*>(cmd.payload.data()));
+ }
+ 
+ Vec2<uint32_t> get_render_target_size() noexcept {
+diff --git a/lib/gx/pipeline.hpp b/lib/gx/pipeline.hpp
+--- a/lib/gx/pipeline.hpp
++++ b/lib/gx/pipeline.hpp
+@@ -44,6 +44,18 @@
+ 
+ gfx::CompiledPipeline create_pipeline(const PipelineConfig& config, const gfx::RenderTargetLayout& layout);
+ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass);
++// 0229: the pass state the last GX draw of a run of GX draws left set (encoding.cpp render_pass).
++// render_seq() issues only what differs from it; the commands reaching the GPU have the same
++// effect as render()'s. Reset it before any other command type touches the pass.
++struct RenderSeqState {
++  bool valid = false;
++  DrawImmediateData immediates{};
++  uint32_t uniformOffset = UINT32_MAX;
++  gfx::BindGroupRef textureBindGroup{};
++  WGPUBuffer indexBuffer = nullptr;  // bound whole (firstIndex addresses the draw's range)
++  uint32_t blendAlpha = UINT32_MAX;
++};
++void render_seq(const DrawData& data, const wgpu::RenderPassEncoder& pass, RenderSeqState& state);
+ 
+ void queue_surface(const u8* dlStart, uint32_t dlSize, bool bigEndian) noexcept;
+ } // namespace aurora::gx
+diff --git a/lib/gx/pipeline.cpp b/lib/gx/pipeline.cpp
+--- a/lib/gx/pipeline.cpp
++++ b/lib/gx/pipeline.cpp
+@@ -11,6 +11,8 @@
+ #include <absl/container/flat_hash_map.h>
+ #include <tracy/Tracy.hpp>
+ 
++#include <array>
++#include <cstring>
+ #include <mutex>
+ 
+ namespace aurora::gx {
+@@ -127,4 +129,67 @@
+   draw();
+ }
+ 
++void render_seq(const DrawData& data, const wgpu::RenderPassEncoder& pass, RenderSeqState& state) {
++  // Same commands as render(), minus the state calls that set what is already set. Matters most
++  // for the early-Z split (0170/0179) at the original frame rate, where every GX draw becomes a
++  // depth-only and a colour command with identical immediates, uniforms, textures and indices:
++  // the forest of the opening had ~40,000 commands per frame, and their encoding plus Dawn's
++  // submit took the render worker 50-90 ms per game frame (the game fell to 18-23 fps).
++  gfx::CompiledPipeline pipeline;
++  if (!gfx::get_pipeline(data.pipeline, pipeline)) {
++    return;
++  }
++  const auto& resources = gfx::detail::resources();
++  if (!state.valid) {
++    state = RenderSeqState{};
++  }
++  if (!state.valid || std::memcmp(&state.immediates, &data.immediateData, sizeof(data.immediateData)) != 0) {
++    pass.SetImmediates(0, &data.immediateData, sizeof(data.immediateData));
++    state.immediates = data.immediateData;
++  }
++  if (!state.valid || state.uniformOffset != data.uniformRange.offset) {
++    const std::array offsets{data.uniformRange.offset};
++    pass.SetBindGroup(1, resources.uniformBindGroup, offsets.size(), offsets.data());
++    state.uniformOffset = data.uniformRange.offset;
++  }
++  if (data.bindGroups.textureBindGroup && data.bindGroups.textureBindGroup != state.textureBindGroup) {
++    pass.SetBindGroup(2, gfx::find_bind_group(data.bindGroups.textureBindGroup));
++    state.textureBindGroup = data.bindGroups.textureBindGroup;
++  }
++  // Indexed draws: the whole index buffer stays bound and firstIndex selects the draw's range
++  // (the same indices as binding the range itself).
++  const bool whole = data.indexCount != 0 && (data.idxRange.offset % sizeof(uint16_t)) == 0;
++  if (data.indexCount != 0) {
++    if (whole) {
++      if (state.indexBuffer != resources.indexBuffer.Get()) {
++        pass.SetIndexBuffer(resources.indexBuffer, wgpu::IndexFormat::Uint16, 0, wgpu::kWholeSize);
++        state.indexBuffer = resources.indexBuffer.Get();
++      }
++    } else {
++      pass.SetIndexBuffer(resources.indexBuffer, wgpu::IndexFormat::Uint16, data.idxRange.offset, data.idxRange.size);
++      state.indexBuffer = nullptr;
++    }
++  }
++  if (data.dstAlpha != UINT32_MAX && (!state.valid || state.blendAlpha != data.dstAlpha)) {
++    const wgpu::Color color{0.f, 0.f, 0.f, data.dstAlpha / 255.f};
++    pass.SetBlendConstant(&color);
++    state.blendAlpha = data.dstAlpha;
++  }
++  state.valid = true;
++  const uint32_t firstIndex = whole ? data.idxRange.offset / static_cast<uint32_t>(sizeof(uint16_t)) : 0;
++  const auto draw = [&] {
++    if (data.indexCount == 0) {
++      pass.Draw(data.vtxCount, data.instanceCount);
++    } else {
++      pass.DrawIndexed(data.indexCount, data.instanceCount, firstIndex);
++    }
++  };
++  if (pipeline.prepass) {
++    gfx::bind_pipeline(pipeline.prepass, pass);
++    draw();
++  }
++  gfx::bind_pipeline(pipeline.main, pass);
++  draw();
++}
++
+ } // namespace aurora::gx
+diff --git a/lib/gfx/encoding.cpp b/lib/gfx/encoding.cpp
+--- a/lib/gfx/encoding.cpp
++++ b/lib/gfx/encoding.cpp
+@@ -6,6 +6,7 @@
+ #include "depth_peek.hpp"
+ #include "efb_blend6.hpp"
+ #include "pipeline_cache.hpp"
++#include "recording.hpp"
+ #include "tex_copy_conv.hpp"
+ #include "tex_palette_conv.hpp"
+ #include "../gx/gx.hpp"
+@@ -19,6 +20,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <cstdint>
++#include <cstdlib>
+ #include <cstring>
+ #include <string>
+ #include <utility>
+@@ -120,6 +122,13 @@
+   // Bind bind group for the whole pass
+   pass.SetBindGroup(0, resources().staticBindGroup);
+   pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
++  // 0229: consecutive GX draws skip the state the previous one set (gx::render_seq).
++  // AURORA_GX_SEQ=0: every GX draw sets all of its state (gx::render), for A/B comparisons.
++  static const bool seqOn = [] {
++    const char* e = std::getenv("AURORA_GX_SEQ");
++    return !(e && e[0] == '0');
++  }();
++  gx::RenderSeqState seq;
+ 
+   for (auto& cmd : passInfo.commands) {
+ #ifdef AURORA_GFX_DEBUG_GROUPS
+@@ -155,12 +164,17 @@
+     } break;
+     case CommandType::Draw: {
+       auto& draw = cmd.data.draw;
+-      if (draw.encoder != nullptr) {
++      if (const gx::DrawData* gxDraw = seqOn ? gx_draw_payload(draw) : nullptr) {
++        gx::render_seq(*gxDraw, pass, seq);
++      } else if (draw.encoder != nullptr) {
++        seq.valid = false;  // another draw type may set any pass state
+         draw.encoder(draw.payload.data(), pass, passInfo);
++        seq.valid = false;
+       }
+     } break;
+     case CommandType::CustomDraw: {
+       render_custom_draw(cmd.data.customDraw, pass, passInfo);
++      seq.valid = false;
+       g_currentPipeline = nullptr;
+       pass.SetBindGroup(0, resources().staticBindGroup);
+       pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);

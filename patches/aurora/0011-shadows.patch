@@ -1,0 +1,231 @@
+diff --git a/include/aurora/efb_ram.h b/include/aurora/efb_ram.h
+index f4a1caf..f49a571 100644
+--- a/include/aurora/efb_ram.h
++++ b/include/aurora/efb_ram.h
+@@ -25,6 +25,11 @@ typedef struct AuroraEfbRamStats {
+ /** Enables accurate copies (default on). Off: copies stay GPU-only (Aurora's original behaviour). */
+ void aurora_efb_ram_set_enabled(bool enabled);
+ bool aurora_efb_ram_enabled(void);
++/** A Z16 depth copy read back as an IA8 texture of the same size at the same address (a depth
++ *  map compared in the TEV, e.g. Luigi's Mansion's shadow map) uses the copy texture at the
++ *  internal resolution (default) instead of the console's 640x480 bytes. Both hold the same
++ *  values (I = depth bits 23..16, A = 15..8); only the resolution differs. */
++void aurora_efb_ram_set_scaled_depth_reads(bool enabled);
+ /** Read back every copy into memory (testing/debug; normally only CPU-read ranges are). */
+ void aurora_efb_ram_set_readback_all(bool enabled);
+ /** The CPU is about to read [ptr, ptr+size) (e.g. DCInvalidateRange): copies there are read back
+diff --git a/lib/gfx/efb_ram.cpp b/lib/gfx/efb_ram.cpp
+index b4bb1b7..0f007d2 100644
+--- a/lib/gfx/efb_ram.cpp
++++ b/lib/gfx/efb_ram.cpp
+@@ -303,6 +303,7 @@ struct DecodedKey {
+ std::mutex g_mutex;
+ std::atomic_bool g_enabled{true};
+ std::atomic_bool g_readbackAll{false};
++std::atomic_bool g_scaledDepthReads{true};
+ std::vector<Entry> g_entries; // oldest first
+ absl::flat_hash_map<uint64_t, LazyBufferRef> g_bytePool; // (dest ^ size) -> bytes buffer, reused per range
+ absl::flat_hash_map<DecodedKey, Decoded> g_decoded;
+@@ -717,6 +718,13 @@ TextureHandle resolve_texture(const GXTexObj_& obj) {
+   if (last->dest == data && static_cast<u32>(last->fmt) == fmt && last->width == width && last->height == height) {
+     return {};
+   }
++  // A Z16 copy read as IA8 of the same size: Aurora's copy texture already holds that view
++  // (tex_copy_conv FragZ16: I = depth bits 23..16, A = 15..8), at the internal resolution.
++  if (g_scaledDepthReads.load(std::memory_order_relaxed) && last->dest == data &&
++      static_cast<u32>(last->fmt) == GX_TF_Z16 && fmt == GX_TF_IA8 && last->width == width &&
++      last->height == height) {
++    return {};
++  }
+   if (!supported_texture_format(fmt)) {
+     return {}; // palette/CMPR reads keep Aurora's reinterpretation
+   }
+@@ -833,6 +841,7 @@ void aurora_efb_ram_set_enabled(bool enabled) {
+ bool aurora_efb_ram_enabled() { return enabled(); }
+ 
+ void aurora_efb_ram_set_readback_all(bool enabled) { g_readbackAll = enabled; }
++void aurora_efb_ram_set_scaled_depth_reads(bool enabled) { g_scaledDepthReads = enabled; }
+ 
+ void aurora_efb_ram_cpu_read(const void* ptr, uint32_t size) {
+   if (!enabled() || size == 0) {
+diff --git a/lib/gfx/encoding.cpp b/lib/gfx/encoding.cpp
+index 4432b36..fd5c624 100644
+--- a/lib/gfx/encoding.cpp
++++ b/lib/gfx/encoding.cpp
+@@ -263,9 +263,7 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
+     const bool needsScaling = dstSize.width != static_cast<uint32_t>(passInfo.resolveRect.width) ||
+                               dstSize.height != static_cast<uint32_t>(passInfo.resolveRect.height);
+     const bool isDepth = gx::is_depth_format(passInfo.resolveFormat);
+-    if (isDepth && passInfo.msaaSamples > 1) {
+-      Log.fatal("Depth tex copies from multisampled EFB targets are not supported");
+-    }
++    // Depth copies from a multisampled EFB read sample 0 (tex_copy_conv's MS depth pipelines).
+     const tex_copy_conv::ConvRequest convReq{
+         .fmt = passInfo.resolveFormat,
+         .srcFmt = passInfo.resolveSourceFormat,
+@@ -273,6 +271,7 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
+         .uniformRange = passInfo.resolveUniformRange,
+         .dst = passInfo.resolveTarget,
+         .sampleFilter = needsScaling ? tex_copy_conv::SampleFilter::Linear : tex_copy_conv::SampleFilter::Nearest,
++        .srcSamples = isDepth ? passInfo.msaaSamples : 1u,
+     };
+     const bool needsOpaqueAlpha = !isDepth && !gx::efb_has_alpha(convReq.srcFmt);
+     const bool sameFormat =
+diff --git a/lib/gfx/tex_copy_conv.cpp b/lib/gfx/tex_copy_conv.cpp
+index 305d090..a3f3560 100644
+--- a/lib/gfx/tex_copy_conv.cpp
++++ b/lib/gfx/tex_copy_conv.cpp
+@@ -330,6 +330,9 @@ static constexpr std::array DepthConvPipelines{
+ 
+ static wgpu::BindGroupLayout g_bindGroupLayout;
+ static wgpu::BindGroupLayout g_depthBindGroupLayout;
++// Depth copies from a multisampled EFB (MSAA enhancement): the same conversions reading sample 0.
++static wgpu::BindGroupLayout g_depthBindGroupLayoutMS;
++static absl::flat_hash_map<GXTexFmt, wgpu::RenderPipeline> g_depthPipelinesMS;
+ static wgpu::Sampler g_nearestSampler;
+ static wgpu::Sampler g_linearSampler;
+ static absl::flat_hash_map<GXTexFmt, wgpu::RenderPipeline> g_pipelines;
+@@ -516,6 +519,33 @@ void initialize() {
+   };
+   g_depthBindGroupLayout = g_device.CreateBindGroupLayout(&depthBindGroupLayoutDescriptor);
+ 
++  static constexpr std::array depthBindGroupLayoutEntriesMS{
++      wgpu::BindGroupLayoutEntry{
++          .binding = 0,
++          .visibility = wgpu::ShaderStage::Fragment,
++          .texture =
++              wgpu::TextureBindingLayout{
++                  .sampleType = wgpu::TextureSampleType::Depth,
++                  .viewDimension = wgpu::TextureViewDimension::e2D,
++                  .multisampled = true,
++              },
++      },
++      wgpu::BindGroupLayoutEntry{
++          .binding = 1,
++          .visibility = wgpu::ShaderStage::Vertex,
++          .buffer =
++              wgpu::BufferBindingLayout{
++                  .type = wgpu::BufferBindingType::Uniform,
++              },
++      },
++  };
++  static constexpr wgpu::BindGroupLayoutDescriptor depthBindGroupLayoutDescriptorMS{
++      .label = "TexCopyConv Depth MS Bind Group Layout",
++      .entryCount = depthBindGroupLayoutEntriesMS.size(),
++      .entries = depthBindGroupLayoutEntriesMS.data(),
++  };
++  g_depthBindGroupLayoutMS = g_device.CreateBindGroupLayout(&depthBindGroupLayoutDescriptorMS);
++
+   g_blitPipeline = create_pipeline(
+       {GX_TF_RGBA8, FragPassthrough, webgpu::g_graphicsConfig.surfaceConfiguration.format, "TexCopyConv Blit"},
+       ShaderPreamble, g_bindGroupLayout);
+@@ -532,6 +562,10 @@ void initialize() {
+       if (conv.outputFormat != to_wgpu(conv.fmt)) {
+         Log.fatal("Output format mismatch for {}", conv.fmt);
+       }
++      std::string preambleMS = DepthShaderPreamble;
++      const std::string_view from = "texture_depth_2d";
++      preambleMS.replace(preambleMS.find(from), from.size(), "texture_depth_multisampled_2d");
++      g_depthPipelinesMS[conv.fmt] = create_pipeline(conv, preambleMS, g_depthBindGroupLayoutMS);
+     }
+     g_depthSnapshotBindGroupLayout = create_depth_snapshot_layout(false, "Depth Snapshot Bind Group Layout");
+     g_depthSnapshotBindGroupLayoutMS = create_depth_snapshot_layout(true, "Depth Snapshot MS Bind Group Layout");
+@@ -561,6 +595,8 @@ void shutdown() {
+   g_blitPipeline = {};
+   g_bindGroupLayout = {};
+   g_depthBindGroupLayout = {};
++  g_depthBindGroupLayoutMS = {};
++  g_depthPipelinesMS.clear();
+   g_nearestSampler = {};
+   g_linearSampler = {};
+   g_depthSnapshotBindGroupLayout = {};
+@@ -592,7 +628,7 @@ static void execute(const wgpu::CommandEncoder& cmd, const ConvRequest& req, con
+         },
+     };
+     const wgpu::BindGroupDescriptor bindGroupDescriptor{
+-        .layout = g_depthBindGroupLayout,
++        .layout = req.srcSamples > 1 ? g_depthBindGroupLayoutMS : g_depthBindGroupLayout,
+         .entryCount = bindGroupEntries.size(),
+         .entries = bindGroupEntries.data(),
+     };
+@@ -645,6 +681,13 @@ static void execute(const wgpu::CommandEncoder& cmd, const ConvRequest& req, con
+ }
+ 
+ void run(const wgpu::CommandEncoder& cmd, const ConvRequest& req) {
++  if (req.srcSamples > 1 && gx::is_depth_format(req.fmt)) {
++    const auto ms = g_depthPipelinesMS.find(req.fmt);
++    if (ms != g_depthPipelinesMS.end()) {
++      execute(cmd, req, ms->second);
++    }
++    return;
++  }
+   const auto it = g_pipelines.find(req.fmt);
+   if (it == g_pipelines.end()) {
+     Log.fatal("No copy conversion pipeline for format {}", static_cast<int>(req.fmt));
+diff --git a/lib/gfx/tex_copy_conv.hpp b/lib/gfx/tex_copy_conv.hpp
+index 9e6c9d2..a6946f9 100644
+--- a/lib/gfx/tex_copy_conv.hpp
++++ b/lib/gfx/tex_copy_conv.hpp
+@@ -28,6 +28,7 @@ struct ConvRequest {
+   Range uniformRange;        // Uniforms
+   TextureHandle dst;         // Destination texture
+   SampleFilter sampleFilter = SampleFilter::Nearest;
++  uint32_t srcSamples = 1;   // depth copies: sample count of srcView (MSAA EFB: sample 0 is copied)
+ };
+ 
+ bool needs_conversion(GXTexFmt fmt);
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index 543d5e3..039bab5 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1038,8 +1038,10 @@ std::string build_int_tev_stage(size_t idx, const ShaderConfig& config, const Te
+       }
+       expr = fmt::format("itev_clamp3({} + select(vec3i(0), {}, {}), {})", d, c, cond, op.clamp);
+     }
+-    const auto outReg = int_reg_name(op.outReg);
+-    out += fmt::format("\n    {0} = vec4i({1}, {0}.a);", outReg, expr);
++    // The color and alpha units read their inputs before either writes its result (the alpha
++    // unit's R8/GR16/BGR24 compares read the stage's color inputs, and color inputs may read
++    // alpha registers), so both results go through temporaries and are stored together below.
++    out += fmt::format("\n    let tevc{} = {};", idx, expr);
+   }
+   // Alpha
+   {
+@@ -1067,8 +1069,11 @@ std::string build_int_tev_stage(size_t idx, const ShaderConfig& config, const Te
+       }
+       expr = fmt::format("itev_clamp1({} + select(0, {}, {}), {})", d, c, cond, op.clamp);
+     }
+-    out += fmt::format("\n    {}.a = {};", int_reg_name(op.outReg), expr);
++    out += fmt::format("\n    let teva{} = {};", idx, expr);
+   }
++  const auto colorReg = int_reg_name(stage.colorOp.outReg);
++  out += fmt::format("\n    {0} = vec4i(tevc{1}, {0}.a);", colorReg, idx);
++  out += fmt::format("\n    {}.a = teva{};", int_reg_name(stage.alphaOp.outReg), idx);
+   return out;
+ }
+ 
+@@ -1329,11 +1334,11 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+         }
+         return fmt::format("tev_overflow_vec3f({})", value);
+       };
+-      std::string_view outReg = regName[stage.colorOp.outReg];
+       std::string op = tev_color_op(stage.colorOp.op, tev_bias(stage.colorOp.bias), tev_scale(stage.colorOp.scale),
+                                     stage.colorOp.clamp, color_arg(stage.colorPass.a), color_arg(stage.colorPass.b),
+                                     color_arg(stage.colorPass.c), color_arg_reg(stage.colorPass.d, idx, config, stage));
+-      fragmentFn += fmt::format("\n    // TEV stage {2}\n    {0} = vec4f({1}, {0}.a);", outReg, op, idx);
++      // Stored after the alpha unit has read its inputs (see build_int_tev_stage).
++      fragmentFn += fmt::format("\n    // TEV stage {1}\n    let tevc{1} = {0};", op, idx);
+       colorNormalized[stage.colorOp.outReg] = stage.colorOp.clamp;
+     }
+     {
+@@ -1358,7 +1363,9 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+                                     stage.alphaOp.clamp, cmp_arg(stage.colorPass.a, stage.alphaPass.a),
+                                     cmp_arg(stage.colorPass.b, stage.alphaPass.b),
+                                     alpha_arg(stage.alphaPass.c), alpha_arg_reg(stage.alphaPass.d, idx, config, stage));
+-      fragmentFn += fmt::format("\n    {0}.a = {1};", outReg, op);
++      fragmentFn += fmt::format("\n    let teva{0} = {1};", idx, op);
++      fragmentFn += fmt::format("\n    {0} = vec4f(tevc{1}, {0}.a);", regName[stage.colorOp.outReg], idx);
++      fragmentFn += fmt::format("\n    {0}.a = teva{1};", outReg, idx);
+       alphaNormalized[stage.alphaOp.outReg] = stage.alphaOp.clamp;
+     }
+   }

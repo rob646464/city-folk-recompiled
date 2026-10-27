@@ -1,0 +1,195 @@
+Early-Z split (0170/0179) for interpolated presentation: the split decision and its two
+pipelines are cached with the draw cache (two whole-config pipeline lookups per draw before), and
+with GX_AURORA_ACCURACY_EARLY_Z_MERGE consecutive draws with the same state are merged into one
+split pair (depth half and colour half extended alike). A foyer frame had ~16,000 split draws,
+all unmerged: replaying it took ~25 ms on the FIFO thread (presentation at ~35 fps at a 120
+target); cached ~11 ms, merged ~4 ms. AURORA_EARLY_Z_MERGE=0/1/ab overrides the flag.
+
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -172,6 +172,14 @@
+   bool hasFogRange = false;
+   GXVtxFmt lastDrawFmt = GX_MAX_VTXFMT;
+   u8 efbBlend6 = 0; // g_drawEfbBlend6 of the cached pipeline
++  // Early-Z split (0170/0182): decision and the two pipelines, for the cached pipeline.
++  gfx::PipelineRef splitFor{};
++  uint64_t splitTargetKey = 0;
++  u32 splitFlags = UINT32_MAX;
++  bool splitValid = false;
++  bool split = false;
++  gfx::PipelineRef splitDepth{};
++  gfx::PipelineRef splitColor{};
+ };
+ DrawCache sDrawCache;
+ 
+@@ -734,6 +742,15 @@
+   }
+   return false;
+ }
++static bool early_z_merge() noexcept {
++  // GX_AURORA_ACCURACY_EARLY_Z_MERGE; AURORA_EARLY_Z_MERGE=0 off, 1 on, ab: on in odd frames (A/B).
++  static const int mode = [] {
++    const char* e = std::getenv("AURORA_EARLY_Z_MERGE");
++    return e == nullptr ? 3 : e[0] == '0' ? 0 : e[0] == 'a' ? 2 : 1;
++  }();
++  return mode == 1 || (mode == 2 && (sDbgFrame.load(std::memory_order_relaxed) & 1) != 0) ||
++         (mode == 3 && (g_accuracyFlags.load(std::memory_order_relaxed) & GX_AURORA_ACCURACY_EARLY_Z_MERGE) != 0);
++}
+ static void push_early_z_split(const DrawCache& cache, const DrawData& data) noexcept {
+   static const bool sLog = std::getenv("AURORA_EARLY_Z_LOG") != nullptr;
+   if (sLog) {
+@@ -745,6 +762,41 @@
+       sLastFrame = f;
+     }
+   }
++  DrawData first = data;
++  first.pipeline = cache.splitDepth;
++  first.dstAlpha = UINT32_MAX;
++  // 0179: the next draw must not be merged into one half of the split (draw_prim extends the last
++  // draw command with the following draw when the GX state is unchanged): merged geometry then
++  // got only the colour pass without a depth write, or only the depth pass without colour.
++  // With the cache's format reset, the next draw is pushed on its own (and split again).
++  // 0182: with AURORA_EARLY_Z_MERGE=1 the next draw is merged into both halves instead.
++  if (!early_z_merge()) {
++    sDrawCache.lastDrawFmt = GX_MAX_VTXFMT;
++  }
++  gfx::push_draw_command(first);
++  DrawData second = data;
++  second.pipeline = cache.splitColor;
++  gfx::push_draw_command(second);
++}
++
++// 0182: the split decision and its two pipelines are derived from the cached pipeline config, so
++// they are computed once per pipeline change instead of for every draw (two pipeline lookups
++// hashing the whole config per draw; ~16,000 split draws per foyer frame).
++static bool early_z_split_cached(DrawCache& cache) noexcept {
++  const u32 flags = g_accuracyFlags.load(std::memory_order_relaxed) | (g_gxState.zCompLocBeforeTex ? 0x80000000u : 0u);
++  const auto targetKey = gfx::get_render_target_layout().key;
++  if (cache.splitValid && cache.splitFor == cache.pipelineRef && cache.splitFlags == flags &&
++      cache.splitTargetKey == targetKey) {
++    return cache.split;
++  }
++  cache.splitValid = true;
++  cache.splitFor = cache.pipelineRef;
++  cache.splitFlags = flags;
++  cache.splitTargetKey = targetKey;
++  cache.split = early_z_alpha_split(cache.config);
++  if (!cache.split) {
++    return false;
++  }
+   PipelineConfig depthOnly = cache.config;
+   depthOnly.shaderConfig.alphaCompare = AlphaCompare{GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0};
+   depthOnly.colorUpdate = false;
+@@ -754,16 +806,7 @@
+   depthOnly.blendFacDst = GX_BL_ZERO;
+   depthOnly.blendOp = GX_LO_COPY;
+   depthOnly.dstAlpha = UINT32_MAX;
+-  DrawData first = data;
+-  first.pipeline = gfx::pipeline_ref(depthOnly);
+-  first.dstAlpha = UINT32_MAX;
+-  // 0179: the next draw must not be merged into one half of the split (draw_prim extends the last
+-  // draw command with the following draw when the GX state is unchanged): merged geometry then
+-  // got only the colour pass without a depth write, or only the depth pass without colour.
+-  // With the cache's format reset, the next draw is pushed on its own (and split again).
+-  sDrawCache.lastDrawFmt = GX_MAX_VTXFMT;
+-  gfx::push_draw_command(first);
+-
++  cache.splitDepth = gfx::pipeline_ref(depthOnly);
+   PipelineConfig color = cache.config;
+   color.depthUpdate = false;
+   switch (color.depthFunc) {
+@@ -772,9 +815,8 @@
+   case GX_NEQUAL: color.depthFunc = GX_EQUAL; break;
+   default: break;
+   }
+-  DrawData second = data;
+-  second.pipeline = gfx::pipeline_ref(color);
+-  gfx::push_draw_command(second);
++  cache.splitColor = gfx::pipeline_ref(color);
++  return true;
+ }
+ 
+ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
+@@ -905,7 +947,7 @@
+       return; // debug: hidden
+     }
+   }
+-  if (early_z_alpha_split(cache.config)) [[unlikely]] {
++  if (early_z_split_cached(cache)) [[unlikely]] {
+     push_early_z_split(cache, drawData);
+     return;
+   }
+@@ -1063,6 +1105,17 @@
+     }
+     lastDraw->vtxCount += vtxCount;
+     lastDraw->indexCount += numIndices;
++    // 0182: the last command is the colour half of an early-Z split pair: its depth half (the
++    // command before it, same geometry) is extended alike.
++    if (sDrawCache.split && sDrawCache.splitValid && lastDraw->pipeline == sDrawCache.splitColor) {
++      if (auto* depthHalf = gfx::get_draw_command_before_last();
++          depthHalf != nullptr && depthHalf->pipeline == sDrawCache.splitDepth) {
++        depthHalf->vertRange = lastDraw->vertRange;
++        depthHalf->idxRange = lastDraw->idxRange;
++        depthHalf->vtxCount = lastDraw->vtxCount;
++        depthHalf->indexCount = lastDraw->indexCount;
++      }
++    }
+     gfx::detail::increment_merged_draw_count();
+     return;
+   }
+diff --git a/lib/gfx/recording.cpp b/lib/gfx/recording.cpp
+--- a/lib/gfx/recording.cpp
++++ b/lib/gfx/recording.cpp
+@@ -792,6 +792,21 @@
+     return nullptr;
+   }
+   return &inline_payload<gx::DrawData>(last.data.draw.payload.data());
++}
++
++gx::DrawData* get_draw_command_before_last() {
++  if (g_recorder.currentRenderPass >= current_render_passes().size()) {
++    return nullptr;
++  }
++  auto& commands = current_render_passes()[g_recorder.currentRenderPass].commands;
++  if (commands.size() < 2) {
++    return nullptr;
++  }
++  auto& cmd = commands[commands.size() - 2];
++  if (cmd.type != CommandType::Draw || cmd.data.draw.encoder != encode_draw<gx::render, gx::DrawData>) {
++    return nullptr;
++  }
++  return &inline_payload<gx::DrawData>(cmd.data.draw.payload.data());
+ }
+ 
+ std::pair<uint32_t, uint32_t> next_command_position() noexcept {
+diff --git a/lib/gfx/recording.hpp b/lib/gfx/recording.hpp
+--- a/lib/gfx/recording.hpp
++++ b/lib/gfx/recording.hpp
+@@ -104,6 +104,8 @@
+ void push_draw_command(DrawData data);
+ template <typename DrawData>
+ DrawData* get_last_draw_command();
++// The draw command before the last one (0182: the depth half of an early-Z split pair).
++gx::DrawData* get_draw_command_before_last();
+ template <typename PipelineConfig>
+ PipelineRef pipeline_ref(const PipelineConfig& config);
+ 
+diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -207,6 +207,14 @@
+  * rounds it, so dark gradients do not show 8-bit steps either.
+  */
+ #define GX_AURORA_ACCURACY_EFB_SMOOTH_NOISE 0x0040
++/**
++ * With GX_AURORA_ACCURACY_EARLY_Z: consecutive draws with the same state are merged into one
++ * split pair (one depth-only pass, then one colour pass for all of them) instead of a pair per
++ * draw. Much cheaper (a foyer frame: ~16,000 split draws -> a few hundred commands); differs from
++ * the per-draw order only where the merged geometry overlaps itself with alpha-rejected pixels
++ * (a few edge pixels of the Game Boy Horror hand in LM). AURORA_EARLY_Z_MERGE=0/1/ab overrides.
++ */
++#define GX_AURORA_ACCURACY_EARLY_Z_MERGE 0x0080
+ 
+ void GXSetAuroraAccuracy(u32 flags);
+ u32 GXGetAuroraAccuracy();

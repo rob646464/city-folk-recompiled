@@ -1,0 +1,61 @@
+--- a/lib/gx/fifo.cpp
++++ b/lib/gx/fifo.cpp
+@@ -9,6 +9,8 @@
+ #include <cstring>
+ #include <limits>
+ #include <mutex>
++#include <chrono>
++#include <thread>
+ 
+ #include <tracy/Tracy.hpp>
+ 
+@@ -79,6 +81,13 @@
+   }
+ }
+ 
++// AURORA_FIFO_DELAY_US=<n> (debug): the worker sleeps n microseconds before each batch it
++// processes, so it lags the publishing thread the way a busy GPU would (provokes CPU/GPU races).
++const uint32_t kWorkerDelayUs = [] {
++  const char* e = std::getenv("AURORA_FIFO_DELAY_US");
++  return e != nullptr ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 0u;
++}();
++
+ void worker_main(std::stop_token token) noexcept {
+   std::stop_callback wakeOnStop{token, wake_worker};
+   while (true) {
+@@ -86,6 +95,9 @@
+     const uint64_t processed = sProcessed.load(std::memory_order_relaxed);
+     const uint64_t published = sPublished.load(std::memory_order_acquire);
+     if (published != processed) {
++      if (kWorkerDelayUs != 0) {
++        std::this_thread::sleep_for(std::chrono::microseconds(kWorkerDelayUs));
++      }
+       process_to(published, std::memory_order_release);
+       continue;
+     }
+@@ -288,6 +300,10 @@
+   sPendingDraws = 0;
+ }
+ 
++uint64_t stream_position() noexcept { return sStreamBase + detail::sBufferSize; }
++uint64_t processed_position() noexcept { return sProcessed.load(std::memory_order_acquire); }
++uint64_t published_position() noexcept { return sPublished.load(std::memory_order_acquire); }
++
+ const uint8_t* get_buffer_data() { return detail::sBufferData; }
+ uint32_t get_buffer_size() { return detail::sBufferSize; }
+ 
+--- a/lib/gx/fifo.hpp
++++ b/lib/gx/fifo.hpp
+@@ -114,6 +114,12 @@
+ // Ensure all buffered commands have been processed.
+ void drain();
+ 
++// Stream offsets (debug: CPU/GPU race detection). stream_position() is the end of everything
++// written so far (call on the writing thread); processed_position() how far the processor got.
++uint64_t stream_position() noexcept;
++uint64_t processed_position() noexcept;
++uint64_t published_position() noexcept;
++
+ // Internal buffer inspection
+ const uint8_t* get_buffer_data();
+ uint32_t get_buffer_size();

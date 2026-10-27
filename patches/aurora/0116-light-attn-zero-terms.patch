@@ -1,0 +1,68 @@
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -826,8 +826,8 @@
+   } else if (cc.attnFn == GX_AF_SPOT) {
+     lightAttnFn = fmt::format(R"""(
+           var cosine = max(0.0, dot(ldir, light.dir));
+-          var cos_attn = dot(light.cos_att, vec3f(1.0, cosine, cosine * cosine));
+-          var dist_attn = dot(light.dist_att, vec3f(1.0, dist, dist2));
++          var cos_attn = gx_attn_poly(light.cos_att, cosine);
++          var dist_attn = gx_attn_poly(light.dist_att, dist);
+           attn = max(0.0, cos_attn / dist_attn);)""");
+   } else if (cc.attnFn == GX_AF_SPEC) {
+     std::string_view normal = UsePerPixelLighting ? "in.mv_nrm"sv : "mv_nrm"sv;
+@@ -836,7 +836,7 @@
+                                 : "max(0.0, dot(light.dist_att, vec3f(1.0, attn, attn * attn)));";
+     lightAttnFn = fmt::format(R"""(
+           attn = select(0.0, max(0.0, dot({0}, light.dir)), dot({0}, ldir) >= 0.0);
+-          var cos_attn = dot(light.cos_att, vec3f(1.0, attn, attn * attn));
++          var cos_attn = gx_attn_poly(light.cos_att, attn);
+           var dist_attn = {1};
+           attn = max(0.0, cos_attn / dist_attn);)""",
+                               normal, dist_attn);
+@@ -910,17 +910,17 @@
+     // masks (the shadow light's ALPHA1 scales the shadow strength) and stay exact.
+     lightAttnFn = alpha ? R"""(
+             let cosine = max(0.0, dot(ldir, light.dir));
+-            let cos_attn = dot(light.cos_att, vec3f(1.0, cosine, cosine * cosine));
+-            let dist_attn = dot(light.dist_att, vec3f(1.0, dist, dist2));
++            let cos_attn = gx_attn_poly(light.cos_att, cosine);
++            let dist_attn = gx_attn_poly(light.dist_att, dist);
+             attn = max(0.0, cos_attn / dist_attn);)"""s
+                         : R"""(
+             let cosine = max(0.0, dot(ldir, light.dir));
+-            var cos_attn = dot(light.cos_att, vec3f(1.0, cosine, cosine * cosine));
++            var cos_attn = gx_attn_poly(light.cos_att, cosine);
+             if (cos_attn < 1.0) {
+               let ca = clamp(cos_attn, 0.0, 1.0);
+               cos_attn = mix(cos_attn, ca * ca * (3.0 - 2.0 * ca), ubuf.enh_flash_soft);
+             }
+-            let dist_attn = dot(light.dist_att, vec3f(1.0, dist, dist2));
++            let dist_attn = gx_attn_poly(light.dist_att, dist);
+             attn = max(0.0, cos_attn / dist_attn);)"""s;
+   } else {
+     const std::string dist_attn = cc.diffFn != GX_DF_NONE
+@@ -928,7 +928,7 @@
+                                       : "max(0.0, dot(light.dist_att, vec3f(1.0, attn, attn * attn)))";
+     lightAttnFn = fmt::format(R"""(
+             attn = select(0.0, max(0.0, dot(enh_n, light.dir)), dot(enh_n, ldir) >= 0.0);
+-            let cos_attn = dot(light.cos_att, vec3f(1.0, attn, attn * attn));
++            let cos_attn = gx_attn_poly(light.cos_att, attn);
+             let dist_attn = {};
+             attn = max(0.0, cos_attn / dist_attn);)""",
+                               dist_attn);
+@@ -3017,6 +3017,14 @@
+   return (byte_space - floor(byte_space / 256.0) * 256.0) / 255.0;
+ }}
+ 
++// Light attenuation polynomial c.x + c.y * x + c.z * x^2: a term whose coefficient is zero is
++// zero, whatever x is. Games leave the direction of lights loaded with GXInitLightPos only
++// uninitialized (stack garbage, e.g. 3e36) and switch the spot terms off with zero
++// coefficients instead; 0 * inf would give NaN and flicker from frame to frame.
++fn gx_attn_poly(c: vec3f, x: f32) -> f32 {{
++  return c.x + select(c.y * x, 0.0, c.y == 0.0) + select(c.z * x * x, 0.0, c.z == 0.0);
++}}
++
+ {8}
+ 
+ struct Immediate {{

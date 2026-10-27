@@ -1,0 +1,711 @@
+diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
+index fe40f9f..e091951 100644
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -99,6 +99,18 @@ extern "C" {
+ #define GX2_SET_POLYGON_OFFSET 0x1000
+ 
+ 
++/*
++ * Hardware-accuracy options (take effect at the next draw; pipelines are rebuilt as needed).
++ */
++
++/** TEV evaluated with the hardware's integer arithmetic (8-bit inputs, s11 registers, per-stage rounding). */
++#define GX_AURORA_ACCURACY_INT_TEV 0x0001
++/** Pixel output quantized to the EFB pixel format (RGBA6 / RGB565) with the PE's ordered dither. */
++#define GX_AURORA_ACCURACY_EFB_DEPTH 0x0002
++
++void GXSetAuroraAccuracy(u32 flags);
++u32 GXGetAuroraAccuracy();
++
+ /*
+  * Debug marker stuff
+  */
+diff --git a/lib/dolphin/gx/GXAurora.cpp b/lib/dolphin/gx/GXAurora.cpp
+index 1513ec0..66e10da 100644
+--- a/lib/dolphin/gx/GXAurora.cpp
++++ b/lib/dolphin/gx/GXAurora.cpp
+@@ -63,6 +63,10 @@ void AuroraGXSync() {
+   aurora::gx::fifo::drain();
+ }
+ 
++void GXSetAuroraAccuracy(u32 flags) { aurora::gx::g_accuracyFlags.store(flags, std::memory_order_relaxed); }
++
++u32 GXGetAuroraAccuracy() { return aurora::gx::g_accuracyFlags.load(std::memory_order_relaxed); }
++
+ void GXSetViewportRender(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz) {
+   GX_WRITE_AURORA(GX_AURORA_LOAD_VIEWPORT_RENDER);
+   GX_WRITE_F32(left);
+diff --git a/lib/gfx/texture.hpp b/lib/gfx/texture.hpp
+index 600a430..2cff180 100644
+--- a/lib/gfx/texture.hpp
++++ b/lib/gfx/texture.hpp
+@@ -91,7 +91,9 @@ struct GXTexObj_ {
+   GXTexWrapMode wrap_t() const noexcept { return static_cast<GXTexWrapMode>(get_bits(mode0, 2, 2)); }
+   GXTexFilter min_filter() const noexcept {
+     constexpr GXTexFilter kHwToGxFilter[8] = {
+-        GX_NEAR, GX_NEAR_MIP_NEAR, GX_LIN_MIP_NEAR, GX_NEAR, GX_LINEAR, GX_NEAR_MIP_LIN, GX_LIN_MIP_LIN, GX_NEAR,
++        // Hardware encoding: bit 2 = linear texel filter, bits 0-1 = mip mode (1 nearest, 2 linear);
++        // the inverse of GX2HWFiltConv in GXTexture.cpp.
++        GX_NEAR, GX_NEAR_MIP_NEAR, GX_NEAR_MIP_LIN, GX_NEAR, GX_LINEAR, GX_LIN_MIP_NEAR, GX_LIN_MIP_LIN, GX_NEAR,
+     };
+     return kHwToGxFilter[get_bits(mode0, 3, 5)];
+   }
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+index 7b3c70e..6c7a6f8 100644
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -15,10 +15,14 @@
+ 
+ #include <tracy/Tracy.hpp>
+ 
++#include <absl/container/flat_hash_set.h>
++
+ #include <algorithm>
+ #include <cmath>
+ #include <cstdint>
++#include <cstdlib>
+ #include <span>
++#include <string>
+ #include <vector>
+ 
+ namespace aurora::gx::fifo {
+@@ -148,34 +152,37 @@ DrawCache sDrawCache;
+ 
+ FogRangeLutKey fog_range_lut_key() noexcept {
+   const auto& state = g_gxState.fog;
+-  const f32 logicalWidth = std::max(g_gxState.logicalViewport.width, 1.f);
+-  const f32 renderWidth = std::max(g_gxState.renderViewport.width, 1.f);
++  const f32 logicalWidth = static_cast<f32>(std::max(logical_fb_size().x, 1u));
++  const u32 targetWidth = gfx::get_render_target_size().x;
+   return {
+       .rangeK = state.rangeK,
+-      .rangeCenter = ((static_cast<f32>(state.rangeCenter) - g_gxState.logicalViewport.left) / logicalWidth) * 2.f -
+-                     1.f + (g_gxState.renderViewport.left / renderWidth) * 2.f,
+-      .renderWidth = renderWidth,
+-      .targetWidth = gfx::get_render_target_size().x,
++      .rangeCenter = static_cast<f32>(state.rangeCenter),
++      // EFB pixels per render-target pixel
++      .renderWidth = logicalWidth / static_cast<f32>(std::max(targetWidth, 1u)),
++      .targetWidth = targetWidth,
+   };
+ }
+ 
++// Range adjustment (GXSetFogRangeAdj): the ten 12-bit table entries are 256x the eye-depth
++// correction factor sqrt(1 + x^2/z^2) at 32, 64, ... 320 EFB pixels from the center column
++// (that is how GXInitFogAdjTable fills them). The factor for a pixel is interpolated from the
++// table by its horizontal distance from the center, 1.0 at the center, the last entry beyond.
+ std::vector<f32> build_fog_range_lut(const FogRangeLutKey& key) {
+-  std::array<f32, 10> rangeK;
+-  for (u32 i = 0; i < rangeK.size(); ++i) {
+-    const u32 source = (i & ~1u) | (1u - (i & 1u));
+-    rangeK[i] = static_cast<f32>(key.rangeK[source]) / 64.f;
+-  }
+-
+   std::vector<f32> lut(key.targetWidth);
+   for (u32 x = 0; x < key.targetWidth; ++x) {
+-    const f32 screenX = ((static_cast<f32>(x) + 0.5f) / key.renderWidth) * 2.f - 1.f;
+-    const f32 offset = screenX - key.rangeCenter;
+-    const f32 rangeIndex = std::clamp(9.f - std::abs(offset) * 9.f, 0.f, 9.f);
+-    const u32 lower = static_cast<u32>(rangeIndex);
+-    const u32 upper = std::min(lower + 1, 9u);
+-    const f32 fraction = rangeIndex - static_cast<f32>(lower);
+-    const f32 k = std::max(rangeK[lower] * (1.f - fraction) + rangeK[upper] * fraction, 0.000001f);
+-    lut[x] = std::sqrt(offset * offset + k * k) / k;
++    const f32 efbX = (static_cast<f32>(x) + 0.5f) * key.renderWidth;
++    const f32 pos = std::abs(efbX - key.rangeCenter) / 32.f; // 1.0 = first table entry
++    f32 factor;
++    if (pos >= 10.f) {
++      factor = static_cast<f32>(key.rangeK[9]) / 256.f;
++    } else {
++      const u32 hi = static_cast<u32>(pos);
++      const f32 frac = pos - static_cast<f32>(hi);
++      const f32 lower = hi == 0 ? 1.f : static_cast<f32>(key.rangeK[hi - 1]) / 256.f;
++      const f32 upper = static_cast<f32>(key.rangeK[hi]) / 256.f;
++      factor = lower + (upper - lower) * frac;
++    }
++    lut[x] = std::max(factor, 1.f / 256.f);
+   }
+   return lut;
+ }
+@@ -381,6 +388,105 @@ static u32 calc_vtx_size(GXVtxFmt fmt) noexcept {
+   return vtxSize;
+ }
+ 
++// GX feature audit (AURORA_GX_AUDIT=1): logs each distinct hardware feature the first time a
++// draw uses it, to see which parts of the GX pipeline a game exercises.
++static void audit_tag(std::string tag) noexcept {
++  static absl::flat_hash_set<std::string> seen;
++  if (seen.insert(tag).second) {
++    Log.info("[gx-audit] {}", tag);
++  }
++}
++
++static void audit_pipeline(const PipelineConfig& pc, GXPrimitive prim) noexcept {
++  static const bool enabled = [] {
++    const char* env = std::getenv("AURORA_GX_AUDIT");
++    return env != nullptr && env[0] == '1';
++  }();
++  if (!enabled) {
++    return;
++  }
++  const auto& sc = pc.shaderConfig;
++  const auto& st = g_gxState;
++  const u32 cmode0 = st.bpRegCache[0x41];
++  audit_tag(fmt::format("pixfmt={} zfmt={} dither={}", underlying(st.pixelFmt), underlying(st.zFmt),
++                        (cmode0 >> 2) & 1));
++  audit_tag(fmt::format("blend mode={} src={} dst={} logic={} dstAlpha={} alphaUpd={}", underlying(pc.blendMode),
++                        underlying(pc.blendFacSrc), underlying(pc.blendFacDst),
++                        pc.blendMode == GX_BM_LOGIC ? int(pc.blendOp) : -1, pc.dstAlpha != UINT32_MAX ? 1 : 0,
++                        pc.alphaUpdate ? 1 : 0));
++  if (sc.alphaCompare) {
++    audit_tag(fmt::format("alphacmp {} {} op={} {} {} zcompBeforeTex={} zupd={}", underlying(sc.alphaCompare.comp0),
++                          sc.alphaCompare.ref0, underlying(sc.alphaCompare.op), underlying(sc.alphaCompare.comp1),
++                          sc.alphaCompare.ref1, st.zCompLocBeforeTex ? 1 : 0, pc.depthUpdate ? 1 : 0));
++  }
++  if (sc.lineMode != 0) {
++    audit_tag(fmt::format("prim={} lineWidth={} pointSize={}", underlying(prim), st.lineWidth, st.pointSize));
++  }
++  audit_tag(fmt::format("tevstages={}", sc.tevStageCount));
++  for (u32 i = 0; i < sc.tevStageCount; ++i) {
++    const auto& s = sc.tevStages[i];
++    audit_tag(fmt::format("tev color op={} bias={} scale={} clamp={} out={}", underlying(s.colorOp.op),
++                          underlying(s.colorOp.bias), underlying(s.colorOp.scale), s.colorOp.clamp ? 1 : 0,
++                          underlying(s.colorOp.outReg)));
++    audit_tag(fmt::format("tev alpha op={} bias={} scale={} clamp={} out={}", underlying(s.alphaOp.op),
++                          underlying(s.alphaOp.bias), underlying(s.alphaOp.scale), s.alphaOp.clamp ? 1 : 0,
++                          underlying(s.alphaOp.outReg)));
++    audit_tag(fmt::format("tev color in a={} b={} c={} d={}", underlying(s.colorPass.a), underlying(s.colorPass.b),
++                          underlying(s.colorPass.c), underlying(s.colorPass.d)));
++    audit_tag(fmt::format("tev alpha in a={} b={} c={} d={}", underlying(s.alphaPass.a), underlying(s.alphaPass.b),
++                          underlying(s.alphaPass.c), underlying(s.alphaPass.d)));
++    const auto usesC = [&](GXTevColorArg a) {
++      return s.colorPass.a == a || s.colorPass.b == a || s.colorPass.c == a || s.colorPass.d == a;
++    };
++    const auto usesA = [&](GXTevAlphaArg a) {
++      return s.alphaPass.a == a || s.alphaPass.b == a || s.alphaPass.c == a || s.alphaPass.d == a;
++    };
++    if (usesC(GX_CC_KONST)) {
++      audit_tag(fmt::format("tev kcsel={}", underlying(s.kcSel)));
++    }
++    if (usesA(GX_CA_KONST)) {
++      audit_tag(fmt::format("tev kasel={}", underlying(s.kaSel)));
++    }
++    if (usesC(GX_CC_RASC) || usesC(GX_CC_RASA) || usesA(GX_CA_RASA)) {
++      if (sc.tevSwapTable[s.tevSwapRas]) {
++        audit_tag(fmt::format("tev swap ras sel={}", underlying(s.tevSwapRas)));
++      }
++    }
++    if (usesC(GX_CC_TEXC) || usesC(GX_CC_TEXA) || usesA(GX_CA_TEXA)) {
++      if (sc.tevSwapTable[s.tevSwapTex]) {
++        const auto& sw = sc.tevSwapTable[s.tevSwapTex];
++        audit_tag(fmt::format("tev swap tex sel={} ({}{}{}{})", underlying(s.tevSwapTex), underlying(sw.red),
++                              underlying(sw.green), underlying(sw.blue), underlying(sw.alpha)));
++      }
++    }
++    if (s.indTexMtxId != GX_ITM_OFF || s.indTexWrapS != GX_ITW_OFF || s.indTexWrapT != GX_ITW_OFF ||
++        s.indTexAddPrev || s.indTexAlphaSel != GX_ITBA_OFF) {
++      audit_tag(fmt::format("ind stage fmt={} bias={} alpha={} mtx={} wrap={},{} addPrev={} origLOD={}",
++                            underlying(s.indTexFormat), underlying(s.indTexBiasSel), underlying(s.indTexAlphaSel),
++                            underlying(s.indTexMtxId), underlying(s.indTexWrapS), underlying(s.indTexWrapT),
++                            s.indTexAddPrev ? 1 : 0, s.indTexUseOrigLOD ? 1 : 0));
++    }
++  }
++  for (u32 i = 0; i < sc.numIndStages; ++i) {
++    audit_tag(fmt::format("ind scale {} {}", underlying(sc.indStages[i].scaleS), underlying(sc.indStages[i].scaleT)));
++  }
++  for (u32 i = 0; i < MaxColorChannels; ++i) {
++    const auto& cc = sc.colorChannels[i];
++    if (cc.lightingEnabled) {
++      audit_tag(fmt::format("light chan={} diff={} attn={} amb={} mat={}", i, underlying(cc.diffFn),
++                            underlying(cc.attnFn), underlying(cc.ambSrc), underlying(cc.matSrc)));
++    }
++  }
++  for (u32 i = 0; i < st.numTexGens; ++i) {
++    const auto& t = sc.tcgs[i];
++    audit_tag(fmt::format("texgen type={} src={} norm={} post={}", underlying(t.type), underlying(t.src),
++                          t.normalize ? 1 : 0, t.postMtx != GX_PTIDENTITY ? 1 : 0));
++  }
++  if (sc.fogType != GX_FOG_NONE) {
++    audit_tag(fmt::format("fog type={} range={}", sc.fogType, sc.fogRangeEnabled ? 1 : 0));
++  }
++}
++
+ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
+                          u32 numIndices) noexcept {
+   auto& state = g_gxState;
+@@ -403,6 +509,11 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
+     immediates.arrayStart[i - GX_VA_POS] = array.cachedRange.offset;
+   }
+ 
++  static u32 sLastAccuracy = UINT32_MAX;
++  if (const u32 accuracy = g_accuracyFlags.load(std::memory_order_relaxed); accuracy != sLastAccuracy) {
++    sLastAccuracy = accuracy;
++    state.dirty |= DirtyPipeline;
++  }
+   const u8 lineMode = line_mode_for_prim(prim);
+   const auto targetLayoutKey = gfx::get_render_target_layout().key;
+   const bool pipelineValid = cache.hasPipeline && (state.dirty & DirtyPipeline) == 0 && cache.fmt == fmt &&
+@@ -412,6 +523,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
+     const auto prevSampledTextures = cache.shaderInfo.sampledTextures;
+     const auto prevSampledIndTextures = cache.shaderInfo.sampledIndTextures;
+     populate_pipeline_config(cache.config, prim, fmt);
++    audit_pipeline(cache.config, prim);
+     cache.shaderInfo = build_shader_info(cache.config.shaderConfig);
+     cache.pipelineRef = gfx::pipeline_ref(cache.config);
+     cache.targetLayoutKey = targetLayoutKey;
+diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
+index 019f5d1..d85e316 100644
+--- a/lib/gx/gx.cpp
++++ b/lib/gx/gx.cpp
+@@ -11,6 +11,7 @@
+ #include "../gfx/resource_cache.hpp"
+ #include "../gfx/texture.hpp"
+ #include "gx_fmt.hpp"
++#include "dolphin/gx/GXAurora.h"
+ 
+ #include <absl/container/flat_hash_map.h>
+ #include <tracy/Tracy.hpp>
+@@ -29,6 +30,7 @@ using webgpu::g_device;
+ using webgpu::g_graphicsConfig;
+ 
+ GXState g_gxState{};
++std::atomic<u32> g_accuracyFlags{GX_AURORA_ACCURACY_INT_TEV | GX_AURORA_ACCURACY_EFB_DEPTH};
+ wgpu::BindGroup g_emptyTextureBindGroup;
+ 
+ namespace {
+@@ -388,6 +390,16 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
+   config.shaderConfig = {};
+   config.shaderConfig.fogType = g_gxState.fog.type;
+   config.shaderConfig.fogRangeEnabled = g_gxState.fog.rangeEnabled;
++  {
++    const u32 accuracy = g_accuracyFlags.load(std::memory_order_relaxed);
++    config.shaderConfig.intTev = (accuracy & GX_AURORA_ACCURACY_INT_TEV) != 0;
++    if ((accuracy & GX_AURORA_ACCURACY_EFB_DEPTH) != 0) {
++      const u8 efbFmt = g_gxState.pixelFmt == GX_PF_RGBA6_Z24 ? 1 : g_gxState.pixelFmt == GX_PF_RGB565_Z16 ? 2 : 0;
++      config.shaderConfig.efbFmt = efbFmt;
++      config.shaderConfig.dither = efbFmt != 0 && g_gxState.dither;
++      config.shaderConfig.efbBlend = efbFmt != 0 && g_gxState.blendMode != GX_BM_NONE;
++    }
++  }
+   u8 vtxOffset = 0;
+   for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
+     const auto attr = static_cast<GXAttr>(i);
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+index 4eaf8e3..0586fae 100644
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -13,6 +13,7 @@
+ #include <memory>
+ #include <array>
+ #include <cfloat>
++#include <atomic>
+ 
+ #define M_PIF 3.14159265358979323846f
+ 
+@@ -351,6 +352,7 @@ struct GXState {
+   GXPixelFmt pixelFmt = GX_PF_RGB8_Z24;
+   GXZFmt16 zFmt = GX_ZC_LINEAR;
+   bool zCompLocBeforeTex = false;
++  bool dither = true; // PE ordered dither (BP 0x41 bit 2)
+   // Z texture (BP 0xF4/0xF5, GXSetZTexture): depth from the texel sampled by the last TEV stage
+   u8 zTexOp = 0;   // 0 = disable, 1 = add, 2 = replace (GXZTexOp)
+   u8 zTexFmt = 2;  // 0 = Z8 (u8), 1 = Z16 (u16), 2 = Z24X8 (u24)
+@@ -434,6 +436,7 @@ struct GXState {
+   void clearVtxSizeCache() { lastVtxFmt = GX_MAX_VTXFMT; }
+ };
+ extern GXState g_gxState;
++extern std::atomic<u32> g_accuracyFlags; // GX_AURORA_ACCURACY_*
+ struct ShaderInfo;
+ 
+ void initialize() noexcept;
+@@ -498,10 +501,14 @@ struct ShaderConfig {
+   u8 vtxStride = 0;
+   u8 lineMode : 2 = 0; // 1 = GX_LINES, 2 = GX_LINESTRIP, 3 = GX_POINTS
+   u8 fogRangeEnabled : 1 = false;
+-  u8 pad1 : 5 = 0;
++  u8 intTev : 1 = false;   // integer TEV arithmetic (GX_AURORA_ACCURACY_INT_TEV)
++  u8 dither : 1 = false;   // PE ordered dither (with efbFmt)
++  u8 efbBlend : 1 = false; // draw blends with the EFB: quantize color only, keep alpha as the blend factor
++  u8 pad1 : 2 = 0;
+   u8 zTexOp : 2 = 0;  // GXZTexOp; non-zero only when the last TEV stage samples a texture
+   u8 zTexFmt : 2 = 0; // 0 = Z8, 1 = Z16, 2 = Z24X8
+-  u8 pad2 : 4 = 0;
++  u8 efbFmt : 2 = 0;  // EFB format to quantize to (GX_AURORA_ACCURACY_EFB_DEPTH): 0 none (RGB8), 1 RGBA6, 2 RGB565
++  u8 pad2 : 2 = 0;
+   std::array<AttrConfig, MaxVtxAttr> attrs;
+   std::array<TevSwap, MaxTevSwap> tevSwapTable;
+   std::array<TevStage, MaxTevStages> tevStages;
+diff --git a/lib/gx/pipeline.hpp b/lib/gx/pipeline.hpp
+index 54456ed..6ec3512 100644
+--- a/lib/gx/pipeline.hpp
++++ b/lib/gx/pipeline.hpp
+@@ -17,7 +17,7 @@ struct DrawData {
+   uint32_t dstAlpha;
+ };
+ 
+-constexpr uint32_t GXPipelineConfigVersion = 13;
++constexpr uint32_t GXPipelineConfigVersion = 15;
+ struct PipelineConfig {
+   uint32_t version = GXPipelineConfigVersion;
+   uint32_t msaaSamples = 1; // deprecated
+diff --git a/lib/gx/regs.cpp b/lib/gx/regs.cpp
+index 19a73cc..aedc027 100644
+--- a/lib/gx/regs.cpp
++++ b/lib/gx/regs.cpp
+@@ -222,6 +222,7 @@ void bp_z_mode(u8, u32 value) noexcept {
+ void bp_cmode0(u8, u32 value) noexcept {
+   bool blendEn = reg_get(value, 1, 0) != 0;
+   bool logicEn = reg_get(value, 1, 1) != 0;
++  g_gxState.dither = reg_get(value, 1, 2) != 0;
+   g_gxState.colorUpdate = reg_get(value, 1, 3) != 0;
+   g_gxState.alphaUpdate = reg_get(value, 1, 4) != 0;
+   g_gxState.blendFacDst = static_cast<GXBlendFactor>(reg_get(value, 3, 5));
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index 895c8c2..543d5e3 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -872,6 +872,236 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8
+                      alpha ? "a"sv : ""sv);
+ }
+ 
++// ---- Integer TEV (GX_AURORA_ACCURACY_INT_TEV) -------------------------------------------------
++// The hardware combiner works on integers: A/B/C inputs are 8 bits (the low byte of a register),
++// D and the registers are signed 11-bit, C is widened to 0..256 (C + C>>7) for the lerp, and every
++// stage rounds its result to an integer and clamps to 0..255 or -1024..1023.
++
++constexpr std::string_view IntTevHelpers = R"(
++fn itev_lerp3(a: vec3i, b: vec3i, c: vec3i) -> vec3i {
++  let cc = c + (c >> vec3u(7u));
++  return a * (vec3i(256) - cc) + b * cc;
++}
++fn itev_lerp1(a: i32, b: i32, c: i32) -> i32 {
++  let cc = c + (c >> 7u);
++  return a * (256 - cc) + b * cc;
++}
++fn itev_clamp3(r: vec3i, clamp8: bool) -> vec3i {
++  if (clamp8) { return clamp(r, vec3i(0), vec3i(255)); }
++  return clamp(r, vec3i(-1024), vec3i(1023));
++}
++fn itev_clamp1(r: i32, clamp8: bool) -> i32 {
++  if (clamp8) { return clamp(r, 0, 255); }
++  return clamp(r, -1024, 1023);
++}
++// v carries 8 fractional bits; scale 0..3 = x1, x2, x4, /2.
++fn itev_finish3(v: vec3i, scale: u32, clamp8: bool) -> vec3i {
++  var r: vec3i;
++  if (scale == 3u) { r = (v + vec3i(256)) >> vec3u(9u); }
++  else { r = (v * i32(1u << scale) + vec3i(128)) >> vec3u(8u); }
++  return itev_clamp3(r, clamp8);
++}
++fn itev_finish1(v: i32, scale: u32, clamp8: bool) -> i32 {
++  var r: i32;
++  if (scale == 3u) { r = (v + 256) >> 9u; }
++  else { r = (v * i32(1u << scale) + 128) >> 8u; }
++  return itev_clamp1(r, clamp8);
++}
++fn itev_op3(a: vec3i, b: vec3i, c: vec3i, d: vec3i, sub: bool, bias: i32, scale: u32, clamp8: bool) -> vec3i {
++  let l = itev_lerp3(a, b, c);
++  return itev_finish3(d * 256 + vec3i(bias * 256) + select(l, -l, sub), scale, clamp8);
++}
++fn itev_op1(a: i32, b: i32, c: i32, d: i32, sub: bool, bias: i32, scale: u32, clamp8: bool) -> i32 {
++  let l = itev_lerp1(a, b, c);
++  return itev_finish1(d * 256 + bias * 256 + select(l, -l, sub), scale, clamp8);
++}
++fn itev_f2i3(v: vec3f) -> vec3i { return vec3i(round(clamp(v, vec3f(0.0), vec3f(1.0)) * 255.0)); }
++fn itev_f2i1(v: f32) -> i32 { return i32(round(clamp(v, 0.0, 1.0) * 255.0)); }
++)";
++
++// Hardware values of the fractional konstant selections (k/8 of 256, 8/8 = 255).
++int konst_fraction(u32 sel) noexcept { return sel == 0 ? 255 : static_cast<int>(8 - sel) * 32; }
++
++std::string_view int_reg_name(u32 reg) noexcept {
++  static constexpr std::array names{"iprev"sv, "ireg0"sv, "ireg1"sv, "ireg2"sv};
++  return names[reg];
++}
++
++// Integer color input. `full` = the D input (signed 11-bit); A/B/C see the low 8 bits.
++std::string int_color_arg(GXTevColorArg arg, size_t stageIdx, const ShaderConfig& config, const TevStage& stage,
++                          bool full) {
++  const auto reg = [&](u32 r, bool alpha) {
++    std::string v = alpha ? fmt::format("vec3i({}.a)", int_reg_name(r)) : fmt::format("{}.rgb", int_reg_name(r));
++    return full ? v : fmt::format("({} & vec3i(255))", v);
++  };
++  switch (arg) {
++  case GX_CC_CPREV:
++    return reg(0, false);
++  case GX_CC_APREV:
++    return reg(0, true);
++  case GX_CC_C0:
++    return reg(1, false);
++  case GX_CC_A0:
++    return reg(1, true);
++  case GX_CC_C1:
++    return reg(2, false);
++  case GX_CC_A1:
++    return reg(2, true);
++  case GX_CC_C2:
++    return reg(3, false);
++  case GX_CC_A2:
++    return reg(3, true);
++  case GX_CC_ONE:
++    return "vec3i(255)";
++  case GX_CC_HALF:
++    return "vec3i(128)";
++  case GX_CC_ZERO:
++    return "vec3i(0)";
++  case GX_CC_KONST:
++    if (stage.kcSel <= GX_TEV_KCSEL_1_8) {
++      return fmt::format("vec3i({})", konst_fraction(stage.kcSel));
++    }
++    [[fallthrough]];
++  default:
++    return fmt::format("itev_f2i3({})", color_arg_reg(arg, stageIdx, config, stage));
++  }
++}
++
++std::string int_alpha_arg(GXTevAlphaArg arg, size_t stageIdx, const ShaderConfig& config, const TevStage& stage,
++                          bool full) {
++  const auto reg = [&](u32 r) {
++    std::string v = fmt::format("{}.a", int_reg_name(r));
++    return full ? v : fmt::format("({} & 255)", v);
++  };
++  switch (arg) {
++  case GX_CA_APREV:
++    return reg(0);
++  case GX_CA_A0:
++    return reg(1);
++  case GX_CA_A1:
++    return reg(2);
++  case GX_CA_A2:
++    return reg(3);
++  case GX_CA_ZERO:
++    return "0";
++  case GX_CA_KONST:
++    if (stage.kaSel <= GX_TEV_KASEL_1_8) {
++      return fmt::format("{}", konst_fraction(stage.kaSel));
++    }
++    [[fallthrough]];
++  default:
++    return fmt::format("itev_f2i1({})", alpha_arg_reg(arg, stageIdx, config, stage));
++  }
++}
++
++// Compare key of an 8-bit-per-channel color for the R8/GR16/BGR24 compare modes.
++std::string int_cmp_key(GXTevOp op, std::string_view v) {
++  switch (op) {
++  case GX_TEV_COMP_R8_GT:
++  case GX_TEV_COMP_R8_EQ:
++    return fmt::format("({}).r", v);
++  case GX_TEV_COMP_GR16_GT:
++  case GX_TEV_COMP_GR16_EQ:
++    return fmt::format("(({0}).g * 256 + ({0}).r)", v);
++  default:
++    return fmt::format("(({0}).b * 65536 + ({0}).g * 256 + ({0}).r)", v);
++  }
++}
++
++bool tev_cmp_is_gt(GXTevOp op) noexcept {
++  return op == GX_TEV_COMP_R8_GT || op == GX_TEV_COMP_GR16_GT || op == GX_TEV_COMP_BGR24_GT ||
++         op == GX_TEV_COMP_RGB8_GT;
++}
++
++std::string build_int_tev_stage(size_t idx, const ShaderConfig& config, const TevStage& stage) {
++  std::string out = fmt::format("\n    // TEV stage {} (integer)", idx);
++  const auto bias = [](GXTevBias b) { return b == GX_TB_ADDHALF ? 128 : b == GX_TB_SUBHALF ? -128 : 0; };
++  // Color
++  {
++    const auto& cp = stage.colorPass;
++    const auto& op = stage.colorOp;
++    const auto a = int_color_arg(cp.a, idx, config, stage, false);
++    const auto b = int_color_arg(cp.b, idx, config, stage, false);
++    const auto c = int_color_arg(cp.c, idx, config, stage, false);
++    const auto d = int_color_arg(cp.d, idx, config, stage, true);
++    std::string expr;
++    if (op.op == GX_TEV_ADD || op.op == GX_TEV_SUB) {
++      expr = fmt::format("itev_op3({}, {}, {}, {}, {}, {}, {}u, {})", a, b, c, d, op.op == GX_TEV_SUB, bias(op.bias),
++                         underlying(op.scale), op.clamp);
++    } else {
++      std::string cond;
++      const std::string_view rel = tev_cmp_is_gt(op.op) ? ">"sv : "=="sv;
++      if (op.op == GX_TEV_COMP_RGB8_GT || op.op == GX_TEV_COMP_RGB8_EQ) {
++        cond = fmt::format("({} {} {})", a, rel, b);
++      } else {
++        cond = fmt::format("vec3<bool>({} {} {})", int_cmp_key(op.op, a), rel, int_cmp_key(op.op, b));
++      }
++      expr = fmt::format("itev_clamp3({} + select(vec3i(0), {}, {}), {})", d, c, cond, op.clamp);
++    }
++    const auto outReg = int_reg_name(op.outReg);
++    out += fmt::format("\n    {0} = vec4i({1}, {0}.a);", outReg, expr);
++  }
++  // Alpha
++  {
++    const auto& ap = stage.alphaPass;
++    const auto& op = stage.alphaOp;
++    const auto c = int_alpha_arg(ap.c, idx, config, stage, false);
++    const auto d = int_alpha_arg(ap.d, idx, config, stage, true);
++    std::string expr;
++    if (op.op == GX_TEV_ADD || op.op == GX_TEV_SUB) {
++      const auto a = int_alpha_arg(ap.a, idx, config, stage, false);
++      const auto b = int_alpha_arg(ap.b, idx, config, stage, false);
++      expr = fmt::format("itev_op1({}, {}, {}, {}, {}, {}, {}u, {})", a, b, c, d, op.op == GX_TEV_SUB, bias(op.bias),
++                         underlying(op.scale), op.clamp);
++    } else {
++      const std::string_view rel = tev_cmp_is_gt(op.op) ? ">"sv : "=="sv;
++      std::string cond;
++      if (op.op == GX_TEV_COMP_A8_GT || op.op == GX_TEV_COMP_A8_EQ) {
++        cond = fmt::format("({} {} {})", int_alpha_arg(ap.a, idx, config, stage, false), rel,
++                           int_alpha_arg(ap.b, idx, config, stage, false));
++      } else {
++        // R8/GR16/BGR24 compare the stage's color inputs A and B, even in the alpha unit.
++        const auto a = int_color_arg(stage.colorPass.a, idx, config, stage, false);
++        const auto b = int_color_arg(stage.colorPass.b, idx, config, stage, false);
++        cond = fmt::format("({} {} {})", int_cmp_key(op.op, a), rel, int_cmp_key(op.op, b));
++      }
++      expr = fmt::format("itev_clamp1({} + select(0, {}, {}), {})", d, c, cond, op.clamp);
++    }
++    out += fmt::format("\n    {}.a = {};", int_reg_name(op.outReg), expr);
++  }
++  return out;
++}
++
++// Quantize the pixel to the EFB pixel format the way the PE stores it (optionally with its 2x2
++// ordered dither), then expand back to 8 bits as copies and the display read it.
++std::string efb_quantize(const ShaderConfig& config) {
++  std::string out = "\n    // EFB pixel format quantization"
++                    "\n    {"
++                    "\n      let q8 = vec4i(round(clamp(prev, vec4f(0.0), vec4f(1.0)) * 255.0));"
++                    "\n      var rgb = q8.rgb;";
++  const bool rgb565 = config.efbFmt == 2;
++  // Per-channel bit depth: RGBA6 = 6/6/6, RGB565 = 5/6/5.
++  const std::string_view bits = rgb565 ? "vec3u(5u, 6u, 5u)"sv : "vec3u(6u)"sv;
++  out += fmt::format("\n      let bits = {};", bits);
++  if (config.dither) {
++    // 2x2 ordered (Bayer) dither: thresholds 0 2 / 3 1 in quarters of one output step.
++    out += "\n      let dp = vec2u(in.pos.xy) & vec2u(1u);"
++           "\n      let dq = i32(select(select(0u, 2u, dp.x == 1u), select(3u, 1u, dp.x == 1u), dp.y == 1u));"
++           "\n      let step = vec3i(1) << (vec3u(8u) - bits);"
++           "\n      rgb = rgb - (rgb >> bits) + (step * dq) / 4;";
++  }
++  out += "\n      let qn = rgb >> (vec3u(8u) - bits);"
++         "\n      rgb = (qn << (vec3u(8u) - bits)) | (qn >> (bits + bits - vec3u(8u)));";
++  if (!rgb565 && !config.efbBlend) {
++    out += "\n      let qa = q8.a >> 2u;"
++           "\n      prev = vec4f(vec4i(rgb, (qa << 2u) | (qa >> 4u))) / 255.0;";
++  } else {
++    out += "\n      prev = vec4f(vec3f(rgb) / 255.0, prev.a);";
++  }
++  out += "\n    }";
++  return out;
++}
++
+ absl::flat_hash_set<gfx::ShaderRef> s_seenShaders;
+ } // namespace
+ 
+@@ -1087,6 +1317,10 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+   std::array<bool, MaxTevRegs> alphaNormalized{};
+   for (u32 idx = 0; idx < config.tevStageCount; ++idx) {
+     const auto& stage = config.tevStages[idx];
++    if (config.intTev) {
++      fragmentFn += build_int_tev_stage(idx, config, stage);
++      continue;
++    }
+     {
+       const auto color_arg = [&](GXTevColorArg arg) {
+         auto value = color_arg_reg(arg, idx, config, stage);
+@@ -1132,11 +1366,35 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+   const auto& lastStage = config.tevStages[config.tevStageCount - 1];
+   const bool prevColorNormalized = colorNormalized[lastStage.colorOp.outReg];
+   const bool prevAlphaNormalized = alphaNormalized[lastStage.alphaOp.outReg];
+-  if (lastStage.colorOp.outReg != 0) {
+-    fragmentFn += fmt::format("\n    prev = vec4f({0}.rgb, prev.a);", regName[lastStage.colorOp.outReg]);
+-  }
+-  if (lastStage.alphaOp.outReg != 0) {
+-    fragmentFn += fmt::format("\n    prev.a = {0}.a;", regName[lastStage.alphaOp.outReg]);
++  if (config.intTev) {
++    if (lastStage.colorOp.outReg != 0) {
++      fragmentFn += fmt::format("\n    iprev = vec4i({0}.rgb, iprev.a);", int_reg_name(lastStage.colorOp.outReg));
++    }
++    if (lastStage.alphaOp.outReg != 0) {
++      fragmentFn += fmt::format("\n    iprev.a = {0}.a;", int_reg_name(lastStage.alphaOp.outReg));
++    }
++    // The PE takes the low 8 bits of the last stage's output.
++    fragmentFn += "\n    prev = vec4f(iprev & vec4i(255)) / 255.0;";
++    uniformPre += IntTevHelpers;
++    if (info.loadsTevReg.test(0)) {
++      fragmentFnPre += "\n    var iprev = vec4i(round(ubuf.tevprev * 255.0));";
++    } else {
++      fragmentFnPre += "\n    var iprev = vec4i(0);";
++    }
++    for (int i = 1; i < info.loadsTevReg.size(); ++i) {
++      if (info.loadsTevReg.test(i)) {
++        fragmentFnPre += fmt::format("\n    var ireg{0} = vec4i(round(ubuf.tevreg{0} * 255.0));", i - 1);
++      } else if (info.writesTevReg.test(i)) {
++        fragmentFnPre += fmt::format("\n    var ireg{0} = vec4i(0);", i - 1);
++      }
++    }
++  } else {
++    if (lastStage.colorOp.outReg != 0) {
++      fragmentFn += fmt::format("\n    prev = vec4f({0}.rgb, prev.a);", regName[lastStage.colorOp.outReg]);
++    }
++    if (lastStage.alphaOp.outReg != 0) {
++      fragmentFn += fmt::format("\n    prev.a = {0}.a;", regName[lastStage.alphaOp.outReg]);
++    }
+   }
+ 
+   if (info.loadsTevReg.test(0)) {
+@@ -1217,6 +1475,10 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+       vtxOutAttrs += fmt::format("\n    @location({}) cc{}: vec4f,", vtxOutIdx++, i);
+       vtxXfrAttrs += lighting_func(config, cc, i, false);
+       vtxXfrAttrs += lighting_func(config, cca, i, true);
++      if (config.intTev) {
++        // The transform unit hands the rasterizer 8-bit vertex colors.
++        vtxXfrAttrs += fmt::format("\n    out.cc{0} = round(clamp(out.cc{0}, vec4f(0.0), vec4f(1.0)) * 255.0) / 255.0;", i);
++      }
+       fragmentFnPre += fmt::format("\n    var rast{0} = in.cc{0};", i);
+     }
+   }
+@@ -1381,6 +1643,10 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+         "\n    var t_IndTexCoord{0} = 255.0 * textureSampleBias(tex{1}, tex{1}_samp, {2}, "
+         "ubuf.tex{1}_size_bias.z).abg;",
+         i, texMapId, scaleExpr);
++    if (config.intTev) {
++      // The indirect unit receives the filtered texel as 8-bit integers.
++      fragmentFnPre += fmt::format("\n    t_IndTexCoord{0} = round(t_IndTexCoord{0});", i);
++    }
+   }
+   if (info.usedIndStages.any()) {
+     fragmentFnPre += "\n    var t_TexCoord = vec2f(0.0);";
+@@ -1616,6 +1882,10 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+       break;
+     }
+     fragmentFn += "\n    prev = vec4f(mix(prev.rgb, ubuf.fog.color.rgb, clamp(fogZ, 0.0, 1.0)), prev.a);";
++    if (config.intTev) {
++      // The fog blender works on 8-bit color.
++      fragmentFn += "\n    prev = vec4f(round(prev.rgb * 255.0) / 255.0, prev.a);";
++    }
+   }
+   uniBufAttrs += fmt::format("\n    texcoord_scale: array<vec4f, {}>,", MaxTexCoord);
+   if (info.usedIndTexMtxs.any()) {
+@@ -1636,7 +1906,9 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+   if (info.usesZTex) {
+     uniBufAttrs += "\n    ztex_bias: vec4u,";
+   }
+-  if (!prevColorNormalized && !prevAlphaNormalized) {
++  if (config.intTev) {
++    // Already wrapped to 8 bits after the last stage.
++  } else if (!prevColorNormalized && !prevAlphaNormalized) {
+     fragmentFn += "\n    prev = tev_overflow_vec4f(prev);";
+   } else if (!prevColorNormalized) {
+     fragmentFn += "\n    prev = vec4f(tev_overflow_vec3f(prev.rgb), prev.a);";
+@@ -1707,6 +1979,10 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+                               UseReversedZ ? "1.0 - f32(ztex_z) / 16777215.0"sv : "f32(ztex_z) / 16777215.0"sv);
+   }
+ 
++  if (config.efbFmt != 0) {
++    fragmentFn += efb_quantize(config);
++  }
++
+   if (dstAlphaMode == DstAlphaMode::Replace) {
+     // GX destination alpha is set via the blend constant
+     fragmentFn += "\n    prev.a = 1.0;";

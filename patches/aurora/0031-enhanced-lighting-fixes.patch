@@ -1,0 +1,48 @@
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -45,7 +45,10 @@
+          EQ(softShadowQuality) && EQ(softShadowRadius) && EQ(softShadowPenumbra) && EQ(extraLights) && EQ(extraLightSaturation) &&
+          EQ(extraLightIntensity) && EQ(volumetric) && EQ(volumetricIntensity) && EQ(volumetricQuality) && EQ(bloom) &&
+          EQ(bloomIntensity) && EQ(bloomThreshold) && EQ(bloomRadius) && EQ(bloomFlashlightSuppress) && EQ(bloomScene) && EQ(bloomEmissive) && EQ(bloomLightGlow) && EQ(ssao) &&
+-         EQ(ssaoIntensity) && EQ(ssaoRadius);
++         EQ(ssaoIntensity) && EQ(ssaoRadius) &&
++         // 0031: the fields added after 0016 (changing only them did not reach the renderer)
++         EQ(extraShadows) && EQ(extraShadowQuality) && EQ(extraShadowMode) && EQ(extraShadowLights) &&
++         EQ(extraShadowMapSize) && EQ(extraShadowSoftness) && EQ(shadowDarkness) && EQ(shadowAmbientKeep);
+ #undef EQ
+ }
+ 
+@@ -321,7 +324,17 @@
+ // re-rendered emissive surfaces pass the depth test against themselves.
+ @fragment
+ fn fs_glowdepth(in: VsOut) -> @builtin(frag_depth) f32 {
+-  let d = load_depth(floor(in.pos.xy * fx.glowdepth.xy) + vec2f(0.5));
++  // 0031: the farthest depth of the scene pixels this texel covers (point sampling one of them
++  // failed the re-rendered surface on floors seen at grazing angles).
++  let p0 = floor(in.pos.xy) * fx.glowdepth.xy;
++  let n = vec2u(clamp(ceil(fx.glowdepth.xy), vec2f(1.0), vec2f(4.0)));
++  var d = select(0.0, 1.0, fx.glowdepth.z > 0.5); // reversed Z: farther is smaller (min from 1)
++  for (var y = 0u; y < n.y; y++) {
++    for (var x = 0u; x < n.x; x++) {
++      let s = load_depth(p0 + vec2f(f32(x), f32(y)) + vec2f(0.5));
++      d = select(max(d, s), min(d, s), fx.glowdepth.z > 0.5);
++    }
++  }
+   if (fx.glowdepth.z > 0.5) {
+     return d * (1.0 - fx.glowdepth.w);
+   }
+@@ -654,8 +667,11 @@
+     let sz = view_pos(sp, sd).z;
+     // Occluded when the stored surface is in front of the sample (range-checked).
+     let diff = sz - q.z;
+-    if (diff > 2.0) {
+-      occ = occ + smoothstep(0.0, 1.0, radius / max(abs(p.z - sz), 1e-3));
++    // 0031: a bias relative to the radius with a soft ramp: decals and layered meshes a few units
++    // above the ground no longer draw dark lines along their edges.
++    let bias = max(2.0, radius * 0.06);
++    if (diff > bias) {
++      occ = occ + smoothstep(bias, bias * 4.0, diff) * smoothstep(0.0, 1.0, radius / max(abs(p.z - sz), 1e-3));
+     }
+   }
+   let ao = 1.0 - occ / 12.0;

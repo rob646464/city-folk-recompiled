@@ -1,0 +1,85 @@
+diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
+index 044714f..728ae5d 100644
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -131,2 +131,11 @@ extern "C" {
+ 
++/**
++ * Replay state slots (frame interpolation): GX_AURORA_STATE_SAVE stores the processed GX state
++ * (registers, matrices, vertex layout and arrays, loaded textures; not the copy-texture caches)
++ * in a slot, GX_AURORA_STATE_RESTORE makes it current again. Followed by a u8 slot (0..3).
++ * Lets a captured frame be replayed several times, each time from the state it started from.
++ */
++#define GX_AURORA_STATE_SAVE 0x0060
++#define GX_AURORA_STATE_RESTORE 0x0061
++
+ #define GX2_SET_POLYGON_OFFSET 0x1000
+@@ -223,6 +232,12 @@ void GXSetWireframeAurora(u8 enable, u32 rgba);
+  */
+ void GXSetCullOverrideAurora(u8 twoSided);
+ 
++/**
++ * Replay state slots (see GX_AURORA_STATE_SAVE): processed in FIFO order.
++ */
++void GXSaveStateAurora(u8 slot);
++void GXRestoreStateAurora(u8 slot);
++
+ /**
+  * Load an arbitrary 4x4 projection matrix, avoiding the 6-parameter hardware encoding.
+  */
+diff --git a/lib/dolphin/gx/GXAurora.cpp b/lib/dolphin/gx/GXAurora.cpp
+index 7df4ab1..9a01613 100644
+--- a/lib/dolphin/gx/GXAurora.cpp
++++ b/lib/dolphin/gx/GXAurora.cpp
+@@ -110,6 +110,16 @@ void GXSetCullOverrideAurora(u8 twoSided) {
+   GX_WRITE_U8(twoSided);
+ }
+ 
++void GXSaveStateAurora(u8 slot) {
++  GX_WRITE_AURORA(GX_AURORA_STATE_SAVE);
++  GX_WRITE_U8(slot);
++}
++
++void GXRestoreStateAurora(u8 slot) {
++  GX_WRITE_AURORA(GX_AURORA_STATE_RESTORE);
++  GX_WRITE_U8(slot);
++}
++
+ void GX2SetPolygonOffset(f32 mFrontOffset, f32 mFrontScale, f32 mBackOffset, f32 mBackScale, f32 mClamp) {
+   GX_WRITE_AURORA(GX2_SET_POLYGON_OFFSET);
+   GX_WRITE_F32(mFrontOffset);
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+index a67fc6d..88d50a9 100644
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -1035,6 +1035,30 @@ void handle_aurora(ByteReader& reader) noexcept {
+     if (drawIndexCount != 0) {
+       push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, drawIndexCount);
+     }
++  } else if (subCmd == GX_AURORA_STATE_SAVE || subCmd == GX_AURORA_STATE_RESTORE) {
++    // Replay state slots: everything but the copy-texture caches (copies made since stay valid)
++    // and the per-frame cache state (array upload ranges, texture binds), which is rebuilt.
++    static std::array<std::unique_ptr<GXState>, 4> sSlots;
++    const u8 slot = reader.read<u8>() & 3;
++    auto& state = g_gxState;
++    auto copies = std::move(state.copyTextures);
++    auto copyCache = std::move(state.copyTextureCache);
++    auto binds = std::move(state.textures);
++    if (subCmd == GX_AURORA_STATE_SAVE) {
++      if (!sSlots[slot]) sSlots[slot] = std::make_unique<GXState>();
++      *sSlots[slot] = state;
++    } else if (sSlots[slot]) {
++      state = *sSlots[slot];
++      for (auto& array : state.arrays) {
++        array.cachedRange = {};
++      }
++      state.clearVtxSizeCache();
++      state.dirty = DirtyAll;
++      clear_draw_cache();
++    }
++    state.copyTextures = std::move(copies);
++    state.copyTextureCache = std::move(copyCache);
++    state.textures = std::move(binds);
+   } else if (subCmd == GX_AURORA_DEBUG_GROUP_PUSH) {
+     auto label = reader.read_string();
+     gfx::push_debug_group(std::move(label));

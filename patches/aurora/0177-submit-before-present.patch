@@ -1,0 +1,31 @@
+diff --git a/lib/aurora.cpp b/lib/aurora.cpp
+index 8003176..4fa9e9b 100644
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -290,6 +290,26 @@ void end_frame() noexcept {
+   gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
+                   imguiDrawData = std::move(imguiDrawData)](
+                      wgpu::CommandEncoder& encoder, std::vector<gfx::AfterSubmitCallback> afterSubmitCallbacks) {
++    // The frame's own GPU work is submitted before the surface texture is acquired, and its
++    // after-submit callbacks (readback maps: EFB copies to RAM, peeks) run right away. Acquiring
++    // the surface texture and presenting can block for a display interval, which used to delay
++    // every readback of the frame by that long; the present blit goes in a second command buffer.
++    // AURORA_LATE_SUBMIT=1: the previous single submission after the acquire (A/B).
++    static const bool sLateSubmit = std::getenv("AURORA_LATE_SUBMIT") != nullptr;
++    if (!sLateSubmit) {
++      ZoneScopedN("Frame Submit");
++      const wgpu::CommandBufferDescriptor frameBufDescriptor{.label = "Frame command buffer"};
++      const auto frameBuffer = encoder.Finish(&frameBufDescriptor);
++      g_queue.Submit(1, &frameBuffer);
++      for (auto& callback : afterSubmitCallbacks) {
++        if (callback) {
++          callback();
++        }
++      }
++      afterSubmitCallbacks.clear();
++      constexpr wgpu::CommandEncoderDescriptor presentEncoderDescriptor{.label = "Present encoder"};
++      encoder = g_device.CreateCommandEncoder(&presentEncoderDescriptor);
++    }
+     wgpu::Texture currentTexture;
+     wgpu::TextureView currentView;
+     auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;

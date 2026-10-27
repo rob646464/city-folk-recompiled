@@ -1,0 +1,171 @@
+diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
+--- a/lib/gx/gx.cpp
++++ b/lib/gx/gx.cpp
+@@ -342,8 +342,8 @@
+ }
+ 
+ void set_logical_viewport(const gfx::Viewport& viewport) noexcept {
+-  if (viewport.left != g_gxState.logicalViewport.left || viewport.width != g_gxState.logicalViewport.width ||
+-      viewport.height != g_gxState.logicalViewport.height) {
++  if (viewport.left != g_gxState.logicalViewport.left || viewport.top != g_gxState.logicalViewport.top ||
++      viewport.width != g_gxState.logicalViewport.width || viewport.height != g_gxState.logicalViewport.height) {
+     g_gxState.dirty |= DirtyUniform;
+   }
+   g_gxState.logicalViewport = viewport;
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -10,6 +10,7 @@
+ #include <dolphin/gx/GXEnum.h>
+ 
+ #include <absl/container/flat_hash_set.h>
++#include <cstdlib>
+ #include <mutex>
+ #include <string_view>
+ #include <utility>
+@@ -1187,6 +1188,29 @@
+          stage.texMapId != GX_TEXMAP_NULL && stage.texCoordId != GX_TEXCOORD_NULL;
+ }
+ 
++// ---- Hardware details (0180) ------------------------------------------------------------------
++// Three Flipper details with their evidence in the ports' docs/ACCURACY.md. Each is on by default;
++// an environment variable set to 0 restores the previous behaviour for A/B comparisons (read once).
++bool hw_env_on(const char* name) noexcept {
++  const char* v = std::getenv(name);
++  return v == nullptr || v[0] != '0';
++}
++// Setup unit: vertex positions snap down to the 1/12-pixel subsample grid (AURORA_PIXEL_SNAP).
++bool hw_pixel_snap() noexcept {
++  static const bool on = hw_env_on("AURORA_PIXEL_SNAP");
++  return on;
++}
++// PE dither: the 4x4 Bayer matrix (AURORA_DITHER_4X4; 0 = the 2x2 matrix).
++bool hw_dither_4x4() noexcept {
++  static const bool on = hw_env_on("AURORA_DITHER_4X4");
++  return on;
++}
++// TEV GX_CS_DIVIDE_2 without a rounding constant (AURORA_TEV_DIV2_TRUNC; 0 = round to nearest).
++bool hw_tev_div2_trunc() noexcept {
++  static const bool on = hw_env_on("AURORA_TEV_DIV2_TRUNC");
++  return on;
++}
++
+ // ---- Integer TEV (GX_AURORA_ACCURACY_INT_TEV) -------------------------------------------------
+ // The hardware combiner works on integers: A/B/C inputs are 8 bits (the low byte of a register),
+ // D and the registers are signed 11-bit, C is widened to 0..256 (C + C>>7) for the lerp, and every
+@@ -1222,12 +1246,26 @@
+   else { r = (v * i32(1u << scale) + 128) >> 8u; }
+   return itev_clamp1(r, clamp8);
+ }
++// GX_CS_DIVIDE_2 (0180): no rounding constant; the lerp is truncated to an integer (floor of
++// lerp / 256, negated for SUB), added to D and the bias, and the sum halved with an arithmetic
++// shift (floor), then clamped. Dolphin's hardware test (hwtests gxtest/tev.cpp, random A/B/C,
++// D = 0, all scales/biases/ops) expects exactly this.
++fn itev_div2_3(l: vec3i, d: vec3i, sub: bool, bias: i32, clamp8: bool) -> vec3i {
++  let lf = l >> vec3u(8u);
++  return itev_clamp3((d + vec3i(bias) + select(lf, -lf, sub)) >> vec3u(1u), clamp8);
++}
++fn itev_div2_1(l: i32, d: i32, sub: bool, bias: i32, clamp8: bool) -> i32 {
++  let lf = l >> 8u;
++  return itev_clamp1((d + bias + select(lf, -lf, sub)) >> 1u, clamp8);
++}
+ fn itev_op3(a: vec3i, b: vec3i, c: vec3i, d: vec3i, sub: bool, bias: i32, scale: u32, clamp8: bool) -> vec3i {
+   let l = itev_lerp3(a, b, c);
++  if (scale == 3u && itev_div2_trunc) { return itev_div2_3(l, d, sub, bias, clamp8); }
+   return itev_finish3(d * 256 + vec3i(bias * 256) + select(l, -l, sub), scale, clamp8);
+ }
+ fn itev_op1(a: i32, b: i32, c: i32, d: i32, sub: bool, bias: i32, scale: u32, clamp8: bool) -> i32 {
+   let l = itev_lerp1(a, b, c);
++  if (scale == 3u && itev_div2_trunc) { return itev_div2_1(l, d, sub, bias, clamp8); }
+   return itev_finish1(d * 256 + bias * 256 + select(l, -l, sub), scale, clamp8);
+ }
+ fn itev_f2i3(v: vec3f) -> vec3i { return vec3i(round(clamp(v, vec3f(0.0), vec3f(1.0)) * 255.0)); }
+@@ -1409,7 +1447,18 @@
+   // Per-channel bit depth: RGBA6 = 6/6/6, RGB565 = 5/6/5.
+   const std::string_view bits = rgb565 ? "vec3u(5u, 6u, 5u)"sv : "vec3u(6u)"sv;
+   out += fmt::format("\n      let bits = {};", bits);
+-  if (config.dither) {
++  if (config.dither && hw_dither_4x4()) {
++    // 4x4 ordered (Bayer) dither (0180): index B = 4 * B2(x, y) + B2(x >> 1, y >> 1) with
++    // B2 = 0 2 / 3 1, in sixteenths of one output step, by EFB pixel. A channel that drops 2 bits
++    // (RGBA6, RGB565's green) sees floor(B / 4) = the 2x2 matrix exactly; RGB565's 5-bit red and
++    // blue drop 3 bits and see 8 levels of the 4x4 pattern.
++    out += "\n      let dp = vec2u(in.pos.xy);"
++           "\n      let d0 = dp & vec2u(1u);"
++           "\n      let d1 = (dp >> vec2u(1u)) & vec2u(1u);"
++           "\n      let dq = i32(4u * (((d0.x ^ d0.y) << 1u) + d0.y) + ((d1.x ^ d1.y) << 1u) + d1.y);"
++           "\n      let step = vec3i(1) << (vec3u(8u) - bits);"
++           "\n      rgb = rgb - (rgb >> bits) + (step * dq) / 16;";
++  } else if (config.dither) {
+     // 2x2 ordered (Bayer) dither: thresholds 0 2 / 3 1 in quarters of one output step.
+     out += "\n      let dp = vec2u(in.pos.xy) & vec2u(1u);"
+            "\n      let dq = i32(select(select(0u, 2u, dp.x == 1u), select(3u, 1u, dp.x == 1u), dp.y == 1u));"
+@@ -1744,6 +1793,7 @@
+     }
+     // The PE takes the low 8 bits of the last stage's output.
+     fragmentFn += "\n    prev = vec4f(iprev & vec4i(255)) / 255.0;";
++    uniformPre += hw_tev_div2_trunc() ? "\nconst itev_div2_trunc = true;"sv : "\nconst itev_div2_trunc = false;"sv;
+     uniformPre += IntTevHelpers;
+     if (info.loadsTevReg.test(0)) {
+       fragmentFnPre += "\n    var iprev = vec4i(round(ubuf.tevprev * 255.0));";
+@@ -2570,6 +2620,25 @@
+   if (config.lightDepth && config.lineMode == 0 && !webgpu::g_clipDistancesSupported) {
+     fragmentFnPre.insert(0, "\n    if (any((in.pos.xy < in.enh_tile.xy)) || any((in.pos.xy >= in.enh_tile.zw))) { discard; }");
+   }
++  if (config.lineMode == 0 && !config.lightDepth && hw_pixel_snap()) {
++    // 0180: Flipper's setup unit takes screen positions on a 1/12-pixel grid (the subsample grid
++    // of GXSetCopyFilter's sample patterns), dropping the rest (floor; positions are positive
++    // thanks to the SDK's +340 viewport offset), and samples non-AA pixels at 6/12 (the SDK's
++    // centred pattern). A left edge at x covers the pixel's sample iff x < 7/12 (Dolphin hwtests
++    // rasterization.cpp: the "7/12 pixel centre"), while geometry on whole pixels is sampled at
++    // exactly the texel centres (1:1 linear blits stay sharp on hardware). Snapped here in the
++    // logical (EFB) pixel grid, so coverage and attribute interpolation follow the snapped
++    // positions at any render scale. The 1/256 tolerance keeps float noise on exact grid
++    // positions from dropping a step.
++    vtxXfrAttrs +=
++        "\n    if (out.pos.w > 0.0 && all(abs(ubuf.logical_viewport_size) >= vec2f(1.0))) {"
++        "\n      let hw_vs = ubuf.logical_viewport_size;"
++        "\n      let hw_ndc = out.pos.xy / out.pos.w;"
++        "\n      let hw_win = ubuf.logical_viewport_origin.xy + vec2f(hw_ndc.x * 0.5 + 0.5, 0.5 - hw_ndc.y * 0.5) * hw_vs;"
++        "\n      let hw_d = (floor(hw_win * 12.0 + 1.0 / 256.0) / 12.0 - hw_win) * 2.0 / hw_vs;"
++        "\n      out.pos = vec4f(out.pos.xy + vec2f(hw_d.x, -hw_d.y) * out.pos.w, out.pos.zw);"
++        "\n    }";
++  }
+   auto shaderSource =
+       fmt::format(R"""(
+ fn bswap32(v: u32, le: bool) -> u32 {{
+@@ -2921,7 +2990,8 @@
+ 
+ struct Uniform {{
+     render_viewport_size: vec2f,
+-    logical_viewport_size: vec2f,{0}
++    logical_viewport_size: vec2f,
++    logical_viewport_origin: vec4f,{0}
+ }};
+ @group(0) @binding(0)
+ var<storage, read> vbuf: array<u32>;
+diff --git a/lib/gx/shader_info.cpp b/lib/gx/shader_info.cpp
+--- a/lib/gx/shader_info.cpp
++++ b/lib/gx/shader_info.cpp
+@@ -220,8 +220,8 @@
+   ZoneScoped;
+ 
+   ShaderInfo info{
+-      // render/logical viewport size, proj
+-      .uniformSize = 8 + 8 + 64,
++      // render/logical viewport size, logical viewport origin (0180), proj
++      .uniformSize = 8 + 8 + 16 + 64,
+   };
+ 
+   if (config.lineMode != 0) {
+@@ -399,6 +399,10 @@
+   buf.append<f32>(g_gxState.renderViewport.height);
+   buf.append<f32>(g_gxState.logicalViewport.width);
+   buf.append<f32>(g_gxState.logicalViewport.height);
++  buf.append<f32>(g_gxState.logicalViewport.left);
++  buf.append<f32>(g_gxState.logicalViewport.top);
++  buf.append<f32>(0.f);
++  buf.append<f32>(0.f);
+   if (info.lineMode != 0) {
+     if (info.lineMode == 3) { // GX_POINTS
+       buf.append<f32>(static_cast<f32>(g_gxState.pointSize) / 6.f);

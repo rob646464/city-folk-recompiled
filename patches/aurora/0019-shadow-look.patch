@@ -1,0 +1,122 @@
+diff --git a/include/aurora/enhanced.h b/include/aurora/enhanced.h
+index e1a017c..cb362fa 100644
+--- a/include/aurora/enhanced.h
++++ b/include/aurora/enhanced.h
+@@ -44,6 +44,14 @@ typedef struct {
+   uint32_t softShadowQuality;
+   float softShadowRadius;  // filter radius in 640x480 shadow-map texels (scaled with the map)
+   float softShadowPenumbra; // PCSS: penumbra growth with blocker distance
++  // How the game's shadow darkens a pixel (shader variants only). The game lerps a shadowed pixel
++  // toward its shadow color by the shadow strength, whatever lights the pixel. With these, only
++  // the share of the light that the shadow represents is removed: colored extra lights always
++  // keep lighting the shadow, `shadowAmbientKeep` of the ambient light is kept too (shadows pick
++  // up the surrounding color instead of going black), and `shadowDarkness` scales the result.
++  // 1 / 0 = the game's darkening (when no extra lights reach the pixel).
++  float shadowDarkness;    // 0..1.5
++  float shadowAmbientKeep; // 0..1
+ 
+   // Extra point lights (aurora/lights.h), per pixel on world geometry.
+   bool extraLights;
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+index b4625f4..1a17a22 100644
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -1086,6 +1086,8 @@ DrawUniform draw_uniform() noexcept {
+   u.extraScale = c.extraLightIntensity;
+   u.shadowRadius = std::max(c.softShadowRadius, 0.f);
+   u.pcss = std::max(c.softShadowPenumbra, 0.f);
++  u.shadowDark = std::clamp(c.shadowDarkness, 0.f, 1.5f);
++  u.shadowKeep = std::clamp(c.shadowAmbientKeep, 0.f, 1.f);
+   return u;
+ }
+ 
+diff --git a/lib/gfx/enhanced.hpp b/lib/gfx/enhanced.hpp
+index 72a3ad8..30b9ffa 100644
+--- a/lib/gfx/enhanced.hpp
++++ b/lib/gfx/enhanced.hpp
+@@ -28,7 +28,9 @@ struct DrawUniform {
+   uint32_t maskDims = 0;  // width | height << 16 (0: no mask this frame)
+   float maskScale = 0.f;  // mask pixels per target pixel
+   float flashSpec = 0.f;  // flashlight specular strength
+-  float pad[3] = {};
++  float shadowDark = 1.f;  // AuroraEnhancedConfig::shadowDarkness
++  float shadowKeep = 0.f;  // AuroraEnhancedConfig::shadowAmbientKeep
++  float pad = 0.f;
+ };
+ static_assert(sizeof(DrawUniform) == 64);
+ 
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index f2b04c0..808ff20 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1026,6 +1026,19 @@ fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
+   }
+   return sum * ubuf.enh_extra_scale;
+ }
++// How much of the game's shadow darkening applies. The game lerps a shadowed pixel toward its
++// shadow color whatever lights it; here only the share of the pixel's light the shadow stands for
++// is removed: extra (colored) lights are never removed (they have their own shadows) and
++// enh_shadow_keep of the ambient part is kept; enh_shadow_dark scales the result. lit < 0: the
++// split is unknown (unlit channel 0), only the darkness applies. Exactly 1 (the game's darkening)
++// when dark = 1, keep = 0 and no extra light reaches the pixel.
++fn enh_shadow_scale(lit: f32, amb: f32, xl: f32) -> f32 {
++  if (lit < 0.0) { return ubuf.enh_shadow_dark; }
++  let total = lit + xl;
++  if (total <= 1e-4) { return ubuf.enh_shadow_dark; }
++  let removable = lit - min(amb, lit) * ubuf.enh_shadow_keep;
++  return ubuf.enh_shadow_dark * clamp(removable / total, 0.0, 1.0);
++}
+ // Interleaved gradient noise (per-pixel rotation of the filter kernels).
+ fn enh_ign(p: vec2f) -> f32 { return fract(52.9829189 * fract(dot(p, vec2f(0.06711056, 0.00583715)))); }
+ fn enh_key(t: vec4f, sr: u32, sg: u32) -> f32 {
+@@ -1142,7 +1155,8 @@ std::string enh_shadow_stage(size_t idx, const ShaderConfig& config, const TevSt
+       "\n    var enh_sf{0} = select(0.0, 1.0, {4});"
+       "\n    if ((ubuf.enh_flags & 4u) != 0u) {{"
+       "\n      enh_sf{0} = enh_shadow(tex{3}, tex{2}_uv, enh_recv{0}, {5}u, {6}u, in.pos.xy, enh_slope{0});"
+-      "\n    }}",
++      "\n    }}"
++      "\n    enh_sf{0} = enh_sf{0} * enh_shadow_scale(enh_s_lit, enh_s_amb, enh_s_xl);",
+       idx, recv, coord, map, binaryCond, swap_index(swap.red), swap_index(swap.green));
+ }
+ 
+@@ -1761,7 +1775,12 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+                        "\n    enh_n = select(enh_n, -enh_n, dot(enh_n, in.enh_pos) > 0.0);";
+     }
+     fragmentFnPre += fmt::format("\n    var enh_xl = vec3f(0.0);"
+-                                 "\n    if ((ubuf.enh_flags & 2u) != 0u) {{ enh_xl = enh_extra_lights(in.enh_pos, enh_n, {}, in.pos.xy); }}",
++                                 "\n    if ((ubuf.enh_flags & 2u) != 0u) {{ enh_xl = enh_extra_lights(in.enh_pos, enh_n, {}, in.pos.xy); }}"
++                                 // Light shares of color channel 0 for the shadow darkening (enh_shadow_scale):
++                                 // lit = the channel's GX lighting result, amb = its ambient part, xl = extra lights.
++                                 "\n    var enh_s_lit = -1.0;"
++                                 "\n    var enh_s_amb = 0.0;"
++                                 "\n    var enh_s_xl = 0.0;",
+                                  config.enhClass == 2 ? "true"sv : "false"sv);
+     uniformPre += EnhHelpers;
+   }
+@@ -1831,6 +1850,15 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+         fragmentFnPre += enh_lighting_func(config, cca, i, true);
+         fragmentFnPre += "\n    }";
+       }
++      if (enh && i == 0 && cc.lightingEnabled && !srtgChannels.test(i)) {
++        const std::string amb = cc.ambSrc == GX_SRC_REG ? fmt::format("{} * ubuf.cc0_amb.rgb", enh_mat_src(cc, 0))
++                                                        : std::string{"vec3f(0.0)"};
++        fragmentFnPre += fmt::format(
++            "\n    enh_s_lit = dot(rast0.rgb, vec3f(0.299, 0.587, 0.114));"
++            "\n    enh_s_amb = dot(clamp({}, vec3f(0.0), vec3f(1.0)), vec3f(0.299, 0.587, 0.114));"
++            "\n    if ((ubuf.enh_flags & 2u) != 0u) {{ enh_s_xl = dot({} * enh_xl, vec3f(0.299, 0.587, 0.114)); }}",
++            amb, enh_mat_src(cc, 0));
++      }
+       if (enh && cc.lightingEnabled && cc.diffFn != GX_DF_NONE && !srtgChannels.test(i)) {
+         // Extra lights join the channel's lighting sum (approximately: mat * extra added after
+         // the clamp), so the game's material and TEV decide how the surface responds.
+@@ -2313,8 +2341,8 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+         "\n    enh_mask_dims: u32,"
+         "\n    enh_mask_scale: f32,"
+         "\n    enh_flash_spec: f32,"
+-        "\n    enh_pad0: f32,"
+-        "\n    enh_pad1: f32,"
++        "\n    enh_shadow_dark: f32,"
++        "\n    enh_shadow_keep: f32,"
+         "\n    enh_pad2: f32,";
+   }
+   if (config.intTev) {

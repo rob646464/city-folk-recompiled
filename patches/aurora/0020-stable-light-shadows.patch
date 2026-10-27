@@ -1,0 +1,65 @@
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+index 1a17a22..0469e88 100644
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -307,7 +307,9 @@ fn fs_xlshadow(in: VsOut) -> @location(0) vec4f {
+   if (d0 <= 1e-7) { return vec4f(0.0); } // nothing drawn (cleared to far)
+   let p = view_pos((mp + vec2f(0.5)) * fx.pp.y, d0);
+   let steps = max(fx.pp.x, 4.0);
+-  let jitter = ign(mp + vec2f(fx.dr.z * 7.0, fx.dr.z * 3.0));
++  // Per-pixel step offset, the same every frame: a pattern that changes per frame made the shadow
++  // edges crawl and pop (and differ between interpolated replays); the receivers blur the mask.
++  let jitter = ign(mp);
+   var occ = vec4f(0.0);
+   if (fx.pp.w > 1.5) {
+     return vec4f(-p.z / 3000.0, -fx.xl[0].z / 3000.0, length(fx.xl[0].xyz - p) / 3000.0, fx.pp.z / 4.0);
+@@ -335,10 +337,13 @@ fn fs_xlshadow(in: VsOut) -> @location(0) vec4f {
+       if (any(sp < vec2f(0.0)) || any(sp >= vec2f(dims))) { break; }
+       let sz = mask_view_pos(sp).z;
+       let front = sz - q.z; // > 0: the stored surface is nearer to the camera than the ray point
+-      if (front > 2.0 + t * 0.01 && front < 160.0) {
+-        o = 1.0;
+-        break;
+-      }
++      // Soft occlusion: ramps in over the first units in front of the ray and out toward the
++      // thickness limit, and is weaker for the last stretch before the light (a hard 0/1 test
++      // flipped whole regions between frames as the casters moved).
++      let bias = 2.0 + t * 0.01;
++      let occ1 = smoothstep(bias, bias + 10.0, front) * (1.0 - smoothstep(120.0, 160.0, front));
++      o = max(o, occ1 * (1.0 - smoothstep(0.75, 1.0, t / (dist * 0.92))));
++      if (o >= 0.999) { break; }
+     }
+     occ[s] = o;
+   }
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index 808ff20..6587975 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -981,7 +981,13 @@ fn enh_ld(i: u32) -> f32 { return bitcast<f32>(abuf[i]); }
+ fn enh_mask(frag: vec2f, slot: u32) -> f32 {
+   let dims = vec2i(i32(ubuf.enh_mask_dims & 0xFFFFu), i32(ubuf.enh_mask_dims >> 16u));
+   if (dims.x == 0) { return 0.0; }
++  // Four bilinear taps around the pixel (a 4x4 tent over the half-resolution mask): the ray
++  // march's per-pixel sample pattern and the mask's blockiness disappear.
+   let m = frag * ubuf.enh_mask_scale - vec2f(0.5);
++  return 0.25 * (enh_mask_bl(m + vec2f(-0.75, -0.75), dims, slot) + enh_mask_bl(m + vec2f(0.75, -0.75), dims, slot) +
++                 enh_mask_bl(m + vec2f(-0.75, 0.75), dims, slot) + enh_mask_bl(m + vec2f(0.75, 0.75), dims, slot));
++}
++fn enh_mask_bl(m: vec2f, dims: vec2i, slot: u32) -> f32 {
+   let base = vec2i(floor(m));
+   let f = fract(m);
+   var acc = 0.0;
+@@ -1017,7 +1023,12 @@ fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
+     ndl = select(max(ndl, 0.0), ndl * 0.5 + 0.5, ghost);
+     var col = vec3f(enh_ld(b + 4u), enh_ld(b + 5u), enh_ld(b + 6u)) * enh_ld(b + 7u);
+     let slot = abuf[b + 10u];
+-    if (slot < 4u) { col = col * (1.0 - enh_mask(frag, slot)); }
++    if (slot < 4u) {
++      // Shadow weight in flags bits 8..15 (0 = full): shadows fade in/out when the set of
++      // shadow-casting lights changes.
++      let sw = (flags >> 8u) & 0xFFu;
++      col = col * (1.0 - enh_mask(frag, slot) * select(1.0, f32(sw) / 255.0, sw != 0u));
++    }
+     sum = sum + col * (ndl * fall);
+     if ((flags & 4u) != 0u) {
+       let h = normalize(l + v);

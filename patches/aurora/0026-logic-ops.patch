@@ -1,0 +1,192 @@
+diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
+index f17dc24..91dd2fe 100644
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -682,6 +682,9 @@ const char* validate_config(const gx::PipelineConfig& c) {
+     return "update flags";
+   }
+   const auto& s = c.shaderConfig;
++  if (s.logicOut > 2 || s.pad0 != 0) {
++    return "logic op source";
++  }
+   switch (s.fogType) {
+   case GX_FOG_NONE:
+   case GX_FOG_PERSP_LIN:
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+index 38c9c51..665489f 100644
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -503,7 +503,7 @@ static void audit_pipeline(const PipelineConfig& pc, GXPrimitive prim) noexcept
+                           t.normalize ? 1 : 0, t.postMtx != GX_PTIDENTITY ? 1 : 0));
+   }
+   if (sc.fogType != GX_FOG_NONE) {
+-    audit_tag(fmt::format("fog type={} range={}", sc.fogType, sc.fogRangeEnabled ? 1 : 0));
++    audit_tag(fmt::format("fog type={} range={}", unsigned(sc.fogType), sc.fogRangeEnabled ? 1 : 0));
+   }
+ }
+ 
+diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
+index 986782c..75f8010 100644
+--- a/lib/gx/gx.cpp
++++ b/lib/gx/gx.cpp
+@@ -112,6 +112,23 @@ wgpu::CompareFunction to_compare_function(GXCompare func) {
+   }
+ }
+ 
++// Shader output for GX_BM_LOGIC (ShaderConfig::logicOut): 1 = white, 2 = inverted color, 0 = as is.
++u8 logic_op_source(GXLogicOp op) noexcept {
++  switch (op) {
++  case GX_LO_SET:
++  case GX_LO_INV:
++  case GX_LO_NAND:
++    return 1;
++  case GX_LO_INVCOPY:
++  case GX_LO_NOR:
++  case GX_LO_INVOR:
++  case GX_LO_EQUIV:
++    return 2;
++  default:
++    return 0;
++  }
++}
++
+ wgpu::BlendState to_blend_state(GXBlendMode mode, GXBlendFactor srcFac, GXBlendFactor dstFac, GXLogicOp op,
+                                 u32 dstAlpha, bool dualSource) {
+   wgpu::BlendComponent colorBlendComponent;
+@@ -138,33 +155,55 @@ wgpu::BlendState to_blend_state(GXBlendMode mode, GXBlendFactor srcFac, GXBlendF
+         .dstFactor = wgpu::BlendFactor::One,
+     };
+     break;
+-  case GX_BM_LOGIC:
++  case GX_BM_LOGIC: {
++    // The blend unit has no bitwise ops. Each GX logic op becomes the blend that matches it
++    // exactly where it can (CLEAR, COPY, NOOP, SET, INV, INVCOPY: ~x = 1 - x on unorm) and
++    // otherwise one that matches it for the masks logic ops are used with (0 and 1 per
++    // channel): AND = min, OR = max, REVAND = s - d, INVAND = d - s, NOR = (1 - s) - d,
++    // INVOR = max(1 - s, d). XOR, EQUIV, REVOR and NAND have no such form; they get the
++    // closest one (3 of the 4 mask cases right). logic_op_source gives the shader's output
++    // (white or the inverted color) for the ops that need it.
++    const auto component = [](wgpu::BlendOperation operation, wgpu::BlendFactor src, wgpu::BlendFactor dst) {
++      return wgpu::BlendComponent{.operation = operation, .srcFactor = src, .dstFactor = dst};
++    };
++    using Op = wgpu::BlendOperation;
++    using F = wgpu::BlendFactor;
+     switch (op) {
+-      DEFAULT_FATAL("unsupported logic op {}", underlying(op));
+-    case GX_LO_CLEAR:
+-      colorBlendComponent = {
+-          .operation = wgpu::BlendOperation::Add,
+-          .srcFactor = wgpu::BlendFactor::Zero,
+-          .dstFactor = wgpu::BlendFactor::Zero,
+-      };
+-      break;
++    default:
+     case GX_LO_COPY:
+-      colorBlendComponent = {
+-          .operation = wgpu::BlendOperation::Add,
+-          .srcFactor = wgpu::BlendFactor::One,
+-          .dstFactor = wgpu::BlendFactor::Zero,
+-      };
++    case GX_LO_INVCOPY:
++    case GX_LO_SET:
++    case GX_LO_REVOR: // approx. COPY
++      colorBlendComponent = component(Op::Add, F::One, F::Zero);
++      break;
++    case GX_LO_CLEAR:
++      colorBlendComponent = component(Op::Add, F::Zero, F::Zero);
+       break;
+     case GX_LO_NOOP:
+-      colorBlendComponent = {
+-          .operation = wgpu::BlendOperation::Add,
+-          .srcFactor = wgpu::BlendFactor::Zero,
+-          .dstFactor = wgpu::BlendFactor::One,
+-      };
++      colorBlendComponent = component(Op::Add, F::Zero, F::One);
++      break;
++    case GX_LO_AND:
++      colorBlendComponent = component(Op::Min, F::One, F::One);
++      break;
++    case GX_LO_OR:
++    case GX_LO_XOR:   // approx. OR
++    case GX_LO_INVOR: // source inverted
++      colorBlendComponent = component(Op::Max, F::One, F::One);
++      break;
++    case GX_LO_REVAND:
++    case GX_LO_INV:   // source white: 1 - d
++    case GX_LO_NAND:  // approx. INV
++    case GX_LO_NOR:   // source inverted: (1 - s) - d
++    case GX_LO_EQUIV: // approx. NOR
++      colorBlendComponent = component(Op::Subtract, F::One, F::One);
++      break;
++    case GX_LO_INVAND:
++      colorBlendComponent = component(Op::ReverseSubtract, F::One, F::One);
+       break;
+     }
+     break;
+   }
++  }
+   if (dualSource) {
+     const auto remap = [](wgpu::BlendFactor factor) {
+       if (factor == wgpu::BlendFactor::SrcAlpha) {
+@@ -537,6 +576,7 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
+       }
+     }
+   }
++  config.shaderConfig.logicOut = g_gxState.blendMode == GX_BM_LOGIC ? logic_op_source(g_gxState.blendOp) : 0;
+   const auto cullMode =
+       config.shaderConfig.lineMode == 0 && !config.shaderConfig.wireframe && !g_gxState.twoSided ? g_gxState.cullMode
+                                                                                                  : GX_CULL_NONE;
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+index 8bf37f7..3388da4 100644
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -507,7 +507,11 @@ struct AttrConfig {
+ enum class DstAlphaMode : u8 { None, Replace, DualSource };
+ 
+ struct ShaderConfig {
+-  u8 fogType = GX_FOG_NONE;
++  // fogType keeps its own byte's low bits (fog types are 4-bit); the free high bits hold logicOut,
++  // so configs without logic ops keep their layout and cached/shipped pipeline lists stay valid.
++  u8 fogType : 4 = GX_FOG_NONE;
++  u8 logicOut : 2 = 0; // GX_BM_LOGIC source for the blend unit: 0 color, 1 white (INV, SET, NAND), 2 inverted color
++  u8 pad0 : 2 = 0;
+   u8 vtxStride = 0;
+   u8 lineMode : 2 = 0; // 1 = GX_LINES, 2 = GX_LINESTRIP, 3 = GX_POINTS
+   u8 fogRangeEnabled : 1 = false;
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index dd37fc1..644e5d4 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1497,7 +1497,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+       }
+       Log.info("  alphaCompare: comp0 {} ref0 {} op {} comp1 {} ref1 {}", config.alphaCompare.comp0,
+                config.alphaCompare.ref0, config.alphaCompare.op, config.alphaCompare.comp1, config.alphaCompare.ref1);
+-      Log.info("  fogType: {}", config.fogType);
++      Log.info("  fogType: {} logicOut: {}", unsigned(config.fogType), unsigned(config.logicOut));
+       Log.info("  fogRangeEnabled: {}", config.fogRangeEnabled);
+     }
+   }
+@@ -2296,7 +2296,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+     }
+     fragmentFn += "\n    var fogF = clamp(fogBase - ubuf.fog.c, 0.0, 1.0);";
+     switch (config.fogType) {
+-      DEFAULT_FATAL("invalid fog type {}", config.fogType);
++      DEFAULT_FATAL("invalid fog type {}", unsigned(config.fogType));
+     case GX_FOG_PERSP_LIN:
+     case GX_FOG_ORTHO_LIN:
+       fragmentFn += "\n    var fogZ = fogF;";
+@@ -2447,6 +2447,14 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+     fragmentFn += efb_quantize(config);
+   }
+ 
++  // Logic ops (GX_BM_LOGIC) that need ~src or a constant source: the blend unit gets white
++  // (INV = 1 - dst, SET) or the inverted color (INVCOPY, NOR, INVOR); see to_blend_state.
++  if (config.logicOut == 1) {
++    fragmentFn += "\n    // Logic op source\n    prev = vec4f(1.0);";
++  } else if (config.logicOut == 2) {
++    fragmentFn += "\n    // Logic op source\n    prev = vec4f(1.0) - clamp(prev, vec4f(0.0), vec4f(1.0));";
++  }
++
+   if (dstAlphaMode == DstAlphaMode::Replace) {
+     // GX destination alpha is set via the blend constant
+     fragmentFn += "\n    prev.a = 1.0;";

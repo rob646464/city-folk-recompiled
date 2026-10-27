@@ -1,0 +1,557 @@
+0210: GPU profile without Tracy (AURORA_GPU_PROFILE=<seconds>)
+
+The pass timestamp profiler (gpu_prof) also runs in builds without Tracy: AURORA_GPU_PROFILE=<s>
+(default 5) requests TimestampQuery (+ allow_unsafe_apis for the encoder-level zones) and logs,
+every <s> seconds, the GPU time per presented frame of every labelled pass and zone (grouped by
+label without the trailing pass index, with the average count per frame), the busiest single
+passes, the summed top-level busy time and its share of wall time. Passes that had no label
+before are timed too: every enhanced-lighting pass (bloom, glow, beam, AO, masks, shadow-map
+atlas, composite, mask copies, scene copy), the post-process chain (PostFx <n>) and the 6-bit
+blend resolves (EFB blend6 copy / quantize). Up to 511 zones per frame (was 127). Nothing changes
+without the variable.
+
+Test aid: AURORA_BEAM_FREEZE_TIME=1 (frozen dust/haze) also steps the realistic flashlight's flare and
+off-time by a fixed 1/30 s per scene end, so frame dumps of separate runs agree in lit rooms too.
+
+diff --git a/lib/webgpu/gpu_prof.cpp b/lib/webgpu/gpu_prof.cpp
+--- a/lib/webgpu/gpu_prof.cpp
++++ b/lib/webgpu/gpu_prof.cpp
+@@ -6,15 +6,17 @@
+ #include <tracy/Tracy.hpp>
+ 
+ #ifdef TRACY_ENABLE
+-
+ #include <tracy/TracyC.h>
++#endif
+ 
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
+ #include <bitset>
+ #include <chrono>
++#include <cstdlib>
+ #include <cstring>
++#include <map>
+ #include <string>
+ #include <utility>
+ #include <vector>
+@@ -22,19 +24,27 @@
+ #include <absl/container/flat_hash_map.h>
+ #include <magic_enum.hpp>
+ 
++// 0210: the GPU profiler also runs without Tracy. AURORA_GPU_PROFILE=<seconds> (default 5) turns
++// on the pass timestamps and logs, every <seconds>, the GPU time per presented frame of every
++// labelled pass/zone (grouped by label without its trailing pass index, plus the busiest
++// individual passes), the summed top-level busy time and the frame rate. With Tracy built in the
++// zones still go to Tracy as before.
++
+ namespace aurora::webgpu::gpu_prof {
+ namespace {
+ Module Log("aurora::webgpu::gpu_prof");
+ 
+ // Each zone consumes a begin/end timestamp pair.
+ // The last pair is reserved for the frame zone.
+-constexpr uint32_t MaxZones = 127;
++constexpr uint32_t MaxZones = 511;
+ constexpr uint32_t QueryCount = MaxZones * 2 + 2;
+ constexpr uint32_t FrameBeginQuery = MaxZones * 2;
+ constexpr uint32_t FrameEndQuery = MaxZones * 2 + 1;
+ constexpr uint64_t ReadbackSize = QueryCount * sizeof(uint64_t);
+ constexpr size_t RingDepth = 4;
++#ifdef TRACY_ENABLE
+ constexpr uint8_t ContextId = 0;
++#endif
+ constexpr uint64_t SaneFrameGapNs = UINT64_C(5'000'000'000);
+ 
+ enum class EventKind : uint8_t {
+@@ -83,9 +93,11 @@
+ bool g_framePending = false;
+ uint32_t g_zoneCount = 0;
+ 
++#ifdef TRACY_ENABLE
+ bool g_contextEmitted = false;
+ uint16_t g_queryId = 0;
+ uint64_t g_lastEmittedTs = 0;
++#endif
+ uint64_t g_lastFrameEnd = 0;
+ 
+ int64_t now_ns() {
+@@ -107,6 +119,126 @@
+   return stable;
+ }
+ 
++// ---- 0210: text profile (AURORA_GPU_PROFILE) ----
++double text_interval_s() {
++  static const double s = [] {
++    const char* env = std::getenv("AURORA_GPU_PROFILE");
++    if (env == nullptr) {
++      return 0.0;
++    }
++    const double v = std::atof(env);
++    return v > 0.0 ? v : 5.0;
++  }();
++  return s;
++}
++
++struct Agg {
++  double ns = 0;
++  uint64_t count = 0;
++};
++std::map<std::string, Agg> g_byGroup;
++std::map<std::string, Agg> g_byLabel;
++double g_busyNs = 0;
++double g_spanNs = 0;
++uint64_t g_frames = 0;
++int64_t g_windowStartNs = 0;
++
++std::string group_of(const char* name) {
++  std::string s{name};
++  while (!s.empty() && (std::isdigit(static_cast<unsigned char>(s.back())) != 0)) {
++    s.pop_back();
++  }
++  while (!s.empty() && s.back() == ' ') {
++    s.pop_back();
++  }
++  return s;
++}
++
++void text_flush(int64_t now) {
++  const double secs = double(now - g_windowStartNs) * 1e-9;
++  if (g_frames == 0 || secs <= 0) {
++    return;
++  }
++  const double perFrame = 1e-6 / double(g_frames);
++  std::vector<std::pair<double, std::string>> rows;
++  for (const auto& [k, v] : g_byGroup) {
++    rows.emplace_back(v.ns * perFrame, fmt::format("{:<34} {:7.3f} ms  x{:.1f}", k, v.ns * perFrame,
++                                                   double(v.count) / double(g_frames)));
++  }
++  std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
++  std::string out = fmt::format("GPU profile: {} frames in {:.1f} s ({:.1f} fps), busy {:.3f} ms/frame "
++                                "(= {:.0f}% of wall time), span {:.3f} ms/frame",
++                                g_frames, secs, double(g_frames) / secs, g_busyNs * perFrame,
++                                100.0 * g_busyNs * 1e-9 / secs, g_spanNs * perFrame);
++  for (const auto& r : rows) {
++    out += "\n  ";
++    out += r.second;
++  }
++  std::vector<std::pair<double, std::string>> labels;
++  for (const auto& [k, v] : g_byLabel) {
++    labels.emplace_back(v.ns * perFrame, k);
++  }
++  std::sort(labels.begin(), labels.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
++  out += "\n  top passes:";
++  for (size_t i = 0; i < labels.size() && i < 12; ++i) {
++    out += fmt::format("  {} {:.3f}", labels[i].second, labels[i].first);
++  }
++  Log.info("{}", out);
++  g_byGroup.clear();
++  g_byLabel.clear();
++  g_busyNs = 0;
++  g_spanNs = 0;
++  g_frames = 0;
++  g_windowStartNs = now;
++}
++
++void text_frame(const Slot& slot, const uint64_t* ts, uint64_t frameBegin, uint64_t frameEnd) {
++  const int64_t now = now_ns();
++  if (g_windowStartNs == 0) {
++    g_windowStartNs = now;
++    return;
++  }
++  // Pair begins with ends (events mirror encode order, properly nested).
++  std::vector<const Event*> stack;
++  uint32_t depth = 0;
++  for (const auto& event : slot.events) {
++    if (event.kind == EventKind::End) {
++      if (stack.empty()) {
++        continue;
++      }
++      const Event* b = stack.back();
++      stack.pop_back();
++      --depth;
++      const uint64_t t0 = ts[b->query];
++      const uint64_t t1 = ts[event.query];
++      if (t0 == 0 || t1 <= t0 || t1 - t0 > SaneFrameGapNs) {
++        continue;
++      }
++      const double d = double(t1 - t0);
++      auto& g = g_byGroup[group_of(b->name)];
++      g.ns += d;
++      ++g.count;
++      auto& l = g_byLabel[b->name];
++      l.ns += d;
++      ++l.count;
++      if (depth == 0) {
++        g_busyNs += d;
++      }
++    } else {
++      stack.push_back(&event);
++      ++depth;
++    }
++  }
++  if (frameEnd > frameBegin && frameEnd - frameBegin < SaneFrameGapNs) {
++    g_spanNs += double(frameEnd - frameBegin);
++  }
++  ++g_frames;
++  if (double(now - g_windowStartNs) * 1e-9 >= text_interval_s()) {
++    text_flush(now);
++  }
++}
++
++#ifdef TRACY_ENABLE
+ // tracy::GpuContextType not exposed through TracyC.h
+ uint8_t tracy_context_type(wgpu::BackendType backend) {
+   switch (backend) {
+@@ -161,6 +293,7 @@
+   ___tracy_emit_gpu_zone_end_serial({.queryId = queryId, .context = ContextId});
+   ___tracy_emit_gpu_time_serial({.gpuTime = int64_t(gpuNs), .queryId = queryId, .context = ContextId});
+ }
++#endif
+ 
+ TimestampBounds event_bounds(const Slot& slot, const uint64_t* ts) {
+   TimestampBounds bounds;
+@@ -199,7 +332,12 @@
+     return;
+   }
+ 
++  if (text_interval_s() > 0.0) {
++    text_frame(slot, ts, frameBegin, frameEnd);
++  }
++
+   const uint64_t lastFrameEnd = std::exchange(g_lastFrameEnd, frameEnd);
++#ifdef TRACY_ENABLE
+   if (lastFrameEnd != 0) {
+     if (frameBegin < lastFrameEnd) {
+       if (frameEnd <= lastFrameEnd || frameEnd - lastFrameEnd >= SaneFrameGapNs) {
+@@ -277,6 +415,9 @@
+   TracyPlot("aurora: gpuFrameMs", double(frameEnd - frameBegin) * 1e-6);
+   TracyPlot("aurora: gpuIdleMs", double(idleNs) * 1e-6);
+   TracyPlot("aurora: gpuPasses", int64_t(slot.passCount));
++#else
++  (void)lastFrameEnd;
++#endif
+ }
+ 
+ Slot& record_slot() { return g_slots[g_recordSlot]; }
+@@ -289,7 +430,14 @@
+ }
+ } // namespace
+ 
++bool text_profile_requested() { return text_interval_s() > 0.0; }
++
+ void initialize() {
++#ifndef TRACY_ENABLE
++  if (text_interval_s() <= 0.0) {
++    return;
++  }
++#endif
+   g_enabled = g_device.HasFeature(wgpu::FeatureName::TimestampQuery);
+   if (!g_enabled) {
+     Log.info("Timestamp queries unsupported; GPU profiling disabled");
+@@ -423,7 +571,7 @@
+   slot.events.push_back({nullptr, index * 2 + 1, EventKind::End});
+   ++slot.passCount;
+ 
+-  static std::array<wgpu::PassTimestampWrites, 4> writes;
++  static std::array<wgpu::PassTimestampWrites, 8> writes;
+   static size_t writesIndex = 0;
+   auto& out = writes[writesIndex++ % writes.size()];
+   out = {
+@@ -457,18 +605,3 @@
+ }
+ 
+ } // namespace aurora::webgpu::gpu_prof
+-
+-#else
+-
+-namespace aurora::webgpu::gpu_prof {
+-void initialize() {}
+-void shutdown() {}
+-void frame_begin(const wgpu::CommandEncoder&) {}
+-void frame_end(const wgpu::CommandEncoder&) {}
+-void after_submit() {}
+-const wgpu::PassTimestampWrites* pass_writes(std::string_view) { return nullptr; }
+-Zone::Zone(const wgpu::CommandEncoder&, std::string_view) {}
+-Zone::~Zone() = default;
+-} // namespace aurora::webgpu::gpu_prof
+-
+-#endif
+diff --git a/lib/webgpu/gpu_prof.hpp b/lib/webgpu/gpu_prof.hpp
+--- a/lib/webgpu/gpu_prof.hpp
++++ b/lib/webgpu/gpu_prof.hpp
+@@ -7,6 +7,8 @@
+ namespace aurora::webgpu::gpu_prof {
+ 
+ void initialize();
++// 0210: AURORA_GPU_PROFILE=<seconds> is set (text profile without Tracy).
++bool text_profile_requested();
+ void shutdown();
+ 
+ void frame_begin(const wgpu::CommandEncoder& encoder);
+diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
+--- a/lib/webgpu/gpu.cpp
++++ b/lib/webgpu/gpu.cpp
+@@ -960,8 +960,10 @@
+ #ifndef TRACY_ENABLE
+       // 0028: AURORA_ENH_GPU_TIMING=1 times the enhanced-lighting shadow passes on the GPU.
+       // 0176: AURORA_EFB_BLEND6_TIMING=1 times the RGBA6 blend resolves.
++      // 0210: AURORA_GPU_PROFILE=<s> logs every pass's GPU time (gpu_prof.cpp).
+       if (feature == wgpu::FeatureName::TimestampQuery && (std::getenv("AURORA_ENH_GPU_TIMING") != nullptr ||
+-                                                           std::getenv("AURORA_EFB_BLEND6_TIMING") != nullptr)) {
++                                                           std::getenv("AURORA_EFB_BLEND6_TIMING") != nullptr ||
++                                                           std::getenv("AURORA_GPU_PROFILE") != nullptr)) {
+         requiredFeatures.push_back(feature);
+       }
+ #endif
+@@ -994,7 +996,8 @@
+           store_to_cache(key.data(), key.size(), value.data(), value.size(), nullptr);
+         });
+ 
+-    constexpr std::array enableToggles{
++    // 0210: the GPU profile's encoder-level timestamps (gpu_prof::Zone) are an unsafe API in Dawn.
++    std::vector<const char*> enableToggles{
+ #if _WIN32
+         "use_dxc",
+ #ifndef NDEBUG
+@@ -1012,6 +1015,9 @@
+         "enable_immediate_error_handling",
+         "gl_allow_context_on_multi_threads",
+     };
++    if (std::getenv("AURORA_GPU_PROFILE") != nullptr) {
++      enableToggles.push_back("allow_unsafe_apis");
++    }
+     constexpr std::array disableToggles{
+         "timestamp_quantization",
+         // Adreno strikes again!
+diff --git a/lib/webgpu/postfx.cpp b/lib/webgpu/postfx.cpp
+--- a/lib/webgpu/postfx.cpp
++++ b/lib/webgpu/postfx.cpp
+@@ -417,7 +417,7 @@
+         .label = "PostFx pass",
+         .colorAttachmentCount = 1,
+         .colorAttachments = &attachment,
+-        .timestampWrites = gpu_prof::pass_writes("PostFx"),
++        .timestampWrites = gpu_prof::pass_writes(fmt::format("PostFx {}", i)),
+     };
+     const auto rp = encoder.BeginRenderPass(&passDesc);
+     rp.SetPipeline(pass.pipeline);
+diff --git a/lib/gfx/efb_blend6.cpp b/lib/gfx/efb_blend6.cpp
+--- a/lib/gfx/efb_blend6.cpp
++++ b/lib/gfx/efb_blend6.cpp
+@@ -289,7 +289,7 @@
+         .label = label,
+         .colorAttachmentCount = 1,
+         .colorAttachments = &att,
+-        .timestampWrites = writes,
++        .timestampWrites = writes != nullptr ? writes : webgpu::gpu_prof::pass_writes(label),
+     };
+     const auto rp = cmd.BeginRenderPass(&desc);
+     rp.SetPipeline(p.pipeline);
+@@ -302,7 +302,10 @@
+     const wgpu::TexelCopyTextureInfo src{.texture = pass.copySourceTexture};
+     const wgpu::TexelCopyTextureInfo dst{.texture = scratch.texture};
+     const wgpu::Extent3D size{color.size.width, color.size.height, 1};
+-    cmd.CopyTextureToTexture(&src, &dst, &size);
++    {
++      const webgpu::gpu_prof::Zone zone{cmd, "EFB blend6 copy"};
++      cmd.CopyTextureToTexture(&src, &dst, &size);
++    }
+     if (timing) {
+       tw[0].endOfPassWriteIndex = 1;
+     }
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -14,6 +14,7 @@
+ #include "../gx/pipeline.hpp"
+ #include "../internal.hpp"
+ #include "../webgpu/gpu.hpp"
++#include "../webgpu/gpu_prof.hpp"
+ 
+ #include <algorithm>
+ #include <array>
+@@ -1353,7 +1354,8 @@
+       .clearValue = {0, 0, 0, 0},
+   };
+   const wgpu::RenderPassDescriptor desc{
+-      .label = label, .colorAttachmentCount = 1, .colorAttachments = &att, .timestampWrites = timing};
++      .label = label, .colorAttachmentCount = 1, .colorAttachments = &att,
++      .timestampWrites = timing != nullptr ? timing : webgpu::gpu_prof::pass_writes(label)};
+   const auto pass = cmd.BeginRenderPass(&desc);
+   pass.SetPipeline(pipeline);
+   pass.SetBindGroup(0, bg);
+@@ -1431,7 +1433,8 @@
+         .depthStoreOp = wgpu::StoreOp::Store,
+         .depthClearValue = 0.f,
+     };
+-    const wgpu::RenderPassDescriptor desc{.label = "Enhanced glow depth", .depthStencilAttachment = &da};
++    const wgpu::RenderPassDescriptor desc{.label = "Enhanced glow depth", .depthStencilAttachment = &da,
++                                         .timestampWrites = webgpu::gpu_prof::pass_writes("Enhanced glow depth")};
+     const auto pass = cmd.BeginRenderPass(&desc);
+     pass.SetPipeline(g_gpu.glowDepthPipe);
+     pass.SetBindGroup(0, bind(job.uniform, {}, {}, {}, g_gpu.glowSrcDepth.view));
+@@ -1448,7 +1451,8 @@
+       .depthStoreOp = wgpu::StoreOp::Discard,
+   };
+   const wgpu::RenderPassDescriptor desc{
+-      .label = "Enhanced glow", .colorAttachmentCount = 1, .colorAttachments = &att, .depthStencilAttachment = &da};
++      .label = "Enhanced glow", .colorAttachmentCount = 1, .colorAttachments = &att, .depthStencilAttachment = &da,
++      .timestampWrites = webgpu::gpu_prof::pass_writes("Enhanced glow")};
+   const auto pass = cmd.BeginRenderPass(&desc);
+   reset_bound_pipeline();
+   pass.SetBindGroup(0, detail::resources().staticBindGroup);
+@@ -1521,7 +1525,9 @@
+   return on;
+ }
+ // Timestamp writes for pass k of the current mask (0 pre-pass, 1 atlas, 2 mask) or null.
+-const wgpu::PassTimestampWrites* timing_writes(uint32_t k) { return g_tcur >= 0 ? &g_tw[k] : nullptr; }
++const wgpu::PassTimestampWrites* timing_writes(uint32_t k, const char* label) {
++  return g_tcur >= 0 ? &g_tw[k] : webgpu::gpu_prof::pass_writes(label);
++}
+ void timing_begin() {
+   g_tcur = -1;
+   if (!timing_on()) {
+@@ -1660,7 +1666,7 @@
+         .depthClearValue = gx::UseReversedZ ? 0.f : 1.f,
+     };
+     const wgpu::RenderPassDescriptor desc{
+-        .label = "Enhanced light-shadow depth", .depthStencilAttachment = &da, .timestampWrites = timing_writes(0)};
++        .label = "Enhanced light-shadow depth", .depthStencilAttachment = &da, .timestampWrites = timing_writes(0, "Enhanced light-shadow depth")};
+     const auto pass = cmd.BeginRenderPass(&desc);
+     reset_bound_pipeline();
+     pass.SetBindGroup(0, detail::resources().staticBindGroup);
+@@ -1698,6 +1704,7 @@
+                    .rowsPerImage = h},
+         .buffer = detail::resources().maskBuffer,
+     };
++    const webgpu::gpu_prof::Zone zone{cmd, "Mask copy to buffer"};
+     cmd.CopyTextureToBuffer(&srcD, &dstD, &extent);
+   }
+   if (job.ao) {
+@@ -1718,7 +1725,8 @@
+                                                 .loadOp = wgpu::LoadOp::Clear,
+                                                 .storeOp = wgpu::StoreOp::Store,
+                                                 .clearValue = {0, 0, 0, 0}};
+-      const wgpu::RenderPassDescriptor desc{.label = "Ambient occlusion mask", .colorAttachmentCount = 1, .colorAttachments = &att};
++      const wgpu::RenderPassDescriptor desc{.label = "Ambient occlusion mask", .colorAttachmentCount = 1, .colorAttachments = &att,
++                                            .timestampWrites = webgpu::gpu_prof::pass_writes("Ambient occlusion mask")};
+       const auto pass = cmd.BeginRenderPass(&desc);
+       pass.SetPipeline(g_gpu.aoMaskPipe);
+       pass.SetBindGroup(0, bind(job.uniform, {}, {}, {}, g_gpu.maskDepthR.view));
+@@ -1727,7 +1735,8 @@
+     }
+     const wgpu::RenderPassColorAttachment att{
+         .view = g_gpu.maskAo.view, .loadOp = wgpu::LoadOp::Clear, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}};
+-    const wgpu::RenderPassDescriptor desc{.label = "Ambient occlusion blur", .colorAttachmentCount = 1, .colorAttachments = &att};
++    const wgpu::RenderPassDescriptor desc{.label = "Ambient occlusion blur", .colorAttachmentCount = 1, .colorAttachments = &att,
++                                          .timestampWrites = webgpu::gpu_prof::pass_writes("Ambient occlusion blur")};
+     const auto pass = cmd.BeginRenderPass(&desc);
+     pass.SetPipeline(g_gpu.aoBlur4Pipe);
+     pass.SetBindGroup(0, bind(job.uniform, g_gpu.maskAoRaw.view, {}, {}, g_gpu.maskDepthR.view));
+@@ -1738,7 +1747,10 @@
+         .layout = {.offset = job.maskOffset + uint64_t(job.pitchBytes) * h * MaskAoPlane, .bytesPerRow = job.pitchBytes, .rowsPerImage = h},
+         .buffer = detail::resources().maskBuffer,
+     };
+-    cmd.CopyTextureToBuffer(&src3, &dst3, &extent);
++    {
++      const webgpu::gpu_prof::Zone zone{cmd, "Mask copy to buffer"};
++      cmd.CopyTextureToBuffer(&src3, &dst3, &extent);
++    }
+   }
+   if (!job.point) {
+     timing_end(cmd);
+@@ -1768,7 +1780,7 @@
+           .depthClearValue = gx::UseReversedZ ? 0.f : 1.f,
+       };
+       const wgpu::RenderPassDescriptor desc{
+-          .label = "Enhanced shadow-map atlas", .depthStencilAttachment = &da, .timestampWrites = timing_writes(1)};
++          .label = "Enhanced shadow-map atlas", .depthStencilAttachment = &da, .timestampWrites = timing_writes(1, "Enhanced shadow-map atlas")};
+       const auto pass = cmd.BeginRenderPass(&desc);
+       reset_bound_pipeline();
+       pass.SetBindGroup(0, detail::resources().staticBindGroup);
+@@ -1799,7 +1811,7 @@
+     const wgpu::RenderPassDescriptor desc{.label = "Shadow-map mask",
+                                           .colorAttachmentCount = att.size(),
+                                           .colorAttachments = att.data(),
+-                                          .timestampWrites = timing_writes(2)};
++                                          .timestampWrites = timing_writes(2, "Shadow-map mask")};
+     const auto pass = cmd.BeginRenderPass(&desc);
+     pass.SetPipeline(g_gpu.cubePipe);
+     pass.SetBindGroup(0, bg);
+@@ -1811,6 +1823,7 @@
+         .buffer = detail::resources().maskBuffer,
+     };
+     if (job.lights > 4) {
++      const webgpu::gpu_prof::Zone zone{cmd, "Mask copy to buffer"};
+       cmd.CopyTextureToBuffer(&src2, &dst2, &extent);
+     }
+     // 0187: lights 8-11 and 12-15 (planes 2 and 3).
+@@ -1824,13 +1837,14 @@
+           .layout = {.offset = job.maskOffset + uint64_t(job.pitchBytes) * h * (2 + k), .bytesPerRow = job.pitchBytes, .rowsPerImage = h},
+           .buffer = detail::resources().maskBuffer,
+       };
++      const webgpu::gpu_prof::Zone zone{cmd, "Mask copy to buffer"};
+       cmd.CopyTextureToBuffer(&srcK, &dstK, &extent);
+     }
+   } else {
+     const wgpu::RenderPassColorAttachment att{
+         .view = g_gpu.mask.view, .loadOp = wgpu::LoadOp::Clear, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}};
+     const wgpu::RenderPassDescriptor desc{
+-        .label = "Light-shadow mask", .colorAttachmentCount = 1, .colorAttachments = &att, .timestampWrites = timing_writes(2)};
++        .label = "Light-shadow mask", .colorAttachmentCount = 1, .colorAttachments = &att, .timestampWrites = timing_writes(2, "Light-shadow mask")};
+     const auto pass = cmd.BeginRenderPass(&desc);
+     pass.SetPipeline(g_gpu.maskPipe);
+     pass.SetBindGroup(0, bind(job.uniform, {}, {}, {}, g_gpu.maskDepthR.view));
+@@ -1842,7 +1856,10 @@
+       .layout = {.offset = job.maskOffset, .bytesPerRow = job.pitchBytes, .rowsPerImage = h},
+       .buffer = detail::resources().maskBuffer,
+   };
+-  cmd.CopyTextureToBuffer(&src, &dst, &extent);
++  {
++    const webgpu::gpu_prof::Zone zone{cmd, "Mask copy to buffer"};
++    cmd.CopyTextureToBuffer(&src, &dst, &extent);
++  }
+   timing_end(cmd);
+ }
+ 
+@@ -1935,6 +1952,7 @@
+     const wgpu::TexelCopyTextureInfo src{.texture = t.colorSource};
+     const wgpu::TexelCopyTextureInfo dst{.texture = g_gpu.scene.texture};
+     const wgpu::Extent3D size{t.width, t.height, 1};
++    const webgpu::gpu_prof::Zone zone{cmd, "Enhanced scene copy"};
+     cmd.CopyTextureToTexture(&src, &dst, &size);
+   }
+   tex_copy_conv::snapshot_depth(cmd, t.depthSource, t.msaa, g_gpu.depth.view);
+@@ -2025,7 +2043,8 @@
+       .loadOp = wgpu::LoadOp::Load,
+       .storeOp = wgpu::StoreOp::Store,
+   };
+-  const wgpu::RenderPassDescriptor desc{.label = "Enhanced composite", .colorAttachmentCount = 1, .colorAttachments = &att};
++  const wgpu::RenderPassDescriptor desc{.label = "Enhanced composite", .colorAttachmentCount = 1, .colorAttachments = &att,
++                                        .timestampWrites = webgpu::gpu_prof::pass_writes("Enhanced composite")};
+   const auto pass = cmd.BeginRenderPass(&desc);
+   pass.SetPipeline(g_gpu.composite);
+   pass.SetBindGroup(0, bind(job.base,
+@@ -3112,7 +3131,10 @@
+     using Clock = std::chrono::steady_clock;
+     static Clock::time_point sPrev = Clock::now();
+     const auto now = Clock::now();
+-    const float dt = std::clamp(std::chrono::duration<float>(now - sPrev).count(), 0.f, 0.25f);
++    // AURORA_BEAM_FREEZE_TIME=1 also steps the flare by a fixed 1/30 s per scene end, so frame
++    // dumps of separate runs agree (wall-clock steps made the beam brightness differ run to run).
++    static const bool sFreezeFlare = std::getenv("AURORA_BEAM_FREEZE_TIME") != nullptr;
++    const float dt = sFreezeFlare ? 1.f / 30.f : std::clamp(std::chrono::duration<float>(now - sPrev).count(), 0.f, 0.25f);
+     sPrev = now;
+     const float level = 0.2126f * f.color.x() + 0.7152f * f.color.y() + 0.0722f * f.color.z();
+     if (g_flashLevel <= 0.f) {
+@@ -3199,7 +3221,8 @@
+     using Clock = std::chrono::steady_clock;
+     static Clock::time_point sOff = Clock::now();
+     const auto now = Clock::now();
+-    const float dt = std::clamp(std::chrono::duration<float>(now - sOff).count(), 0.f, 0.25f);
++    static const bool sFreezeOff = std::getenv("AURORA_BEAM_FREEZE_TIME") != nullptr; // see fill_beam
++    const float dt = sFreezeOff ? 1.f / 30.f : std::clamp(std::chrono::duration<float>(now - sOff).count(), 0.f, 0.25f);
+     sOff = now;
+     g_flashOffTime += dt;
+   }

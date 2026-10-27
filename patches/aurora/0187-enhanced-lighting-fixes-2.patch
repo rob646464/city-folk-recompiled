@@ -1,0 +1,561 @@
+diff --git a/include/aurora/enhanced.h b/include/aurora/enhanced.h
+--- a/include/aurora/enhanced.h
++++ b/include/aurora/enhanced.h
+@@ -84,7 +84,7 @@
+   float bloomFlashlightSuppress; // 0..1: less glow from surfaces that are only bright from the flashlight
+   float bloomScene;     // 0..1: glow from bright scene pixels (lit walls/objects) above the threshold
+   float bloomEmissive;  // 0..2: glow from light-emitting draws (additive effects: glows, fire, beams, sparks)
+-  float bloomLightGlow; // 0..2: glow around extra lights (aurora/lights.h), occluded by the scene
++  float bloomLightGlow; // unused since 0187 (extra lights never draw a halo of their own)
+ 
+   // Screen-space ambient occlusion (scene end).
+   bool ssao;
+diff --git a/include/aurora/lights.h b/include/aurora/lights.h
+--- a/include/aurora/lights.h
++++ b/include/aurora/lights.h
+@@ -18,8 +18,14 @@
+   float intensity;   // multiplier
+   uint32_t flags;    // bit0: cast shadows, bit1: affects ghosts/translucent, bit2: specular
+   uint32_t id;       // stable per-source id for interpolation pairing (0 = none)
++  // 0187 (flag ExtraLightRoomBox): the light only reaches inside this box (its room), fading out
++  // over a short margin past it, so a light without a shadow does not shine through walls into the
++  // next room. VIEW space: box centre relative to `pos` (3), then the three half-axis vectors
++  // (3 x 3: the box's world axes in view space, scaled by its half extents). Relative to `pos`
++  // so it follows the light when frame interpolation blends the position.
++  float box[12] = {};
+ };
+-static_assert(sizeof(ExtraLight) == 40);
++static_assert(sizeof(ExtraLight) == 88);
+ 
+ constexpr uint32_t MaxExtraLights = 64; // 0023: was 16 (world lights: candles, fires, lamps)
+ constexpr uint32_t ExtraLightCastShadows = 1u << 0;
+@@ -27,6 +33,8 @@
+ constexpr uint32_t ExtraLightSpecular = 1u << 2;
+ // 0025: a flame: yellow-white near the source, red-orange toward the edge of its reach.
+ constexpr uint32_t ExtraLightFire = 1u << 3;
++// 0187: limited to `box` (its room).
++constexpr uint32_t ExtraLightRoomBox = 1u << 4;
+ 
+ // Call once per game frame (guest thread), before the frame's draws; applies to world-geometry
+ // draws of that frame. Lights beyond MaxExtraLights are dropped (pass the strongest first).
+diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -121,7 +121,7 @@
+  * 2 u32 (flags, id), all big-endian like the rest of the stream.
+  */
+ #define GX_AURORA_SET_EXTRA_LIGHTS 0x0053
+-#define GX_AURORA_EXTRA_LIGHT_WORDS 10 // 8 f32 + 2 u32 per light
++#define GX_AURORA_EXTRA_LIGHT_WORDS 22 // 8 f32 + 2 u32 + 12 f32 (room box, 0187) per light
+ 
+ /**
+  * Enhanced lighting: end of the frame's 3D scene (screen-space effects are applied here).
+diff --git a/lib/dolphin/gx/GXAurora.cpp b/lib/dolphin/gx/GXAurora.cpp
+--- a/lib/dolphin/gx/GXAurora.cpp
++++ b/lib/dolphin/gx/GXAurora.cpp
+@@ -185,6 +185,9 @@
+     GX_WRITE_F32(l.intensity);
+     GX_WRITE_U32(l.flags);
+     GX_WRITE_U32(l.id);
++    for (float v : l.box) {
++      GX_WRITE_F32(v);
++    }
+   }
+ }
+ } // namespace aurora::gfx
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -142,7 +142,7 @@
+ // a cube-map atlas from each shadowed light (one instanced draw: instance = light x face), and
+ // the mask pass looks the camera-depth positions up in the atlas (PCF / PCSS) instead of ray
+ // marching. The mask lives in its own GPU buffer (group 0 binding 2): nothing is uploaded.
+-constexpr uint32_t MaxShadowLights = 8;
++constexpr uint32_t MaxShadowLights = 16; // 0187: was 8 (shadow maps; screen-space stays at 4)
+ std::array<uint32_t, MaxExtraLights> g_shadowSlot{};
+ uint32_t g_shadowCount = 0;
+ std::vector<GlowDraw> g_depthDraws;
+@@ -202,7 +202,7 @@
+   pp: vec4f,     // per pass: source texel size xy, radius, weight
+   bloom2: vec4f, // scene highlights amount, emissive amount, light glow amount, light count
+   glowdepth: vec4f, // glow depth pass: source scale xy (glow -> target pixels), reversed z, bias
+-  xl: array<vec4f, 32>, // light glows: view pos + core radius, color * intensity
++  xl: array<vec4f, 36>, // light shadows (0187: 16 lights): see fs_xlshadow / cube_occlusion
+ };
+ @group(0) @binding(0) var<uniform> fx: Fx;
+ @group(0) @binding(1) var samp: sampler;
+@@ -301,39 +301,14 @@
+     col = col * (1.0 - fx.bloom.w * lit);
+   }
+   // Ordinary lit surfaces only glow by the "scene highlights" amount; light sources come from the
+-  // glow buffer (additive/emissive draws re-rendered depth-tested at this resolution) and from
+-  // the light glows below.
++  // glow buffer (additive/emissive draws re-rendered depth-tested at this resolution) only.
++  // 0187: no halo at extra-light positions any more. A point light is not a visible object: a
++  // halo drawn there showed as a floating orb wherever the source itself was hidden or never
++  // drawn (hidden ghosts, the light above a Grabbing Ghost, fixtures).
+   // The glow buffer is compressed (Reinhard on luma) so large additive areas such as the
+   // flashlight beam pointing at the camera glow softly instead of blowing out.
+   let gl = textureSampleLevel(t1, samp, uv, 0.0).rgb * fx.bloom2.y;
+   col = col * fx.bloom2.x + gl / (1.0 + luma(gl));
+-  let nl = u32(fx.bloom2.w);
+-  if (nl > 0u && fx.bloom2.z > 0.0) {
+-    let px = uv * fx.size.xy;
+-    for (var li = 0u; li < nl; li++) {
+-      let lp = fx.xl[li * 2u];
+-      let w = -lp.z;
+-      if (w <= 1.0) { continue; }
+-      let cx = (fx.proj.x * lp.x + fx.proj.z * lp.z + fx.projz.z) / w;
+-      let cy = (fx.proj.y * lp.y + fx.proj.w * lp.z + fx.projz.w) / w;
+-      let sp = vec2f(fx.vp.x + (cx * 0.5 + 0.5) * fx.vp.z, fx.vp.y + (0.5 - cy * 0.5) * fx.vp.w);
+-      let sigma = max(lp.w * fx.proj.y * 0.5 * fx.vp.w / w, 1.0);
+-      let dd = px - sp;
+-      let r2 = dot(dd, dd) / (sigma * sigma);
+-      if (r2 > 16.0) { continue; }
+-      // Hidden behind a surface in front of the light (with a margin of the core radius). 0186:
+-      // five depth taps over the core give partial visibility, so a glow fades as an edge (Luigi
+-      // walking past, a door frame) slides over the light instead of popping on and off.
+-      var vis = 0.0;
+-      for (var k = 0u; k < 5u; k++) {
+-        let o = select(vec2f(0.0), vec2f(cos(f32(k) * 1.5707963), sin(f32(k) * 1.5707963)) * sigma, k > 0u);
+-        let sz = view_pos(sp + o, load_depth(sp + o)).z;
+-        vis = vis + select(0.2, 0.0, sz > lp.z + lp.w * 2.0);
+-      }
+-      if (vis <= 0.0) { continue; }
+-      col = col + fx.xl[li * 2u + 1u].rgb * (exp(-0.5 * r2) * fx.bloom2.z * vis);
+-    }
+-  }
+   return vec4f(col, 1.0);
+ }
+ 
+@@ -422,15 +397,17 @@
+ // 0028: shadow maps. The atlas holds a cube map per shadowed light (3x2 faces); xrec has one
+ // record per (light, face): view -> atlas clip matrix rows, the face's tile in atlas NDC (x0, y0,
+ // x1, y1) and in atlas pixels.
+-// fx.xl[s] = view position + reach, fx.xl[8 + s] = near, tan(half fov), face size, 0;
+-// fx.xl[16] = atlas w, h, filter taps, base filter radius (texels);
+-// fx.xl[17] = light size (PCSS, world units), reversed z, 0, 0.
++// fx.xl[s] = view position + reach, fx.xl[16 + s] = near, tan(half fov), face size, 0;
++// fx.xl[32] = atlas w, h, filter taps, base filter radius (texels);
++// fx.xl[33] = light size (PCSS, world units), reversed z, 0, 0. (0187: 16 lights; was 8/16/17.)
+ @group(0) @binding(6) var tatlas: texture_depth_2d;
+ @group(0) @binding(7) var tcmp: sampler_comparison;
+ @group(0) @binding(8) var<storage, read> xrec: array<f32>;
+ struct MaskOut {
+   @location(0) a: vec4f,
+   @location(1) b: vec4f,
++  @location(2) c: vec4f, // 0187: lights 8-11
++  @location(3) d: vec4f, // 0187: lights 12-15
+ };
+ fn xrow(i: u32) -> vec4f { return vec4f(xrec[i], xrec[i + 1u], xrec[i + 2u], xrec[i + 3u]); }
+ fn vogel(k: u32, n: u32, rot: f32) -> vec2f {
+@@ -447,10 +424,10 @@
+ }
+ // Distance along the face axis of a stored depth.
+ fn atlas_axis(z: f32, near: f32) -> f32 {
+-  if (fx.xl[17].y > 0.5) { return near / max(z, 1e-7); }
++  if (fx.xl[33].y > 0.5) { return near / max(z, 1e-7); }
+   return near / max(1.0 - z, 1e-7);
+ }
+-fn atlas_blocks(z: f32, r: f32) -> bool { return select((z < r), (z > r), (fx.xl[17].y > 0.5)); }
++fn atlas_blocks(z: f32, r: f32) -> bool { return select((z < r), (z > r), (fx.xl[33].y > 0.5)); }
+ // Surface normal from the camera depth (the flatter of the two neighbours on each axis, so
+ // silhouettes do not bend it).
+ // w = 0 where the pixel sits on a one-pixel ledge (both neighbours on an axis jump away, e.g. the
+@@ -480,7 +457,7 @@
+ }
+ fn cube_occlusion(s: u32, p: vec3f, nr: vec4f, mp: vec2f) -> f32 {
+   let lp = fx.xl[s];
+-  let lq = fx.xl[8u + s];
++  let lq = fx.xl[16u + s];
+   let toL = lp.xyz - p;
+   let dist = length(toL);
+   if (dist >= lp.w || dist <= lq.x) { return 0.0; }
+@@ -502,7 +479,7 @@
+   let clip = vec4f(dot(qv, xrow(b)), dot(qv, xrow(b + 4u)), dot(qv, xrow(b + 8u)), dot(qv, xrow(b + 12u)));
+   if (clip.w <= 1e-4) { return 0.0; }
+   let ndc = clip.xyz / clip.w;
+-  let adims = fx.xl[16].xy;
++  let adims = fx.xl[32].xy;
+   let px = vec2f((ndc.x * 0.5 + 0.5) * adims.x, (0.5 - ndc.y * 0.5) * adims.y);
+   let tile = xrow(b + 20u);
+   let lo = tile.xy + vec2f(1.0);
+@@ -513,7 +490,7 @@
+     let zs = textureLoad(tatlas, vec2i(clamp(px, lo, hi)), 0);
+     dbg = vec4f(atlas_axis(zs, lq.x) / 1000.0, clip.w / 1000.0, f32(f) / 5.0, 1.0);
+   }
+-  let taps = max(u32(fx.xl[16].z), 4u);
++  let taps = max(u32(fx.xl[32].z), 4u);
+   // Same rotation every frame for a pixel: a per-frame pattern makes the edges crawl.
+   let rot = ign(mp) * 6.2831853;
+   let axis = clip.w;
+@@ -522,11 +499,11 @@
+   // angle from the light does not shadow the floor itself.
+   let tu = normalize(select(cross(n, vec3f(0.0, 1.0, 0.0)), cross(n, vec3f(1.0, 0.0, 0.0)), abs(n.y) > 0.9));
+   let tv = cross(n, tu);
+-  var radius = fx.xl[16].w * texel; // world units
+-  if (fx.xl[17].x > 0.0) {
++  var radius = fx.xl[32].w * texel; // world units
++  if (fx.xl[33].x > 0.0) {
+     // PCSS: average blocker distance in a region the size of the light seen from the receiver,
+     // then a penumbra that widens with the receiver's distance behind the blocker.
+-    let search = clamp(fx.xl[17].x * 1.5, 2.0 * texel, 40.0 * texel);
++    let search = clamp(fx.xl[33].x * 1.5, 2.0 * texel, 40.0 * texel);
+     let ns = max(taps / 2u, 8u);
+     var sum = 0.0;
+     var cnt = 0.0;
+@@ -543,7 +520,7 @@
+     // Every search tap blocked: deep in the umbra, no filtering needed.
+     if (cnt > f32(ns) - 0.5) { return 1.0; }
+     let ab = sum / cnt;
+-    let pen = fx.xl[17].x * max(axis - ab, 0.0) / max(ab, 1.0);
++    let pen = fx.xl[33].x * max(axis - ab, 0.0) / max(ab, 1.0);
+     radius = clamp(radius + pen, texel, 24.0 * texel);
+   }
+   var lit = 0.0;
+@@ -561,12 +538,16 @@
+   var o: MaskOut;
+   o.a = vec4f(0.0);
+   o.b = vec4f(0.0);
++  o.c = vec4f(0.0);
++  o.d = vec4f(0.0);
+   if (d0 <= 1e-7) { return o; } // nothing drawn (cleared to far)
+   let p = view_pos((mp + vec2f(0.5)) * fx.pp.y, d0);
+   let n = mask_normal(mp, p);
+   let cnt = u32(fx.pp.z);
+   for (var s = 0u; s < min(cnt, 4u); s++) { o.a[s] = cube_occlusion(s, p, n, mp); }
+   for (var s = 4u; s < min(cnt, 8u); s++) { o.b[s - 4u] = cube_occlusion(s, p, n, mp); }
++  for (var s = 8u; s < min(cnt, 12u); s++) { o.c[s - 8u] = cube_occlusion(s, p, n, mp); }
++  for (var s = 12u; s < min(cnt, 16u); s++) { o.d[s - 12u] = cube_occlusion(s, p, n, mp); }
+   if (fx.pp.w > 0.5) { o.a = dbg; }
+   return o;
+ }
+@@ -606,10 +587,15 @@
+     if (any(sp < vec2f(0.0)) || any(sp >= dims)) { continue; }
+     let sd = textureLoad(tdepth, vec2i(sp), 0).r;
+     if (sd <= 1e-7) { continue; }
+-    let sz = mask_view_pos(sp).z;
+-    let diff = sz - q.z;
++    let o = mask_view_pos(sp);
++    let diff = o.z - q.z;
+     if (diff > bias) {
+-      occ = occ + smoothstep(bias, bias * 4.0, diff) * smoothstep(0.0, 1.0, radius / max(abs(p.z - sz), 1e-3));
++      // 0187: only occluders within the radius of the receiving point count (3D distance, hard
++      // falloff from 1x to 1.5x the radius). The former range term radius / |dz| still gave a
++      // character standing far in front of a wall 10-50% weight, so the wall around the character's
++      // silhouette darkened: a halo that followed the character.
++      let dist = length(o - p);
++      occ = occ + smoothstep(bias, bias * 4.0, diff) * (1.0 - smoothstep(radius, radius * 1.5, dist));
+     }
+   }
+   let ao = clamp(1.0 - occ / 12.0, 0.0, 1.0);
+@@ -837,9 +823,9 @@
+   float pass[4];
+   float bloom2[4];
+   float glowdepth[4];
+-  float xl[32][4];
++  float xl[36][4];
+ };
+-static_assert(sizeof(FxUniform) == 224 + 32 + 512);
++static_assert(sizeof(FxUniform) == 224 + 32 + 576);
+ 
+ constexpr uint32_t MaxBloomLevels = 6;
+ constexpr auto HdrFormat = wgpu::TextureFormat::RGBA16Float;
+@@ -871,7 +857,7 @@
+   Tex maskDepth, maskDepthR, mask;
+   wgpu::RenderPipeline maskPipe;
+   // 0028 shadow maps
+-  Tex atlas, mask2;
++  Tex atlas, mask2, mask3, mask4; // 0187: mask3/4 = lights 8-15
+   wgpu::BindGroupLayout cubeBgl;
+   wgpu::PipelineLayout cubeLayout;
+   wgpu::RenderPipeline cubePipe;
+@@ -1226,7 +1212,9 @@
+       .compare = gx::UseReversedZ ? wgpu::CompareFunction::GreaterEqual : wgpu::CompareFunction::LessEqual,
+   };
+   g_gpu.cmpSampler = webgpu::g_device.CreateSampler(&cmpDesc);
+-  const std::array<wgpu::ColorTargetState, 2> targets{
++  const std::array<wgpu::ColorTargetState, 4> targets{
++      wgpu::ColorTargetState{.format = wgpu::TextureFormat::RGBA8Unorm, .writeMask = wgpu::ColorWriteMask::All},
++      wgpu::ColorTargetState{.format = wgpu::TextureFormat::RGBA8Unorm, .writeMask = wgpu::ColorWriteMask::All},
+       wgpu::ColorTargetState{.format = wgpu::TextureFormat::RGBA8Unorm, .writeMask = wgpu::ColorWriteMask::All},
+       wgpu::ColorTargetState{.format = wgpu::TextureFormat::RGBA8Unorm, .writeMask = wgpu::ColorWriteMask::All},
+   };
+@@ -1385,7 +1373,7 @@
+     pass.End();
+     const wgpu::TexelCopyTextureInfo src3{.texture = g_gpu.maskAo.texture};
+     const wgpu::TexelCopyBufferInfo dst3{
+-        .layout = {.offset = job.maskOffset + uint64_t(job.pitchBytes) * h * 2, .bytesPerRow = job.pitchBytes, .rowsPerImage = h},
++        .layout = {.offset = job.maskOffset + uint64_t(job.pitchBytes) * h * MaskAoPlane, .bytesPerRow = job.pitchBytes, .rowsPerImage = h},
+         .buffer = detail::resources().maskBuffer,
+     };
+     cmd.CopyTextureToBuffer(&src3, &dst3, &extent);
+@@ -1403,6 +1391,12 @@
+     ensure_tex(g_gpu.mask2, w, h, wgpu::TextureFormat::RGBA8Unorm,
+                wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc | wgpu::TextureUsage::TextureBinding,
+                "Enhanced light-shadow mask 2");
++    ensure_tex(g_gpu.mask3, w, h, wgpu::TextureFormat::RGBA8Unorm,
++               wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc | wgpu::TextureUsage::TextureBinding,
++               "Enhanced light-shadow mask 3");
++    ensure_tex(g_gpu.mask4, w, h, wgpu::TextureFormat::RGBA8Unorm,
++               wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc | wgpu::TextureUsage::TextureBinding,
++               "Enhanced light-shadow mask 4");
+     uint32_t drawn = 0, skipped = 0;
+     {
+       const wgpu::RenderPassDepthStencilAttachment da{
+@@ -1434,9 +1428,11 @@
+     };
+     const wgpu::BindGroupDescriptor bgDesc{.layout = g_gpu.cubeBgl, .entryCount = entries.size(), .entries = entries.data()};
+     const auto bg = webgpu::g_device.CreateBindGroup(&bgDesc);
+-    const std::array<wgpu::RenderPassColorAttachment, 2> att{
++    const std::array<wgpu::RenderPassColorAttachment, 4> att{
+         wgpu::RenderPassColorAttachment{.view = g_gpu.mask.view, .loadOp = wgpu::LoadOp::Clear, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}},
+         wgpu::RenderPassColorAttachment{.view = g_gpu.mask2.view, .loadOp = wgpu::LoadOp::Clear, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}},
++        wgpu::RenderPassColorAttachment{.view = g_gpu.mask3.view, .loadOp = wgpu::LoadOp::Clear, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}},
++        wgpu::RenderPassColorAttachment{.view = g_gpu.mask4.view, .loadOp = wgpu::LoadOp::Clear, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}},
+     };
+     const wgpu::RenderPassDescriptor desc{.label = "Shadow-map mask",
+                                           .colorAttachmentCount = att.size(),
+@@ -1455,6 +1451,19 @@
+     if (job.lights > 4) {
+       cmd.CopyTextureToBuffer(&src2, &dst2, &extent);
+     }
++    // 0187: lights 8-11 and 12-15 (planes 2 and 3).
++    const Tex* more[2] = {&g_gpu.mask3, &g_gpu.mask4};
++    for (uint32_t k = 0; k < 2; ++k) {
++      if (job.lights <= 8 + 4 * k) {
++        break;
++      }
++      const wgpu::TexelCopyTextureInfo srcK{.texture = more[k]->texture};
++      const wgpu::TexelCopyBufferInfo dstK{
++          .layout = {.offset = job.maskOffset + uint64_t(job.pitchBytes) * h * (2 + k), .bytesPerRow = job.pitchBytes, .rowsPerImage = h},
++          .buffer = detail::resources().maskBuffer,
++      };
++      cmd.CopyTextureToBuffer(&srcK, &dstK, &extent);
++    }
+   } else {
+     const wgpu::RenderPassColorAttachment att{
+         .view = g_gpu.mask.view, .loadOp = wgpu::LoadOp::Clear, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}};
+@@ -1632,10 +1641,10 @@
+   }
+   if (c.extraLights && g_lightCount > 0) {
+     if (!g_lightRangeValid) {
+-      std::array<uint32_t, MaxExtraLights * 12> words{};
++      std::array<uint32_t, MaxExtraLights * 24> words{};
+       for (uint32_t i = 0; i < g_lightCount; ++i) {
+         const auto& l = g_lights[i];
+-        uint32_t* w = &words[i * 12];
++        uint32_t* w = &words[i * 24];
+         std::memcpy(w + 0, l.pos, 12);
+         std::memcpy(w + 3, &l.radius, 4);
+         const auto vc = vivid(l.color, std::clamp(c.extraLightSaturation, 0.f, 2.5f));
+@@ -1644,8 +1653,9 @@
+         w[8] = l.flags;
+         w[9] = l.id;
+         w[10] = g_shadowSlot[i];
++        std::memcpy(w + 12, l.box, 48); // 0187: room box (ExtraLightRoomBox)
+       }
+-      g_lightRange = push_storage(reinterpret_cast<const uint8_t*>(words.data()), g_lightCount * 12 * sizeof(uint32_t));
++      g_lightRange = push_storage(reinterpret_cast<const uint8_t*>(words.data()), g_lightCount * 24 * sizeof(uint32_t));
+       g_lightRangeValid = true;
+     }
+     u.flags |= 2u;
+@@ -1705,8 +1715,8 @@
+       } else {
+         std::tie(w, h) = bloom_base_size(size.x, size.y);
+       }
+-      // 0186: four planes: light shadows 0-3 and 4-7, ambient occlusion, and the pre-pass depth that
+-      // the receivers compare their own depth with (MaskDepthPlane).
++      // 0186: planes for the light shadows (0187: four, 16 lights), ambient occlusion, and the
++      // pre-pass depth that the receivers compare their own depth with (MaskDepthPlane).
+       while (uint64_t(AURORA_ALIGN(w * 4, 256)) * h * MaskPlanes > MaskBufferSize) {
+         w = std::max(w * 7 / 8, 1u);
+         h = std::max(h * 7 / 8, 1u);
+@@ -2090,11 +2100,18 @@
+   u.ao[0] = std::clamp(g_cfg.ssaoIntensity, 0.f, 2.f);
+   u.ao[1] = std::max(g_cfg.ssaoRadius, 1.f);
+   if (job.point && shadow_maps()) {
+-    // Atlas: per light 3x2 faces of S texels, lights in two columns (texture size limit 8192).
++    // Atlas: per light 3x2 faces of S texels. 0187: up to 16 lights in a roughly square grid
++    // (cols x 3 ~ rows x 2), within the device's texture size limit (was two columns and 8192).
+     const uint32_t k = g_shadowCount;
+-    const uint32_t cols = k > 1 ? 2 : 1, rows = (k + cols - 1) / cols;
++    const uint32_t cols = std::max(1u, std::min(k, uint32_t(std::lround(std::sqrt(double(k) * 2.0 / 3.0))))),
++                   rows = (k + cols - 1) / cols;
++    static const uint32_t sMaxTex = [] {
++      wgpu::Limits lim{};
++      webgpu::g_device.GetLimits(&lim);
++      return std::clamp(lim.maxTextureDimension2D, 8192u, 16384u);
++    }();
+     uint32_t S = std::clamp(g_cfg.extraShadowMapSize, 128u, 2048u);
+-    while (S > 128 && (cols * 3 * S > 8192 || rows * 2 * S > 8192)) {
++    while (S > 128 && (cols * 3 * S > sMaxTex || rows * 2 * S > sMaxTex)) {
+       S /= 2;
+     }
+     const float fS = float(S);
+@@ -2114,9 +2131,9 @@
+       }
+       const auto& l = g_lights[i];
+       const float near = std::clamp(l.radius * 0.02f, 3.f, 20.f);
+-      u.xl[8 + s][0] = near;
+-      u.xl[8 + s][1] = t;
+-      u.xl[8 + s][2] = fS;
++      u.xl[16 + s][0] = near;
++      u.xl[16 + s][1] = t;
++      u.xl[16 + s][2] = fS;
+       for (uint32_t f = 0; f < 6; ++f) {
+         const auto& B = kBasis[f];
+         const auto row = [&](const float* v) {
+@@ -2156,12 +2173,12 @@
+     job.atlasW = uint32_t(W);
+     job.atlasH = uint32_t(H);
+     job.records = push_storage(reinterpret_cast<const uint8_t*>(rec.data()), rec.size() * sizeof(float));
+-    u.xl[16][0] = W;
+-    u.xl[16][1] = H;
+-    u.xl[16][2] = q == 0 ? 8.f : q == 1 ? 12.f : 20.f; // PCF taps (receiver-plane, rotated Vogel disk)
+-    u.xl[16][3] = 1.5f; // base filter radius in texels (larger maps: sharper)
+-    u.xl[17][0] = std::max(g_cfg.extraShadowSoftness, 0.f);
+-    u.xl[17][1] = gx::UseReversedZ ? 1.f : 0.f;
++    u.xl[32][0] = W;
++    u.xl[32][1] = H;
++    u.xl[32][2] = q == 0 ? 8.f : q == 1 ? 12.f : 20.f; // PCF taps (receiver-plane, rotated Vogel disk)
++    u.xl[32][3] = 1.5f; // base filter radius in texels (larger maps: sharper)
++    u.xl[33][0] = std::max(g_cfg.extraShadowSoftness, 0.f);
++    u.xl[33][1] = gx::UseReversedZ ? 1.f : 0.f;
+   }
+   if (g_log) {
+     Log.info("  mask uniform: size {} {} vp {} {} {} {} proj {} {} {} {} projz {} {} {} {} dr {} {} pass {} {} {}", u.size[0],
+@@ -2317,26 +2334,10 @@
+   u.bloom[3] = std::clamp(c.bloomFlashlightSuppress, 0.f, 1.f);
+   u.bloom2[0] = std::max(c.bloomScene, 0.f);
+   u.bloom2[1] = std::max(c.bloomEmissive, 0.f);
+-  u.bloom2[2] = c.extraLights ? std::max(c.bloomLightGlow, 0.f) * std::max(c.extraLightIntensity, 0.f) : 0.f;
++  // 0187: the light-glow halos are gone (bloomLightGlow is ignored): extra lights only light
++  // surfaces, they never draw anything of their own.
++  u.bloom2[2] = 0.f;
+   u.bloom2[3] = 0.f;
+-  if (u.bloom2[2] > 0.f) {
+-    uint32_t n = 0;
+-    for (uint32_t i = 0; i < g_lightCount && n < 16u /* bloom glow slots (fx.xl holds 16 pairs) */; ++i) {
+-      const auto& l = g_lights[i];
+-      if (l.intensity <= 0.f || l.radius <= 0.f) {
+-        continue;
+-      }
+-      // Core of the glow: a small fraction of the light's reach.
+-      u.xl[n * 2][0] = l.pos[0], u.xl[n * 2][1] = l.pos[1], u.xl[n * 2][2] = l.pos[2];
+-      u.xl[n * 2][3] = std::clamp(l.radius * 0.03f, 4.f, 20.f);
+-      const auto vc = vivid(l.color, std::clamp(c.extraLightSaturation, 0.f, 2.5f));
+-      u.xl[n * 2 + 1][0] = vc[0] * l.intensity * 0.35f;
+-      u.xl[n * 2 + 1][1] = vc[1] * l.intensity * 0.35f;
+-      u.xl[n * 2 + 1][2] = vc[2] * l.intensity * 0.35f;
+-      ++n;
+-    }
+-    u.bloom2[3] = float(n);
+-  }
+   {
+     const auto [w0, h0] = bloom_base_size(size.x, size.y);
+     u.glowdepth[0] = float(size.x) / float(w0);
+diff --git a/lib/gfx/resources.hpp b/lib/gfx/resources.hpp
+--- a/lib/gfx/resources.hpp
++++ b/lib/gfx/resources.hpp
+@@ -10,9 +10,10 @@
+ inline constexpr uint64_t StorageBufferSize = 67108864; // 64 MiB
+ inline constexpr uint64_t TextureUploadSize = 25165824; // 24 MiB
+ // 0028: enhanced-lighting shadow masks (written on the GPU, read by world shaders; group 0 binding 2)
+-inline constexpr uint64_t MaskBufferSize = 67108864; // 64 MiB (0032: a third plane for ambient occlusion; 0186: a fourth for depth)
+-inline constexpr uint32_t MaskPlanes = 4;             // 0186: shadows 0-3, shadows 4-7, ambient occlusion, pre-pass depth
+-inline constexpr uint32_t MaskDepthPlane = 3;
++inline constexpr uint64_t MaskBufferSize = 134217728; // 128 MiB (0032: ambient occlusion; 0186: depth; 0187: 16 lights)
++inline constexpr uint32_t MaskPlanes = 6;              // 0187: shadows 0-3, 4-7, 8-11, 12-15, ambient occlusion, pre-pass depth
++inline constexpr uint32_t MaskAoPlane = 4;
++inline constexpr uint32_t MaskDepthPlane = 5;
+ 
+ namespace detail {
+ struct Resources {
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -1246,6 +1246,7 @@
+       l.intensity = reader.read<f32>();
+       l.flags = reader.read<u32>();
+       l.id = reader.read<u32>();
++      for (float& v : l.box) v = reader.read<f32>();
+     }
+     if (!g_gxState.replayMask) {
+       gfx::enhanced::set_lights(lights.data(), count);
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -994,7 +994,7 @@
+   let m = frag * ubuf.enh_mask_scale - vec2f(0.5);
+   let base = vec2i(floor(m)) - vec2i(1);
+   let plane = (slot >> 2u) * ubuf.enh_mask_pitch * u32(dims.y);
+-  let dplane = 3u * ubuf.enh_mask_pitch * u32(dims.y);
++  let dplane = 5u * ubuf.enh_mask_pitch * u32(dims.y); // 0187: MaskDepthPlane
+   let tol = enh_dz * (2.5 / max(ubuf.enh_mask_scale, 1e-3) + 1.0) + enh_fz * 0.004 + 1e-7;
+   var acc = 0.0;
+   var wsum = 0.0;
+@@ -1016,14 +1016,15 @@
+   }
+   return select(0.0, acc / wsum, wsum > 1e-4);
+ }
+-// Extra point lights (aurora/lights.h), 12 words each in the storage buffer:
+-// pos xyz, radius, color rgb, intensity, flags, id, shadow slot (or ~0), 0.
++// Extra point lights (aurora/lights.h), 24 words each in the storage buffer:
++// pos xyz, radius, color rgb, intensity, flags, id, shadow slot (or ~0), 0, then (0187) the room
++// box: centre relative to pos (3), half-axis vectors (3 x 3), all view space.
+ fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
+   var sum = vec3f(0.0);
+   let cnt = min(ubuf.enh_light_count, 64u);
+   let v = normalize(-p);
+   for (var i = 0u; i < cnt; i++) {
+-    let b = ubuf.enh_light_base + i * 12u;
++    let b = ubuf.enh_light_base + i * 24u;
+     let flags = abuf[b + 8u];
+     if (ghost && (flags & 2u) == 0u) { continue; }
+     let d = vec3f(enh_ld(b), enh_ld(b + 1u), enh_ld(b + 2u)) - p;
+@@ -1033,7 +1034,20 @@
+     let l = d * inverseSqrt(max(dist2, 1e-6));
+     let x2 = dist2 / (radius * radius);
+     let w = (1.0 - x2) * (1.0 - x2);
+-    let fall = w / (1.0 + 8.0 * x2);
++    var fall = w / (1.0 + 8.0 * x2);
++    if ((flags & 16u) != 0u) {
++      // 0187: limited to its room's box (fading out over 24 units past it): no light through
++      // walls into the next room for lights without a shadow there.
++      let q = -d - vec3f(enh_ld(b + 12u), enh_ld(b + 13u), enh_ld(b + 14u));
++      var ex = vec3f(0.0);
++      for (var k = 0u; k < 3u; k++) {
++        let ax = vec3f(enh_ld(b + 15u + 3u * k), enh_ld(b + 16u + 3u * k), enh_ld(b + 17u + 3u * k));
++        let al = max(length(ax), 1e-3);
++        ex[k] = max(abs(dot(q, ax)) / al - al, 0.0);
++      }
++      fall = fall * (1.0 - smoothstep(0.0, 24.0, length(ex)));
++      if (fall <= 0.0) { continue; }
++    }
+     var ndl = dot(n, l);
+     ndl = select(max(ndl, 0.0), ndl * 0.5 + 0.5, ghost);
+     // Characters (enh_material 1): matte wrap-around diffuse, so a colored light shapes the body
+@@ -1047,7 +1061,7 @@
+       col = col * vec3f(1.0, mix(1.2, 0.62, x), mix(1.5, 0.35, x));
+     }
+     let slot = abuf[b + 10u];
+-    if (slot < 8u) {
++    if (slot < 16u) {
+       // Shadow weight in flags bits 8..15 (0 = full): shadows fade in/out when the set of
+       // shadow-casting lights changes.
+       let sw = (flags >> 8u) & 0xFFu;
+@@ -2510,10 +2524,10 @@
+     fragmentFn += "\n    prev.a = tev_overflow_f32(prev.a);";
+   }
+   if (enh) {
+-    // 0032: forward ambient occlusion (opaque world draws: enh_flags bit 16; mask slot 8).
+-    fragmentFn += "\n    if ((ubuf.enh_flags & 16u) != 0u) { prev = vec4f(prev.rgb * (1.0 - enh_mask(in.pos.xy, 8u)), prev.a); }"
++    // 0032: forward ambient occlusion (opaque world draws: enh_flags bit 16; mask slot 16 since 0187).
++    fragmentFn += "\n    if ((ubuf.enh_flags & 16u) != 0u) { prev = vec4f(prev.rgb * (1.0 - enh_mask(in.pos.xy, 16u)), prev.a); }"
+                   // 0186 debug (AURORA_ENH_AO_SHOW=1): the occlusion each surface receives, white = none.
+-                  "\n    if ((ubuf.enh_flags & 0x30000u) == 0x30000u) { prev = vec4f(vec3f(1.0 - enh_mask(in.pos.xy, 8u)), prev.a); }";
++                  "\n    if ((ubuf.enh_flags & 0x30000u) == 0x30000u) { prev = vec4f(vec3f(1.0 - enh_mask(in.pos.xy, 16u)), prev.a); }";
+   }
+   if (config.wireframe) {
+     // GX_AURORA_SET_WIREFRAME: edges in the override colour (before alpha compare, so

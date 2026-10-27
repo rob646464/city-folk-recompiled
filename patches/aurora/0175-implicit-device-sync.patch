@@ -1,0 +1,22 @@
+diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
+index 7da137d..403e307 100644
+--- a/lib/webgpu/gpu.cpp
++++ b/lib/webgpu/gpu.cpp
+@@ -964,6 +964,17 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+       }
+ #endif
+     }
++    // Aurora calls the device from several threads at once (GX FIFO processor: bind groups, copy
++    // textures; render worker: encoding, copy conversions; pipeline compile threads). Dawn native
++    // only serializes device calls with this feature; without it, rare overlapping calls crashed
++    // inside Dawn (CreateBindGroup on the FIFO thread while the render worker ran a copy
++    // conversion: 3 of ~200 SMS test runs). The adapter list does not name it (magic_enum), so it
++    // is checked directly. AURORA_NO_DEVICE_SYNC=1 for A/B.
++    if (g_adapter.HasFeature(wgpu::FeatureName::ImplicitDeviceSynchronization) &&
++        std::getenv("AURORA_NO_DEVICE_SYNC") == nullptr) {
++      requiredFeatures.push_back(wgpu::FeatureName::ImplicitDeviceSynchronization);
++      Log.info("Implicit device synchronization on");
++    }
+     std::string featureList;
+     for (auto featureName : requiredFeatures) {
+       featureList += "\n  ";

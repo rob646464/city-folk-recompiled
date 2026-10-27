@@ -1,0 +1,39 @@
+diff --git a/include/aurora/lights.h b/include/aurora/lights.h
+index 84fb2a5..c5617f2 100644
+--- a/include/aurora/lights.h
++++ b/include/aurora/lights.h
+@@ -21,7 +21,7 @@ struct ExtraLight {
+ };
+ static_assert(sizeof(ExtraLight) == 40);
+ 
+-constexpr uint32_t MaxExtraLights = 16;
++constexpr uint32_t MaxExtraLights = 64; // 0023: was 16 (world lights: candles, fires, lamps)
+ constexpr uint32_t ExtraLightCastShadows = 1u << 0;
+ constexpr uint32_t ExtraLightTranslucent = 1u << 1;
+ constexpr uint32_t ExtraLightSpecular = 1u << 2;
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+index 0469e88..75c0105 100644
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -1523,7 +1523,7 @@ void scene_end() noexcept {
+   u.bloom2[3] = 0.f;
+   if (u.bloom2[2] > 0.f) {
+     uint32_t n = 0;
+-    for (uint32_t i = 0; i < g_lightCount && n < MaxExtraLights; ++i) {
++    for (uint32_t i = 0; i < g_lightCount && n < 16u /* bloom glow slots (fx.xl holds 16 pairs) */; ++i) {
+       const auto& l = g_lights[i];
+       if (l.intensity <= 0.f || l.radius <= 0.f) {
+         continue;
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index 6587975..d518dbf 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1005,7 +1005,7 @@ fn enh_mask_bl(m: vec2f, dims: vec2i, slot: u32) -> f32 {
+ // pos xyz, radius, color rgb, intensity, flags, id, shadow slot (or ~0), 0.
+ fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
+   var sum = vec3f(0.0);
+-  let cnt = min(ubuf.enh_light_count, 16u);
++  let cnt = min(ubuf.enh_light_count, 64u);
+   let v = normalize(-p);
+   for (var i = 0u; i < cnt; i++) {
+     let b = ubuf.enh_light_base + i * 12u;

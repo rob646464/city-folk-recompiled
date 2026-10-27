@@ -1,0 +1,635 @@
+diff --git a/cmake/aurora_gx.cmake b/cmake/aurora_gx.cmake
+index ed94d61..574e7e1 100644
+--- a/cmake/aurora_gx.cmake
++++ b/cmake/aurora_gx.cmake
+@@ -53,6 +53,11 @@ set_target_properties(aurora_gx PROPERTIES FOLDER "aurora")
+ target_link_libraries(aurora_gx PUBLIC aurora::core dawn::webgpu_dawn xxHash::xxhash)
+ target_link_libraries(aurora_gx PRIVATE absl::btree absl::flat_hash_map sqlite3 Tracy::TracyClient PNG::PNG)
+ target_compile_definitions(aurora_gx PRIVATE WEBGPU_DAWN)
++if (AURORA_CACHE_USE_ZSTD)
++    # Compressed pipeline precache lists (aurora_pipeline_cache_seed).
++    target_compile_definitions(aurora_gx PRIVATE AURORA_CACHE_USE_ZSTD)
++    target_link_libraries(aurora_gx PRIVATE zstd::libzstd)
++endif ()
+ 
+ if (AURORA_ENABLE_RMLUI)
+     target_sources(aurora_gx PRIVATE
+diff --git a/include/aurora/pipeline_cache.h b/include/aurora/pipeline_cache.h
+new file mode 100644
+index 0000000..3da63c4
+--- /dev/null
++++ b/include/aurora/pipeline_cache.h
+@@ -0,0 +1,60 @@
++#ifndef AURORA_PIPELINE_CACHE_H
++#define AURORA_PIPELINE_CACHE_H
++
++// Pipeline precaching (lib/gfx/pipeline_cache.cpp).
++//
++// Render pipelines (WGSL generated from the GX TEV/vertex state + blend/depth state) are
++// created on worker threads. Every pipeline config ever used is remembered in
++// <cachePath>/pipeline_cache.db and all of them are rebuilt in the background at startup
++// (and again when the render target layout or the GX accuracy flags change), so draws
++// normally find their pipeline ready. A draw whose pipeline is still being compiled waits
++// for it instead of being skipped (a hitch, never a missing object).
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct AuroraPipelineStats {
++  uint32_t precacheTotal;   // pipelines queued by background precaching (seed + known configs)
++  uint32_t precacheDone;    // ... of which finished
++  uint32_t pending;         // pipelines queued or compiling right now (any priority)
++  uint32_t demandCreated;   // pipelines a draw needed that precaching had not queued (cache misses)
++  uint32_t stalledDraws;    // draws that had to wait for their pipeline
++  uint64_t stallNs;         // total time draws waited
++  uint64_t maxStallNs;      // longest single wait
++  uint32_t workerThreads;   // pipeline compile threads
++  uint32_t seeded;          // configs added by aurora_pipeline_cache_seed
++  uint32_t droppedDraws;    // draws skipped: pipeline creation failed, or not ready with waiting disabled
++} AuroraPipelineStats;
++
++/** Adds the pipeline configs in a precache list file (format below) to the known set; they
++ *  are compiled in the background with the rest. Call after aurora_initialize and before the
++ *  first frame. Returns the number of configs accepted (rows for another config version or
++ *  struct size are ignored).
++ *
++ *  File: "AUPC" magic, u32 format (1), u32 flags (bit 0: payload zstd-compressed), u32 row
++ *  count, u64 raw payload size, then the payload: rows of
++ *  { u8 type (0 clear, 1 GX), u32 configVersion, u32 configSize, u32 firstFrameUsed, bytes }.
++ *  All little-endian. tools/pipelines/pipelines.py writes it from pipeline_cache.db files. */
++uint32_t aurora_pipeline_cache_seed(const char* path);
++/** Writes every known pipeline config in the format above (uncompressed). */
++bool aurora_pipeline_cache_export(const char* path);
++void aurora_pipeline_cache_get_stats(AuroraPipelineStats* out);
++/** Logs every pipeline creation (source, time) and every draw that waits. */
++void aurora_pipeline_cache_set_log(bool enabled);
++/** Testing: false restores Aurora's original behaviour of skipping a draw whose pipeline is not
++ *  ready yet (objects missing for a few frames = the first-run flicker). Default true. */
++void aurora_pipeline_cache_set_wait(bool enabled);
++/** Worker threads compiling pipelines (default: half the hardware threads, 1..8). Takes effect
++ *  at initialization; call before aurora_initialize. */
++void aurora_pipeline_cache_set_threads(uint32_t threads);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
+index 4dc6337..54fa60c 100644
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -30,10 +30,41 @@
+ #include <absl/container/flat_hash_set.h>
+ #include <fmt/format.h>
+ #include <tracy/Tracy.hpp>
++#if defined(AURORA_CACHE_USE_ZSTD)
++#include <zstd.h>
++#endif
++
++#include <aurora/pipeline_cache.h>
++#include <dolphin/gx/GXAurora.h>
++
++#include <chrono>
++#include <cstdio>
++#include <vector>
+ 
+ namespace aurora::gfx {
+ static Module Log("aurora::gfx::pipeline_cache");
+ 
++// Precache bookkeeping (include/aurora/pipeline_cache.h).
++static std::atomic<uint32_t> g_precacheTotal{0};
++static std::atomic<uint32_t> g_precacheDone{0};
++static std::atomic<uint32_t> g_demandCreated{0};
++static std::atomic<uint32_t> g_stalledDraws{0};
++static std::atomic<uint64_t> g_stallNs{0};
++static std::atomic<uint64_t> g_maxStallNs{0};
++static std::atomic<uint32_t> g_seeded{0};
++static std::atomic_bool g_pipelineLog{false};
++static std::atomic_bool g_waitForPipelines{true};
++static std::atomic<uint32_t> g_droppedDraws{0};
++static uint32_t g_requestedThreads = 0;
++static uint32_t g_workerThreadCount = 0;
++static std::optional<uint32_t> g_rebuildAccuracy; // GX accuracy flags the known set was last built for
++
++static uint64_t now_ns() {
++  return static_cast<uint64_t>(
++      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
++          .count());
++}
++
+ constexpr int PipelineCacheSchema = 1;
+ constexpr const char* InitialPipelineCacheName = "initial_pipeline_cache.db";
+ constexpr const char* SdlVfsName = "aurora_pipeline_cache_sdl_vfs";
+@@ -43,6 +74,7 @@ using NewPipelineCallback = std::function<CompiledPipeline()>;
+ struct PendingPipeline {
+   PipelineRef hash;
+   NewPipelineCallback create;
++  bool precache = false; // queued by background precaching (rebuild_pipeline_cache)
+ };
+ 
+ struct PipelineCacheWrite {
+@@ -80,7 +112,7 @@ constexpr size_t BuildPipelinesPerFrame = 5;
+ #else
+ constexpr size_t BuildPipelinesPerFrame = 1;
+ #endif
+-static std::thread g_pipelineThread;
++static std::vector<std::thread> g_pipelineThreads;
+ static std::atomic_bool g_pipelineThreadEnd = false;
+ static std::condition_variable g_pipelineQueueCv;
+ static std::condition_variable g_pipelineReadyCv;
+@@ -91,6 +123,7 @@ static std::deque<PendingPipeline> g_pipelineQueue;
+ static std::deque<PendingPipeline> g_backgroundPipelineQueue;
+ static absl::flat_hash_set<PipelineRef> g_pendingPipelines;
+ static std::atomic_bool g_gpuCachePrunePending = false;
++static bool g_gpuCachePruneArmed = false; // prune once the first full rebuild has been queued
+ 
+ static sqlite3* g_pipelineCacheDb = nullptr;
+ static sqlite3_stmt* g_pipelineCacheLoadStmt = nullptr;
+@@ -482,6 +515,9 @@ static PipelineRef find_pipeline_impl(PipelineRef runtimeKey, NewPipelineCallbac
+         notifyWorker = priority != PipelinePriority::Background;
+       }
+     } else if (!g_hasPipelineThread && (blocking || g_pipelinesPerFrame < BuildPipelinesPerFrame)) {
++      if (priority != PipelinePriority::Background) {
++        ++g_demandCreated;
++      }
+       auto result = cb();
+       pipelineCount = result.pipeline_count();
+       g_pipelines.try_emplace(runtimeKey, std::move(result));
+@@ -492,7 +528,17 @@ static PipelineRef find_pipeline_impl(PipelineRef runtimeKey, NewPipelineCallbac
+       PendingPipeline pending{
+           .hash = runtimeKey,
+           .create = std::move(cb),
++          .precache = priority == PipelinePriority::Background,
+       };
++      if (priority == PipelinePriority::Background) {
++        ++g_precacheTotal;
++      } else {
++        // A draw needs a pipeline nothing precached: a gap in the precache list.
++        ++g_demandCreated;
++        if (g_pipelineLog.load(std::memory_order_relaxed)) {
++          Log.info("pipeline {:016x}: MISS (not precached) frame {}", runtimeKey, current_frame());
++        }
++      }
+       switch (priority) {
+       case PipelinePriority::Background:
+         g_backgroundPipelineQueue.emplace_back(std::move(pending));
+@@ -955,22 +1001,33 @@ static void pipeline_cache_writer() {
+   }
+ }
+ 
++static CompiledPipeline create_pending(PendingPipeline& pending) {
++  const uint64_t start = now_ns();
++  auto result = pending.create();
++  if (g_pipelineLog.load(std::memory_order_relaxed)) {
++    Log.info("pipeline {:016x}: created in {:.2f} ms ({}) frame {}", pending.hash, (now_ns() - start) / 1e6,
++             pending.precache ? "precache" : "demand", current_frame());
++  }
++  if (pending.precache) {
++    ++g_precacheDone;
++  }
++  return result;
++}
++
+ static void pipeline_worker() {
+ #ifdef TRACY_ENABLE
+   tracy::SetThreadName("Pipeline compilation thread");
+ #endif
+ 
+-  bool hasMore = false;
+   while (g_hasPipelineThread || g_pipelinesPerFrame < BuildPipelinesPerFrame) {
+     PendingPipeline pending;
+     {
+       std::unique_lock lock{g_pipelineMutex};
+       if (g_hasPipelineThread) {
+-        if (!hasMore) {
+-          g_pipelineQueueCv.wait(lock, [] {
+-            return !g_pipelineQueue.empty() || !g_backgroundPipelineQueue.empty() || g_pipelineThreadEnd;
+-          });
+-        }
++        // Several workers share the queues: always re-check under the lock.
++        g_pipelineQueueCv.wait(lock, [] {
++          return !g_pipelineQueue.empty() || !g_backgroundPipelineQueue.empty() || g_pipelineThreadEnd;
++        });
+       } else if (g_pipelineQueue.empty() && g_backgroundPipelineQueue.empty()) {
+         return;
+       }
+@@ -981,13 +1038,12 @@ static void pipeline_worker() {
+       pending = std::move(source.front());
+       source.pop_front();
+     }
+-    auto result = pending.create();
++    auto result = create_pending(pending);
+     const auto pipelineCount = result.pipeline_count();
+     {
+       std::lock_guard lock{g_pipelineMutex};
+       g_pipelines.try_emplace(pending.hash, std::move(result));
+       g_pendingPipelines.erase(pending.hash);
+-      hasMore = !g_pipelineQueue.empty() || !g_backgroundPipelineQueue.empty();
+     }
+     if (!g_hasPipelineThread) {
+       g_pipelinesPerFrame += std::max(1u, pipelineCount);
+@@ -996,6 +1052,61 @@ static void pipeline_worker() {
+   }
+ }
+ 
++// A draw is about to be encoded but its pipeline is still queued or compiling: move it to the
++// front of the queue and wait for it. Skipping the draw instead (Aurora's original behaviour)
++// made objects vanish for a few frames whenever a new shader was first needed.
++static bool wait_for_pending_pipeline(PipelineRef ref, CompiledPipeline& out) {
++  const uint64_t start = now_ns();
++  std::unique_lock lock{g_pipelineMutex};
++  if (!g_pendingPipelines.contains(ref)) {
++    return false;
++  }
++  if (!g_hasPipelineThread) {
++    auto pending = take_pending_pipeline(ref);
++    if (!pending) {
++      return false;
++    }
++    lock.unlock();
++    auto result = create_pending(*pending);
++    const auto pipelineCount = result.pipeline_count();
++    lock.lock();
++    g_pipelines.try_emplace(ref, std::move(result));
++    lock.unlock();
++    notify_pipeline_ready(true, pipelineCount);
++    lock.lock();
++  } else {
++    // Still queued (not yet picked up by a worker): compile it next.
++    if (auto it = find_pending_pipeline(g_pipelineQueue, ref); it != g_pipelineQueue.end()) {
++      auto pending = std::move(*it);
++      g_pipelineQueue.erase(it);
++      g_pipelineQueue.emplace_front(std::move(pending));
++    } else if (auto bit = find_pending_pipeline(g_backgroundPipelineQueue, ref);
++               bit != g_backgroundPipelineQueue.end()) {
++      auto pending = std::move(*bit);
++      g_backgroundPipelineQueue.erase(bit);
++      g_pipelineQueue.emplace_front(std::move(pending));
++    }
++    g_pipelineQueueCv.notify_one();
++    g_pipelineReadyCv.wait(lock, [=] { return g_pipelines.contains(ref) || g_pipelineThreadEnd; });
++  }
++  const auto it = g_pipelines.find(ref);
++  const bool ok = it != g_pipelines.end() && it->second.main;
++  if (ok) {
++    out = it->second;
++  }
++  lock.unlock();
++  const uint64_t waited = now_ns() - start;
++  ++g_stalledDraws;
++  g_stallNs += waited;
++  uint64_t prevMax = g_maxStallNs.load(std::memory_order_relaxed);
++  while (waited > prevMax && !g_maxStallNs.compare_exchange_weak(prevMax, waited)) {
++  }
++  if (g_pipelineLog.load(std::memory_order_relaxed)) {
++    Log.info("pipeline {:016x}: draw waited {:.2f} ms frame {}", ref, waited / 1e6, current_frame());
++  }
++  return ok;
++}
++
+ template <typename PipelineConfig>
+ static size_t load_pipeline_cache_entries(ShaderType type, uint32_t configVersion) {
+   if (!prepare_pipeline_cache_db()) {
+@@ -1122,16 +1233,42 @@ void rebuild_pipeline_cache() {
+     }
+   }
+   std::ranges::sort(known, {}, &KnownPipeline::firstFrameUsed);
++  // The GX accuracy flags (GXSetAuroraAccuracy) are baked into each config's shader. Known
++  // configs (and the shipped precache list) are recorded with them on; build the variant the
++  // current flags produce (lib/gx/gx.cpp populate_pipeline_config) so turning a flag off does
++  // not miss the precache.
++  const uint32_t accuracy = gx::g_accuracyFlags.load(std::memory_order_relaxed);
++  g_rebuildAccuracy = accuracy;
++  const auto adjust = [accuracy]<typename Config>(const Config& config) {
++    if constexpr (std::is_same_v<Config, gx::PipelineConfig>) {
++      auto adjusted = config;
++      adjusted.shaderConfig.intTev = (accuracy & GX_AURORA_ACCURACY_INT_TEV) != 0;
++      if ((accuracy & GX_AURORA_ACCURACY_EFB_DEPTH) == 0) {
++        adjusted.shaderConfig.efbFmt = 0;
++        adjusted.shaderConfig.dither = false;
++        adjusted.shaderConfig.efbBlend = false;
++      }
++      return adjusted;
++    } else {
++      return config;
++    }
++  };
+   for (const auto& pipeline : known) {
+     std::visit(
+         [&](const auto& config) {
+-          resolve_pipeline(pipeline.type, config, scene, PipelinePriority::Background);
++          const auto adjusted = adjust(config);
++          resolve_pipeline(pipeline.type, adjusted, scene, PipelinePriority::Background);
+           if (offscreen.key != scene.key) {
+-            resolve_pipeline(pipeline.type, config, offscreen, PipelinePriority::Background);
++            resolve_pipeline(pipeline.type, adjusted, offscreen, PipelinePriority::Background);
+           }
+         },
+         pipeline.config);
+   }
++  if (g_gpuCachePruneArmed) {
++    // Prune unused Dawn cache entries once everything queued so far has been built.
++    g_gpuCachePruneArmed = false;
++    g_gpuCachePrunePending = true;
++  }
+ }
+ 
+ void initialize_pipeline_cache() {
+@@ -1142,15 +1279,26 @@ void initialize_pipeline_cache() {
+ 
+   if (webgpu::g_backendType == wgpu::BackendType::WebGPU) {
+     g_hasPipelineThread = false;
++    g_workerThreadCount = 0;
+   } else {
+     g_hasPipelineThread = true;
+-    g_pipelineThread = std::thread(pipeline_worker);
++    uint32_t threads = g_requestedThreads;
++    if (threads == 0) {
++      threads = std::clamp(std::thread::hardware_concurrency() / 2, 1u, 8u);
++    }
++    g_workerThreadCount = threads;
++    for (uint32_t i = 0; i < threads; ++i) {
++      g_pipelineThreads.emplace_back(pipeline_worker);
++    }
+   }
+ 
+   const size_t loadedCount = load_pipeline_cache();
+-  rebuild_pipeline_cache();
++  // The known set is built on the first frame (begin_pipeline_frame), once the application has
++  // added its precache list (aurora_pipeline_cache_seed) and set the GX accuracy flags.
++  g_pipelineLayoutKey.reset();
++  g_rebuildAccuracy.reset();
+   if (!g_pipelineCacheBroken && loadedCount > 0) {
+-    g_gpuCachePrunePending = true;
++    g_gpuCachePruneArmed = true;
+   }
+ 
+   if (!g_pipelineCacheBroken) {
+@@ -1160,10 +1308,16 @@ void initialize_pipeline_cache() {
+ 
+ void shutdown_pipeline_cache() {
+   if (g_hasPipelineThread) {
+-    g_pipelineThreadEnd = true;
++    {
++      std::lock_guard lock{g_pipelineMutex};
++      g_pipelineThreadEnd = true;
++    }
+     g_pipelineQueueCv.notify_all();
+     g_pipelineReadyCv.notify_all();
+-    g_pipelineThread.join();
++    for (auto& thread : g_pipelineThreads) {
++      thread.join();
++    }
++    g_pipelineThreads.clear();
+   }
+   g_hasPipelineThread = false;
+ 
+@@ -1172,6 +1326,8 @@ void shutdown_pipeline_cache() {
+   g_pipelineCacheBroken = false;
+   g_pipelinesPerFrame = 0;
+   g_gpuCachePrunePending = false;
++  g_gpuCachePruneArmed = false;
++  g_rebuildAccuracy.reset();
+   g_pipelines.clear();
+   g_knownPipelines.clear();
+   g_pipelineLayoutKey.reset();
+@@ -1187,7 +1343,8 @@ void begin_pipeline_frame() {
+   if (!g_hasPipelineThread) {
+     g_pipelinesPerFrame = 0;
+   }
+-  if (g_pipelineLayoutKey != scene_render_target_layout().key) {
++  if (g_pipelineLayoutKey != scene_render_target_layout().key ||
++      g_rebuildAccuracy != gx::g_accuracyFlags.load(std::memory_order_relaxed)) {
+     rebuild_pipeline_cache();
+   }
+ }
+@@ -1199,13 +1356,219 @@ void end_pipeline_frame() {
+ }
+ 
+ bool get_pipeline(PipelineRef ref, CompiledPipeline& pipeline) {
+-  std::lock_guard guard{g_pipelineMutex};
+-  const auto it = g_pipelines.find(ref);
+-  if (it == g_pipelines.end() || !it->second.main) {
++  {
++    std::lock_guard guard{g_pipelineMutex};
++    const auto it = g_pipelines.find(ref);
++    if (it != g_pipelines.end()) {
++      if (!it->second.main) {
++        ++g_droppedDraws; // creation failed
++        return false;
++      }
++      pipeline = it->second;
++      return true;
++    }
++  }
++  // Not built yet: never drop the draw, wait for it.
++  if (!g_waitForPipelines.load(std::memory_order_relaxed)) {
++    ++g_droppedDraws;
++    return false;
++  }
++  if (!wait_for_pending_pipeline(ref, pipeline)) {
++    ++g_droppedDraws;
++    return false;
++  }
++  return true;
++}
++
++// ---- Precache list files (include/aurora/pipeline_cache.h) ----------------------------------
++
++namespace {
++constexpr uint32_t PrecacheMagic = 0x43505541; // "AUPC"
++constexpr uint32_t PrecacheFormat = 1;
++constexpr uint32_t PrecacheFlagZstd = 1;
++constexpr size_t PrecacheHeaderSize = 4 + 4 + 4 + 4 + 8;
++
++template <typename T>
++bool read_le(const uint8_t*& p, const uint8_t* end, T& out) {
++  if (static_cast<size_t>(end - p) < sizeof(T)) {
++    return false;
++  }
++  std::memcpy(&out, p, sizeof(T)); // little-endian hosts only (x86/ARM)
++  p += sizeof(T);
++  return true;
++}
++
++template <typename T>
++void write_le(std::vector<uint8_t>& buf, T value) {
++  const auto* b = reinterpret_cast<const uint8_t*>(&value);
++  buf.insert(buf.end(), b, b + sizeof(T));
++}
++
++std::vector<uint8_t> read_file(const char* path) {
++  std::vector<uint8_t> data;
++  SDL_IOStream* io = SDL_IOFromFile(path, "rb");
++  if (io == nullptr) {
++    return data;
++  }
++  const Sint64 size = SDL_GetIOSize(io);
++  if (size > 0) {
++    data.resize(static_cast<size_t>(size));
++    if (SDL_ReadIO(io, data.data(), data.size()) != data.size()) {
++      data.clear();
++    }
++  }
++  SDL_CloseIO(io);
++  return data;
++}
++
++template <typename Config>
++bool seed_row(ShaderType type, uint32_t version, const uint8_t* bytes, uint32_t size, uint32_t firstFrame) {
++  if (size != sizeof(Config) || version != Config{}.version) {
++    return false;
++  }
++  Config config;
++  std::memcpy(&config, bytes, sizeof(config));
++  if (config.version != version) {
+     return false;
+   }
+-  pipeline = it->second;
++  remember_pipeline_config(type, config, firstFrame, false);
+   return true;
+ }
++} // namespace
+ 
+ } // namespace aurora::gfx
++
++using namespace aurora::gfx;
++
++uint32_t aurora_pipeline_cache_seed(const char* path) {
++  const auto file = read_file(path);
++  if (file.size() < PrecacheHeaderSize) {
++    Log.info("No pipeline precache list at '{}'", path);
++    return 0;
++  }
++  const uint8_t* p = file.data();
++  const uint8_t* end = p + file.size();
++  uint32_t magic = 0, format = 0, flags = 0, count = 0;
++  uint64_t rawSize = 0;
++  read_le(p, end, magic);
++  read_le(p, end, format);
++  read_le(p, end, flags);
++  read_le(p, end, count);
++  read_le(p, end, rawSize);
++  if (magic != PrecacheMagic || format != PrecacheFormat || rawSize > (1ull << 31)) {
++    Log.warn("Pipeline precache list '{}' has an unknown format", path);
++    return 0;
++  }
++  std::vector<uint8_t> payload;
++  if ((flags & PrecacheFlagZstd) != 0) {
++#if defined(AURORA_CACHE_USE_ZSTD)
++    payload.resize(static_cast<size_t>(rawSize));
++    const size_t ret = ZSTD_decompress(payload.data(), payload.size(), p, static_cast<size_t>(end - p));
++    if (ZSTD_isError(ret) || ret != rawSize) {
++      Log.warn("Pipeline precache list '{}' failed to decompress", path);
++      return 0;
++    }
++#else
++    Log.warn("Pipeline precache list '{}' is compressed but zstd support is disabled", path);
++    return 0;
++#endif
++  } else {
++    payload.assign(p, end);
++  }
++  p = payload.data();
++  end = p + payload.size();
++  uint32_t accepted = 0, skipped = 0;
++  for (uint32_t i = 0; i < count; ++i) {
++    uint8_t type = 0;
++    uint32_t version = 0, size = 0, firstFrame = 0;
++    if (!read_le(p, end, type) || !read_le(p, end, version) || !read_le(p, end, size) ||
++        !read_le(p, end, firstFrame) || static_cast<size_t>(end - p) < size) {
++      Log.warn("Pipeline precache list '{}' is truncated", path);
++      break;
++    }
++    bool ok = false;
++    switch (static_cast<ShaderType>(type)) {
++    case ShaderType::Clear:
++      ok = seed_row<clear::PipelineConfig>(ShaderType::Clear, version, p, size, firstFrame);
++      break;
++    case ShaderType::GX:
++      ok = seed_row<aurora::gx::PipelineConfig>(ShaderType::GX, version, p, size, firstFrame);
++      break;
++    default:
++      break;
++    }
++    p += size;
++    ok ? ++accepted : ++skipped;
++  }
++  g_seeded += accepted;
++  Log.info("Pipeline precache list '{}': {} configs ({} for another Aurora version skipped)", path, accepted,
++           skipped);
++  return accepted;
++}
++
++bool aurora_pipeline_cache_export(const char* path) {
++  std::vector<uint8_t> payload;
++  uint32_t count = 0;
++  {
++    std::lock_guard lock{g_pipelineMutex};
++    for (const auto& known : g_knownPipelines | std::views::values) {
++      std::visit(
++          [&]<typename Config>(const Config& config) {
++            if constexpr (!std::is_same_v<Config, clear::PipelineConfig> &&
++                          !std::is_same_v<Config, aurora::gx::PipelineConfig>) {
++              return;
++            } else {
++              write_le<uint8_t>(payload, static_cast<uint8_t>(known.type));
++              write_le<uint32_t>(payload, config.version);
++              write_le<uint32_t>(payload, sizeof(Config));
++              write_le<uint32_t>(payload, known.firstFrameUsed);
++              const auto* b = reinterpret_cast<const uint8_t*>(&config);
++              payload.insert(payload.end(), b, b + sizeof(Config));
++              ++count;
++            }
++          },
++          known.config);
++    }
++  }
++  std::vector<uint8_t> file;
++  write_le<uint32_t>(file, PrecacheMagic);
++  write_le<uint32_t>(file, PrecacheFormat);
++  write_le<uint32_t>(file, 0);
++  write_le<uint32_t>(file, count);
++  write_le<uint64_t>(file, payload.size());
++  file.insert(file.end(), payload.begin(), payload.end());
++  SDL_IOStream* io = SDL_IOFromFile(path, "wb");
++  if (io == nullptr) {
++    return false;
++  }
++  const bool ok = SDL_WriteIO(io, file.data(), file.size()) == file.size();
++  SDL_CloseIO(io);
++  Log.info("Exported {} pipeline configs to '{}'", count, path);
++  return ok;
++}
++
++void aurora_pipeline_cache_get_stats(AuroraPipelineStats* out) {
++  if (out == nullptr) {
++    return;
++  }
++  *out = {};
++  out->precacheTotal = g_precacheTotal.load(std::memory_order_relaxed);
++  out->precacheDone = g_precacheDone.load(std::memory_order_relaxed);
++  {
++    std::lock_guard lock{g_pipelineMutex};
++    out->pending = static_cast<uint32_t>(g_pendingPipelines.size());
++  }
++  out->demandCreated = g_demandCreated.load(std::memory_order_relaxed);
++  out->stalledDraws = g_stalledDraws.load(std::memory_order_relaxed);
++  out->stallNs = g_stallNs.load(std::memory_order_relaxed);
++  out->maxStallNs = g_maxStallNs.load(std::memory_order_relaxed);
++  out->workerThreads = g_workerThreadCount;
++  out->seeded = g_seeded.load(std::memory_order_relaxed);
++  out->droppedDraws = g_droppedDraws.load(std::memory_order_relaxed);
++}
++
++void aurora_pipeline_cache_set_log(bool enabled) { g_pipelineLog = enabled; }
++
++void aurora_pipeline_cache_set_wait(bool enabled) { g_waitForPipelines = enabled; }
++
++void aurora_pipeline_cache_set_threads(uint32_t threads) { g_requestedThreads = std::min(threads, 32u); }

@@ -1,0 +1,188 @@
+0219: EFB-copy readback map callbacks make no Dawn call (render-loop deadlock)
+
+The readback MapAsync callback (AllowSpontaneous) called GetConstMappedRange and Unmap. Spontaneous
+callbacks run inside whatever Dawn call notices the map; the present-timing waiter thread (0197/0216)
+polls Instance::WaitAny every ~0.25 ms, so the callback often ran there. When the render worker was
+at the same time inside a Dawn call holding the device lock and waiting for that event to finish,
+the callback's Unmap waited for the device lock and the render worker waited for the callback: the
+render loop stopped for good (the main thread in acquire_frame_slot's wait_for_gpu_progress, the
+game thread in VISetNextFrameBuffer). Seen in LM's frame interpolation runs in Bogmire's arena after
+about 3 minutes (LM_HANG_DUMP stacks: present_timing::waiter -> Dawn -> efb_ram map callback ->
+Dawn -> Mtx_lock; render worker in Dawn Cnd_wait).
+
+Now the callback only records the status and queues the readback (leaf lock); finish_maps copies
+the mapped bytes out and unmaps, holding no lock, on the render worker after each frame
+(gfx::after_submit) and in aurora_efb_ram_apply. The readback pool keeps each buffer's size so
+acquire_readback_buffer makes no Dawn call (GetSize) under g_poolMutex.
+
+--- a/lib/gfx/efb_ram.cpp
++++ b/lib/gfx/efb_ram.cpp
+@@ -274,8 +274,9 @@
+ };
+ 
+ struct Readback {
+-  wgpu::Buffer buffer;        // render worker / map callback only
+-  std::vector<uint8_t> data;  // filled by the map callback
++  wgpu::Buffer buffer;        // render worker / finish_maps only
++  std::vector<uint8_t> data;  // filled by finish_maps
++  int mapStatus = 0;          // set by the map callback: 1 mapped, 2 failed (0219)
+   const uint8_t* dest = nullptr;
+   uint32_t size = 0;
+   GXTexFmt fmt = GX_TF_I8;
+@@ -315,6 +316,13 @@
+ // render worker held the device lock in Submit and its map callback waited for g_mutex: a
+ // deadlock that froze the game when entering a room or a transition that first decodes a texture
+ // from EFB copy memory (the Sealed Room from the roof, mirror warps).
++// 0219: the map callback makes no Dawn call at all (it only records the status and queues the
++// readback in g_mapped); GetConstMappedRange/Unmap run in finish_maps (render worker after each
++// frame, and aurora_efb_ram_apply), holding no lock. A callback that called Unmap deadlocked inside
++// Dawn when it fired from the present-timing thread's WaitAny poll while the render worker held the
++// device lock in a Dawn call waiting for that same event to finish (the game's render loop stopped
++// for good: LM frame interpolation runs, Bogmire's arena, ~3 min). The pool holds each buffer's size
++// so no Dawn call (GetSize) is made under g_poolMutex either.
+ std::mutex g_mutex;
+ std::mutex g_landedMutex; // g_landed only (leaf lock: map callbacks)
+ std::atomic_bool g_enabled{true};
+@@ -326,8 +334,9 @@
+ std::vector<std::pair<const uint8_t*, uint32_t>> g_cpuReadRanges;
+ std::vector<std::pair<const uint8_t*, uint32_t>> g_watchRanges; // read back even when disabled
+ std::deque<std::shared_ptr<Readback>> g_landed; // guarded by g_landedMutex
+-std::mutex g_poolMutex;  // readback buffer pool: render worker + map callbacks (leaf lock)
+-std::vector<wgpu::Buffer> g_readbackPool;
++std::deque<std::shared_ptr<Readback>> g_mapped; // map callback done, not yet copied out (g_landedMutex)
++std::mutex g_poolMutex;  // readback buffer pool (leaf lock, no Dawn call under it)
++std::vector<std::pair<wgpu::Buffer, uint32_t>> g_readbackPool; // buffer, size
+ absl::flat_hash_map<const uint8_t*, std::pair<uint32_t, HashType>> g_written; // our last writeback per dest
+ uint64_t g_seq = 0;
+ AuroraEfbRamStats g_stats{};
+@@ -490,8 +499,8 @@
+   {
+     std::lock_guard lock{g_poolMutex};
+     for (auto it = g_readbackPool.begin(); it != g_readbackPool.end(); ++it) {
+-      if (it->GetSize() >= size) {
+-        auto buf = std::move(*it);
++      if (it->second >= align4(size)) {
++        auto buf = std::move(it->first);
+         g_readbackPool.erase(it);
+         return buf;
+       }
+@@ -581,8 +590,8 @@
+   std::vector<Entry> entries;
+   absl::flat_hash_map<uint64_t, LazyBufferRef> bytePool;
+   absl::flat_hash_map<DecodedKey, Decoded> decoded;
+-  std::vector<wgpu::Buffer> readbackPool;
+-  std::deque<std::shared_ptr<Readback>> landed;
++  std::vector<std::pair<wgpu::Buffer, uint32_t>> readbackPool;
++  std::deque<std::shared_ptr<Readback>> landed, mapped;
+   {
+     std::lock_guard lock{g_mutex};
+     entries.swap(g_entries);
+@@ -596,6 +605,7 @@
+   {
+     std::lock_guard landedLock{g_landedMutex};
+     landed.swap(g_landed);
++    mapped.swap(g_mapped);
+   }
+   g_encodePipeline = {};
+   g_encodeLayout = {};
+@@ -603,6 +613,38 @@
+   g_decodeLayout = {};
+ }
+ 
++void finish_maps() {
++  std::deque<std::shared_ptr<Readback>> mapped;
++  {
++    std::lock_guard lock{g_landedMutex};
++    mapped.swap(g_mapped);
++  }
++  if (mapped.empty()) {
++    return;
++  }
++  // No lock held across the Dawn calls (GetConstMappedRange, Unmap, buffer release).
++  for (auto& rb : mapped) {
++    rb->ok = false;
++    if (rb->mapStatus == 1 && rb->buffer) {
++      const auto* p = static_cast<const uint8_t*>(rb->buffer.GetConstMappedRange(0, align4(rb->size)));
++      if (p != nullptr) {
++        rb->data.assign(p, p + rb->size);
++        rb->ok = true;
++      }
++      rb->buffer.Unmap();
++      std::lock_guard lock{g_poolMutex};
++      if (g_readbackPool.size() < 16) {
++        g_readbackPool.emplace_back(std::move(rb->buffer), align4(rb->size));
++      }
++    }
++    rb->buffer = {};
++  }
++  std::lock_guard lock{g_landedMutex};
++  for (auto& rb : mapped) {
++    g_landed.push_back(std::move(rb));
++  }
++}
++
+ bool enabled() noexcept { return g_enabled.load(std::memory_order_relaxed); }
+ 
+ bool supports_copy_format(GXTexFmt fmt) noexcept {
+@@ -695,25 +737,15 @@
+       rb->buffer.MapAsync(
+           wgpu::MapMode::Read, 0, align4(rb->size), wgpu::CallbackMode::AllowSpontaneous,
+           [rb](wgpu::MapAsyncStatus status, wgpu::StringView) {
+-            rb->ok = status == wgpu::MapAsyncStatus::Success;
+-            if (rb->ok) {
+-              const auto* mapped = static_cast<const uint8_t*>(rb->buffer.GetConstMappedRange(0, align4(rb->size)));
+-              rb->ok = mapped != nullptr;
+-              if (rb->ok) {
+-                rb->data.assign(mapped, mapped + rb->size);
+-              }
+-              rb->buffer.Unmap();
+-              std::lock_guard lock{g_poolMutex};
+-              if (g_readbackPool.size() < 16) {
+-                g_readbackPool.push_back(std::move(rb->buffer));
+-              }
+-            } else if (status != wgpu::MapAsyncStatus::CallbackCancelled && status != wgpu::MapAsyncStatus::Aborted) {
++            // Spontaneous: runs inside whatever Dawn call noticed the map, on any thread. No Dawn
++            // call here (0219, see the lock order notes) and only the leaf lock g_landedMutex.
++            rb->mapStatus = status == wgpu::MapAsyncStatus::Success ? 1 : 2;
++            if (status != wgpu::MapAsyncStatus::Success && status != wgpu::MapAsyncStatus::CallbackCancelled &&
++                status != wgpu::MapAsyncStatus::Aborted) {
+               Log.warn("readback map failed: {}", magic_enum::enum_name(status));
+             }
+-            rb->buffer = {};
+-            // Runs with Dawn's device lock held (spontaneous): leaf lock only, never g_mutex.
+             std::lock_guard lock{g_landedMutex};
+-            g_landed.push_back(rb);
++            g_mapped.push_back(rb);
+           });
+     });
+   };
+@@ -998,6 +1030,7 @@
+ }
+ 
+ uint32_t aurora_efb_ram_apply() {
++  finish_maps();
+   std::deque<std::shared_ptr<Readback>> landed;
+   {
+     std::lock_guard lock{g_landedMutex};
+--- a/lib/gfx/efb_ram.hpp
++++ b/lib/gfx/efb_ram.hpp
+@@ -35,6 +35,9 @@
+ 
+ void initialize();
+ void shutdown();
++// Copies finished readback maps out of their buffers (0219: never inside the map callback). Called
++// on the render worker after each frame and by aurora_efb_ram_apply; holds no lock across Dawn calls.
++void finish_maps();
+ 
+ bool enabled() noexcept;
+ bool supports_copy_format(GXTexFmt fmt) noexcept;
+--- a/lib/gfx/frame.cpp
++++ b/lib/gfx/frame.cpp
+@@ -730,6 +730,7 @@
+ uint32_t current_frame() noexcept { return g_frameIndex; }
+ 
+ void after_submit() noexcept {
++  efb_ram::finish_maps();
+   depth_peek::after_submit();
+   enhanced::after_submit();
+ }

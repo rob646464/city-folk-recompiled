@@ -1,0 +1,11 @@
+LIBXML2_2.4.30 {
+  global:
+    xmlSetGenericErrorFunc; xmlDocGetRootElement; xmlNewDoc; xmlDocSetRootElement;
+    xmlDocDumpFormatMemoryEnc; xmlUnlinkNode; xmlFreeNode; xmlAddChild; xmlNewProp; xmlNewNs;
+    xmlStrdup; xmlCopyNamespace; xmlFreeNs; xmlFreeDoc; xmlFree;
+  local: *;
+};
+LIBXML2_2.6.0 {
+  global:
+    xmlReadMemory;
+} LIBXML2_2.4.30;

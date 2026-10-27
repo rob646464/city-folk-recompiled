@@ -1,0 +1,222 @@
+diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
+index 156a45b..3249f32 100644
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -155,6 +155,18 @@ extern "C" {
+  */
+ #define GX_AURORA_COPY_GENERATION 0x0062
+ 
++/**
++ * Frame interpolation fades (spawns/despawns between two captured frames).
++ * GX_AURORA_SET_FADE, u8 q: later draws lose q/255 of their pixels (ordered 4x4 dither, so it
++ * works for opaque and blended draws alike and keeps depth correct); 0 = drawn as usual.
++ * GX_AURORA_SET_REPLAY_MASK, u8 on: while on, draws, EFB copies, offscreen passes, depth
++ * snapshots, extra lights and texture evictions are skipped (state changes still apply), so
++ * a replay can run another frame's commands just to draw a few of its draws.
++ * State slots 4..7 save/restore the GX state only (no copy textures or copy-to-RAM entries).
++ */
++#define GX_AURORA_SET_FADE 0x0063
++#define GX_AURORA_SET_REPLAY_MASK 0x0064
++
+ #define GX2_SET_POLYGON_OFFSET 0x1000
+ 
+ 
+@@ -255,6 +267,8 @@ void GXSetCullOverrideAurora(u8 twoSided);
+ void GXSaveStateAurora(u8 slot);
+ void GXRestoreStateAurora(u8 slot);
+ void GXSetCopyGenerationAurora(u8 generationAndFlags);
++void GXSetFadeAurora(u8 q);
++void GXSetReplayMaskAurora(u8 on);
+ 
+ /**
+  * Load an arbitrary 4x4 projection matrix, avoiding the 6-parameter hardware encoding.
+diff --git a/lib/dolphin/gx/GXAurora.cpp b/lib/dolphin/gx/GXAurora.cpp
+index b6e54d3..5679566 100644
+--- a/lib/dolphin/gx/GXAurora.cpp
++++ b/lib/dolphin/gx/GXAurora.cpp
+@@ -125,6 +125,16 @@ void GXSetCopyGenerationAurora(u8 generationAndFlags) {
+   GX_WRITE_U8(generationAndFlags);
+ }
+ 
++void GXSetFadeAurora(u8 q) {
++  GX_WRITE_AURORA(GX_AURORA_SET_FADE);
++  GX_WRITE_U8(q);
++}
++
++void GXSetReplayMaskAurora(u8 on) {
++  GX_WRITE_AURORA(GX_AURORA_SET_REPLAY_MASK);
++  GX_WRITE_U8(on);
++}
++
+ void GX2SetPolygonOffset(f32 mFrontOffset, f32 mFrontScale, f32 mBackOffset, f32 mBackScale, f32 mClamp) {
+   GX_WRITE_AURORA(GX2_SET_POLYGON_OFFSET);
+   GX_WRITE_F32(mFrontOffset);
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+index a220be3..4204dae 100644
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -518,8 +518,13 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
+   if (state.cullMode == GX_CULL_ALL && prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS) {
+     return;
+   }
++  if (state.replayMask) {
++    return;
++  }
+ 
+-  DrawImmediateData immediates{.vtxStart = vertRange.offset, .currentPnMtx = state.currentPnMtx};
++  // Bits 8..15: GX_AURORA_SET_FADE (the matrix index stays in the low byte).
++  DrawImmediateData immediates{.vtxStart = vertRange.offset,
++                               .currentPnMtx = state.currentPnMtx | u32(state.fadeQ) << 8};
+   for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+     if (state.vtxDesc[i] != GX_INDEX8 && state.vtxDesc[i] != GX_INDEX16) {
+       continue;
+@@ -948,9 +953,13 @@ void handle_aurora(ByteReader& reader) noexcept {
+       l.flags = reader.read<u32>();
+       l.id = reader.read<u32>();
+     }
+-    gfx::enhanced::set_lights(lights.data(), count);
++    if (!g_gxState.replayMask) {
++      gfx::enhanced::set_lights(lights.data(), count);
++    }
+   } else if (subCmd == GX_AURORA_SCENE_END) {
+-    gfx::enhanced::scene_end();
++    if (!g_gxState.replayMask) {
++      gfx::enhanced::scene_end();
++    }
+   } else if (subCmd == GX2_SET_POLYGON_OFFSET) {
+     const f32 frontOffset = reader.read<f32>();
+     const f32 frontScale = reader.read<f32>();
+@@ -981,19 +990,42 @@ void handle_aurora(ByteReader& reader) noexcept {
+   } else if (subCmd == GX_AURORA_LOAD_COPY_DEST) {
+     g_gxState.texCopyDest = reinterpret_cast<const void*>(reader.read<u64>());
+   } else if (subCmd == GX_AURORA_REQUEST_DEPTH_SNAPSHOT) {
+-    gfx::depth_peek::request_snapshot();
++    if (!g_gxState.replayMask) {
++      gfx::depth_peek::request_snapshot();
++    }
+   } else if (subCmd == GX_AURORA_BEGIN_OFFSCREEN) {
+     const u32 width = reader.read<u32>();
+     const u32 height = reader.read<u32>();
+-    gfx::begin_offscreen(width, height);
++    if (!g_gxState.replayMask) {
++      gfx::begin_offscreen(width, height);
++    }
+   } else if (subCmd == GX_AURORA_END_OFFSCREEN) {
+-    gfx::end_offscreen();
++    if (!g_gxState.replayMask) {
++      gfx::end_offscreen();
++    }
+   } else if (subCmd == GX_AURORA_DESTROY_TEXOBJ) {
+-    evict_texture_object(reader.read<u32>());
++    const u32 id = reader.read<u32>();
++    if (!g_gxState.replayMask) {
++      evict_texture_object(id);
++    }
+   } else if (subCmd == GX_AURORA_DESTROY_TLUT) {
+-    evict_tlut_object(reader.read<u32>());
++    const u32 id = reader.read<u32>();
++    if (!g_gxState.replayMask) {
++      evict_tlut_object(id);
++    }
+   } else if (subCmd == GX_AURORA_DESTROY_COPY_TEX) {
+-    evict_copy_texture(reinterpret_cast<const void*>(reader.read<u64>()));
++    const auto* ptr = reinterpret_cast<const void*>(reader.read<u64>());
++    if (!g_gxState.replayMask) {
++      evict_copy_texture(ptr);
++    }
++  } else if (subCmd == GX_AURORA_SET_FADE) {
++    const u8 q = reader.read<u8>();
++    if (g_gxState.fadeQ != q) {
++      g_gxState.fadeQ = q;
++      g_gxState.dirty |= DirtyImmediates;  // no merging across a fade change
++    }
++  } else if (subCmd == GX_AURORA_SET_REPLAY_MASK) {
++    g_gxState.replayMask = reader.read<u8>() != 0;
+   } else if (subCmd == GX_AURORA_DRAW_SIZED) {
+     const u8 cmd = reader.read<u8>();
+     const u32 byteLen = reader.read<u32>();
+@@ -1049,13 +1081,16 @@ void handle_aurora(ByteReader& reader) noexcept {
+   } else if (subCmd == GX_AURORA_STATE_SAVE || subCmd == GX_AURORA_STATE_RESTORE) {
+     // Replay state slots: everything but the copy-texture caches (copies made since stay valid)
+     // and the per-frame cache state (array upload ranges, texture binds), which is rebuilt.
+-    static std::array<std::unique_ptr<GXState>, 4> sSlots;
++    // Slots 4..7 (GX_AURORA_SET_REPLAY_MASK passes) hold the GX state only.
++    static std::array<std::unique_ptr<GXState>, 8> sSlots;
+     // The copy textures each slot's frame ended with (by generation, so they stay as they were).
+     static std::array<std::optional<decltype(GXState::copyTextures)>, 4> sCopySlots;
+-    const u8 slot = reader.read<u8>() & 3;
++    const u8 slot = reader.read<u8>() & 7;
+     auto& state = g_gxState;
+     const u8 generation = state.copyGeneration;
+-    if (subCmd == GX_AURORA_STATE_SAVE) {
++    if (slot >= 4) {
++      // (state only: copies, copy-to-RAM entries and generation flags stay as they are)
++    } else if (subCmd == GX_AURORA_STATE_SAVE) {
+       sCopySlots[slot] = state.copyTextures;
+       gfx::efb_ram::save_slot(slot);
+       gfx::efb_ram::set_generation(generation, false, false);
+diff --git a/lib/gx/regs.cpp b/lib/gx/regs.cpp
+index 28a5658..2c203af 100644
+--- a/lib/gx/regs.cpp
++++ b/lib/gx/regs.cpp
+@@ -271,6 +271,9 @@ void bp_clear_depth(u8, u32 value) noexcept { g_gxState.clearDepth = reg_get(val
+ 
+ // EFB copy trigger (0x52)
+ void bp_efb_copy(u8, u32 value) noexcept {
++  if (g_gxState.replayMask) {
++    return;
++  }
+   const bool clear = reg_get(value, 1, 11) != 0;
+   g_gxState.copyClamp = static_cast<u8>(reg_get(value, 2, 0));
+   if (reg_get(value, 1, 14) != 0) {
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+index c83b09a..2113f65 100644
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -336,6 +336,8 @@ struct GXState {
+     }
+   };
+   u8 copyGeneration = 0;
++  u8 fadeQ = 0;             // GX_AURORA_SET_FADE: share of pixels dropped (0..255)
++  bool replayMask = false;  // GX_AURORA_SET_REPLAY_MASK: skip draws, copies and passes
+   // Frame interpolation: per loaded texture, a copy of its texels taken when the frame was
+   // captured (GX_AURORA_LOAD_TEXOBJ's content pointer). When set, the texture is read from it as
+   // plain memory, without EFB-copy lookups by its address.
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index aa1e89c..57d82aa 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -559,7 +559,7 @@ std::string vtx_attr(const ShaderConfig& config, GXAttr attr) {
+   const auto type = config.attrs[attr].attrType;
+   if (type == GX_NONE) {
+     if (attr == GX_VA_PNMTXIDX) {
+-      return "imm.current_pnmtx";
++      return "(imm.current_pnmtx & 0xFFu)";
+     }
+     if (attr == GX_VA_NRM) {
+       // Default normal
+@@ -1555,7 +1555,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+     }
+     vidxAttr = "in_vidx"sv;
+   } else if (config.attrs[GX_VA_PNMTXIDX].attrType == GX_NONE) {
+-    vtxXfrAttrsPre += "\n    let in_pnmtxidx = imm.current_pnmtx;";
++    vtxXfrAttrsPre += "\n    let in_pnmtxidx = imm.current_pnmtx & 0xFFu;";
+   }
+ 
+   // Load vertex attributes
+@@ -2490,6 +2490,15 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+     fragmentFn += "\n    prev.a = 1.0;";
+   }
+ 
++  // GX_AURORA_SET_FADE (frame interpolation): drop q/255 of the pixels in a 4x4 ordered dither.
++  fragmentFn +=
++      "\n    let fade_q = (imm.current_pnmtx >> 8u) & 0xFFu;"
++      "\n    if (fade_q != 0u) {"
++      "\n        var fade_bayer = array<u32, 16>(0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);"
++      "\n        let fade_p = vec2u(in.pos.xy) & vec2u(3u);"
++      "\n        if ((f32(fade_bayer[fade_p.y * 4u + fade_p.x]) + 0.5) * 16.0 < f32(fade_q)) { discard; }"
++      "\n    }";
++
+   std::string fragmentOutput;
+   std::string_view fragmentOutputType = "@location(0) vec4f"sv;
+   std::string fragmentReturn = "\n    return prev;"s;

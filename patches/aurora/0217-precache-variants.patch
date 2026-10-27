@@ -1,0 +1,777 @@
+0217: precache every variant the current settings produce, keyed by canonical configs
+
+A play session with enhanced lighting still compiled 137 pipelines on demand (100-180 ms frames).
+They were variants of configs the shipped list held, or the same shader under another key:
+
+- Canonical keys (gx::canonicalize_pipeline_config, applied in find_pipeline and to every known
+  config): the destination alpha value is reduced to none / 0 / other (create_pipeline only tests
+  those; the value is the draw's blend constant), and color channels / texgens the shader does not
+  read are reset; depth-only copies drop the enhanced class (no enhanced shading; the class only
+  appended uniforms). LM drew each ghost fade level with its own pipeline; the 5453-config list
+  collapses to 1117 shaders.
+- The rebuild expands every recorded config into the variants the current settings produce
+  (queue_gx_variants): GX accuracy flags (as before), enhanced shader classes, the glow re-draw,
+  the depth pre-pass and shadow-caster copies, the realistic flashlight's alpha-only cone
+  (enhanced::precache_variants, from enhanced::precache_bits of the set configuration) and the
+  early-Z alpha-test split pair (gx::early_z_split_variants), each for the targets it is drawn
+  into. A change of those bits rebuilds the set like an accuracy flag change.
+- A config met for the first time in play queues its own variants at once.
+- aurora_pipeline_cache_get_stats: rebuildPending = pipelines queued by rebuilds not built yet (the
+  application holds the game while they compile). MISS log lines name the config, the render
+  target layout and the state.
+
+diff --git a/include/aurora/pipeline_cache.h b/include/aurora/pipeline_cache.h
+--- a/include/aurora/pipeline_cache.h
++++ b/include/aurora/pipeline_cache.h
+@@ -6,7 +6,9 @@
+ // Render pipelines (WGSL generated from the GX TEV/vertex state + blend/depth state) are
+ // created on worker threads. Every pipeline config ever used is remembered in
+ // <cachePath>/pipeline_cache.db and all of them are rebuilt in the background at startup
+-// (and again when the render target layout or the GX accuracy flags change), so draws
++// (and again when the render target layout, the GX accuracy flags or the enhanced-lighting
++// parts that select shader variants change; 0217: each recorded config is expanded into the
++// variants the current settings produce), so draws
+ // normally find their pipeline ready. A draw whose pipeline is still being compiled waits
+ // for it instead of being skipped (a hitch, never a missing object).
+ 
+@@ -29,6 +31,8 @@
+   uint32_t workerThreads;   // pipeline compile threads
+   uint32_t seeded;          // configs added by aurora_pipeline_cache_seed
+   uint32_t droppedDraws;    // draws skipped: pipeline creation failed, or not ready with waiting disabled
++  uint32_t rebuildPending;  // 0217: pipelines the last rebuilds of the known set (startup, settings
++                            // or render target changes) queued that are not built yet
+ } AuroraPipelineStats;
+ 
+ /** Adds the pipeline configs in a precache list file (format below) to the known set; they
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -2488,6 +2488,136 @@
+   return n;
+ }
+ 
++bool is_emissive(const gx::PipelineConfig& c) noexcept;
++
++// 0217: the parts of the configuration that select pipeline variants (see precache_variants).
++uint32_t precache_bits() noexcept {
++  std::lock_guard lock{g_cfgMutex};
++  const auto& c = g_pending;
++  if (!c.enabled) {
++    return 0;
++  }
++  const bool aoRecv = c.ssao && !g_aoPost;
++  uint32_t bits = PrecacheEnabled;
++  if (c.bloom && c.bloomEmissive > 0.f) {
++    bits |= PrecacheGlow;
++  }
++  const bool pointShadows = c.extraLights && c.extraShadows;
++  if (pointShadows || (aoRecv && c.ssaoIntensity > 0.f)) {
++    bits |= PrecacheDepth;
++  }
++  if (pointShadows && c.extraShadowMode == 1) {
++    bits |= PrecacheCasters;
++  }
++  if (c.realisticFlashlight != 0) {
++    bits |= PrecacheBeam;
++  }
++  if (aoRecv) {
++    bits |= PrecacheAo;
++  }
++  return bits;
++}
++
++// 0217: every pipeline config a game draw with config `c` can lead to while enhanced lighting is
++// on with `bits` (precache_bits): its shader classes (shader_class: a config recorded with the
++// master switch off is also built as world (1) and ghost-pass (2) variant when it could be one),
++// the glow re-draw (note_glow_draw), the depth pre-pass copy and the light shadow-map caster
++// (note_draw: dc, lc) and the realistic flashlight's alpha-only cone (ac). Draw classes and
++// scene state are not known here, so this errs on the side of building a variant too many.
++void precache_variants(const gx::PipelineConfig& c, uint32_t bits,
++                       const std::function<void(const gx::PipelineConfig&, uint8_t targets)>& emit) noexcept {
++  if (c.shaderConfig.depthOnly || c.shaderConfig.lightDepth) {
++    if (bits & PrecacheEnabled) {
++      emit(c, PrecacheDepthTarget);
++    }
++    return;
++  }
++  const bool additive = c.blendMode == GX_BM_BLEND && c.blendFacDst == GX_BL_ONE;
++  uint8_t classes = 0;
++  if ((bits & PrecacheEnabled) == 0) {
++    classes = 1u << 0;
++  } else {
++    classes = 1u << c.shaderConfig.enhClass;
++    if (c.shaderConfig.enhClass == 0 && !additive && c.shaderConfig.lineMode == 0 && !c.shaderConfig.wireframe) {
++      // shader_class's test on the (canonical) config: textured and lit, a GR16 shadow compare, or
++      // an AO receiver (depth-writing). A channel lit but unread by the TEV no longer shows in the
++      // canonical config; such a draw is still built when it is first drawn (with its variants).
++      bool textured = false, want = (bits & PrecacheAo) && c.depthUpdate;
++      for (const auto& cc : c.shaderConfig.colorChannels) {
++        want = want || cc.lightingEnabled;
++      }
++      for (u32 i = 0; i < c.shaderConfig.tevStageCount && i < gx::MaxTevStages; ++i) {
++        const auto& st = c.shaderConfig.tevStages[i];
++        textured = textured || st.texMapId != GX_TEXMAP_NULL;
++        want = want || (st.alphaOp.op == GX_TEV_COMP_GR16_GT && st.colorPass.b == GX_CC_TEXC);
++      }
++      if (textured && want) {
++        classes |= (1u << 1) | (1u << 2);
++      }
++    }
++  }
++  for (uint8_t cls = 0; cls < 3; ++cls) {
++    if ((classes & (1u << cls)) == 0) {
++      continue;
++    }
++    gx::PipelineConfig v = c;
++    v.shaderConfig.enhClass = cls;
++    // (a recorded glow-shaped config may be a glow re-draw: 0214 builds those for the glow target)
++    emit(v, PrecacheScene | PrecacheOffscreen |
++                ((bits & PrecacheEnabled) && v.colorUpdate && !v.alphaUpdate && !v.depthUpdate &&
++                         v.dstAlpha == UINT32_MAX && additive
++                     ? PrecacheGlowTarget
++                     : 0));
++    if ((bits & PrecacheEnabled) == 0) {
++      continue;
++    }
++    if ((bits & PrecacheGlow) && is_emissive(v)) {
++      gx::PipelineConfig gc = v;
++      if (gc.depthFunc == GX_LESS) {
++        gc.depthFunc = GX_LEQUAL;
++      } else if (gc.depthFunc == GX_GREATER) {
++        gc.depthFunc = GX_GEQUAL;
++      }
++      gc.depthUpdate = false;
++      gc.alphaUpdate = false;
++      gc.colorUpdate = true;
++      gc.dstAlpha = UINT32_MAX;
++      emit(gc, PrecacheGlowTarget); // only drawn into the glow buffer (not offscreen)
++    }
++    if ((bits & PrecacheDepth) && v.depthCompare && v.depthUpdate && !additive) {
++      gx::PipelineConfig dc = v;
++      dc.colorUpdate = false;
++      dc.alphaUpdate = false;
++      dc.dstAlpha = UINT32_MAX;
++      dc.shaderConfig.depthOnly = 1;
++      emit(dc, PrecacheDepthTarget);
++      if ((bits & PrecacheCasters) && v.shaderConfig.lineMode == 0 && v.shaderConfig.zTexOp == 0) {
++        gx::PipelineConfig lc = dc;
++        lc.shaderConfig.lightDepth = 1;
++        lc.depthCompare = true;
++        lc.depthUpdate = true;
++        lc.depthFunc = GX_LEQUAL;
++        lc.cullMode = GX_CULL_NONE;
++        lc.polygonOffsetBits = 0;
++        lc.polygonOffsetScaleBits = 0;
++        emit(lc, PrecacheDepthTarget);
++      }
++    }
++    if ((bits & PrecacheBeam) && additive && v.alphaUpdate) {
++      bool cone = false;
++      for (u32 i = 0; i < v.shaderConfig.tevStageCount && i < gx::MaxTevStages && !cone; ++i) {
++        const auto tc = v.shaderConfig.tevStages[i].texCoordId;
++        cone = tc < gx::MaxTexCoord && v.shaderConfig.tcgs[tc].type == GX_TG_SRTG;
++      }
++      if (cone) {
++        gx::PipelineConfig ac = v;
++        ac.colorUpdate = false;
++        emit(ac, PrecacheScene); // (not in offscreen passes)
++      }
++    }
++  }
++}
++
+ // Additive draws: what they add to the picture is light (glows, sparkles, lens/beam sprites,
+ // fire, lightning effects).
+ bool is_emissive(const gx::PipelineConfig& c) noexcept {
+diff --git a/lib/gfx/enhanced.hpp b/lib/gfx/enhanced.hpp
+--- a/lib/gfx/enhanced.hpp
++++ b/lib/gfx/enhanced.hpp
+@@ -5,6 +5,8 @@
+ #include <aurora/lights.h>
+ 
+ #include "types.hpp"
++
++#include <functional>
+ 
+ namespace aurora::gx {
+ struct PipelineConfig;
+@@ -72,5 +74,25 @@
+ // 0214: the enhanced passes' render targets a known config is drawn into (written to `out`, at most
+ // 2; returns the count); `sceneToo` false when the config is never drawn into the scene.
+ size_t precache_layouts(const gx::PipelineConfig& c, RenderTargetLayout* out, bool& sceneToo) noexcept;
++// 0217: the configuration parts that select pipeline variants (the latest set configuration) and
++// the configs a draw with config `c` leads to under them (itself included; emitted, not deduped).
++enum : uint32_t {
++  PrecacheEnabled = 1u << 0, // master switch: enhanced shader classes
++  PrecacheGlow = 1u << 1,    // bloom from emissive draws: glow re-draws
++  PrecacheDepth = 1u << 2,   // depth pre-pass (point-light shadows, forward AO)
++  PrecacheCasters = 1u << 3, // light shadow maps (shadow-map mode)
++  PrecacheBeam = 1u << 4,    // realistic flashlight (alpha-only cone)
++  PrecacheAo = 1u << 5,      // ambient occlusion receivers (unlit opaque world draws get the world class)
++};
++// Render targets a variant is built for (emit's second argument).
++enum : uint8_t {
++  PrecacheScene = 1u << 0,     // the EFB (scene layout)
++  PrecacheOffscreen = 1u << 1, // offscreen EFB passes (single sample, one attachment)
++  PrecacheGlowTarget = 1u << 2,
++  PrecacheDepthTarget = 1u << 3,
++};
++uint32_t precache_bits() noexcept;
++void precache_variants(const gx::PipelineConfig& c, uint32_t bits,
++                       const std::function<void(const gx::PipelineConfig&, uint8_t targets)>& emit) noexcept;
+ 
+ } // namespace aurora::gfx::enhanced
+diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -75,6 +75,12 @@
+ static uint32_t g_requestedThreads = 0;
+ static uint32_t g_workerThreadCount = 0;
+ static std::optional<uint32_t> g_rebuildAccuracy; // GX accuracy flags the known set was last built for
++// 0217: enhanced-lighting variant bits (enhanced::precache_bits) the known set was last built for,
++// and the pipelines a rebuild queued that are not built yet (the application holds the game
++// while they compile: aurora_pipeline_cache_get_stats rebuildPending).
++static std::optional<uint32_t> g_rebuildEnhBits;
++static std::atomic<uint32_t> g_rebuildPending{0};
++static thread_local bool g_inRebuild = false; // set while rebuild_pipeline_cache queues (its thread)
+ 
+ static uint64_t now_ns() {
+   return static_cast<uint64_t>(
+@@ -95,6 +101,7 @@
+   PipelineRef hash;
+   NewPipelineCallback create;
+   bool precache = false; // queued by background precaching (rebuild_pipeline_cache)
++  bool rebuild = false;  // 0217: queued by a rebuild (counted in g_rebuildPending)
+ };
+ 
+ enum class CacheWriteOp : uint8_t {
+@@ -525,19 +532,59 @@
+   g_pipelineReadyCv.notify_all();
+ }
+ 
++// 0217: known configs are kept in their canonical form (gx::canonicalize_pipeline_config), so lists
++// and caches recorded before it collapse to one entry per shader and an export is canonical.
+ template <typename Config>
+-static void remember_pipeline_config(ShaderType type, const Config& config, uint32_t firstFrameUsed, bool persist) {
++static Config canonical_known(const Config& config) {
++  if constexpr (std::is_same_v<Config, gx::PipelineConfig>) {
++    auto c = config;
++    gx::canonicalize_pipeline_config(c);
++    return c;
++  } else {
++    return config;
++  }
++}
++
++template <typename Config>
++static bool remember_pipeline_config(ShaderType type, const Config& config, uint32_t firstFrameUsed, bool persist) {
+   const auto cacheKey = xxh3_hash(config, static_cast<HashType>(type));
+   bool changed = false;
++  bool isNew = false;
+   {
+     std::lock_guard lock{g_pipelineMutex};
+     auto [it, inserted] = g_knownPipelines.try_emplace(cacheKey, KnownPipeline{type, config, firstFrameUsed});
+     changed = inserted || firstFrameUsed < it->second.firstFrameUsed;
++    isNew = inserted;
+     it->second.firstFrameUsed = std::min(it->second.firstFrameUsed, firstFrameUsed);
+   }
+   if (persist && changed) {
+     enqueue_pipeline_cache_write(make_pipeline_cache_write(type, cacheKey, config, firstFrameUsed));
+   }
++  return isNew;
++}
++
++static CompiledPipeline create_pending(PendingPipeline& pending);
++
++// 0217: what a MISS log line says about the pipeline (set by resolve_pipeline on this thread).
++static thread_local const gx::PipelineConfig* tl_missConfig = nullptr;
++static thread_local const RenderTargetLayout* tl_missLayout = nullptr;
++static thread_local HashType tl_missCacheKey = 0;
++static std::string miss_detail() {
++  if (tl_missConfig == nullptr || tl_missLayout == nullptr) {
++    return {};
++  }
++  const auto& c = *tl_missConfig;
++  const auto& l = *tl_missLayout;
++  const auto& sc = c.shaderConfig;
++  return fmt::format(" config {:016x} layout {:016x} ({} color {} depth {} x{}) enh{} dO{} lD{} efb{} dith{} eb{} "
++                     "blend {} {}/{} op {} cUaUzU {}{}{} zc{} zf{} cull {} dA {}",
++                     tl_missCacheKey, l.key, l.colorAttachmentCount,
++                     l.colorAttachmentCount ? static_cast<uint32_t>(l.colorAttachments[0].format) : 0u,
++                     static_cast<uint32_t>(l.depthStencilFormat), l.sampleCount, int(sc.enhClass), int(sc.depthOnly),
++                     int(sc.lightDepth), int(sc.efbFmt), int(sc.dither), int(sc.efbBlend), int(c.blendMode),
++                     int(c.blendFacSrc), int(c.blendFacDst), int(c.blendOp), int(c.colorUpdate), int(c.alphaUpdate),
++                     int(c.depthUpdate), int(c.depthCompare), int(c.depthFunc), int(c.cullMode),
++                     c.dstAlpha == UINT32_MAX ? -1 : int(c.dstAlpha));
+ }
+ 
+ static PipelineRef find_pipeline_impl(PipelineRef runtimeKey, NewPipelineCallback&& cb,
+@@ -559,7 +606,7 @@
+       if (blocking && !g_hasPipelineThread) {
+         auto pending = take_pending_pipeline(runtimeKey);
+         if (pending) {
+-          auto result = pending->create();
++          auto result = create_pending(*pending);
+           pipelineCount = result.pipeline_count();
+           g_pipelines.try_emplace(runtimeKey, std::move(result));
+           pipelineReady = true;
+@@ -586,14 +633,18 @@
+           .hash = runtimeKey,
+           .create = std::move(cb),
+           .precache = priority == PipelinePriority::Background,
++          .rebuild = priority == PipelinePriority::Background && g_inRebuild,
+       };
+       if (priority == PipelinePriority::Background) {
+         ++g_precacheTotal;
++        if (pending.rebuild) {
++          ++g_rebuildPending;
++        }
+       } else {
+         // A draw needs a pipeline nothing precached: a gap in the precache list.
+         ++g_demandCreated;
+         if (g_pipelineLog.load(std::memory_order_relaxed)) {
+-          Log.info("pipeline {:016x}: MISS (not precached) frame {}", runtimeKey, current_frame());
++          Log.info("pipeline {:016x}: MISS (not precached) frame {}{}", runtimeKey, current_frame(), miss_detail());
+         }
+       }
+       switch (priority) {
+@@ -970,6 +1021,9 @@
+                                     PipelinePriority priority) {
+   const auto cacheKey = xxh3_hash(config, static_cast<HashType>(type));
+   const auto runtimeKey = xxh3_hash(layout.key, cacheKey);
++  tl_missConfig = &config;
++  tl_missLayout = &layout;
++  tl_missCacheKey = cacheKey;
+   return find_pipeline_impl(
+       runtimeKey,
+       [type, cacheKey, config, layout] {
+@@ -1533,6 +1587,9 @@
+   if (pending.precache) {
+     ++g_precacheDone;
+   }
++  if (pending.rebuild) {
++    --g_rebuildPending;
++  }
+   return result;
+ }
+ 
+@@ -1680,7 +1737,7 @@
+       continue;
+     }
+ 
+-    remember_pipeline_config(type, config, static_cast<uint32_t>(firstFrameRaw), false);
++    remember_pipeline_config(type, canonical_known(config), static_cast<uint32_t>(firstFrameRaw), false);
+     ++acceptedRows;
+   }
+ 
+@@ -1765,9 +1822,21 @@
+   return resolve_pipeline(ShaderType::Clear, config, layout, PipelinePriority::Normal);
+ }
+ 
+-PipelineRef find_pipeline(const gx::PipelineConfig& config, const RenderTargetLayout& layout) {
+-  remember_pipeline_config(ShaderType::GX, config, current_frame(), true);
+-  return resolve_pipeline(ShaderType::GX, config, layout, PipelinePriority::Normal);
++static void queue_gx_variants(const gx::PipelineConfig& recorded, uint32_t accuracy, uint32_t enhBits,
++                              absl::flat_hash_set<HashType>* seen);
++
++PipelineRef find_pipeline(const gx::PipelineConfig& drawConfig, const RenderTargetLayout& layout) {
++  // 0217: pipelines are keyed (and built) by the canonical config.
++  gx::PipelineConfig config = drawConfig;
++  gx::canonicalize_pipeline_config(config);
++  const bool isNew = remember_pipeline_config(ShaderType::GX, config, current_frame(), true);
++  const auto ref = resolve_pipeline(ShaderType::GX, config, layout, PipelinePriority::Normal);
++  if (isNew) {
++    // A config the precache did not know: queue the variants it leads to under the current
++    // settings now (compiled while this one is), instead of one more miss for each later.
++    queue_gx_variants(config, gx::g_accuracyFlags.load(std::memory_order_relaxed), enhanced::precache_bits(), nullptr);
++  }
++  return ref;
+ }
+ 
+ #ifdef AURORA_ENABLE_RMLUI
+@@ -1776,6 +1845,107 @@
+   return resolve_pipeline(ShaderType::Rml, config, {}, PipelinePriority::Blocking);
+ }
+ #endif
++
++// The accuracy flags' variant of a recorded config (lib/gx/gx.cpp populate_pipeline_config): known
++// configs (and the shipped precache list) were recorded with some set of flags; build the variant
++// the current flags produce so turning a flag on or off does not miss the precache.
++static gx::PipelineConfig adjust_accuracy(const gx::PipelineConfig& config, uint32_t accuracy) {
++  auto adjusted = config;
++  adjusted.shaderConfig.intTev = (accuracy & GX_AURORA_ACCURACY_INT_TEV) != 0;
++  if ((accuracy & GX_AURORA_ACCURACY_EFB_DEPTH) == 0) {
++    adjusted.shaderConfig.efbFmt = 0;
++    adjusted.shaderConfig.dither = false;
++    adjusted.shaderConfig.efbBlend = false;
++  } else if ((accuracy & GX_AURORA_ACCURACY_EFB_BLEND) != 0 && adjusted.shaderConfig.efbFmt == 1 &&
++             adjusted.shaderConfig.efbBlend) {
++    // 0176: a blended RGBA6 draw is built without the in-shader quantization (as
++    // populate_pipeline_config does), so lists recorded without 6-bit blending cover it.
++    const bool replace =
++        (adjusted.blendMode == GX_BM_BLEND && adjusted.blendFacSrc == GX_BL_ONE &&
++         adjusted.blendFacDst == GX_BL_ZERO) ||
++        (adjusted.blendMode == GX_BM_LOGIC && adjusted.blendOp == GX_LO_COPY);
++    if (!replace) {
++      adjusted.shaderConfig.efbFmt = 0;
++      adjusted.shaderConfig.dither = false;
++      adjusted.shaderConfig.efbBlend = false;
++    }
++  }
++  return adjusted;
++}
++
++// 0217: queue every pipeline a recorded config leads to under the given settings: its accuracy
++// variant (canonical), the enhanced-lighting variants (enhanced::precache_variants: shader
++// classes, glow, depth pre-pass, shadow casters, beam) and the early-Z split pair, each for the
++// render targets it is drawn into (scene + offscreen; 0214: depth-only / glow targets). Built
++// from the recorded configs at every rebuild, so any combination of settings is covered by one
++// list recorded with any settings. `seen` (optional) skips configs already queued this rebuild.
++static void queue_gx_variants(const gx::PipelineConfig& recorded, uint32_t accuracy, uint32_t enhBits,
++                              absl::flat_hash_set<HashType>* seen) {
++  static thread_local RenderTargetLayout scene, offscreen;
++  static thread_local uint64_t sceneKey = UINT64_MAX;
++  if (const auto s = scene_render_target_layout(); s.key != sceneKey) {
++    scene = s;
++    offscreen = s;
++    offscreen.colorAttachmentCount = 1;
++    offscreen.sampleCount = 1;
++    detail::finalize_render_target_layout(offscreen);
++    sceneKey = s.key;
++  }
++  gx::PipelineConfig base = adjust_accuracy(recorded, accuracy);
++  gx::canonicalize_pipeline_config(base);
++  static const RenderTargetLayout* const sExtra = [] {
++    // The enhanced passes' own targets (enhanced::precache_layouts of a depth / glow shaped config).
++    static RenderTargetLayout l[2];
++    gx::PipelineConfig d{};
++    d.shaderConfig.depthOnly = 1;
++    bool sceneToo = true;
++    enhanced::precache_layouts(d, &l[0], sceneToo);
++    gx::PipelineConfig g{};
++    g.colorUpdate = true;
++    g.dstAlpha = UINT32_MAX;
++    g.blendMode = GX_BM_BLEND;
++    g.blendFacSrc = GX_BL_SRCALPHA;
++    g.blendFacDst = GX_BL_ONE;
++    enhanced::precache_layouts(g, &l[1], sceneToo);
++    return l;
++  }();
++  const auto queue = [&](const gx::PipelineConfig& in, uint8_t targets) {
++    gx::PipelineConfig v = in;
++    gx::canonicalize_pipeline_config(v);
++    const auto key = xxh3_hash(v, static_cast<HashType>(ShaderType::GX));
++    if (seen != nullptr && !seen->insert(key ^ (uint64_t(targets) << 56)).second) {
++      return;
++    }
++    // Bad or crash-suspect configs are not precached (a suspect may still be built when a draw
++    // needs it, see guarded_create).
++    if (is_quarantined(key)) {
++      return;
++    }
++    if (targets & enhanced::PrecacheDepthTarget) {
++      resolve_pipeline(ShaderType::GX, v, sExtra[0], PipelinePriority::Background);
++    }
++    if (targets & enhanced::PrecacheGlowTarget) {
++      resolve_pipeline(ShaderType::GX, v, sExtra[1], PipelinePriority::Background);
++    }
++    if (targets & enhanced::PrecacheScene) {
++      resolve_pipeline(ShaderType::GX, v, scene, PipelinePriority::Background);
++    }
++    if ((targets & enhanced::PrecacheOffscreen) && offscreen.key != scene.key) {
++      resolve_pipeline(ShaderType::GX, v, offscreen, PipelinePriority::Background);
++    }
++  };
++  enhanced::precache_variants(base, enhBits, [&](const gx::PipelineConfig& v, uint8_t targets) {
++    queue(v, targets);
++    if ((accuracy & GX_AURORA_ACCURACY_EARLY_Z) != 0 && (targets & enhanced::PrecacheScene) &&
++        !v.shaderConfig.depthOnly && !v.shaderConfig.lightDepth) {
++      gx::PipelineConfig depthOnly, color;
++      if (gx::early_z_split_variants(v, depthOnly, color)) {
++        queue(depthOnly, enhanced::PrecacheScene | enhanced::PrecacheOffscreen);
++        queue(color, enhanced::PrecacheScene | enhanced::PrecacheOffscreen);
++      }
++    }
++  });
++}
+ 
+ void rebuild_pipeline_cache() {
+   ZoneScoped;
+@@ -1795,67 +1965,37 @@
+     }
+   }
+   std::ranges::sort(known, {}, &KnownPipeline::firstFrameUsed);
+-  // The GX accuracy flags (GXSetAuroraAccuracy) are baked into each config's shader. Known
+-  // configs (and the shipped precache list) are recorded with them on; build the variant the
+-  // current flags produce (lib/gx/gx.cpp populate_pipeline_config) so turning a flag off does
+-  // not miss the precache.
++  // The GX accuracy flags (GXSetAuroraAccuracy) and the enhanced-lighting parts that select
++  // variants are baked into each config's shader; every recorded config is expanded into the
++  // variants the current settings produce (0217: queue_gx_variants).
+   const uint32_t accuracy = gx::g_accuracyFlags.load(std::memory_order_relaxed);
++  const uint32_t enhBits = enhanced::precache_bits();
+   g_rebuildAccuracy = accuracy;
+-  const auto adjust = [accuracy]<typename Config>(const Config& config) {
+-    if constexpr (std::is_same_v<Config, gx::PipelineConfig>) {
+-      auto adjusted = config;
+-      adjusted.shaderConfig.intTev = (accuracy & GX_AURORA_ACCURACY_INT_TEV) != 0;
+-      if ((accuracy & GX_AURORA_ACCURACY_EFB_DEPTH) == 0) {
+-        adjusted.shaderConfig.efbFmt = 0;
+-        adjusted.shaderConfig.dither = false;
+-        adjusted.shaderConfig.efbBlend = false;
+-      } else if ((accuracy & GX_AURORA_ACCURACY_EFB_BLEND) != 0 && adjusted.shaderConfig.efbFmt == 1 &&
+-                 adjusted.shaderConfig.efbBlend) {
+-        // 0176: a blended RGBA6 draw is built without the in-shader quantization (as
+-        // populate_pipeline_config does), so lists recorded without 6-bit blending cover it.
+-        const bool replace =
+-            (adjusted.blendMode == GX_BM_BLEND && adjusted.blendFacSrc == GX_BL_ONE &&
+-             adjusted.blendFacDst == GX_BL_ZERO) ||
+-            (adjusted.blendMode == GX_BM_LOGIC && adjusted.blendOp == GX_LO_COPY);
+-        if (!replace) {
+-          adjusted.shaderConfig.efbFmt = 0;
+-          adjusted.shaderConfig.dither = false;
+-          adjusted.shaderConfig.efbBlend = false;
+-        }
+-      }
+-      return adjusted;
+-    } else {
+-      return config;
+-    }
+-  };
++  g_rebuildEnhBits = enhBits;
++  absl::flat_hash_set<HashType> seen;
++  seen.reserve(known.size() * 4);
++  const uint32_t before = g_precacheTotal.load();
++  g_inRebuild = true;
+   for (const auto& pipeline : known) {
+     std::visit(
+         [&](const auto& config) {
+-          const auto adjusted = adjust(config);
+-          // Bad or crash-suspect configs are not precached (a suspect may still be built when a
+-          // draw needs it, see guarded_create).
+-          if (is_quarantined(xxh3_hash(adjusted, static_cast<HashType>(pipeline.type)))) {
+-            return;
+-          }
+-          if constexpr (std::is_same_v<std::decay_t<decltype(adjusted)>, gx::PipelineConfig>) {
+-            // 0214: also (or only) the enhanced-lighting targets the config is drawn into.
+-            RenderTargetLayout extra[2];
+-            bool sceneToo = true;
+-            const size_t n = enhanced::precache_layouts(adjusted, extra, sceneToo);
+-            for (size_t i = 0; i < n; ++i) {
+-              resolve_pipeline(pipeline.type, adjusted, extra[i], PipelinePriority::Background);
+-            }
+-            if (!sceneToo) {
++          if constexpr (std::is_same_v<std::decay_t<decltype(config)>, gx::PipelineConfig>) {
++            queue_gx_variants(config, accuracy, enhBits, &seen);
++          } else {
++            if (is_quarantined(xxh3_hash(config, static_cast<HashType>(pipeline.type)))) {
+               return;
+             }
+-          }
+-          resolve_pipeline(pipeline.type, adjusted, scene, PipelinePriority::Background);
+-          if (offscreen.key != scene.key) {
+-            resolve_pipeline(pipeline.type, adjusted, offscreen, PipelinePriority::Background);
++            resolve_pipeline(pipeline.type, config, scene, PipelinePriority::Background);
++            if (offscreen.key != scene.key) {
++              resolve_pipeline(pipeline.type, config, offscreen, PipelinePriority::Background);
++            }
+           }
+         },
+         pipeline.config);
+   }
++  g_inRebuild = false;
++  Log.info("Pipeline precache: {} known configs -> {} configs for accuracy {:#x} enhanced {:#x}, {} new pipelines queued",
++           known.size(), seen.size(), accuracy, enhBits, g_precacheTotal.load() - before);
+   if (g_gpuCachePruneArmed) {
+     // Prune unused Dawn cache entries once everything queued so far has been built.
+     g_gpuCachePruneArmed = false;
+@@ -1891,6 +2031,7 @@
+   // added its precache list (aurora_pipeline_cache_seed) and set the GX accuracy flags.
+   g_pipelineLayoutKey.reset();
+   g_rebuildAccuracy.reset();
++  g_rebuildEnhBits.reset();
+   if (!g_pipelineCacheBroken && loadedCount > 0) {
+     g_gpuCachePruneArmed = true;
+   }
+@@ -1922,6 +2063,8 @@
+   g_gpuCachePrunePending = false;
+   g_gpuCachePruneArmed = false;
+   g_rebuildAccuracy.reset();
++  g_rebuildEnhBits.reset();
++  g_rebuildPending = 0;
+   g_pipelines.clear();
+   g_knownPipelines.clear();
+   g_pipelineLayoutKey.reset();
+@@ -1944,7 +2087,8 @@
+   }
+   journal_update_phase();
+   if (g_pipelineLayoutKey != scene_render_target_layout().key ||
+-      g_rebuildAccuracy != gx::g_accuracyFlags.load(std::memory_order_relaxed)) {
++      g_rebuildAccuracy != gx::g_accuracyFlags.load(std::memory_order_relaxed) ||
++      g_rebuildEnhBits != enhanced::precache_bits()) {
+     rebuild_pipeline_cache();
+   }
+ }
+@@ -2314,7 +2458,7 @@
+       return "recorded as bad";
+     }
+   }
+-  remember_pipeline_config(type, config, firstFrame, false);
++  remember_pipeline_config(type, canonical_known(config), firstFrame, false);
+   return nullptr;
+ }
+ } // namespace
+@@ -2477,6 +2621,7 @@
+   out->workerThreads = g_workerThreadCount;
+   out->seeded = g_seeded.load(std::memory_order_relaxed);
+   out->droppedDraws = g_droppedDraws.load(std::memory_order_relaxed);
++  out->rebuildPending = g_rebuildPending.load(std::memory_order_relaxed);
+ }
+ 
+ void aurora_pipeline_cache_set_log(bool enabled) { g_pipelineLog = enabled; }
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -782,6 +782,7 @@
+ // 0182: the split decision and its two pipelines are derived from the cached pipeline config, so
+ // they are computed once per pipeline change instead of for every draw (two pipeline lookups
+ // hashing the whole config per draw; ~16,000 split draws per foyer frame).
++static bool split_variants_impl(const PipelineConfig& pc, PipelineConfig& depthOnly, PipelineConfig& color) noexcept;
+ static bool early_z_split_cached(DrawCache& cache) noexcept {
+   const u32 flags = g_accuracyFlags.load(std::memory_order_relaxed) | (g_gxState.zCompLocBeforeTex ? 0x80000000u : 0u);
+   const auto targetKey = gfx::get_render_target_layout().key;
+@@ -797,7 +798,26 @@
+   if (!cache.split) {
+     return false;
+   }
+-  PipelineConfig depthOnly = cache.config;
++  PipelineConfig depthOnly, color;
++  split_variants_impl(cache.config, depthOnly, color);
++  cache.splitDepth = gfx::pipeline_ref(depthOnly);
++  cache.splitColor = gfx::pipeline_ref(color);
++  return true;
++}
++
++static bool split_variants_impl(const PipelineConfig& pc, PipelineConfig& depthOnly, PipelineConfig& color) noexcept {
++  if (!pc.depthCompare || !pc.depthUpdate || !pc.shaderConfig.alphaCompare || pc.shaderConfig.lineMode != 0 ||
++      pc.shaderConfig.wireframe) {
++    return false;
++  }
++  bool rejects = false;
++  for (u32 a = 0; a < 256 && !rejects; ++a) {
++    rejects = !alpha_compare_passes(pc.shaderConfig.alphaCompare, a);
++  }
++  if (!rejects) {
++    return false;
++  }
++  depthOnly = pc;
+   depthOnly.shaderConfig.alphaCompare = AlphaCompare{GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0};
+   depthOnly.colorUpdate = false;
+   depthOnly.alphaUpdate = false;
+@@ -806,8 +826,7 @@
+   depthOnly.blendFacDst = GX_BL_ZERO;
+   depthOnly.blendOp = GX_LO_COPY;
+   depthOnly.dstAlpha = UINT32_MAX;
+-  cache.splitDepth = gfx::pipeline_ref(depthOnly);
+-  PipelineConfig color = cache.config;
++  color = pc;
+   color.depthUpdate = false;
+   switch (color.depthFunc) {
+   case GX_LESS: color.depthFunc = GX_LEQUAL; break;
+@@ -815,7 +834,6 @@
+   case GX_NEQUAL: color.depthFunc = GX_EQUAL; break;
+   default: break;
+   }
+-  cache.splitColor = gfx::pipeline_ref(color);
+   return true;
+ }
+ 
+@@ -1493,3 +1511,9 @@
+ }
+ 
+ } // namespace aurora::gx::fifo
++
++// 0217: the split pair for the pipeline precache (lib/gfx/pipeline_cache.cpp).
++bool aurora::gx::early_z_split_variants(const PipelineConfig& pc, PipelineConfig& depthOnly,
++                                        PipelineConfig& color) noexcept {
++  return fifo::split_variants_impl(pc, depthOnly, color);
++}
+diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
+--- a/lib/gx/gx.cpp
++++ b/lib/gx/gx.cpp
+@@ -1,6 +1,7 @@
+ #include "gx.hpp"
+ 
+ #include "pipeline.hpp"
++#include "shader_info.hpp"
+ #include "texture.hpp"
+ #include "../dolphin/vi/vi_internal.hpp"
+ #include "../webgpu/gpu.hpp"
+@@ -423,6 +424,47 @@
+       .fragment = &fragmentState,
+   };
+   return g_device.CreateRenderPipeline(&descriptor);
++}
++
++void canonicalize_pipeline_config(PipelineConfig& config) noexcept {
++  if (config.dstAlpha != UINT32_MAX && config.dstAlpha != 0) {
++    config.dstAlpha = 0xFF; // create_pipeline / to_blend_state only test for UINT32_MAX and 0
++  }
++  auto& sc = config.shaderConfig;
++  if (sc.depthOnly || sc.lightDepth) {
++    // Depth-only copies (enhanced pre-pass, shadow casters) never run the enhanced shading; the
++    // class only appended the enhanced uniforms to the struct (last, so nothing before moves).
++    sc.enhClass = 0;
++  }
++  if (sc.tevStageCount > MaxTevStages || sc.numIndStages > MaxIndStages) {
++    return; // (invalid; validate_config rejects it)
++  }
++  const ShaderInfo info = build_shader_info(sc);
++  // Texgens: every coordinate the shader generates (sampled, emboss sources) plus any a TEV stage
++  // names (the enhanced shadow receiver looks at the previous stage's texgen type).
++  auto keepTc = info.sampledTexCoords;
++  for (u32 i = 0; i < sc.tevStageCount; ++i) {
++    if (const auto tc = sc.tevStages[i].texCoordId; tc < MaxTexCoord) {
++      keepTc.set(tc);
++    }
++  }
++  for (u32 i = 0; i < sc.numIndStages; ++i) {
++    if (const auto tc = sc.indStages[i].texCoordId; tc < MaxTexCoord) {
++      keepTc.set(tc);
++    }
++  }
++  for (u32 i = 0; i < MaxTexCoord; ++i) {
++    if (!keepTc.test(i)) {
++      sc.tcgs[i] = {};
++    }
++  }
++  // Color channels: the shader evaluates channel pair i (color i, alpha i) only when sampled.
++  for (u32 i = 0; i < MaxColorChannels / 2; ++i) {
++    if (!info.sampledColorChannels.test(i)) {
++      sc.colorChannels[i] = {};
++      sc.colorChannels[i + GX_ALPHA0] = {};
++    }
++  }
+ }
+ 
+ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXVtxFmt fmt) noexcept {
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -581,6 +581,16 @@
+   std::array<gfx::Range, MaxIndexAttr> vaRanges{};
+ };
+ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXVtxFmt fmt) noexcept;
++// 0217: the pipeline cache's key form of a config. Fields the generated pipeline does not depend
++// on are reset: the destination alpha value (only none / 0 / other matter: the value itself is the
++// draw's blend constant), color channels no TEV stage or color texgen reads, and texgens of
++// coordinates nothing reads. Equal shaders then share one pipeline, and the precache list holds
++// one config per shader instead of one per game state (LM: every ghost fade level was a pipeline).
++void canonicalize_pipeline_config(PipelineConfig& config) noexcept;
++// 0217: the two pipelines of the early-Z alpha-test split (lib/gx/command_processor.cpp) for a
++// config, when its alpha test can reject (false otherwise). The accuracy flag and the GX
++// z-compare location are the caller's to check.
++bool early_z_split_variants(const PipelineConfig& pc, PipelineConfig& depthOnly, PipelineConfig& color) noexcept;
+ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, const gfx::RenderTargetLayout& layout,
+                                     const PipelineOptions& options, ArrayRef<wgpu::VertexBufferLayout> vtxBuffers,
+                                     wgpu::ShaderModule shader, const char* label) noexcept;

@@ -1,0 +1,1171 @@
+diff --git a/include/aurora/enhanced.h b/include/aurora/enhanced.h
+index 68eb07d..ede775d 100644
+--- a/include/aurora/enhanced.h
++++ b/include/aurora/enhanced.h
+@@ -60,7 +60,16 @@ typedef struct {
+   // Shadows of the extra lights flagged ExtraLightCastShadows (up to 4 per frame): a depth
+   // pre-pass of the opaque world draws and a screen-space ray march toward each light.
+   bool extraShadows;
+-  uint32_t extraShadowQuality; // 0 low (8 steps), 1 medium (16), 2 high (32)
++  uint32_t extraShadowQuality; // 0 low, 1 medium, 2 high: ray-march steps 8/16/32, shadow-map filter taps 8/16/32
++  // 0028: how the extra-light shadows are made. 0 = screen-space ray march through the camera
++  // depth (cheap; blockers outside the picture cast nothing; up to 4 lights). 1 = shadow maps:
++  // the frame's opaque world draws are rendered from each shadowed light into a cube map (six
++  // faces in one atlas, all faces and lights in one instanced draw per world draw), so blockers
++  // the camera does not see still cast shadows; PCF/PCSS soft edges.
++  uint32_t extraShadowMode;
++  uint32_t extraShadowLights;  // shadow-casting lights per frame, 0..8 (the first flagged lights; screen-space: up to 4)
++  uint32_t extraShadowMapSize; // cube face size in texels (shadow maps): 256..2048
++  float extraShadowSoftness;   // light source size in world units for contact-hardening penumbrae (0 = hard edges)
+ 
+   // Volumetric flashlight beam (scene end, uses depth).
+   bool volumetric;
+@@ -100,6 +109,9 @@ void GXSceneEndAurora(void);
+ // Statistics for the overlay / tests: number of extra lights in the last frame, GPU-side
+ // scene-end passes recorded in the last frame.
+ uint32_t aurora_enhanced_last_light_count(void);
++// 0028: shadow-map statistics of the last mask (shadowed lights, caster draws rendered into the
++// atlas, caster draws skipped because their pipeline was still compiling).
++void aurora_enhanced_shadow_stats(uint32_t* lights, uint32_t* casters, uint32_t* skipped);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+index c2d9eaf..95f0bc6 100644
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -4,6 +4,8 @@
+ #include "enhanced.hpp"
+ 
+ #include "encoding.hpp"
++#include "pipeline_cache.hpp"
++#include "resource_cache.hpp"
+ #include "recording.hpp"
+ #include "resources.hpp"
+ #include "tex_copy_conv.hpp"
+@@ -118,6 +120,7 @@ std::array<float, 3> vivid(const float c[3], float sat) noexcept {
+ // scene's depth, at scene end.
+ struct GlowDraw {
+   gx::DrawData data;
++  PipelineRef lightPipe{}; // 0028: shadow-map caster variant (depth draws; 0 = none)
+   Viewport viewport;
+   ClipRect scissor;
+   uint32_t pass = UINT32_MAX, command = 0; // the recorded draw (merged draws extend it)
+@@ -131,15 +134,23 @@ std::vector<GlowDraw> g_glowDraws;
+ // world draws are re-rendered depth-only (same mechanism as the glow draws) into a pre-pass
+ // before the EFB pass they belong to, a ray-march pass writes the RGBA8 mask and it is copied
+ // into a storage-buffer range that the world shaders of that pass read.
+-constexpr uint32_t MaxShadowLights = 4;
++// 0028: up to 8 lights (two RGBA8 planes) and, with extraShadowMode 1, shadow maps: every
++// opaque world draw also gets a caster variant (ShaderConfig::lightDepth) that renders it into
++// a cube-map atlas from each shadowed light (one instanced draw: instance = light x face), and
++// the mask pass looks the camera-depth positions up in the atlas (PCF / PCSS) instead of ray
++// marching. The mask lives in its own GPU buffer (group 0 binding 2): nothing is uploaded.
++constexpr uint32_t MaxShadowLights = 8;
+ std::array<uint32_t, MaxExtraLights> g_shadowSlot{};
+ uint32_t g_shadowCount = 0;
+ std::vector<GlowDraw> g_depthDraws;
+-Range g_maskRange{};
+ bool g_maskReserved = false; // this frame
+ size_t g_depthFlushed = 0;   // g_depthDraws already resolved and in a queued mask
+ uint32_t g_maskW = 0, g_maskH = 0, g_maskPitch = 0; // pitch in u32 words
+-std::vector<uint8_t> g_maskZeros;
++std::atomic<uint32_t> g_statLights{0}, g_statCasters{0}, g_statSkipped{0};
++uint32_t g_lightGen = 0;                  // bumped when the lights or the configuration change
++uint64_t g_maskKey = ~0ull;               // light gen / atlas / mask layout of the last mask
++bool shadow_maps() noexcept;
++void assign_shadow_slots() noexcept;
+ constexpr auto GlowFormat = wgpu::TextureFormat::RGBA16Float;
+ constexpr size_t MaxGlowDraws = 4096;
+ 
+@@ -378,6 +389,158 @@ fn fs_xlshadow(in: VsOut) -> @location(0) vec4f {
+   return occ;
+ }
+ 
++// 0028: shadow maps. The atlas holds a cube map per shadowed light (3x2 faces); xrec has one
++// record per (light, face): view -> atlas clip matrix rows, the face's tile in atlas NDC (x0, y0,
++// x1, y1) and in atlas pixels.
++// fx.xl[s] = view position + reach, fx.xl[8 + s] = near, tan(half fov), face size, 0;
++// fx.xl[16] = atlas w, h, filter taps, base filter radius (texels);
++// fx.xl[17] = light size (PCSS, world units), reversed z, 0, 0.
++@group(0) @binding(6) var tatlas: texture_depth_2d;
++@group(0) @binding(7) var tcmp: sampler_comparison;
++@group(0) @binding(8) var<storage, read> xrec: array<f32>;
++struct MaskOut {
++  @location(0) a: vec4f,
++  @location(1) b: vec4f,
++};
++fn xrow(i: u32) -> vec4f { return vec4f(xrec[i], xrec[i + 1u], xrec[i + 2u], xrec[i + 3u]); }
++fn vogel(k: u32, n: u32, rot: f32) -> vec2f {
++  let r = sqrt((f32(k) + 0.5) / f32(n));
++  let th = f32(k) * 2.39996323 + rot;
++  return r * vec2f(cos(th), sin(th));
++}
++// Cube face of a direction (view space): 0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z.
++fn cube_face(d: vec3f) -> u32 {
++  let a = abs(d);
++  if (a.x >= a.y && a.x >= a.z) { return select(1u, 0u, d.x >= 0.0); }
++  if (a.y >= a.z) { return select(3u, 2u, d.y >= 0.0); }
++  return select(5u, 4u, d.z >= 0.0);
++}
++// Distance along the face axis of a stored depth.
++fn atlas_axis(z: f32, near: f32) -> f32 {
++  if (fx.xl[17].y > 0.5) { return near / max(z, 1e-7); }
++  return near / max(1.0 - z, 1e-7);
++}
++fn atlas_blocks(z: f32, r: f32) -> bool { return select((z < r), (z > r), (fx.xl[17].y > 0.5)); }
++// Surface normal from the camera depth (the flatter of the two neighbours on each axis, so
++// silhouettes do not bend it).
++// w = 0 where the pixel sits on a one-pixel ledge (both neighbours on an axis jump away, e.g. the
++// edge row of a floor in front of a wall): no reliable normal there.
++fn mask_normal(mp: vec2f, p: vec3f) -> vec4f {
++  let r = mask_view_pos(mp + vec2f(1.0, 0.0)) - p;
++  let l = p - mask_view_pos(mp - vec2f(1.0, 0.0));
++  let u = mask_view_pos(mp + vec2f(0.0, 1.0)) - p;
++  let d = p - mask_view_pos(mp - vec2f(0.0, 1.0));
++  let dx = select(l, r, abs(r.z) < abs(l.z));
++  let dy = select(d, u, abs(u.z) < abs(d.z));
++  let jump = 4.0 + abs(p.z) * 0.02;
++  let ok = min(abs(r.z), abs(l.z)) < jump && min(abs(u.z), abs(d.z)) < jump;
++  let c = cross(dx, dy);
++  if (dot(c, c) < 1e-12) { return vec4f(normalize(-p), 0.0); }
++  var n = normalize(c);
++  if (dot(n, p) > 0.0) { n = -n; }
++  return vec4f(n, select(0.0, 1.0, ok));
++}
++var<private> dbg: vec4f;
++// Atlas pixel position and depth of a view-space point in face record b.
++fn cube_proj(b: u32, w: vec3f, adims: vec2f) -> vec3f {
++  let v = vec4f(w, 1.0);
++  let c = vec4f(dot(v, xrow(b)), dot(v, xrow(b + 4u)), dot(v, xrow(b + 8u)), dot(v, xrow(b + 12u)));
++  let nd = c.xyz / max(c.w, 1e-4);
++  return vec3f((nd.x * 0.5 + 0.5) * adims.x, (0.5 - nd.y * 0.5) * adims.y, nd.z);
++}
++fn cube_occlusion(s: u32, p: vec3f, nr: vec4f, mp: vec2f) -> f32 {
++  let lp = fx.xl[s];
++  let lq = fx.xl[8u + s];
++  let toL = lp.xyz - p;
++  let dist = length(toL);
++  if (dist >= lp.w || dist <= lq.x) { return 0.0; }
++  let l = toL / dist;
++  // Unreliable normal (ledge pixel): offset toward the light instead.
++  let n = select(l, nr.xyz, nr.w > 0.5);
++  let ndl = dot(n, l);
++  if (ndl <= -0.05) { return 0.0; } // facing away: the light's N.L already leaves it dark
++  let dn = -toL;
++  let axis0 = max(max(abs(dn.x), abs(dn.y)), abs(dn.z));
++  // World size of one shadow-map texel at the receiver; offset along the normal (more at grazing
++  // angles) and toward the light against acne.
++  let texel = 2.0 * axis0 * lq.y / lq.z;
++  let q = p + n * texel * (0.8 + 1.6 * (1.0 - clamp(ndl, 0.0, 1.0))) + l * texel * 0.6;
++  let d = q - lp.xyz;
++  let f = cube_face(d);
++  let b = (s * 6u + f) * 24u;
++  let qv = vec4f(q, 1.0);
++  let clip = vec4f(dot(qv, xrow(b)), dot(qv, xrow(b + 4u)), dot(qv, xrow(b + 8u)), dot(qv, xrow(b + 12u)));
++  if (clip.w <= 1e-4) { return 0.0; }
++  let ndc = clip.xyz / clip.w;
++  let adims = fx.xl[16].xy;
++  let px = vec2f((ndc.x * 0.5 + 0.5) * adims.x, (0.5 - ndc.y * 0.5) * adims.y);
++  let tile = xrow(b + 20u);
++  let lo = tile.xy + vec2f(1.0);
++  let hi = tile.zw - vec2f(1.0);
++  let refz = ndc.z;
++  if (fx.pp.w > 0.5) {
++    // Debug (AURORA_ENH_GLOWDBG=9): stored vs receiver distance along the face axis, face.
++    let zs = textureLoad(tatlas, vec2i(clamp(px, lo, hi)), 0);
++    dbg = vec4f(atlas_axis(zs, lq.x) / 1000.0, clip.w / 1000.0, f32(f) / 5.0, 1.0);
++  }
++  let taps = max(u32(fx.xl[16].z), 4u);
++  // Same rotation every frame for a pixel: a per-frame pattern makes the edges crawl.
++  let rot = ign(mp) * 6.2831853;
++  let axis = clip.w;
++  // Filter taps are spread on the receiver's tangent plane in world space and each projected
++  // with its own depth (receiver-plane depth): a wide soft filter on a floor seen at a grazing
++  // angle from the light does not shadow the floor itself.
++  let tu = normalize(select(cross(n, vec3f(0.0, 1.0, 0.0)), cross(n, vec3f(1.0, 0.0, 0.0)), abs(n.y) > 0.9));
++  let tv = cross(n, tu);
++  var radius = fx.xl[16].w * texel; // world units
++  if (fx.xl[17].x > 0.0) {
++    // PCSS: average blocker distance in a region the size of the light seen from the receiver,
++    // then a penumbra that widens with the receiver's distance behind the blocker.
++    let search = clamp(fx.xl[17].x * 1.5, 2.0 * texel, 40.0 * texel);
++    let ns = max(taps / 2u, 8u);
++    var sum = 0.0;
++    var cnt = 0.0;
++    for (var k = 0u; k < ns; k++) {
++      let o = vogel(k, ns, rot + 1.7) * search;
++      let t = cube_proj(b, q + tu * o.x + tv * o.y, adims);
++      let z = textureLoad(tatlas, vec2i(clamp(t.xy, lo, hi)), 0);
++      if (atlas_blocks(z, t.z)) {
++        sum = sum + atlas_axis(z, lq.x);
++        cnt = cnt + 1.0;
++      }
++    }
++    if (cnt < 0.5) { return 0.0; }
++    // Every search tap blocked: deep in the umbra, no filtering needed.
++    if (cnt > f32(ns) - 0.5) { return 1.0; }
++    let ab = sum / cnt;
++    let pen = fx.xl[17].x * max(axis - ab, 0.0) / max(ab, 1.0);
++    radius = clamp(radius + pen, texel, 24.0 * texel);
++  }
++  var lit = 0.0;
++  for (var k = 0u; k < taps; k++) {
++    let o = vogel(k, taps, rot) * radius;
++    let t = cube_proj(b, q + tu * o.x + tv * o.y, adims);
++    lit = lit + textureSampleCompareLevel(tatlas, tcmp, clamp(t.xy, lo, hi) / adims, t.z);
++  }
++  return 1.0 - lit / f32(taps);
++}
++@fragment
++fn fs_xlcube(in: VsOut) -> MaskOut {
++  let mp = floor(in.pos.xy);
++  let d0 = textureLoad(tdepth, vec2i(mp), 0).r;
++  var o: MaskOut;
++  o.a = vec4f(0.0);
++  o.b = vec4f(0.0);
++  if (d0 <= 1e-7) { return o; } // nothing drawn (cleared to far)
++  let p = view_pos((mp + vec2f(0.5)) * fx.pp.y, d0);
++  let n = mask_normal(mp, p);
++  let cnt = u32(fx.pp.z);
++  for (var s = 0u; s < min(cnt, 4u); s++) { o.a[s] = cube_occlusion(s, p, n, mp); }
++  for (var s = 4u; s < min(cnt, 8u); s++) { o.b[s - 4u] = cube_occlusion(s, p, n, mp); }
++  if (fx.pp.w > 0.5) { o.a = dbg; }
++  return o;
++}
++
+ // Downsample (13-tap, as above without threshold).
+ @fragment
+ fn fs_down(in: VsOut) -> @location(0) vec4f {
+@@ -596,6 +759,12 @@ struct Gpu {
+   wgpu::RenderPipeline glowDepthPipe;
+   Tex maskDepth, maskDepthR, mask;
+   wgpu::RenderPipeline maskPipe;
++  // 0028 shadow maps
++  Tex atlas, mask2;
++  wgpu::BindGroupLayout cubeBgl;
++  wgpu::PipelineLayout cubeLayout;
++  wgpu::RenderPipeline cubePipe;
++  wgpu::Sampler cmpSampler;
+ };
+ Gpu g_gpu;
+ 
+@@ -844,18 +1013,167 @@ struct MaskJob {
+   Range uniform{};
+   uint32_t maskOffset = 0, maskW = 0, maskH = 0, pitchBytes = 0;
+   float scaleBack = 2.f; // EFB target pixels per mask pixel
++  // 0028 shadow maps
++  bool cube = false;
++  uint32_t lights = 0, atlasW = 0, atlasH = 0;
++  Range records{}; // storage: lights x 6 faces x 24 floats
++  // Draws [0, firstNew) are already in the depth pre-pass and the atlas from this frame's
++  // previous mask (same lights): only the new ones are added (a second EFB pass in a frame
++  // would otherwise render every caster twice).
++  size_t firstNew = 0;
+ };
+ 
++// GPU timing of the light-shadow passes (AURORA_ENH_GPU_TIMING=1, needs TimestampQuery): camera
++// depth pre-pass, shadow-map atlas, mask pass; averaged and logged every 240 masks.
++constexpr uint32_t TimingQueries = 6;
++struct TimingSlot {
++  wgpu::Buffer resolve, readback;
++  std::atomic<int> state{0}; // 0 free, 1 written, 2 mapping, 3 mapped
++};
++std::array<TimingSlot, 6> g_tslots;
++wgpu::QuerySet g_tq;
++int g_tcur = -1;
++std::array<wgpu::PassTimestampWrites, 3> g_tw{};
++double g_tsum[3] = {}, g_tcnt = 0;
++bool timing_on() {
++  static const bool on = std::getenv("AURORA_ENH_GPU_TIMING") != nullptr &&
++                         webgpu::g_device.HasFeature(wgpu::FeatureName::TimestampQuery);
++  if (on && !g_tq) {
++    const wgpu::QuerySetDescriptor qd{.label = "Enhanced shadow timing", .type = wgpu::QueryType::Timestamp, .count = TimingQueries};
++    g_tq = webgpu::g_device.CreateQuerySet(&qd);
++    for (auto& t : g_tslots) {
++      const wgpu::BufferDescriptor rd{.usage = wgpu::BufferUsage::QueryResolve | wgpu::BufferUsage::CopySrc, .size = TimingQueries * 8};
++      t.resolve = webgpu::g_device.CreateBuffer(&rd);
++      const wgpu::BufferDescriptor bd{.usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst, .size = TimingQueries * 8};
++      t.readback = webgpu::g_device.CreateBuffer(&bd);
++    }
++    for (uint32_t i = 0; i < 3; ++i) {
++      g_tw[i] = {.querySet = g_tq, .beginningOfPassWriteIndex = i * 2, .endOfPassWriteIndex = i * 2 + 1};
++    }
++  }
++  return on;
++}
++// Timestamp writes for pass k of the current mask (0 pre-pass, 1 atlas, 2 mask) or null.
++const wgpu::PassTimestampWrites* timing_writes(uint32_t k) { return g_tcur >= 0 ? &g_tw[k] : nullptr; }
++void timing_begin() {
++  g_tcur = -1;
++  if (!timing_on()) {
++    return;
++  }
++  for (int i = 0; i < int(g_tslots.size()); ++i) {
++    if (g_tslots[i].state.load() == 0) {
++      g_tcur = i;
++      break;
++    }
++  }
++}
++void timing_end(const wgpu::CommandEncoder& cmd) {
++  if (g_tcur < 0) {
++    return;
++  }
++  auto& t = g_tslots[g_tcur];
++  cmd.ResolveQuerySet(g_tq, 0, TimingQueries, t.resolve, 0);
++  cmd.CopyBufferToBuffer(t.resolve, 0, t.readback, 0, TimingQueries * 8);
++  t.state.store(1);
++  g_tcur = -1;
++}
++
++bool init_cube() {
++  if (g_gpu.cubePipe) {
++    return true;
++  }
++  std::array<wgpu::BindGroupLayoutEntry, 5> e{};
++  e[0] = {.binding = 0,
++          .visibility = wgpu::ShaderStage::Fragment | wgpu::ShaderStage::Vertex,
++          .buffer = {.type = wgpu::BufferBindingType::Uniform, .minBindingSize = sizeof(FxUniform)}};
++  e[1] = {.binding = 5,
++          .visibility = wgpu::ShaderStage::Fragment,
++          .texture = {.sampleType = wgpu::TextureSampleType::UnfilterableFloat, .viewDimension = wgpu::TextureViewDimension::e2D}};
++  e[2] = {.binding = 6,
++          .visibility = wgpu::ShaderStage::Fragment,
++          .texture = {.sampleType = wgpu::TextureSampleType::Depth, .viewDimension = wgpu::TextureViewDimension::e2D}};
++  e[3] = {.binding = 7, .visibility = wgpu::ShaderStage::Fragment, .sampler = {.type = wgpu::SamplerBindingType::Comparison}};
++  e[4] = {.binding = 8, .visibility = wgpu::ShaderStage::Fragment, .buffer = {.type = wgpu::BufferBindingType::ReadOnlyStorage}};
++  const wgpu::BindGroupLayoutDescriptor bglDesc{.label = "Enhanced shadow maps", .entryCount = e.size(), .entries = e.data()};
++  g_gpu.cubeBgl = webgpu::g_device.CreateBindGroupLayout(&bglDesc);
++  const wgpu::PipelineLayoutDescriptor plDesc{.label = "Enhanced shadow maps", .bindGroupLayoutCount = 1, .bindGroupLayouts = &g_gpu.cubeBgl};
++  g_gpu.cubeLayout = webgpu::g_device.CreatePipelineLayout(&plDesc);
++  const wgpu::SamplerDescriptor cmpDesc{
++      .label = "Enhanced shadow map compare",
++      .addressModeU = wgpu::AddressMode::ClampToEdge,
++      .addressModeV = wgpu::AddressMode::ClampToEdge,
++      .magFilter = wgpu::FilterMode::Linear,
++      .minFilter = wgpu::FilterMode::Linear,
++      .compare = gx::UseReversedZ ? wgpu::CompareFunction::GreaterEqual : wgpu::CompareFunction::LessEqual,
++  };
++  g_gpu.cmpSampler = webgpu::g_device.CreateSampler(&cmpDesc);
++  const std::array<wgpu::ColorTargetState, 2> targets{
++      wgpu::ColorTargetState{.format = wgpu::TextureFormat::RGBA8Unorm, .writeMask = wgpu::ColorWriteMask::All},
++      wgpu::ColorTargetState{.format = wgpu::TextureFormat::RGBA8Unorm, .writeMask = wgpu::ColorWriteMask::All},
++  };
++  const wgpu::FragmentState fragment{.module = g_gpu.module, .entryPoint = "fs_xlcube", .targetCount = targets.size(), .targets = targets.data()};
++  const wgpu::RenderPipelineDescriptor desc{
++      .label = "Enhanced shadow-map mask",
++      .layout = g_gpu.cubeLayout,
++      .vertex = {.module = g_gpu.module, .entryPoint = "vs_main"},
++      .primitive = {.topology = wgpu::PrimitiveTopology::TriangleList},
++      .fragment = &fragment,
++  };
++  g_gpu.cubePipe = webgpu::g_device.CreateRenderPipeline(&desc);
++  return bool(g_gpu.cubePipe);
++}
++
++// Caster draws into the atlas: like gx::render, but a draw whose pipeline is still compiling is
++// skipped (its shadow appears a moment later) instead of stalling the frame.
++void render_casters(const wgpu::RenderPassEncoder& pass, const MaskJob& job, size_t from, uint32_t& drawn,
++                    uint32_t& skipped) {
++  const auto& resources = detail::resources();
++  const uint32_t recordWord = job.records.offset / 4;
++  for (size_t i = from; i < job.draws.size(); ++i) {
++    const auto& g = job.draws[i];
++    if (!g.lightPipe) {
++      continue;
++    }
++    CompiledPipeline pipeline;
++    if (!try_get_pipeline(g.lightPipe, pipeline)) {
++      ++skipped;
++      continue;
++    }
++    auto imm = g.data.immediateData;
++    imm._pad = recordWord;
++    pass.SetImmediates(0, &imm, sizeof(imm));
++    const std::array offsets{g.data.uniformRange.offset};
++    pass.SetBindGroup(1, resources.uniformBindGroup, offsets.size(), offsets.data());
++    if (g.data.bindGroups.textureBindGroup) {
++      pass.SetBindGroup(2, find_bind_group(g.data.bindGroups.textureBindGroup));
++    } else {
++      pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
++    }
++    pass.SetIndexBuffer(resources.indexBuffer, wgpu::IndexFormat::Uint16, g.data.idxRange.offset, g.data.idxRange.size);
++    bind_pipeline(pipeline.main, pass);
++    const uint32_t instances = job.lights * 6;
++    if (g.data.indexCount == 0) {
++      pass.Draw(g.data.vtxCount, instances);
++    } else {
++      pass.DrawIndexed(g.data.indexCount, instances);
++    }
++    ++drawn;
++  }
++}
++
+ // Extra-light shadow mask, before the EFB pass whose world draws read it: depth pre-pass of the
+ // opaque world draws at mask resolution, ray march, copy into the storage buffer.
+ void encode_mask(const wgpu::CommandEncoder& cmd, const MaskJob& job) {
+   if (!init_gpu()) {
+     return;
+   }
++  timing_begin();
+   const uint32_t w = job.maskW, h = job.maskH;
+   const auto depthFormat = webgpu::g_graphicsConfig.depthFormat;
++  const auto* prevDepth = g_gpu.maskDepth.texture.Get();
+   ensure_tex(g_gpu.maskDepth, w, h, depthFormat, wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding,
+              "Enhanced light-shadow depth");
++  const size_t fromDepth = g_gpu.maskDepth.texture.Get() == prevDepth ? job.firstNew : 0;
+   ensure_tex(g_gpu.maskDepthR, w, h, wgpu::TextureFormat::R32Float,
+              wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding, "Enhanced light-shadow depth R");
+   ensure_tex(g_gpu.mask, w, h, wgpu::TextureFormat::RGBA8Unorm,
+@@ -867,18 +1185,20 @@ void encode_mask(const wgpu::CommandEncoder& cmd, const MaskJob& job) {
+   {
+     const wgpu::RenderPassDepthStencilAttachment da{
+         .view = g_gpu.maskDepth.view,
+-        .depthLoadOp = wgpu::LoadOp::Clear,
++        .depthLoadOp = fromDepth > 0 ? wgpu::LoadOp::Load : wgpu::LoadOp::Clear,
+         .depthStoreOp = wgpu::StoreOp::Store,
+         .depthClearValue = gx::UseReversedZ ? 0.f : 1.f,
+     };
+-    const wgpu::RenderPassDescriptor desc{.label = "Enhanced light-shadow depth", .depthStencilAttachment = &da};
++    const wgpu::RenderPassDescriptor desc{
++        .label = "Enhanced light-shadow depth", .depthStencilAttachment = &da, .timestampWrites = timing_writes(0)};
+     const auto pass = cmd.BeginRenderPass(&desc);
+     reset_bound_pipeline();
+     pass.SetBindGroup(0, detail::resources().staticBindGroup);
+     pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
+     // Viewports are in EFB target pixels; the mask is bloom-level-0 sized.
+     const float sx = 1.f / std::max(job.scaleBack, 1e-3f), sy = sx;
+-    for (const auto& g : job.draws) {
++    for (size_t i = fromDepth; i < job.draws.size(); ++i) {
++      const auto& g = job.draws[i];
+       const auto& vp = g.viewport;
+       const float minDepth = gx::UseReversedZ ? 1.f - vp.zfar : vp.znear;
+       const float maxDepth = gx::UseReversedZ ? 1.f - vp.znear : vp.zfar;
+@@ -896,15 +1216,86 @@ void encode_mask(const wgpu::CommandEncoder& cmd, const MaskJob& job) {
+     reset_bound_pipeline();
+   }
+   tex_copy_conv::snapshot_depth(cmd, g_gpu.maskDepth.view, 1, g_gpu.maskDepthR.view);
+-  run_pass(cmd, "Light-shadow mask", g_gpu.mask.view, g_gpu.maskPipe, bind(job.uniform, {}, {}, {}, g_gpu.maskDepthR.view),
+-           false);
++  const wgpu::Extent3D extent{w, h, 1};
++  if (job.cube && init_cube()) {
++    // Shadow maps: all casters from every shadowed light into the atlas, then the lookup.
++    const auto* prevAtlas = g_gpu.atlas.texture.Get();
++    ensure_tex(g_gpu.atlas, job.atlasW, job.atlasH, depthFormat,
++               wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding, "Enhanced shadow-map atlas");
++    const size_t fromAtlas = g_gpu.atlas.texture.Get() == prevAtlas ? job.firstNew : 0;
++    ensure_tex(g_gpu.mask2, w, h, wgpu::TextureFormat::RGBA8Unorm,
++               wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc | wgpu::TextureUsage::TextureBinding,
++               "Enhanced light-shadow mask 2");
++    uint32_t drawn = 0, skipped = 0;
++    {
++      const wgpu::RenderPassDepthStencilAttachment da{
++          .view = g_gpu.atlas.view,
++          .depthLoadOp = fromAtlas > 0 ? wgpu::LoadOp::Load : wgpu::LoadOp::Clear,
++          .depthStoreOp = wgpu::StoreOp::Store,
++          .depthClearValue = gx::UseReversedZ ? 0.f : 1.f,
++      };
++      const wgpu::RenderPassDescriptor desc{
++          .label = "Enhanced shadow-map atlas", .depthStencilAttachment = &da, .timestampWrites = timing_writes(1)};
++      const auto pass = cmd.BeginRenderPass(&desc);
++      reset_bound_pipeline();
++      pass.SetBindGroup(0, detail::resources().staticBindGroup);
++      pass.SetViewport(0.f, 0.f, float(job.atlasW), float(job.atlasH), 0.f, 1.f);
++      pass.SetScissorRect(0, 0, job.atlasW, job.atlasH);
++      render_casters(pass, job, fromAtlas, drawn, skipped);
++      pass.End();
++      reset_bound_pipeline();
++    }
++    g_statLights.store(job.lights, std::memory_order_relaxed);
++    g_statCasters.store(drawn, std::memory_order_relaxed);
++    g_statSkipped.store(skipped, std::memory_order_relaxed);
++    const std::array<wgpu::BindGroupEntry, 5> entries{
++        wgpu::BindGroupEntry{.binding = 0, .buffer = detail::resources().uniformBuffer, .offset = job.uniform.offset, .size = sizeof(FxUniform)},
++        wgpu::BindGroupEntry{.binding = 5, .textureView = g_gpu.maskDepthR.view},
++        wgpu::BindGroupEntry{.binding = 6, .textureView = g_gpu.atlas.view},
++        wgpu::BindGroupEntry{.binding = 7, .sampler = g_gpu.cmpSampler},
++        wgpu::BindGroupEntry{.binding = 8, .buffer = detail::resources().storageBuffer, .offset = job.records.offset, .size = job.records.size},
++    };
++    const wgpu::BindGroupDescriptor bgDesc{.layout = g_gpu.cubeBgl, .entryCount = entries.size(), .entries = entries.data()};
++    const auto bg = webgpu::g_device.CreateBindGroup(&bgDesc);
++    const std::array<wgpu::RenderPassColorAttachment, 2> att{
++        wgpu::RenderPassColorAttachment{.view = g_gpu.mask.view, .loadOp = wgpu::LoadOp::Clear, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}},
++        wgpu::RenderPassColorAttachment{.view = g_gpu.mask2.view, .loadOp = wgpu::LoadOp::Clear, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}},
++    };
++    const wgpu::RenderPassDescriptor desc{.label = "Shadow-map mask",
++                                          .colorAttachmentCount = att.size(),
++                                          .colorAttachments = att.data(),
++                                          .timestampWrites = timing_writes(2)};
++    const auto pass = cmd.BeginRenderPass(&desc);
++    pass.SetPipeline(g_gpu.cubePipe);
++    pass.SetBindGroup(0, bg);
++    pass.Draw(3);
++    pass.End();
++    const wgpu::TexelCopyTextureInfo src2{.texture = g_gpu.mask2.texture};
++    const wgpu::TexelCopyBufferInfo dst2{
++        .layout = {.offset = job.maskOffset + uint64_t(job.pitchBytes) * h, .bytesPerRow = job.pitchBytes, .rowsPerImage = h},
++        .buffer = detail::resources().maskBuffer,
++    };
++    if (job.lights > 4) {
++      cmd.CopyTextureToBuffer(&src2, &dst2, &extent);
++    }
++  } else {
++    const wgpu::RenderPassColorAttachment att{
++        .view = g_gpu.mask.view, .loadOp = wgpu::LoadOp::Clear, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}};
++    const wgpu::RenderPassDescriptor desc{
++        .label = "Light-shadow mask", .colorAttachmentCount = 1, .colorAttachments = &att, .timestampWrites = timing_writes(2)};
++    const auto pass = cmd.BeginRenderPass(&desc);
++    pass.SetPipeline(g_gpu.maskPipe);
++    pass.SetBindGroup(0, bind(job.uniform, {}, {}, {}, g_gpu.maskDepthR.view));
++    pass.Draw(3);
++    pass.End();
++  }
+   const wgpu::TexelCopyTextureInfo src{.texture = g_gpu.mask.texture};
+   const wgpu::TexelCopyBufferInfo dst{
+       .layout = {.offset = job.maskOffset, .bytesPerRow = job.pitchBytes, .rowsPerImage = h},
+-      .buffer = detail::resources().storageBuffer,
++      .buffer = detail::resources().maskBuffer,
+   };
+-  const wgpu::Extent3D extent{w, h, 1};
+   cmd.CopyTextureToBuffer(&src, &dst, &extent);
++  timing_end(cmd);
+ }
+ 
+ void encode_scene(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, const SceneJob& job) {
+@@ -1009,6 +1400,9 @@ bool sync_config() noexcept {
+   const bool masterChanged = g_cfg.enabled != g_pending.enabled;
+   g_cfg = g_pending;
+   g_cfgGen = gen;
++  ++g_lightGen;
++  assign_shadow_slots();
++  g_lightRangeValid = false;
+   gx::g_gxState.dirty |= gx::DirtyUniform;
+   // Only the master switch selects shader variants; the parts are uniforms.
+   return masterChanged;
+@@ -1098,19 +1492,30 @@ DrawUniform draw_uniform() noexcept {
+   }
+   if (c.extraLights && c.extraShadows && g_shadowCount > 0) {
+     if (!g_maskReserved) {
++      // Half resolution (bloom level 0 size), except shadow maps at high quality: full resolution
++      // (sharp contact edges) up to 1440 lines, within the mask buffer (two planes).
+       const auto size = get_render_target_size();
+-      const auto [w, h] = bloom_base_size(size.x, size.y);
++      uint32_t w, h;
++      if (shadow_maps() && g_cfg.extraShadowQuality >= 2) {
++        w = std::max(size.x, 1u);
++        h = std::max(size.y, 1u);
++        if (h > 1440) {
++          w = std::max(w * 1440 / h, 1u);
++          h = 1440;
++        }
++      } else {
++        std::tie(w, h) = bloom_base_size(size.x, size.y);
++      }
++      while (uint64_t(AURORA_ALIGN(w * 4, 256)) * h * 2 > MaskBufferSize) {
++        w = std::max(w * 7 / 8, 1u);
++        h = std::max(h * 7 / 8, 1u);
++      }
+       g_maskW = w;
+       g_maskH = h;
+       g_maskPitch = AURORA_ALIGN(w * 4, 256) / 4;
+-      const size_t bytes = size_t(g_maskPitch) * 4 * h;
+-      if (g_maskZeros.size() < bytes) {
+-        g_maskZeros.assign(bytes, 0);
+-      }
+-      g_maskRange = push_storage(g_maskZeros.data(), bytes);
+       g_maskReserved = true;
+     }
+-    u.maskBase = g_maskRange.offset / 4;
++    u.maskBase = 0;
+     u.maskPitch = g_maskPitch;
+     u.maskDims = g_maskW | g_maskH << 16;
+     const auto size = get_render_target_size();
+@@ -1131,6 +1536,24 @@ DrawUniform draw_uniform() noexcept {
+   return u;
+ }
+ 
++namespace {
++bool shadow_maps() noexcept { return g_cfg.extraShadowMode == 1; }
++
++// Shadow slots go to the first flagged lights (providers pass the strongest first), as many as
++// the configuration allows (screen-space: at most 4).
++void assign_shadow_slots() noexcept {
++  const uint32_t cap = std::min(g_cfg.extraShadowLights, shadow_maps() ? MaxShadowLights : 4u);
++  g_shadowCount = 0;
++  for (uint32_t i = 0; i < MaxExtraLights; ++i) {
++    g_shadowSlot[i] = UINT32_MAX;
++    if (i < g_lightCount && (g_lights[i].flags & ExtraLightCastShadows) != 0 && g_shadowCount < cap &&
++        g_lights[i].intensity > 0.f && g_lights[i].radius > 0.f) {
++      g_shadowSlot[i] = g_shadowCount++;
++    }
++  }
++}
++} // namespace
++
+ void set_lights(const ExtraLight* lights, uint32_t count) noexcept {
+   count = std::min(count, MaxExtraLights);
+   if (count == g_lightCount && std::memcmp(lights, g_lights.data(), count * sizeof(ExtraLight)) == 0) {
+@@ -1138,14 +1561,8 @@ void set_lights(const ExtraLight* lights, uint32_t count) noexcept {
+   }
+   std::memcpy(g_lights.data(), lights, count * sizeof(ExtraLight));
+   g_lightCount = count;
+-  g_shadowCount = 0;
+-  for (uint32_t i = 0; i < MaxExtraLights; ++i) {
+-    g_shadowSlot[i] = UINT32_MAX;
+-    if (i < count && (lights[i].flags & ExtraLightCastShadows) != 0 && g_shadowCount < MaxShadowLights &&
+-        lights[i].intensity > 0.f && lights[i].radius > 0.f) {
+-      g_shadowSlot[i] = g_shadowCount++;
+-    }
+-  }
++  ++g_lightGen;
++  assign_shadow_slots();
+   g_lightRangeValid = false;
+   g_lastLightCount.store(count, std::memory_order_relaxed);
+   gx::g_gxState.dirty |= gx::DirtyUniform;
+@@ -1249,6 +1666,7 @@ bool note_draw(const gx::PipelineConfig& config, uint8_t drawClass, uint32_t vtx
+     dc.colorUpdate = false;
+     dc.alphaUpdate = false;
+     dc.dstAlpha = UINT32_MAX;
++    dc.shaderConfig.depthOnly = 1; // the enhanced shading of the copy would be wasted (depth only)
+     static const RenderTargetLayout layout = [] {
+       RenderTargetLayout l{
+           .colorAttachmentCount = 0,
+@@ -1267,6 +1685,23 @@ bool note_draw(const gx::PipelineConfig& config, uint8_t drawClass, uint32_t vtx
+       sVariants.emplace(data.pipeline, g.data.pipeline);
+     }
+     g.data.dstAlpha = UINT32_MAX;
++    if (shadow_maps() && config.shaderConfig.lineMode == 0 && config.shaderConfig.zTexOp == 0) {
++      static std::unordered_map<PipelineRef, PipelineRef> sCasters;
++      if (const auto it = sCasters.find(data.pipeline); it != sCasters.end()) {
++        g.lightPipe = it->second;
++      } else {
++        gx::PipelineConfig lc = dc;
++        lc.shaderConfig.lightDepth = 1;
++        lc.depthCompare = true;
++        lc.depthUpdate = true;
++        lc.depthFunc = GX_LEQUAL;
++        lc.cullMode = GX_CULL_NONE; // single-sided walls and cards still block the light
++        lc.polygonOffsetBits = 0;
++        lc.polygonOffsetScaleBits = 0;
++        g.lightPipe = find_pipeline(lc, layout);
++        sCasters.emplace(data.pipeline, g.lightPipe);
++      }
++    }
+     std::tie(g.pass, g.command) = next_command_position();
+     g_depthDraws.push_back(g);
+   }
+@@ -1388,9 +1823,10 @@ void flush_shadows() noexcept {
+       g.data.instanceCount = d->instanceCount;
+     }
+   }
++  const size_t flushedBefore = g_depthFlushed;
+   g_depthFlushed = g_depthDraws.size();
+   MaskJob job{.draws = g_depthDraws,
+-              .maskOffset = static_cast<uint32_t>(g_maskRange.offset),
++              .maskOffset = 0,
+               .maskW = g_maskW,
+               .maskH = g_maskH,
+               .pitchBytes = g_maskPitch * 4};
+@@ -1432,6 +1868,80 @@ void flush_shadows() noexcept {
+   u.pass[2] = float(g_shadowCount);
+   u.pass[3] = g_glowDbg == 9 ? 1.f : g_glowDbg == 10 ? 2.f : 0.f;
+   job.scaleBack = u.pass[1];
++  if (shadow_maps()) {
++    // Atlas: per light 3x2 faces of S texels, lights in two columns (texture size limit 8192).
++    const uint32_t k = g_shadowCount;
++    const uint32_t cols = k > 1 ? 2 : 1, rows = (k + cols - 1) / cols;
++    uint32_t S = std::clamp(g_cfg.extraShadowMapSize, 128u, 2048u);
++    while (S > 128 && (cols * 3 * S > 8192 || rows * 2 * S > 8192)) {
++      S /= 2;
++    }
++    const float fS = float(S);
++    const float W = float(cols * 3 * S), H = float(rows * 2 * S);
++    // Faces see a little more than 90 degrees, so a filter kernel near a face edge stays on the face.
++    const float t = 1.0f + 48.0f / fS;
++    static constexpr float kBasis[6][3][3] = {
++        // forward, right, up (view space)
++        {{1, 0, 0}, {0, 0, -1}, {0, 1, 0}},  {{-1, 0, 0}, {0, 0, 1}, {0, 1, 0}}, {{0, 1, 0}, {1, 0, 0}, {0, 0, -1}},
++        {{0, -1, 0}, {1, 0, 0}, {0, 0, 1}}, {{0, 0, 1}, {1, 0, 0}, {0, 1, 0}},  {{0, 0, -1}, {-1, 0, 0}, {0, 1, 0}},
++    };
++    std::vector<float> rec(size_t(k) * 6 * 24, 0.f);
++    for (uint32_t i = 0; i < g_lightCount; ++i) {
++      const uint32_t s = g_shadowSlot[i];
++      if (s >= MaxShadowLights) {
++        continue;
++      }
++      const auto& l = g_lights[i];
++      const float near = std::clamp(l.radius * 0.02f, 3.f, 20.f);
++      u.xl[8 + s][0] = near;
++      u.xl[8 + s][1] = t;
++      u.xl[8 + s][2] = fS;
++      for (uint32_t f = 0; f < 6; ++f) {
++        const auto& B = kBasis[f];
++        const auto row = [&](const float* v) {
++          return std::array<float, 4>{v[0], v[1], v[2], -(v[0] * l.pos[0] + v[1] * l.pos[1] + v[2] * l.pos[2])};
++        };
++        const auto ra = row(B[0]), rr = row(B[1]), ru = row(B[2]);
++        const float tx = float((s % cols) * 3 * S + (f % 3) * S), ty = float((s / cols) * 2 * S + (f / 3) * S);
++        const float cx = 2.f / W * (tx + fS * 0.5f) - 1.f, kx = fS / (W * t);
++        const float cy = 1.f - 2.f / H * (ty + fS * 0.5f), ky = fS / (H * t);
++        float* r = &rec[(size_t(s) * 6 + f) * 24];
++        for (int c = 0; c < 4; ++c) {
++          r[0 + c] = cx * ra[c] + kx * rr[c];
++          r[4 + c] = cy * ra[c] + ky * ru[c];
++          r[8 + c] = gx::UseReversedZ ? 0.f : ra[c];
++          r[12 + c] = ra[c];
++        }
++        if (gx::UseReversedZ) {
++          r[11] = near;
++        } else {
++          r[11] -= near;
++        }
++        r[16] = tx / W * 2.f - 1.f;          // NDC x0
++        r[17] = 1.f - (ty + fS) / H * 2.f;   // NDC y0 (bottom)
++        r[18] = (tx + fS) / W * 2.f - 1.f;   // NDC x1
++        r[19] = 1.f - ty / H * 2.f;          // NDC y1 (top)
++        r[20] = tx;
++        r[21] = ty;
++        r[22] = tx + fS;
++        r[23] = ty + fS;
++      }
++    }
++    job.cube = true;
++    job.lights = k;
++    const uint64_t key = uint64_t(g_lightGen) << 32 | uint64_t(S) << 16 | uint64_t(k) << 8 | uint64_t(g_maskW & 0xFF);
++    job.firstNew = key == g_maskKey ? flushedBefore : 0;
++    g_maskKey = key;
++    job.atlasW = uint32_t(W);
++    job.atlasH = uint32_t(H);
++    job.records = push_storage(reinterpret_cast<const uint8_t*>(rec.data()), rec.size() * sizeof(float));
++    u.xl[16][0] = W;
++    u.xl[16][1] = H;
++    u.xl[16][2] = q == 0 ? 8.f : q == 1 ? 12.f : 20.f; // PCF taps (receiver-plane, rotated Vogel disk)
++    u.xl[16][3] = 1.5f; // base filter radius in texels (larger maps: sharper)
++    u.xl[17][0] = std::max(g_cfg.extraShadowSoftness, 0.f);
++    u.xl[17][1] = gx::UseReversedZ ? 1.f : 0.f;
++  }
+   if (g_log) {
+     Log.info("  mask uniform: size {} {} vp {} {} {} {} proj {} {} {} {} projz {} {} {} {} dr {} {} pass {} {} {}", u.size[0],
+              u.size[1], u.vp[0], u.vp[1], u.vp[2], u.vp[3], u.proj[0], u.proj[1], u.proj[2], u.proj[3], u.projz[0],
+@@ -1445,6 +1955,38 @@ void flush_shadows() noexcept {
+   queue_pre_pass_ops(std::move(ops));
+ }
+ 
++void after_submit() noexcept {
++  for (auto& t : g_tslots) {
++    if (t.state.load() == 3) {
++      const auto* ts = static_cast<const uint64_t*>(t.readback.GetConstMappedRange(0, TimingQueries * 8));
++      if (ts != nullptr) {
++        for (int k = 0; k < 3; ++k) {
++          const uint64_t b = ts[k * 2], e = ts[k * 2 + 1];
++          g_tsum[k] += e > b && e - b < 1000000000ull ? double(e - b) * 1e-6 : 0.0;
++        }
++        g_tcnt += 1;
++      }
++      t.readback.Unmap();
++      t.state.store(0);
++      if (g_tcnt >= 240) {
++        Log.info("light shadows GPU (per mask, ms): depth pre-pass {:.3f}, shadow-map atlas {:.3f}, mask {:.3f}, total {:.3f}",
++                 g_tsum[0] / g_tcnt, g_tsum[1] / g_tcnt, g_tsum[2] / g_tcnt, (g_tsum[0] + g_tsum[1] + g_tsum[2]) / g_tcnt);
++        g_tsum[0] = g_tsum[1] = g_tsum[2] = 0;
++        g_tcnt = 0;
++      }
++    }
++  }
++  for (auto& t : g_tslots) {
++    if (t.state.load() == 1) {
++      t.state.store(2);
++      t.readback.MapAsync(wgpu::MapMode::Read, 0, TimingQueries * 8, wgpu::CallbackMode::AllowSpontaneous,
++                          [&t](wgpu::MapAsyncStatus status, wgpu::StringView) {
++                            t.state.store(status == wgpu::MapAsyncStatus::Success ? 3 : 0);
++                          });
++    }
++  }
++}
++
+ void before_efb_copy() noexcept {
+   if (g_cfg.enabled) {
+     flush_shadows();
+@@ -1658,6 +2200,19 @@ void aurora_enhanced_set_config(const AuroraEnhancedConfig* config) {
+   g_pendingGen.fetch_add(1, std::memory_order_release);
+ }
+ 
++void aurora_enhanced_shadow_stats(uint32_t* lights, uint32_t* casters, uint32_t* skipped) {
++  using namespace aurora::gfx::enhanced;
++  if (lights != nullptr) {
++    *lights = g_statLights.load(std::memory_order_relaxed);
++  }
++  if (casters != nullptr) {
++    *casters = g_statCasters.load(std::memory_order_relaxed);
++  }
++  if (skipped != nullptr) {
++    *skipped = g_statSkipped.load(std::memory_order_relaxed);
++  }
++}
++
+ uint32_t aurora_enhanced_last_light_count(void) {
+   return aurora::gfx::enhanced::g_lastLightCount.load(std::memory_order_relaxed);
+ }
+diff --git a/lib/gfx/enhanced.hpp b/lib/gfx/enhanced.hpp
+index b9d06b6..e821f5d 100644
+--- a/lib/gfx/enhanced.hpp
++++ b/lib/gfx/enhanced.hpp
+@@ -60,5 +60,7 @@ void before_efb_copy() noexcept;
+ void scene_end() noexcept;
+ // A new frame starts recording.
+ void begin_frame() noexcept;
++// 0028: a frame's command buffer was submitted (GPU timing readback, AURORA_ENH_GPU_TIMING=1).
++void after_submit() noexcept;
+ 
+ } // namespace aurora::gfx::enhanced
+diff --git a/lib/gfx/frame.cpp b/lib/gfx/frame.cpp
+index 9e24e46..1dfad2b 100644
+--- a/lib/gfx/frame.cpp
++++ b/lib/gfx/frame.cpp
+@@ -1,6 +1,7 @@
+ #include "frame.hpp"
+ 
+ #include "depth_peek.hpp"
++#include "enhanced.hpp"
+ #include "pipeline_cache.hpp"
+ #include "recording.hpp"
+ #include "render_worker.hpp"
+@@ -427,6 +428,8 @@ void initialize() {
+                "Shared Index Buffer");
+   createBuffer(g_resources.storageBuffer, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, StorageBufferSize,
+                "Shared Storage Buffer");
++  createBuffer(g_resources.maskBuffer, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, MaskBufferSize,
++               "Enhanced Shadow Mask Buffer");
+   for (size_t i = 0; i < g_stagingBuffers.size(); ++i) {
+     const auto label = fmt::format("Staging Buffer {}", i);
+     createBuffer(g_stagingBuffers[i], wgpu::BufferUsage::MapWrite | wgpu::BufferUsage::CopySrc, StagingBufferSize,
+@@ -459,6 +462,15 @@ void initialize() {
+                     .type = wgpu::BufferBindingType::ReadOnlyStorage,
+                 },
+         },
++        // 0028: enhanced-lighting shadow masks
++        wgpu::BindGroupLayoutEntry{
++            .binding = 2,
++            .visibility = wgpu::ShaderStage::Fragment,
++            .buffer =
++                wgpu::BufferBindingLayout{
++                    .type = wgpu::BufferBindingType::ReadOnlyStorage,
++                },
++        },
+     };
+     const wgpu::BindGroupLayoutDescriptor layoutDesc{
+         .label = "Static bind group layout",
+@@ -475,6 +487,10 @@ void initialize() {
+             .binding = 1,
+             .buffer = g_resources.storageBuffer,
+         },
++        wgpu::BindGroupEntry{
++            .binding = 2,
++            .buffer = g_resources.maskBuffer,
++        },
+     };
+     const wgpu::BindGroupDescriptor bindGroupDescriptor{
+         .label = "Static bind group",
+@@ -562,6 +578,7 @@ void shutdown() {
+   g_resources.uniformBuffer = {};
+   g_resources.indexBuffer = {};
+   g_resources.storageBuffer = {};
++  g_resources.maskBuffer = {};
+   g_stagingBuffers.fill({});
+   for (auto& packet : g_framePackets) {
+     packet = {};
+@@ -708,7 +725,10 @@ void end_frame(EndFrameCallback callback) {
+ 
+ uint32_t current_frame() noexcept { return g_frameIndex; }
+ 
+-void after_submit() noexcept { depth_peek::after_submit(); }
++void after_submit() noexcept {
++  depth_peek::after_submit();
++  enhanced::after_submit();
++}
+ 
+ void gpu_synchronize() { render_worker::synchronize(); }
+ 
+diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
+index 91dd2fe..34bfcc5 100644
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -1929,6 +1929,17 @@ void end_pipeline_frame() {
+   }
+ }
+ 
++// 0028: the pipeline if it is built, without waiting (optional passes skip draws instead).
++bool try_get_pipeline(PipelineRef ref, CompiledPipeline& pipeline) {
++  std::lock_guard guard{g_pipelineMutex};
++  const auto it = g_pipelines.find(ref);
++  if (it == g_pipelines.end() || !it->second.main) {
++    return false;
++  }
++  pipeline = it->second;
++  return true;
++}
++
+ bool get_pipeline(PipelineRef ref, CompiledPipeline& pipeline) {
+   {
+     std::lock_guard guard{g_pipelineMutex};
+diff --git a/lib/gfx/pipeline_cache.hpp b/lib/gfx/pipeline_cache.hpp
+index ff806d3..74570cc 100644
+--- a/lib/gfx/pipeline_cache.hpp
++++ b/lib/gfx/pipeline_cache.hpp
+@@ -42,6 +42,7 @@ PipelineRef find_pipeline(const clear::PipelineConfig& config, const RenderTarge
+ PipelineRef find_pipeline(const rmlui::PipelineConfig& config);
+ 
+ bool get_pipeline(PipelineRef ref, CompiledPipeline& pipeline);
++bool try_get_pipeline(PipelineRef ref, CompiledPipeline& pipeline);
+ 
+ // Around shader module creation: false when the module failed to compile (logged). A pipeline
+ // must not be created from such a module (patch 0017).
+diff --git a/lib/gfx/resources.hpp b/lib/gfx/resources.hpp
+index add7909..aaee15e 100644
+--- a/lib/gfx/resources.hpp
++++ b/lib/gfx/resources.hpp
+@@ -9,6 +9,8 @@ inline constexpr uint64_t VertexBufferSize = 33554432;  // 32 MiB
+ inline constexpr uint64_t IndexBufferSize = 8388608;    // 8 MiB
+ inline constexpr uint64_t StorageBufferSize = 67108864; // 64 MiB
+ inline constexpr uint64_t TextureUploadSize = 25165824; // 24 MiB
++// 0028: enhanced-lighting shadow masks (written on the GPU, read by world shaders; group 0 binding 2)
++inline constexpr uint64_t MaskBufferSize = 33554432; // 32 MiB
+ 
+ namespace detail {
+ struct Resources {
+@@ -16,6 +18,7 @@ struct Resources {
+   wgpu::Buffer uniformBuffer;
+   wgpu::Buffer indexBuffer;
+   wgpu::Buffer storageBuffer;
++  wgpu::Buffer maskBuffer; // 0028
+   wgpu::BindGroupLayout staticBindGroupLayout;
+   wgpu::BindGroup staticBindGroup;
+   wgpu::BindGroupLayout uniformBindGroupLayout;
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+index 3388da4..5986095 100644
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -511,7 +511,8 @@ struct ShaderConfig {
+   // so configs without logic ops keep their layout and cached/shipped pipeline lists stay valid.
+   u8 fogType : 4 = GX_FOG_NONE;
+   u8 logicOut : 2 = 0; // GX_BM_LOGIC source for the blend unit: 0 color, 1 white (INV, SET, NAND), 2 inverted color
+-  u8 pad0 : 2 = 0;
++  u8 depthOnly : 1 = 0; // 0028: enhanced-lighting depth pre-pass copy (no enhanced shading; uniform layout kept)
++  u8 pad0 : 1 = 0;
+   u8 vtxStride = 0;
+   u8 lineMode : 2 = 0; // 1 = GX_LINES, 2 = GX_LINESTRIP, 3 = GX_POINTS
+   u8 fogRangeEnabled : 1 = false;
+@@ -519,7 +520,7 @@ struct ShaderConfig {
+   u8 dither : 1 = false;   // PE ordered dither (with efbFmt)
+   u8 efbBlend : 1 = false; // draw blends with the EFB: quantize color only, keep alpha as the blend factor
+   u8 wireframe : 1 = false; // GX_AURORA_SET_WIREFRAME: line-list edges in ubuf.wire_*
+-  u8 pad1 : 1 = 0;
++  u8 lightDepth : 1 = 0; // 0028: shadow-map caster variant (enhanced lighting): light-space position from abuf[imm._pad + instance * 24], depth only
+   u8 zTexOp : 2 = 0;  // GXZTexOp; non-zero only when the last TEV stage samples a texture
+   u8 zTexFmt : 2 = 0; // 0 = Z8, 1 = Z16, 2 = Z24X8
+   u8 efbFmt : 2 = 0;  // EFB format to quantize to (GX_AURORA_ACCURACY_EFB_DEPTH): 0 none (RGB8), 1 RGBA6, 2 RGB565
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index 644e5d4..aa1e89c 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -994,8 +994,10 @@ fn enh_mask_bl(m: vec2f, dims: vec2i, slot: u32) -> f32 {
+   for (var k = 0; k < 4; k++) {
+     let o = vec2i(k & 1, k >> 1u);
+     let c = clamp(base + o, vec2i(0), dims - vec2i(1));
+-    let word = abuf[ubuf.enh_mask_base + u32(c.y) * ubuf.enh_mask_pitch + u32(c.x)];
+-    let v = f32((word >> (slot * 8u)) & 0xFFu) / 255.0;
++    // 0028: two planes (slots 0-3, 4-7) in the mask buffer (group 0 binding 2).
++    let plane = (slot >> 2u) * ubuf.enh_mask_pitch * u32(dims.y);
++    let word = mbuf[ubuf.enh_mask_base + plane + u32(c.y) * ubuf.enh_mask_pitch + u32(c.x)];
++    let v = f32((word >> ((slot & 3u) * 8u)) & 0xFFu) / 255.0;
+     let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
+     acc = acc + v * w;
+   }
+@@ -1032,7 +1034,7 @@ fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
+       col = col * vec3f(1.0, mix(1.2, 0.62, x), mix(1.5, 0.35, x));
+     }
+     let slot = abuf[b + 10u];
+-    if (slot < 4u) {
++    if (slot < 8u) {
+       // Shadow weight in flags bits 8..15 (0 = full): shadows fade in/out when the set of
+       // shadow-casting lights changes.
+       let sw = (flags >> 8u) & 0xFFu;
+@@ -1181,7 +1183,7 @@ std::string enh_shadow_stage(size_t idx, const ShaderConfig& config, const TevSt
+ }
+ 
+ bool enh_is_shadow_stage(const ShaderConfig& config, const TevStage& stage) noexcept {
+-  return config.enhClass != 0 && stage.alphaOp.op == GX_TEV_COMP_GR16_GT && stage.colorPass.b == GX_CC_TEXC &&
++  return config.enhClass != 0 && !config.lightDepth && !config.depthOnly && stage.alphaOp.op == GX_TEV_COMP_GR16_GT && stage.colorPass.b == GX_CC_TEXC &&
+          stage.texMapId != GX_TEXMAP_NULL && stage.texCoordId != GX_TEXCOORD_NULL;
+ }
+ 
+@@ -1513,6 +1515,9 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+ 
+   // Load points for line/point expansion
+   std::string_view vidxAttr = "vidx"sv;
++  if (config.lightDepth && config.lineMode == 0) {
++    vtxInAttrs += ",\n    @builtin(instance_index) iidx: u32";
++  }
+   if (config.lineMode != 0) {
+     vtxInAttrs += ",\n    @builtin(instance_index) iidx: u32";
+     uniBufAttrs +=
+@@ -1588,6 +1593,31 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+         "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
+         "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;",
+         vtx_attr(config, GX_VA_POS));
++    if (config.lightDepth) {
++      // 0028 shadow-map caster: instance = (light, cube face); the record holds the view -> atlas
++      // clip matrix (rows) and the face's tile rectangle in atlas pixels.
++      vtxXfrAttrsPre +=
++          "\n    let enh_lt = imm._pad + iidx * 24u;"
++          "\n    let enh_lp = vec4f(mv_pos, 1.0);"
++          "\n    out.pos = vec4f(dot(enh_lp, enh_ldv(enh_lt)), dot(enh_lp, enh_ldv(enh_lt + 4u)), dot(enh_lp, enh_ldv(enh_lt + 8u)),"
++          "\n                    dot(enh_lp, enh_ldv(enh_lt + 12u)));"
++          "";
++      if (webgpu::g_clipDistancesSupported) {
++        // Clip each instance to its face's tile (atlas NDC rectangle): no rasterization outside it.
++        vtxXfrAttrsPre +=
++            "\n    let enh_tb = enh_ldv(enh_lt + 16u);"
++            "\n    out.enh_clip[0] = out.pos.x - enh_tb.x * out.pos.w;"
++            "\n    out.enh_clip[1] = enh_tb.z * out.pos.w - out.pos.x;"
++            "\n    out.enh_clip[2] = out.pos.y - enh_tb.y * out.pos.w;"
++            "\n    out.enh_clip[3] = enh_tb.w * out.pos.w - out.pos.y;";
++        vtxOutAttrs += "\n    @builtin(clip_distances) enh_clip: array<f32, 4>,";
++      } else {
++        vtxXfrAttrsPre += "\n    out.enh_tile = enh_ldv(enh_lt + 20u);";
++        vtxOutAttrs += fmt::format("\n    @location({}) @interpolate(flat) enh_tile: vec4f,", vtxOutIdx++);
++      }
++      uniformPre += "\nfn enh_ldv(i: u32) -> vec4f {\n  return vec4f(bitcast<f32>(abuf[i]), bitcast<f32>(abuf[i + 1u]), "
++                    "bitcast<f32>(abuf[i + 2u]), bitcast<f32>(abuf[i + 3u]));\n}\n";
++    }
+   } else if (config.lineMode == 3) {
+     // GX_POINTS: expand single vertex to axis-aligned screen-space square
+     vtxXfrAttrsPre +=
+@@ -1778,7 +1808,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+   }
+ 
+   // Enhanced lighting variant: view-space position/normal for per-pixel work.
+-  const bool enh = config.enhClass != 0;
++  const bool enh = config.enhClass != 0 && !config.lightDepth && !config.depthOnly;
+   if (enh) {
+     vtxOutAttrs += fmt::format("\n    @location({}) enh_pos: vec3f,", vtxOutIdx++);
+     vtxXfrAttrs += "\n    out.enh_pos = mv_pos;";
+@@ -2345,7 +2375,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+   if (info.usesZTex) {
+     uniBufAttrs += "\n    ztex_bias: vec4u,";
+   }
+-  if (enh) {
++  if (config.enhClass != 0) {
+     // Must stay last (fill_uniform appends them last).
+     uniBufAttrs +=
+         "\n    enh_flags: u32,"
+@@ -2524,6 +2554,9 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+     fragmentOutputType = "FragmentOutput"sv;
+   }
+ 
++  if (config.lightDepth && config.lineMode == 0 && !webgpu::g_clipDistancesSupported) {
++    fragmentFnPre.insert(0, "\n    if (any((in.pos.xy < in.enh_tile.xy)) || any((in.pos.xy >= in.enh_tile.zw))) { discard; }");
++  }
+   auto shaderSource =
+       fmt::format(R"""(
+ fn bswap32(v: u32, le: bool) -> u32 {{
+@@ -2872,7 +2905,7 @@ struct Uniform {{
+ @group(0) @binding(0)
+ var<storage, read> vbuf: array<u32>;
+ @group(0) @binding(1)
+-var<storage, read> abuf: array<u32>;
++var<storage, read> abuf: array<u32>;{12}
+ @group(1) @binding(0)
+ var<uniform> ubuf: Uniform;{1}
+ 
+@@ -2894,17 +2927,37 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}{11}
+ }}
+ )""",
+                   uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn, fragmentFnPre,
+-                  vtxXfrAttrsPre, uniformPre, fragmentOutput, fragmentOutputType, fragmentReturn);
++                  vtxXfrAttrsPre, uniformPre, fragmentOutput, fragmentOutputType, fragmentReturn,
++                  enh ? "\n@group(0) @binding(2)\nvar<storage, read> mbuf: array<u32>;"sv : ""sv);
+   if (dstAlphaMode == DstAlphaMode::DualSource) {
+     shaderSource.insert(0, "enable dual_source_blending;\n");
+   }
++  if (config.lightDepth && config.lineMode == 0 && webgpu::g_clipDistancesSupported) {
++    // clip_distances is a vertex output only: the fragment stage reads a copy of the struct
++    // without it.
++    const std::string clipField = "\n    @builtin(clip_distances) enh_clip: array<f32, 4>,";
++    const auto structPos = shaderSource.find("struct VertexOutput {");
++    const auto structEnd = shaderSource.find("};", structPos);
++    if (structPos != std::string::npos && structEnd != std::string::npos) {
++      std::string fragStruct = shaderSource.substr(structPos, structEnd + 2 - structPos);
++      fragStruct.replace(0, std::string_view("struct VertexOutput").size(), "struct FragmentInput");
++      if (const auto c = fragStruct.find(clipField); c != std::string::npos) {
++        fragStruct.erase(c, clipField.size());
++      }
++      shaderSource.insert(structEnd + 2, "\n" + fragStruct);
++      if (const auto f = shaderSource.find("fn fs_main(in: VertexOutput)"); f != std::string::npos) {
++        shaderSource.replace(f, std::string_view("fn fs_main(in: VertexOutput)").size(), "fn fs_main(in: FragmentInput)");
++      }
++    }
++    shaderSource.insert(0, "enable clip_distances;\n");
++  }
+   if (EnableDebugPrints) {
+     Log.info("Generated shader (hash {:x}): {}", hash, shaderSource);
+   }
+   // Enhanced lighting debug aid: AURORA_SHADER_DUMP=<dir> writes every generated shader.
+   static const char* sDumpDir = std::getenv("AURORA_SHADER_DUMP");
+   if (sDumpDir != nullptr) {
+-    const auto path = fmt::format("{}/{:016x}_e{}.wgsl", sDumpDir, hash, int(config.enhClass));
++    const auto path = fmt::format("{}/{:016x}_e{}{}.wgsl", sDumpDir, hash, int(config.enhClass), config.lightDepth ? "L" : "");
+     if (FILE* f = std::fopen(path.c_str(), "wb")) {
+       std::fwrite(shaderSource.data(), 1, shaderSource.size(), f);
+       std::fclose(f);
+diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
+index b3ae6cd..7da137d 100644
+--- a/lib/webgpu/gpu.cpp
++++ b/lib/webgpu/gpu.cpp
+@@ -67,6 +67,7 @@ wgpu::AdapterInfo g_adapterInfo;
+ static wgpu::SurfaceCapabilities g_surfaceCapabilities;
+ bool g_hasCoreFeatures = false;
+ bool g_dualSourceBlendingSupported = false;
++bool g_clipDistancesSupported = false;
+ bool g_bcTexturesSupported = false;
+ bool g_astcTexturesSupported = false;
+ bool g_textureComponentSwizzleSupported = false;
+@@ -925,6 +926,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+     g_astcTexturesSupported = false;
+     g_textureComponentSwizzleSupported = false;
+     g_dualSourceBlendingSupported = false;
++    g_clipDistancesSupported = false;
+     wgpu::SupportedFeatures supportedFeatures;
+     g_adapter.GetFeatures(&supportedFeatures);
+     for (size_t i = 0; i < supportedFeatures.featureCount; ++i) {
+@@ -949,6 +951,17 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+       if (feature == wgpu::FeatureName::TimestampQuery) {
+         requiredFeatures.push_back(feature);
+       }
++#endif
++      // 0028: shadow-map casters clip each instance to its cube face (enhanced lighting).
++      if (feature == wgpu::FeatureName::ClipDistances && std::getenv("AURORA_NO_CLIP_DISTANCES") == nullptr) {
++        g_clipDistancesSupported = true;
++        requiredFeatures.push_back(feature);
++      }
++#ifndef TRACY_ENABLE
++      // 0028: AURORA_ENH_GPU_TIMING=1 times the enhanced-lighting shadow passes on the GPU.
++      if (feature == wgpu::FeatureName::TimestampQuery && std::getenv("AURORA_ENH_GPU_TIMING") != nullptr) {
++        requiredFeatures.push_back(feature);
++      }
+ #endif
+     }
+     std::string featureList;
+diff --git a/lib/webgpu/gpu.hpp b/lib/webgpu/gpu.hpp
+index be134a7..1f5aab1 100644
+--- a/lib/webgpu/gpu.hpp
++++ b/lib/webgpu/gpu.hpp
+@@ -61,6 +61,7 @@ extern bool g_bcTexturesSupported;
+ extern bool g_astcTexturesSupported;
+ extern bool g_textureComponentSwizzleSupported;
+ extern bool g_dualSourceBlendingSupported;
++extern bool g_clipDistancesSupported; // 0028
+ 
+ bool initialize(AuroraBackend backend, bool allowCpu);
+ void shutdown();

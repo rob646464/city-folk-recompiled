@@ -1,0 +1,1223 @@
+diff --git a/cmake/aurora_gx.cmake b/cmake/aurora_gx.cmake
+index 02a96af..ed94d61 100644
+--- a/cmake/aurora_gx.cmake
++++ b/cmake/aurora_gx.cmake
+@@ -10,6 +10,7 @@ add_library(aurora_gx STATIC
+         lib/gfx/dds_io.cpp
+         lib/gfx/tex_copy_conv.cpp
+         lib/gfx/tex_palette_conv.cpp
++        lib/gfx/efb_ram.cpp
+         lib/gfx/texture.cpp
+         lib/gfx/texture_format.cpp
+         lib/gfx/texture_convert.cpp
+diff --git a/include/aurora/efb_ram.h b/include/aurora/efb_ram.h
+new file mode 100644
+index 0000000..f4a1caf
+--- /dev/null
++++ b/include/aurora/efb_ram.h
+@@ -0,0 +1,48 @@
++#ifndef AURORA_EFB_RAM_H
++#define AURORA_EFB_RAM_H
++
++// EFB copies to RAM (hardware-accurate GXCopyTex). See lib/gfx/efb_ram.hpp.
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct AuroraEfbRamStats {
++  uint32_t copies;        // GXCopyTex calls tracked (supported formats)
++  uint32_t encodes;       // copies encoded to GX bytes on the GPU
++  uint32_t decodes;       // textures decoded from copied bytes
++  uint32_t readbacks;     // copies read back for the CPU
++  uint32_t writebacks;    // readbacks written into memory
++  uint32_t skipped;       // readbacks dropped because the CPU wrote the range first
++  uint32_t cpuOverwrites; // copies dropped because the CPU/DMA overwrote their memory
++  uint64_t hashedBytes;   // memory hashed for write detection
++  uint64_t cpuNs;         // CPU time spent in copy tracking, texture resolves and writebacks
++} AuroraEfbRamStats;
++
++/** Enables accurate copies (default on). Off: copies stay GPU-only (Aurora's original behaviour). */
++void aurora_efb_ram_set_enabled(bool enabled);
++bool aurora_efb_ram_enabled(void);
++/** Read back every copy into memory (testing/debug; normally only CPU-read ranges are). */
++void aurora_efb_ram_set_readback_all(bool enabled);
++/** The CPU is about to read [ptr, ptr+size) (e.g. DCInvalidateRange): copies there are read back
++ *  into memory from now on, and readbacks that already finished are applied. */
++void aurora_efb_ram_cpu_read(const void* ptr, uint32_t size);
++/** Always read back copies overlapping [ptr, ptr+size) (e.g. a debug capture buffer). */
++void aurora_efb_ram_watch(const void* ptr, uint32_t size);
++/** Writes finished readbacks into memory. Returns how many were written. */
++uint32_t aurora_efb_ram_apply(void);
++/** Called after each writeback (from the thread calling aurora_efb_ram_apply). */
++typedef void (*AuroraEfbRamWritebackFn)(const void* dest, uint32_t size, uint32_t format, uint32_t width,
++                                        uint32_t height, void* userdata);
++void aurora_efb_ram_set_writeback_callback(AuroraEfbRamWritebackFn fn, void* userdata);
++/** Counters since start. */
++void aurora_efb_ram_get_stats(AuroraEfbRamStats* out);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/lib/dolphin/gx/GXFrameBuffer.cpp b/lib/dolphin/gx/GXFrameBuffer.cpp
+index 8a3d428..18ee339 100644
+--- a/lib/dolphin/gx/GXFrameBuffer.cpp
++++ b/lib/dolphin/gx/GXFrameBuffer.cpp
+@@ -1,6 +1,7 @@
+ #include "gx.hpp"
+ #include "__gx.h"
+ 
++#include "../../gfx/efb_ram.hpp"
+ #include "../../gfx/tex_copy_conv.hpp"
+ #include "../../gfx/texture.hpp"
+ #include "../../gfx/recording.hpp"
+@@ -59,6 +60,9 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
+   const auto clearColor = clear && g_gxState.colorUpdate;
+   const auto clearAlpha = clear && g_gxState.alphaUpdate && efb_has_alpha(g_gxState.pixelFmt);
+   const auto clearDepth = clear && g_gxState.depthUpdate;
++  // EFB copy to RAM: the copy's bytes at `dest` (native size), for textures/CPU reading them.
++  gfx::set_next_resolve_op(gfx::efb_ram::on_copy(dest, texCopyFmt, g_gxState.texCopyDstWidth,
++                                                 g_gxState.texCopyDstHeight, handle.handle));
+   gfx::resolve_pass_into(handle.handle, rect, clearColor, clearAlpha, clearDepth, g_gxState.clearColor,
+                          clear_depth_value(), texCopyFmt, g_gxState.pixelFmt);
+   ++handle.revision;
+diff --git a/lib/gfx/efb_ram.cpp b/lib/gfx/efb_ram.cpp
+new file mode 100644
+index 0000000..b4bb1b7
+--- /dev/null
++++ b/lib/gfx/efb_ram.cpp
+@@ -0,0 +1,920 @@
++#include "efb_ram.hpp"
++
++#include "frame_packet.hpp"
++#include "hash.hpp"
++#include "recording.hpp"
++#include "tex_copy_conv.hpp"
++#include "texture.hpp"
++
++#include "../gx/gx.hpp"
++#include "../gx/texture.hpp"
++#include "../internal.hpp"
++#include "../webgpu/gpu.hpp"
++#include "../webgpu/gpu_prof.hpp"
++#include "frame.hpp"
++
++#include <aurora/efb_ram.h>
++
++#include <absl/container/flat_hash_map.h>
++#include <magic_enum.hpp>
++
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cstring>
++#include <deque>
++#include <mutex>
++#include <string>
++#include <vector>
++
++namespace aurora::gfx::efb_ram {
++namespace {
++Module Log("aurora::gfx::efb_ram");
++
++using webgpu::g_device;
++
++// ---------------------------------------------------------------------------------------------
++// Shaders. Texel layouts follow the GX memory format: 4bpp in 8x8 tiles, 8bpp in 8x4 tiles,
++// 16bpp in 4x4 tiles (32 bytes each), RGBA8/Z24X8 in 4x4 tiles of 64 bytes (AR pairs, then GB
++// pairs). Multi-byte texels are big-endian. Copy textures hold Aurora's conversion of the EFB
++// (tex_copy_conv.cpp), which already matches the semantics of the format read as a texture
++// (e.g. Z16 = intensity hi byte, alpha lo byte, as IA8 reads it), so encoding is a repack.
++// ---------------------------------------------------------------------------------------------
++
++constexpr std::string_view ShaderCommon = R"(
++struct Params {
++    fmt: u32,
++    width: u32,     // texels (native)
++    height: u32,
++    srcWidth: u32,  // copy texture size (may be upscaled)
++    srcHeight: u32,
++    byteSize: u32,
++    byteOffset: u32,
++    pad: u32,
++};
++
++// 0: 4bpp (8x8), 1: 8bpp (8x4), 2: 16bpp (4x4), 3: 32bpp (4x4, 64-byte tiles)
++fn fmt_kind(fmt: u32) -> u32 {
++    switch fmt {
++        case 0x00u, 0x20u, 0x30u: { return 0u; }
++        case 0x01u, 0x02u, 0x22u, 0x27u, 0x28u, 0x29u, 0x2Au, 0x11u, 0x39u, 0x3Au: { return 1u; }
++        case 0x03u, 0x04u, 0x05u, 0x23u, 0x2Bu, 0x2Cu, 0x13u, 0x3Cu: { return 2u; }
++        default: { return 3u; }
++    }
++}
++fn tile_w(kind: u32) -> u32 { return select(4u, 8u, kind <= 1u); }
++fn tile_h(kind: u32) -> u32 { return select(4u, 8u, kind == 0u); }
++)";
++
++constexpr std::string_view EncodeShader = R"(
++@group(0) @binding(0) var src: texture_2d<f32>;
++@group(0) @binding(1) var<storage, read_write> dst: array<u32>;
++@group(0) @binding(2) var<uniform> p: Params;
++
++fn fetch(x: u32, y: u32) -> vec4f {
++    let cx = min(x, p.width - 1u);
++    let cy = min(y, p.height - 1u);
++    let sx = min(u32((f32(cx) + 0.5) * f32(p.srcWidth) / f32(p.width)), p.srcWidth - 1u);
++    let sy = min(u32((f32(cy) + 0.5) * f32(p.srcHeight) / f32(p.height)), p.srcHeight - 1u);
++    return textureLoad(src, vec2i(i32(sx), i32(sy)), 0);
++}
++fn u8v(v: f32) -> u32 { return u32(clamp(round(v * 255.0), 0.0, 255.0)); }
++fn u4v(v: f32) -> u32 { return u32(clamp(round(v * 15.0), 0.0, 15.0)); }
++
++// Byte `sel` of a 16-bit texel, or of the AR/GB half of an RGBA8 texel.
++fn texel_byte(c: vec4f, sel: u32, half: u32) -> u32 {
++    switch p.fmt {
++        case 0x04u: { // RGB565
++            let v = ((u8v(c.r) >> 3u) << 11u) | ((u8v(c.g) >> 2u) << 5u) | (u8v(c.b) >> 3u);
++            return select(v & 0xFFu, v >> 8u, sel == 0u);
++        }
++        case 0x05u: { // RGB5A3
++            let a = u8v(c.a);
++            var v: u32;
++            if (a >= 0xE0u) {
++                v = 0x8000u | ((u8v(c.r) >> 3u) << 10u) | ((u8v(c.g) >> 3u) << 5u) | (u8v(c.b) >> 3u);
++            } else {
++                v = ((a >> 5u) << 12u) | ((u8v(c.r) >> 4u) << 8u) | ((u8v(c.g) >> 4u) << 4u) | (u8v(c.b) >> 4u);
++            }
++            return select(v & 0xFFu, v >> 8u, sel == 0u);
++        }
++        case 0x06u, 0x16u, 0x26u: { // RGBA8: AR then GB
++            if (half == 0u) { return select(u8v(c.r), u8v(c.a), sel == 0u); }
++            return select(u8v(c.b), u8v(c.g), sel == 0u);
++        }
++        default: { // IA8-like: [alpha-ish, intensity-ish] as Aurora's copy texture stores them
++            return select(u8v(c.r), u8v(c.a), sel == 0u);
++        }
++    }
++}
++
++fn byte8(c: vec4f) -> u32 {
++    switch p.fmt {
++        case 0x02u, 0x22u: { return (u4v(c.a) << 4u) | u4v(c.r); } // IA4 / RA4
++        default: { return u8v(c.r); }                              // I8, A8, R8, G8, B8, Z8...
++    }
++}
++
++fn encode_byte(off: u32) -> u32 {
++    let kind = fmt_kind(p.fmt);
++    let tw = tile_w(kind);
++    let th = tile_h(kind);
++    let tilesPerRow = (p.width + tw - 1u) / tw;
++    let tileBytes = select(32u, 64u, kind == 3u);
++    let tile = off / tileBytes;
++    let r = off % tileBytes;
++    let tx = (tile % tilesPerRow) * tw;
++    let ty = (tile / tilesPerRow) * th;
++    if (kind == 0u) {
++        let t = r * 2u;
++        let a = fetch(tx + t % tw, ty + t / tw);
++        let b = fetch(tx + (t + 1u) % tw, ty + (t + 1u) / tw);
++        return (u4v(a.r) << 4u) | u4v(b.r);
++    }
++    if (kind == 1u) {
++        return byte8(fetch(tx + r % tw, ty + r / tw));
++    }
++    let half = r / 32u;
++    let t = (r % 32u) / 2u;
++    return texel_byte(fetch(tx + t % tw, ty + t / tw), r % 2u, half);
++}
++
++@compute @workgroup_size(64)
++fn cs_main(@builtin(global_invocation_id) gid: vec3u) {
++    let word = gid.x + gid.y * 65535u * 64u;
++    if (word * 4u >= p.byteSize) { return; }
++    let base = word * 4u;
++    dst[word] = encode_byte(base) | (encode_byte(base + 1u) << 8u) | (encode_byte(base + 2u) << 16u) |
++                (encode_byte(base + 3u) << 24u);
++}
++)";
++
++constexpr std::string_view DecodeShader = R"(
++@group(0) @binding(0) var<storage, read> mem: array<u32>;
++@group(0) @binding(1) var<uniform> p: Params;
++
++var<private> positions: array<vec2f, 3> = array(vec2f(-1.0, 1.0), vec2f(-1.0, -3.0), vec2f(3.0, 1.0));
++@vertex fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
++    return vec4f(positions[vi], 0.0, 1.0);
++}
++
++fn rd(o: u32) -> u32 {
++    let a = o + p.byteOffset;
++    if (a >= p.byteSize) { return 0u; }
++    return (mem[a >> 2u] >> ((a & 3u) * 8u)) & 0xFFu;
++}
++fn rd16(o: u32) -> u32 { return (rd(o) << 8u) | rd(o + 1u); }
++fn x4(v: u32) -> f32 { return f32(v * 17u) / 255.0; }
++fn x5(v: u32) -> f32 { return f32((v << 3u) | (v >> 2u)) / 255.0; }
++fn x6(v: u32) -> f32 { return f32((v << 2u) | (v >> 4u)) / 255.0; }
++fn x3(v: u32) -> f32 { return f32((v << 5u) | (v << 2u) | (v >> 1u)) / 255.0; }
++fn n8(v: u32) -> f32 { return f32(v) / 255.0; }
++
++@fragment fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
++    let x = u32(pos.x);
++    let y = u32(pos.y);
++    let kind = fmt_kind(p.fmt);
++    let tw = tile_w(kind);
++    let th = tile_h(kind);
++    let tilesPerRow = (p.width + tw - 1u) / tw;
++    let tile = (y / th) * tilesPerRow + x / tw;
++    let t = (y % th) * tw + x % tw;
++    switch p.fmt {
++        case 0x00u: { // I4
++            let b = rd(tile * 32u + t / 2u);
++            let i = x4(select(b & 0xFu, b >> 4u, (t & 1u) == 0u));
++            return vec4f(i, i, i, i);
++        }
++        case 0x01u: { // I8
++            let i = n8(rd(tile * 32u + t));
++            return vec4f(i, i, i, i);
++        }
++        case 0x02u: { // IA4
++            let b = rd(tile * 32u + t);
++            let i = x4(b & 0xFu);
++            return vec4f(i, i, i, x4(b >> 4u));
++        }
++        case 0x03u: { // IA8
++            let o = tile * 32u + t * 2u;
++            let i = n8(rd(o + 1u));
++            return vec4f(i, i, i, n8(rd(o)));
++        }
++        case 0x04u: { // RGB565
++            let v = rd16(tile * 32u + t * 2u);
++            return vec4f(x5(v >> 11u), x6((v >> 5u) & 0x3Fu), x5(v & 0x1Fu), 1.0);
++        }
++        case 0x05u: { // RGB5A3
++            let v = rd16(tile * 32u + t * 2u);
++            if ((v & 0x8000u) != 0u) {
++                return vec4f(x5((v >> 10u) & 0x1Fu), x5((v >> 5u) & 0x1Fu), x5(v & 0x1Fu), 1.0);
++            }
++            return vec4f(x4((v >> 8u) & 0xFu), x4((v >> 4u) & 0xFu), x4(v & 0xFu), x3((v >> 12u) & 0x7u));
++        }
++        default: { // RGBA8
++            let o = tile * 64u + t * 2u;
++            return vec4f(n8(rd(o + 1u)), n8(rd(o + 32u)), n8(rd(o + 33u)), n8(rd(o)));
++        }
++    }
++}
++)";
++
++struct Params {
++  uint32_t fmt = 0;
++  uint32_t width = 0;
++  uint32_t height = 0;
++  uint32_t srcWidth = 0;
++  uint32_t srcHeight = 0;
++  uint32_t byteSize = 0;
++  uint32_t byteOffset = 0;
++  uint32_t pad = 0;
++};
++static_assert(sizeof(Params) == 32);
++
++wgpu::ComputePipeline g_encodePipeline;
++wgpu::BindGroupLayout g_encodeLayout;
++wgpu::RenderPipeline g_decodePipeline;
++wgpu::BindGroupLayout g_decodeLayout;
++
++// ---------------------------------------------------------------------------------------------
++// State. Copies are recorded and textures resolved on the FIFO thread; readbacks complete on
++// whatever thread services Dawn callbacks; writebacks run on the caller of apply().
++// ---------------------------------------------------------------------------------------------
++
++// A GPU buffer recorded on the FIFO thread but created and used only on the render worker
++// (Dawn device calls from the FIFO thread race with the render worker).
++struct LazyBuffer {
++  wgpu::Buffer buffer;
++  uint64_t size = 0;
++  wgpu::BufferUsage usage = wgpu::BufferUsage::None;
++  const char* label = "";
++  const wgpu::Buffer& get() {
++    if (!buffer) {
++      const wgpu::BufferDescriptor desc{.label = label, .usage = usage, .size = size};
++      buffer = g_device.CreateBuffer(&desc);
++    }
++    return buffer;
++  }
++};
++using LazyBufferRef = std::shared_ptr<LazyBuffer>;
++
++struct Entry {
++  const uint8_t* dest = nullptr;
++  uint32_t size = 0;
++  GXTexFmt fmt = GX_TF_I8;
++  uint32_t width = 0;
++  uint32_t height = 0;
++  TextureHandle copy;   // the copy's GPU texture (Aurora's, possibly upscaled)
++  LazyBufferRef bytes;  // GX-format bytes of the copy
++  uint64_t seq = 0;
++  uint64_t encodedSeq = 0;
++  HashType ramHash = 0; // memory contents we expect (pre-copy, or our writeback)
++  uint32_t verifiedFrame = UINT32_MAX;
++};
++
++struct Readback {
++  wgpu::Buffer buffer;        // render worker / map callback only
++  std::vector<uint8_t> data;  // filled by the map callback
++  const uint8_t* dest = nullptr;
++  uint32_t size = 0;
++  GXTexFmt fmt = GX_TF_I8;
++  uint32_t width = 0;
++  uint32_t height = 0;
++  HashType preHash = 0;
++  uint64_t seq = 0;
++  bool ok = false;
++};
++
++struct Decoded {
++  TextureHandle handle;
++  uint64_t signature = 0;
++  uint32_t lastUsedFrame = 0;
++};
++
++struct DecodedKey {
++  const void* data;
++  uint32_t fmt, width, height;
++  bool operator==(const DecodedKey&) const = default;
++  template <typename H>
++  friend H AbslHashValue(H h, const DecodedKey& k) {
++    return H::combine(std::move(h), k.data, k.fmt, k.width, k.height);
++  }
++};
++
++std::mutex g_mutex;
++std::atomic_bool g_enabled{true};
++std::atomic_bool g_readbackAll{false};
++std::vector<Entry> g_entries; // oldest first
++absl::flat_hash_map<uint64_t, LazyBufferRef> g_bytePool; // (dest ^ size) -> bytes buffer, reused per range
++absl::flat_hash_map<DecodedKey, Decoded> g_decoded;
++std::vector<std::pair<const uint8_t*, uint32_t>> g_cpuReadRanges;
++std::vector<std::pair<const uint8_t*, uint32_t>> g_watchRanges; // read back even when disabled
++std::deque<std::shared_ptr<Readback>> g_landed;
++std::mutex g_poolMutex;  // readback buffer pool: render worker + map callbacks
++std::vector<wgpu::Buffer> g_readbackPool;
++absl::flat_hash_map<const uint8_t*, std::pair<uint32_t, HashType>> g_written; // our last writeback per dest
++uint64_t g_seq = 0;
++AuroraEfbRamStats g_stats{};
++AuroraEfbRamWritebackFn g_writebackFn = nullptr;
++void* g_writebackUser = nullptr;
++
++constexpr size_t MaxEntries = 64;
++
++struct CpuTimer {
++  std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
++  ~CpuTimer() {
++    g_stats.cpuNs += static_cast<uint64_t>(
++        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
++  }
++};
++
++bool overlaps(const uint8_t* a, uint32_t as, const uint8_t* b, uint32_t bs) { return a < b + bs && b < a + as; }
++
++HashType hash_range(const uint8_t* p, uint32_t size) {
++  g_stats.hashedBytes += size;
++  return xxh3_hash_s(p, size);
++}
++
++uint32_t align4(uint32_t v) { return (v + 3u) & ~3u; }
++
++LazyBufferRef bytes_buffer(const uint8_t* dest, uint32_t size) {
++  const uint64_t key = reinterpret_cast<uintptr_t>(dest) ^ (static_cast<uint64_t>(size) << 40);
++  auto& buf = g_bytePool[key];
++  if (!buf) {
++    buf = std::make_shared<LazyBuffer>(LazyBuffer{
++        .size = align4(size),
++        .usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc | wgpu::BufferUsage::CopyDst,
++        .label = "EFB copy RAM bytes",
++    });
++  }
++  return buf;
++}
++
++// Render worker only.
++wgpu::Buffer params_buffer(const Params& params) {
++  const wgpu::BufferDescriptor desc{
++      .label = "EFB copy RAM params",
++      .usage = wgpu::BufferUsage::Uniform,
++      .size = sizeof(Params),
++      .mappedAtCreation = true,
++  };
++  auto buf = g_device.CreateBuffer(&desc);
++  std::memcpy(buf.GetMappedRange(0, sizeof(Params)), &params, sizeof(Params));
++  buf.Unmap();
++  return buf;
++}
++
++// Encode `copy` (width x height native texels) into `bytes`. Runs on the render worker.
++void run_encode(const wgpu::CommandEncoder& cmd, const TextureHandle& copy, const wgpu::Buffer& bytes, GXTexFmt fmt,
++                uint32_t width, uint32_t height, uint32_t size, const wgpu::Buffer& paramsBuf) {
++  const std::array entries{
++      wgpu::BindGroupEntry{.binding = 0, .textureView = copy->sampleTextureView},
++      wgpu::BindGroupEntry{.binding = 1, .buffer = bytes, .size = align4(size)},
++      wgpu::BindGroupEntry{.binding = 2, .buffer = paramsBuf, .size = sizeof(Params)},
++  };
++  const wgpu::BindGroupDescriptor bgDesc{
++      .label = "EFB copy encode bind group",
++      .layout = g_encodeLayout,
++      .entryCount = entries.size(),
++      .entries = entries.data(),
++  };
++  const auto bindGroup = g_device.CreateBindGroup(&bgDesc);
++  const wgpu::ComputePassDescriptor passDesc{
++      .label = "EFB copy to RAM encode",
++      .timestampWrites = webgpu::gpu_prof::pass_writes("EFB copy RAM encode"),
++  };
++  const auto pass = cmd.BeginComputePass(&passDesc);
++  pass.SetPipeline(g_encodePipeline);
++  pass.SetBindGroup(0, bindGroup);
++  const uint32_t words = align4(size) / 4;
++  const uint32_t groups = (words + 63) / 64;
++  pass.DispatchWorkgroups(std::min<uint32_t>(groups, 65535), (groups + 65534) / 65535);
++  pass.End();
++  (void)fmt;
++  (void)width;
++  (void)height;
++}
++
++void run_decode(const wgpu::CommandEncoder& cmd, const wgpu::Buffer& bytes, uint32_t bytesSize,
++                const wgpu::Buffer& paramsBuf, const TextureHandle& dst) {
++  const std::array entries{
++      wgpu::BindGroupEntry{.binding = 0, .buffer = bytes, .size = align4(bytesSize)},
++      wgpu::BindGroupEntry{.binding = 1, .buffer = paramsBuf, .size = sizeof(Params)},
++  };
++  const wgpu::BindGroupDescriptor bgDesc{
++      .label = "EFB copy decode bind group",
++      .layout = g_decodeLayout,
++      .entryCount = entries.size(),
++      .entries = entries.data(),
++  };
++  const auto bindGroup = g_device.CreateBindGroup(&bgDesc);
++  const std::array colorAttachments{
++      wgpu::RenderPassColorAttachment{
++          .view = dst->attachmentTextureView,
++          .loadOp = wgpu::LoadOp::Clear,
++          .storeOp = wgpu::StoreOp::Store,
++          .clearValue = {0.0, 0.0, 0.0, 0.0},
++      },
++  };
++  const wgpu::RenderPassDescriptor passDesc{
++      .label = "EFB copy RAM decode",
++      .colorAttachmentCount = colorAttachments.size(),
++      .colorAttachments = colorAttachments.data(),
++      .timestampWrites = webgpu::gpu_prof::pass_writes("EFB copy RAM decode"),
++  };
++  const auto pass = cmd.BeginRenderPass(&passDesc);
++  pass.SetPipeline(g_decodePipeline);
++  pass.SetBindGroup(0, bindGroup);
++  pass.Draw(3);
++  pass.End();
++}
++
++// Records the encode of `e` into the pass op list (caller holds g_mutex).
++PassOp make_encode_op(Entry& e) {
++  e.encodedSeq = e.seq;
++  ++g_stats.encodes;
++  const Params params{
++      .fmt = static_cast<uint32_t>(e.fmt),
++      .width = e.width,
++      .height = e.height,
++      .srcWidth = e.copy->size.width,
++      .srcHeight = e.copy->size.height,
++      .byteSize = e.size,
++  };
++  return [copy = e.copy, bytes = e.bytes, fmt = e.fmt, w = e.width, h = e.height, size = e.size,
++          params](const wgpu::CommandEncoder& cmd, detail::FramePacket&) {
++    run_encode(cmd, copy, bytes->get(), fmt, w, h, size, params_buffer(params));
++  };
++}
++
++bool supported_texture_format(u32 fmt) {
++  switch (fmt) {
++  case GX_TF_I4:
++  case GX_TF_I8:
++  case GX_TF_IA4:
++  case GX_TF_IA8:
++  case GX_TF_RGB565:
++  case GX_TF_RGB5A3:
++  case GX_TF_RGBA8:
++    return true;
++  default:
++    return false;
++  }
++}
++
++// Render worker only.
++wgpu::Buffer acquire_readback_buffer(uint32_t size) {
++  std::lock_guard lock{g_poolMutex};
++  for (auto it = g_readbackPool.begin(); it != g_readbackPool.end(); ++it) {
++    if (it->GetSize() >= size) {
++      auto buf = std::move(*it);
++      g_readbackPool.erase(it);
++      return buf;
++    }
++  }
++  const wgpu::BufferDescriptor desc{
++      .label = "EFB copy RAM readback",
++      .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst,
++      .size = align4(size),
++  };
++  return g_device.CreateBuffer(&desc);
++}
++} // namespace
++
++void initialize() {
++  const std::string encodeSrc = std::string{ShaderCommon} + std::string{EncodeShader};
++  const std::string decodeSrc = std::string{ShaderCommon} + std::string{DecodeShader};
++  {
++    const wgpu::ShaderSourceWGSL wgsl{wgpu::ShaderSourceWGSL::Init{.code = encodeSrc.c_str()}};
++    const wgpu::ShaderModuleDescriptor modDesc{.nextInChain = &wgsl, .label = "EFB copy RAM encode"};
++    const auto module = g_device.CreateShaderModule(&modDesc);
++    const std::array entries{
++        wgpu::BindGroupLayoutEntry{
++            .binding = 0,
++            .visibility = wgpu::ShaderStage::Compute,
++            .texture = {.sampleType = wgpu::TextureSampleType::UnfilterableFloat,
++                        .viewDimension = wgpu::TextureViewDimension::e2D},
++        },
++        wgpu::BindGroupLayoutEntry{
++            .binding = 1,
++            .visibility = wgpu::ShaderStage::Compute,
++            .buffer = {.type = wgpu::BufferBindingType::Storage},
++        },
++        wgpu::BindGroupLayoutEntry{
++            .binding = 2,
++            .visibility = wgpu::ShaderStage::Compute,
++            .buffer = {.type = wgpu::BufferBindingType::Uniform},
++        },
++    };
++    const wgpu::BindGroupLayoutDescriptor layoutDesc{
++        .label = "EFB copy RAM encode layout", .entryCount = entries.size(), .entries = entries.data()};
++    g_encodeLayout = g_device.CreateBindGroupLayout(&layoutDesc);
++    const wgpu::PipelineLayoutDescriptor plDesc{.bindGroupLayoutCount = 1, .bindGroupLayouts = &g_encodeLayout};
++    const wgpu::ComputePipelineDescriptor desc{
++        .label = "EFB copy RAM encode",
++        .layout = g_device.CreatePipelineLayout(&plDesc),
++        .compute = {.module = module, .entryPoint = "cs_main"},
++    };
++    g_encodePipeline = g_device.CreateComputePipeline(&desc);
++  }
++  {
++    const wgpu::ShaderSourceWGSL wgsl{wgpu::ShaderSourceWGSL::Init{.code = decodeSrc.c_str()}};
++    const wgpu::ShaderModuleDescriptor modDesc{.nextInChain = &wgsl, .label = "EFB copy RAM decode"};
++    const auto module = g_device.CreateShaderModule(&modDesc);
++    const std::array entries{
++        wgpu::BindGroupLayoutEntry{
++            .binding = 0,
++            .visibility = wgpu::ShaderStage::Fragment,
++            .buffer = {.type = wgpu::BufferBindingType::ReadOnlyStorage},
++        },
++        wgpu::BindGroupLayoutEntry{
++            .binding = 1,
++            .visibility = wgpu::ShaderStage::Fragment,
++            .buffer = {.type = wgpu::BufferBindingType::Uniform},
++        },
++    };
++    const wgpu::BindGroupLayoutDescriptor layoutDesc{
++        .label = "EFB copy RAM decode layout", .entryCount = entries.size(), .entries = entries.data()};
++    g_decodeLayout = g_device.CreateBindGroupLayout(&layoutDesc);
++    const wgpu::PipelineLayoutDescriptor plDesc{.bindGroupLayoutCount = 1, .bindGroupLayouts = &g_decodeLayout};
++    constexpr std::array targets{wgpu::ColorTargetState{.format = wgpu::TextureFormat::RGBA8Unorm}};
++    const wgpu::FragmentState fragment{
++        .module = module, .entryPoint = "fs_main", .targetCount = targets.size(), .targets = targets.data()};
++    const wgpu::RenderPipelineDescriptor desc{
++        .label = "EFB copy RAM decode",
++        .layout = g_device.CreatePipelineLayout(&plDesc),
++        .vertex = {.module = module, .entryPoint = "vs_main"},
++        .primitive = {.topology = wgpu::PrimitiveTopology::TriangleList},
++        .fragment = &fragment,
++    };
++    g_decodePipeline = g_device.CreateRenderPipeline(&desc);
++  }
++}
++
++void shutdown() {
++  std::lock_guard lock{g_mutex};
++  g_entries.clear();
++  g_bytePool.clear();
++  g_decoded.clear();
++  {
++    std::lock_guard poolLock{g_poolMutex};
++    g_readbackPool.clear();
++  }
++  g_landed.clear();
++  g_encodePipeline = {};
++  g_encodeLayout = {};
++  g_decodePipeline = {};
++  g_decodeLayout = {};
++}
++
++bool enabled() noexcept { return g_enabled.load(std::memory_order_relaxed); }
++
++bool supports_copy_format(GXTexFmt fmt) noexcept {
++  return tex_copy_conv::needs_conversion(fmt) || fmt == GX_TF_RGBA8 || fmt == GX_TF_RGB5A3;
++}
++
++PassOp on_copy(const void* destPtr, GXTexFmt fmt, uint32_t width, uint32_t height, const TextureHandle& copy) {
++  if (!copy || !supports_copy_format(fmt) || width == 0 || height == 0) {
++    return {};
++  }
++  const auto* dest = static_cast<const uint8_t*>(destPtr);
++  bool watched = false;
++  {
++    std::lock_guard lock{g_mutex};
++    for (const auto& [p, s] : g_watchRanges) {
++      watched = watched || (dest >= p && dest < p + s);
++    }
++  }
++  if (!enabled() && !watched) {
++    return {};
++  }
++  const auto size = static_cast<uint32_t>(GXGetTexBufferSize(width, height, fmt, GX_FALSE, 0));
++  if (size == 0) {
++    return {};
++  }
++
++  std::lock_guard lock{g_mutex};
++  const CpuTimer timer;
++  ++g_stats.copies;
++  // A copy overwrites its whole range: older copies entirely inside it are gone.
++  std::erase_if(g_entries, [&](const Entry& e) { return e.dest >= dest && e.dest + e.size <= dest + size; });
++  if (g_entries.size() >= MaxEntries) {
++    g_entries.erase(g_entries.begin());
++  }
++  auto& e = g_entries.emplace_back(Entry{
++      .dest = dest,
++      .size = size,
++      .fmt = fmt,
++      .width = width,
++      .height = height,
++      .copy = copy,
++      .bytes = bytes_buffer(dest, size),
++      .seq = ++g_seq,
++  });
++  // Memory still holds what was there before the copy until a writeback lands.
++  e.ramHash = hash_range(dest, size);
++  e.verifiedFrame = current_frame();
++
++  bool readback = watched || g_readbackAll.load(std::memory_order_relaxed);
++  for (const auto& [p, s] : g_cpuReadRanges) {
++    readback = readback || overlaps(p, s, dest, size);
++  }
++  if (!readback) {
++    return {}; // encoded lazily if a texture reads it with another format
++  }
++
++  ++g_stats.readbacks;
++  auto encode = make_encode_op(e);
++  auto rb = std::make_shared<Readback>(Readback{
++      .dest = dest,
++      .size = size,
++      .fmt = fmt,
++      .width = width,
++      .height = height,
++      .preHash = e.ramHash,
++      .seq = e.seq,
++  });
++  return [encode = std::move(encode), bytes = e.bytes, rb](const wgpu::CommandEncoder& cmd,
++                                                           detail::FramePacket& frame) {
++    encode(cmd, frame);
++    rb->buffer = acquire_readback_buffer(rb->size);
++    cmd.CopyBufferToBuffer(bytes->get(), 0, rb->buffer, 0, align4(rb->size));
++    frame.afterSubmitCallbacks.emplace_back([rb] {
++      rb->buffer.MapAsync(
++          wgpu::MapMode::Read, 0, align4(rb->size), wgpu::CallbackMode::AllowSpontaneous,
++          [rb](wgpu::MapAsyncStatus status, wgpu::StringView) {
++            rb->ok = status == wgpu::MapAsyncStatus::Success;
++            if (rb->ok) {
++              const auto* mapped = static_cast<const uint8_t*>(rb->buffer.GetConstMappedRange(0, align4(rb->size)));
++              rb->ok = mapped != nullptr;
++              if (rb->ok) {
++                rb->data.assign(mapped, mapped + rb->size);
++              }
++              rb->buffer.Unmap();
++              std::lock_guard lock{g_poolMutex};
++              if (g_readbackPool.size() < 16) {
++                g_readbackPool.push_back(std::move(rb->buffer));
++              }
++            } else if (status != wgpu::MapAsyncStatus::CallbackCancelled && status != wgpu::MapAsyncStatus::Aborted) {
++              Log.warn("readback map failed: {}", magic_enum::enum_name(status));
++            }
++            rb->buffer = {};
++            std::lock_guard lock{g_mutex};
++            g_landed.push_back(rb);
++          });
++    });
++  };
++}
++
++TextureHandle resolve_texture(const GXTexObj_& obj) {
++  if (!enabled() || !obj.has_data()) {
++    return {};
++  }
++  const auto* data = static_cast<const uint8_t*>(obj.data);
++  const u32 fmt = obj.format();
++  const u32 width = obj.width();
++  const u32 height = obj.height();
++  const auto texSize = static_cast<uint32_t>(gx::texture::texture_source_size(fmt, width, height, 1));
++  if (texSize == 0) {
++    return {};
++  }
++
++  std::lock_guard lock{g_mutex};
++  if (g_entries.empty()) {
++    return {};
++  }
++  const CpuTimer timer;
++  const uint32_t frame = current_frame();
++  // Drop copies whose memory the CPU (or DMA) has written since.
++  bool any = false;
++  for (auto it = g_entries.begin(); it != g_entries.end();) {
++    if (!overlaps(it->dest, it->size, data, texSize)) {
++      ++it;
++      continue;
++    }
++    if (it->verifiedFrame != frame) {
++      it->verifiedFrame = frame;
++      if (hash_range(it->dest, it->size) != it->ramHash) {
++        ++g_stats.cpuOverwrites;
++        const void* dest = it->dest;
++        it = g_entries.erase(it);
++        // Aurora's GPU association for the pointer goes too, unless a newer copy owns it.
++        if (std::none_of(g_entries.begin(), g_entries.end(), [&](const Entry& e) { return e.dest == dest; })) {
++          gx::evict_copy_texture(dest);
++        }
++        continue;
++      }
++    }
++    any = true;
++    ++it;
++  }
++  if (!any) {
++    return {};
++  }
++
++  // Exactly the copy as copied: Aurora's (upscaled) copy texture is right.
++  const auto last = std::find_if(g_entries.rbegin(), g_entries.rend(),
++                                 [&](const Entry& e) { return overlaps(e.dest, e.size, data, texSize); });
++  if (last->dest == data && static_cast<u32>(last->fmt) == fmt && last->width == width && last->height == height) {
++    return {};
++  }
++  if (!supported_texture_format(fmt)) {
++    return {}; // palette/CMPR reads keep Aurora's reinterpretation
++  }
++
++  // Which copies make up the texture's bytes, oldest first.
++  std::vector<Entry*> parts;
++  uint64_t signature = 0;
++  for (auto& e : g_entries) {
++    if (overlaps(e.dest, e.size, data, texSize)) {
++      parts.push_back(&e);
++      signature = signature * 1000003u + e.seq;
++    }
++  }
++  auto& dec = g_decoded[DecodedKey{data, fmt, width, height}];
++  dec.lastUsedFrame = frame;
++  if (!dec.handle) {
++    Log.info("texture {} {}x{} fmt {:#x} reads EFB copy memory ({} copies, newest {} {}x{} fmt {:#x}): decoding",
++             obj.data, width, height, fmt, parts.size(), static_cast<const void*>(last->dest), last->width,
++             last->height, static_cast<u32>(last->fmt));
++    dec.handle = new_conv_texture(width, height, fmt, "EFB copy RAM decoded texture");
++  }
++  if (dec.signature == signature) {
++    return dec.handle;
++  }
++
++  std::vector<PassOp> ops;
++  for (auto* e : parts) {
++    if (e->encodedSeq != e->seq) {
++      ops.push_back(make_encode_op(*e));
++    }
++  }
++  LazyBufferRef src;
++  uint32_t srcSize = 0;
++  uint32_t srcOffset = 0;
++  const auto* single = parts.size() == 1 && parts[0]->dest <= data && data + texSize <= parts[0]->dest + parts[0]->size
++                           ? parts[0]
++                           : nullptr;
++  if (single != nullptr) {
++    src = single->bytes;
++    srcSize = single->size;
++    srcOffset = static_cast<uint32_t>(data - single->dest);
++  } else {
++    // Memory under the texture, then each copy's bytes over it in copy order.
++    src = std::make_shared<LazyBuffer>(LazyBuffer{
++        .size = align4(texSize),
++        .usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst,
++        .label = "EFB copy RAM staging",
++    });
++    auto mem = std::make_shared<std::vector<uint8_t>>(data, data + texSize);
++    mem->resize(align4(texSize));
++    ops.push_back([src, mem](const wgpu::CommandEncoder& cmd, detail::FramePacket&) {
++      // Through a mapped-at-creation copy buffer recorded into the same encoder, so the upload is
++      // ordered with the copies below (queue.WriteBuffer would land before the whole frame).
++      const wgpu::BufferDescriptor desc{
++          .label = "EFB copy RAM staging upload",
++          .usage = wgpu::BufferUsage::CopySrc,
++          .size = mem->size(),
++          .mappedAtCreation = true,
++      };
++      const auto upload = g_device.CreateBuffer(&desc);
++      std::memcpy(upload.GetMappedRange(0, mem->size()), mem->data(), mem->size());
++      upload.Unmap();
++      cmd.CopyBufferToBuffer(upload, 0, src->get(), 0, mem->size());
++    });
++    srcSize = texSize;
++    for (auto* e : parts) {
++      const uint8_t* lo = std::max(e->dest, data);
++      const uint8_t* hi = std::min(e->dest + e->size, data + texSize);
++      const auto from = static_cast<uint32_t>(lo - e->dest) & ~3u;
++      const auto to = static_cast<uint32_t>(lo - data) & ~3u;
++      const auto len = align4(static_cast<uint32_t>(hi - lo));
++      ops.push_back([bytes = e->bytes, src, from, to, len](const wgpu::CommandEncoder& cmd, detail::FramePacket&) {
++        cmd.CopyBufferToBuffer(bytes->get(), from, src->get(), to, len);
++      });
++    }
++  }
++  const Params params{
++      .fmt = fmt,
++      .width = width,
++      .height = height,
++      .byteSize = srcSize,
++      .byteOffset = srcOffset,
++  };
++  ops.push_back([src, srcSize, params, dst = dec.handle](const wgpu::CommandEncoder& cmd, detail::FramePacket&) {
++    run_decode(cmd, src->get(), srcSize, params_buffer(params), dst);
++  });
++  if (!queue_pre_pass_ops(std::move(ops))) {
++    return {};
++  }
++  dec.signature = signature;
++  ++g_stats.decodes;
++
++  // Forget decoded textures nobody has used for a while.
++  if (g_decoded.size() > 32) {
++    absl::erase_if(g_decoded, [&](const auto& kv) { return frame - kv.second.lastUsedFrame > 600; });
++  }
++  return dec.handle;
++}
++
++} // namespace aurora::gfx::efb_ram
++
++using namespace aurora::gfx::efb_ram;
++
++void aurora_efb_ram_set_enabled(bool enabled) {
++  if (enabled == g_enabled.exchange(enabled)) {
++    return;
++  }
++  std::lock_guard lock{g_mutex};
++  g_entries.clear();
++  g_decoded.clear();
++  g_cpuReadRanges.clear();
++}
++
++bool aurora_efb_ram_enabled() { return enabled(); }
++
++void aurora_efb_ram_set_readback_all(bool enabled) { g_readbackAll = enabled; }
++
++void aurora_efb_ram_cpu_read(const void* ptr, uint32_t size) {
++  if (!enabled() || size == 0) {
++    return;
++  }
++  {
++    std::lock_guard lock{g_mutex};
++    const auto* p = static_cast<const uint8_t*>(ptr);
++    bool known = false;
++    bool copied = false;
++    for (const auto& [rp, rs] : g_cpuReadRanges) {
++      known = known || (p >= rp && p + size <= rp + rs);
++    }
++    for (const auto& e : g_entries) {
++      copied = copied || overlaps(e.dest, e.size, p, size);
++    }
++    // Only ranges that hold EFB copies matter; remember a bounded number of them.
++    if (!known && copied) {
++      if (g_cpuReadRanges.size() >= 32) {
++        g_cpuReadRanges.erase(g_cpuReadRanges.begin());
++      }
++      g_cpuReadRanges.emplace_back(p, size);
++      Log.info("CPU reads EFB copy memory at {} (+{:#x}); copies there are read back", ptr, size);
++    }
++  }
++  aurora_efb_ram_apply();
++}
++
++void aurora_efb_ram_watch(const void* ptr, uint32_t size) {
++  std::lock_guard lock{g_mutex};
++  g_watchRanges.emplace_back(static_cast<const uint8_t*>(ptr), size);
++}
++
++uint32_t aurora_efb_ram_apply() {
++  std::deque<std::shared_ptr<Readback>> landed;
++  {
++    std::lock_guard lock{g_mutex};
++    landed.swap(g_landed);
++  }
++  if (landed.empty()) {
++    return 0;
++  }
++  std::sort(landed.begin(), landed.end(), [](const auto& a, const auto& b) { return a->seq < b->seq; });
++  uint32_t written = 0;
++  for (auto& rb : landed) {
++    bool wrote = false;
++    if (rb->ok) {
++      std::lock_guard lock{g_mutex};
++      const CpuTimer timer;
++      auto* dest = const_cast<uint8_t*>(rb->dest);
++      const aurora::HashType now = hash_range(dest, rb->size);
++      const auto prev = g_written.find(rb->dest);
++      const bool ours = prev != g_written.end() && prev->second.first == rb->size && prev->second.second == now;
++      if (now == rb->preHash || ours) {
++        std::memcpy(dest, rb->data.data(), rb->size);
++        const aurora::HashType h = hash_range(dest, rb->size);
++        g_written[rb->dest] = {rb->size, h};
++        for (auto& e : g_entries) {
++          if (e.dest == rb->dest && e.size == rb->size) {
++            e.ramHash = h;
++          }
++        }
++        ++g_stats.writebacks;
++        ++written;
++        wrote = true;
++      } else {
++        ++g_stats.skipped;
++      }
++    }
++    if (wrote && g_writebackFn != nullptr) {
++      g_writebackFn(rb->dest, rb->size, rb->fmt, rb->width, rb->height, g_writebackUser);
++    }
++  }
++  return written;
++}
++
++void aurora_efb_ram_set_writeback_callback(AuroraEfbRamWritebackFn fn, void* userdata) {
++  g_writebackFn = fn;
++  g_writebackUser = userdata;
++}
++
++void aurora_efb_ram_get_stats(AuroraEfbRamStats* out) {
++  std::lock_guard lock{g_mutex};
++  *out = g_stats;
++}
+diff --git a/lib/gfx/efb_ram.hpp b/lib/gfx/efb_ram.hpp
+new file mode 100644
+index 0000000..4e20e28
+--- /dev/null
++++ b/lib/gfx/efb_ram.hpp
+@@ -0,0 +1,51 @@
++#pragma once
++
++// Hardware-accurate EFB copies to main memory ("EFB copies to texture + RAM").
++//
++// GXCopyTex keeps its fast GPU texture (possibly upscaled), keyed by destination pointer.
++// This module adds what the console does besides: the copy's texels exist as GX-format
++// bytes (tiled, big-endian) at the destination in main memory.
++//
++//  * GPU consumers: a texture that reads a copy's memory with a different format, size or
++//    offset than the copy (e.g. a Z16 depth copy sampled as IA8) is decoded from those
++//    exact bytes, at native resolution, in the same frame (GPU encode + decode, no stall).
++//  * CPU consumers: copies into ranges the guest reads with the CPU (DCInvalidateRange, or
++//    every copy when readback-all is on) are read back asynchronously and written into
++//    memory once the GPU has finished the frame (writeback skipped when the CPU has written
++//    the range since the copy).
++//  * CPU/DMA writes into a copy's range (detected by hashing the range) drop the copy, so a
++//    texture loaded there afterwards comes from memory.
++
++#include "types.hpp"
++
++#include <dolphin/gx/GXEnum.h>
++
++#include <functional>
++
++struct GXTexObj_;
++
++namespace aurora::gfx::detail {
++struct FramePacket;
++}
++
++namespace aurora::gfx::efb_ram {
++
++// Work recorded on the FIFO thread and run on the render worker, in pass order.
++using PassOp = std::function<void(const wgpu::CommandEncoder& cmd, detail::FramePacket& frame)>;
++
++void initialize();
++void shutdown();
++
++bool enabled() noexcept;
++bool supports_copy_format(GXTexFmt fmt) noexcept;
++
++// Called by GXCopyTex processing before the EFB pass is resolved into `copy`. Returns work to
++// run right after the resolve (encode + readback) or an empty function.
++PassOp on_copy(const void* dest, GXTexFmt fmt, uint32_t width, uint32_t height, const TextureHandle& copy);
++
++// Called when a texture is bound. Returns a texture decoded from the copied bytes when `obj`
++// reads EFB-copied memory in a way the copy's own texture can't represent; drops copies whose
++// memory the CPU has overwritten. Returns an empty handle to use the normal paths.
++TextureHandle resolve_texture(const GXTexObj_& obj);
++
++} // namespace aurora::gfx::efb_ram
+diff --git a/lib/gfx/encoding.cpp b/lib/gfx/encoding.cpp
+index 2337784..4432b36 100644
+--- a/lib/gfx/encoding.cpp
++++ b/lib/gfx/encoding.cpp
+@@ -191,6 +191,9 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
+     return;
+   }
+ 
++  for (const auto& op : passInfo.ramPreOps) {
++    op(cmd, frame);
++  }
+   for (const auto& conv : passInfo.paletteConvs) {
+     tex_palette_conv::run(cmd, conv);
+   }
+@@ -300,6 +303,10 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
+     }
+   }
+ 
++  for (const auto& op : passInfo.ramPostOps) {
++    op(cmd, frame);
++  }
++
+   if (passInfo.snapshotColorDst) {
+     const webgpu::gpu_prof::Zone zone{cmd, "Pass snapshot"};
+     const wgpu::TexelCopyTextureInfo src{
+diff --git a/lib/gfx/frame.cpp b/lib/gfx/frame.cpp
+index e005a60..9e24e46 100644
+--- a/lib/gfx/frame.cpp
++++ b/lib/gfx/frame.cpp
+@@ -402,6 +402,7 @@ void initialize() {
+   depth_peek::initialize();
+   tex_copy_conv::initialize();
+   tex_palette_conv::initialize();
++  efb_ram::initialize();
+ 
+   // For uniform & storage buffer offset alignments
+   g_device.GetLimits(&g_resources.limits);
+@@ -542,6 +543,7 @@ void shutdown() {
+   depth_peek::shutdown();
+   tex_copy_conv::shutdown();
+   tex_palette_conv::shutdown();
++  efb_ram::shutdown();
+   texture_replacement::shutdown();
+   gx::shutdown();
+ #ifdef AURORA_ENABLE_RMLUI
+diff --git a/lib/gfx/frame_packet.hpp b/lib/gfx/frame_packet.hpp
+index 564e2f0..0d38a4e 100644
+--- a/lib/gfx/frame_packet.hpp
++++ b/lib/gfx/frame_packet.hpp
+@@ -2,6 +2,7 @@
+ 
+ #include "pipeline_cache.hpp"
+ #include "types.hpp"
++#include "efb_ram.hpp"
+ #include "tex_palette_conv.hpp"
+ #include "texture.hpp"
+ 
+@@ -108,6 +109,8 @@ struct RenderPass {
+   bool captureDepthSnapshot = false;
+   bool sealed = false;
+   std::vector<tex_palette_conv::ConvRequest> paletteConvs;
++  std::vector<efb_ram::PassOp> ramPreOps;  // before the pass (EFB copy RAM decodes)
++  std::vector<efb_ram::PassOp> ramPostOps; // after the resolve (EFB copy RAM encode/readback)
+ 
+   RenderTargetLayout target_layout() const noexcept;
+   bool has_consumer() const { return resolveTarget || snapshotColorDst || snapshotDepthDst || snapshotNormalDst; }
+diff --git a/lib/gfx/recording.cpp b/lib/gfx/recording.cpp
+index 67c57a8..78b1ca1 100644
+--- a/lib/gfx/recording.cpp
++++ b/lib/gfx/recording.cpp
+@@ -70,6 +70,7 @@ struct FrameRecorder {
+ };
+ 
+ FrameRecorder g_recorder;
++efb_ram::PassOp g_nextResolveOp; // consumed by the next resolve_pass_into
+ 
+ std::string pass_label(std::string_view kind) {
+ #ifdef AURORA_GFX_DEBUG_GROUPS
+@@ -842,6 +843,10 @@ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bo
+       .opaqueAlpha = !gx::efb_has_alpha(sourceFormat),
+   };
+   prevPass.resolveUniformRange = push_uniform(uniforms);
++  if (g_nextResolveOp) {
++    prevPass.ramPostOps.push_back(std::move(g_nextResolveOp));
++    g_nextResolveOp = {};
++  }
+   enqueue_pass(current_frame_packet(), g_recorder.currentRenderPass);
+ 
+   // Populate new render pass from previous
+@@ -914,6 +919,22 @@ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bo
+   push_command(CommandType::SetScissor, Command::Data{.setScissor = g_recorder.cachedScissor});
+ }
+ 
++bool queue_pre_pass_ops(std::vector<efb_ram::PassOp> ops) {
++  if (!g_recorder.active() || g_recorder.currentRenderPass == UINT32_MAX) {
++    return false;
++  }
++  auto& renderPass = current_render_passes()[g_recorder.currentRenderPass];
++  if (renderPass.sealed) {
++    return false;
++  }
++  for (auto& op : ops) {
++    renderPass.ramPreOps.push_back(std::move(op));
++  }
++  return true;
++}
++
++void set_next_resolve_op(efb_ram::PassOp op) { g_nextResolveOp = std::move(op); }
++
+ void queue_palette_conv(tex_palette_conv::ConvRequest req) {
+   auto& renderPass = current_render_passes()[g_recorder.currentRenderPass];
+   AURORA_ASSERT(!renderPass.sealed, "Attempted to append palette conversion to sealed render pass {}",
+diff --git a/lib/gfx/recording.hpp b/lib/gfx/recording.hpp
+index c1b4a7d..8a9f256 100644
+--- a/lib/gfx/recording.hpp
++++ b/lib/gfx/recording.hpp
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include "types.hpp"
++#include "efb_ram.hpp"
+ 
+ #include <cstddef>
+ #include <string>
+@@ -101,6 +102,9 @@ PipelineRef pipeline_ref(const PipelineConfig& config);
+ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
+                        Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat,
+                        GXPixelFmt sourceFormat);
++// EFB copy to RAM work: run before the current pass / right after the next resolve.
++bool queue_pre_pass_ops(std::vector<efb_ram::PassOp> ops);
++void set_next_resolve_op(efb_ram::PassOp op);
+ uint32_t align_uniform(uint32_t value);
+ Vec2<uint32_t> get_render_target_size() noexcept;
+ void set_viewport(const Viewport& viewport) noexcept;
+diff --git a/lib/gx/texture.cpp b/lib/gx/texture.cpp
+index a56709a..a778ece 100644
+--- a/lib/gx/texture.cpp
++++ b/lib/gx/texture.cpp
+@@ -851,7 +851,12 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
+       continue;
+     }
+ 
+-    gfx::TextureHandle handle;
++    gfx::TextureHandle handle = gfx::efb_ram::resolve_texture(obj);
++    if (handle) {
++      obj.mFormat = resolved_format_for_handle(handle);
++      textureBind = gfx::TextureBind{obj, std::move(handle), s_bindGeneration};
++      continue;
++    }
+     const auto copyIt = g_gxState.copyTextures.find(obj.data);
+     const GXState::CopyTextureRef* copyRef = copyIt != g_gxState.copyTextures.end() ? &copyIt->second : nullptr;
+     if (is_palette_format(obj.format())) {

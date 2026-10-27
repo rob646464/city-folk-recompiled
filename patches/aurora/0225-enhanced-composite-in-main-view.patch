@@ -1,0 +1,55 @@
+0225: Enhanced lighting composite stays inside a partial main view
+
+The game's unused bordered view (patch 50, F1 > Unused content > Bordered view) draws the main
+view into a 40,30 520x400 rectangle with a black border. Bloom, the realistic flashlight beam
+and AO are full-screen passes composited over the whole target, so the beam reached past the
+border to the screen edge. The composite is now scissored to the main view's viewport when that
+does not cover the target; a full-screen main view (all of normal play) is unchanged.
+
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -1465,6 +1465,10 @@
+   TextureHandle beamShadow;
+   uint32_t beamW = 0, beamH = 0;
+   Range beamBlur[2]{};
++  // 0225: the main view's viewport (target pixels) when it does not cover the target (e.g. the
++  // game's unused bordered view): the composite stays inside it.
++  bool clipped = false;
++  uint32_t clip[4]{};
+ };
+ 
+ // Glow buffer (bloom level 0 size). Emissive draws are re-rendered right after the EFB pass
+@@ -2206,6 +2210,9 @@
+                                         .timestampWrites = webgpu::gpu_prof::pass_writes("Enhanced composite")};
+   const auto pass = cmd.BeginRenderPass(&desc);
+   pass.SetPipeline(g_gpu.composite);
++  if (job.clipped && job.clip[0] + job.clip[2] <= t.width && job.clip[1] + job.clip[3] <= t.height) {
++    pass.SetScissorRect(job.clip[0], job.clip[1], job.clip[2], job.clip[3]);  // 0225
++  }
+   pass.SetBindGroup(0, bind(job.base,
+                             (job.mask & 8u) != 0 ? (g_glowDbg == 11 && g_gpu.maskAo.view ? g_gpu.maskAo.view
+                                                     : g_glowDbg >= 8 && g_gpu.mask.view ? g_gpu.mask.view
+@@ -3587,9 +3594,23 @@
+   u.size[3] = 1.f / float(std::max(size.y, 1u));
+   const auto& vp = g_camera.vp;
+   u.vp[0] = vp.left;
+   u.vp[1] = vp.top;
+   u.vp[2] = std::max(vp.width, 1.f);
+   u.vp[3] = std::max(vp.height, 1.f);
++  {
++    // 0225: bloom, the beam and AO are full-screen passes; a main view smaller than the target
++    // (the game's unused bordered view) keeps them inside its rectangle. A full-screen view is
++    // unchanged (no scissor).
++    const float l = std::clamp(vp.left, 0.f, float(size.x)), t = std::clamp(vp.top, 0.f, float(size.y));
++    const float r = std::clamp(vp.left + vp.width, l, float(size.x)), b = std::clamp(vp.top + vp.height, t, float(size.y));
++    job.clipped = l > 0.5f || t > 0.5f || r < float(size.x) - 0.5f || b < float(size.y) - 0.5f;
++    if (job.clipped) {
++      job.clip[0] = uint32_t(std::floor(l));
++      job.clip[1] = uint32_t(std::floor(t));
++      job.clip[2] = uint32_t(std::ceil(r)) - job.clip[0];
++      job.clip[3] = uint32_t(std::ceil(b)) - job.clip[1];
++    }
++  }
+   u.proj[0] = g_camera.p00;
+   u.proj[1] = g_camera.p11;
+   u.proj[2] = g_camera.p02;

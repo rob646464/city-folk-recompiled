@@ -1,0 +1,221 @@
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+index 49d4814..7e65029 100644
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -20,7 +20,9 @@
+ #include <absl/container/flat_hash_set.h>
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <cmath>
++#include <cstdio>
+ #include <cstdint>
+ #include <cstdlib>
+ #include <span>
+@@ -540,6 +542,178 @@ static void audit_pipeline(const PipelineConfig& pc, GXPrimitive prim) noexcept
+   }
+ }
+ 
++// Per-draw debug log (AURORA_DRAW_LOG=<file>, AURORA_DRAW_LOG_FRAMES=<first>,<last>): every draw
++// of those recorded frames with its full pixel pipeline state (TEV stages and registers, texture
++// maps, texgens, channels, blend/Z/alpha compare, masks). AURORA_DRAW_SKIP=<i>[,<i>...] drops
++// those draw ordinals (per frame) in the same frames, to find which draw makes which pixels.
++static std::atomic<u32> sDbgFrame{0};
++static u32 sDbgDraw = 0;
++struct DrawDebug {
++  FILE* file = nullptr;
++  u32 first = 0, last = UINT32_MAX;
++  std::vector<u32> skip;
++  std::vector<std::vector<std::string>> match;
++  bool any = false;
++};
++static const DrawDebug& draw_debug() noexcept {
++  static const DrawDebug d = [] {
++    DrawDebug r;
++    if (const char* p = std::getenv("AURORA_DRAW_LOG")) {
++      r.file = std::fopen(p, "w");
++    }
++    if (const char* p = std::getenv("AURORA_DRAW_LOG_FRAMES")) {
++      std::sscanf(p, "%u,%u", &r.first, &r.last);
++    }
++    if (const char* p = std::getenv("AURORA_DRAW_SKIP")) {
++      for (const char* s = p; *s;) {
++        char* end = nullptr;
++        const unsigned long v = std::strtoul(s, &end, 10);
++        if (end == s) {
++          break;
++        }
++        u32 hi = static_cast<u32>(v);
++        if (*end == '-') { // a range a-b
++          const char* t = end + 1;
++          hi = static_cast<u32>(std::strtoul(t, &end, 10));
++        }
++        for (u32 i = static_cast<u32>(v); i <= hi; ++i) {
++          r.skip.push_back(i);
++        }
++        s = *end ? end + 1 : end;
++      }
++    }
++    // AURORA_DRAW_SKIP_MATCH=<text>[|<text>...]: drop draws whose log entry contains all the
++    // '&'-separated parts of any '|' alternative (e.g. "dst=2 lop=4&s2 "), whatever their ordinal.
++    if (const char* p = std::getenv("AURORA_DRAW_SKIP_MATCH")) {
++      std::string all = p;
++      size_t pos = 0;
++      while (pos <= all.size()) {
++        const size_t bar = std::min(all.find('|', pos), all.size());
++        std::vector<std::string> parts;
++        const std::string alt = all.substr(pos, bar - pos);
++        size_t q = 0;
++        while (q <= alt.size()) {
++          const size_t amp = std::min(alt.find('&', q), alt.size());
++          if (amp > q) {
++            parts.push_back(alt.substr(q, amp - q));
++          }
++          q = amp + 1;
++        }
++        if (!parts.empty()) {
++          r.match.push_back(std::move(parts));
++        }
++        pos = bar + 1;
++      }
++    }
++    r.any = r.file != nullptr || !r.skip.empty() || !r.match.empty();
++    return r;
++  }();
++  return d;
++}
++static std::string dbg_color(const Vec4<float>& c) {
++  return fmt::format("({},{},{},{})", int(std::round(c.x() * 255.f)), int(std::round(c.y() * 255.f)),
++                     int(std::round(c.z() * 255.f)), int(std::round(c.w() * 255.f)));
++}
++// Returns true when the draw is to be skipped.
++static bool draw_debug_note(const PipelineConfig& pc, GXPrimitive prim, u16 vtxCount) noexcept {
++  const auto& dbg = draw_debug();
++  if (!dbg.any) {
++    return false;
++  }
++  const u32 frame = sDbgFrame.load(std::memory_order_relaxed);
++  if (frame < dbg.first || frame > dbg.last) {
++    return false;
++  }
++  const u32 idx = sDbgDraw++;
++  bool skip = std::find(dbg.skip.begin(), dbg.skip.end(), idx) != dbg.skip.end();
++  if (dbg.file == nullptr && dbg.match.empty()) {
++    return skip;
++  }
++  const auto& sc = pc.shaderConfig;
++  const auto& st = g_gxState;
++  std::string s = fmt::format("F{} D{} prim={} n={} vp=({:.0f},{:.0f} {:.0f}x{:.0f}) sc=({},{} {}x{})", frame, idx,
++                              underlying(prim), vtxCount, st.logicalViewport.left,
++                              st.logicalViewport.top, st.logicalViewport.width, st.logicalViewport.height,
++                              st.logicalScissor.x, st.logicalScissor.y, st.logicalScissor.width,
++                              st.logicalScissor.height);
++  s += fmt::format("\n  blend={} src={} dst={} lop={} z={}/{}/{} cupd={} aupd={} dstA={} acmp={} {} op{} {} {} zloc={} "
++                   "cull={} pix={} dither={} fog={}",
++                   underlying(pc.blendMode), underlying(pc.blendFacSrc), underlying(pc.blendFacDst),
++                   underlying(pc.blendOp), pc.depthCompare ? 1 : 0, underlying(pc.depthFunc), pc.depthUpdate ? 1 : 0,
++                   pc.colorUpdate ? 1 : 0, pc.alphaUpdate ? 1 : 0,
++                   st.dstAlpha == UINT32_MAX ? -1 : int(st.dstAlpha), underlying(sc.alphaCompare.comp0),
++                   sc.alphaCompare.ref0, underlying(sc.alphaCompare.op), underlying(sc.alphaCompare.comp1),
++                   sc.alphaCompare.ref1, st.zCompLocBeforeTex ? 1 : 0, underlying(st.cullMode),
++                   underlying(st.pixelFmt), st.dither ? 1 : 0, unsigned(sc.fogType));
++  for (u32 i = 0; i < sc.tevStageCount; ++i) {
++    const auto& t = sc.tevStages[i];
++    s += fmt::format("\n  s{} tc={} map={} ch={} C[{} {} {} {} op{} b{} s{} cl{} ->{}] A[{} {} {} {} op{} b{} s{} cl{} ->{}] "
++                     "kc={} ka={} swap={}/{}",
++                     i, int(t.texCoordId), int(t.texMapId), int(t.channelId), underlying(t.colorPass.a),
++                     underlying(t.colorPass.b), underlying(t.colorPass.c), underlying(t.colorPass.d),
++                     underlying(t.colorOp.op), underlying(t.colorOp.bias), underlying(t.colorOp.scale),
++                     t.colorOp.clamp ? 1 : 0, underlying(t.colorOp.outReg), underlying(t.alphaPass.a),
++                     underlying(t.alphaPass.b), underlying(t.alphaPass.c), underlying(t.alphaPass.d),
++                     underlying(t.alphaOp.op), underlying(t.alphaOp.bias), underlying(t.alphaOp.scale),
++                     t.alphaOp.clamp ? 1 : 0, underlying(t.alphaOp.outReg), underlying(t.kcSel),
++                     underlying(t.kaSel), underlying(t.tevSwapRas), underlying(t.tevSwapTex));
++    if (t.indTexMtxId != GX_ITM_OFF || t.indTexWrapS != GX_ITW_OFF || t.indTexWrapT != GX_ITW_OFF ||
++        t.indTexAddPrev || t.indTexAlphaSel != GX_ITBA_OFF) {
++      s += fmt::format(" ind[st{} f{} b{} m{} w{},{} add{} a{}]", underlying(t.indTexStage),
++                       underlying(t.indTexFormat), underlying(t.indTexBiasSel), underlying(t.indTexMtxId),
++                       underlying(t.indTexWrapS), underlying(t.indTexWrapT), t.indTexAddPrev ? 1 : 0,
++                       underlying(t.indTexAlphaSel));
++    }
++  }
++  s += fmt::format("\n  regs prev={} r0={} r1={} r2={} k0={} k1={} k2={} k3={}", dbg_color(st.colorRegs[0]),
++                   dbg_color(st.colorRegs[1]), dbg_color(st.colorRegs[2]), dbg_color(st.colorRegs[3]),
++                   dbg_color(st.kcolors[0]), dbg_color(st.kcolors[1]), dbg_color(st.kcolors[2]),
++                   dbg_color(st.kcolors[3]));
++  for (u32 i = 0; i < 2 && i < st.numChans; ++i) {
++    const auto& c = sc.colorChannels[i];
++    const auto& a = sc.colorChannels[i + GX_ALPHA0];
++    s += fmt::format("\n  chan{} light={} mat={} amb={} diff={} attn={} | alpha light={} mat={} amb={} | mat={} amb={} "
++                     "amat={} aamb={} mask={:02X}",
++                     i, c.lightingEnabled ? 1 : 0, underlying(c.matSrc), underlying(c.ambSrc), underlying(c.diffFn),
++                     underlying(c.attnFn), a.lightingEnabled ? 1 : 0, underlying(a.matSrc), underlying(a.ambSrc),
++                     dbg_color(st.colorChannelState[i].matColor), dbg_color(st.colorChannelState[i].ambColor),
++                     dbg_color(st.colorChannelState[i + GX_ALPHA0].matColor),
++                     dbg_color(st.colorChannelState[i + GX_ALPHA0].ambColor),
++                     static_cast<unsigned>(st.colorChannelState[i].lightMask.to_ulong()));
++  }
++  for (u32 i = 0; i < st.numTexGens; ++i) {
++    const auto& t = sc.tcgs[i];
++    s += fmt::format("\n  tg{} type={} src={} mtx={} post={} norm={} su={}x{}", i, underlying(t.type),
++                     underlying(t.src), underlying(t.mtx), underlying(t.postMtx), t.normalize ? 1 : 0,
++                     st.texCoordScales[i].scaleS + 1, st.texCoordScales[i].scaleT + 1);
++  }
++  for (u32 i = 0; i < MaxTextures; ++i) {
++    const auto& tex = st.textures[i];
++    if (tex) {
++      s += fmt::format("\n  tex{} {}x{} fmt={} wrap={},{} filt={},{} lod={:.2f}..{:.2f} bias={:.2f} edge={} mips={}/{}{}", i,
++                       tex.texObj.width(), tex.texObj.height(), tex.texObj.format(), underlying(tex.texObj.wrap_s()),
++                       underlying(tex.texObj.wrap_t()), underlying(tex.texObj.min_filter()),
++                       underlying(tex.texObj.mag_filter()), tex.texObj.min_lod(), tex.texObj.max_lod(),
++                       tex.texObj.lod_bias(), tex.texObj.do_edge_lod() ? 1 : 0, tex.texObj.mip_count(),
++                       tex.ref ? tex.ref->mipCount : 0, tex.ref && tex.ref->hasArbitraryMips ? " arb" : "");
++    }
++  }
++  for (u32 i = 0; i < sc.numIndStages; ++i) {
++    s += fmt::format("\n  indstage{} tc={} map={} scale={},{}", i, underlying(sc.indStages[i].texCoordId),
++                     underlying(sc.indStages[i].texMapId), underlying(sc.indStages[i].scaleS),
++                     underlying(sc.indStages[i].scaleT));
++  }
++  for (const auto& alt : dbg.match) {
++    if (std::all_of(alt.begin(), alt.end(), [&](const std::string& part) { return s.find(part) != std::string::npos; })) {
++      skip = true;
++    }
++  }
++  if (dbg.file != nullptr) {
++    std::fprintf(dbg.file, "%s%s\n", skip ? "SKIPPED " : "", s.c_str());
++  }
++  return skip;
++}
++
+ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
+                          u32 numIndices) noexcept {
+   auto& state = g_gxState;
+@@ -645,6 +819,9 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
+       .instanceCount = instanceCount,
+       .dstAlpha = state.dstAlpha,
+   };
++  if (draw_debug_note(cache.config, prim, vtxCount)) [[unlikely]] {
++    return;
++  }
+   if (gfx::enhanced::config().enabled) {
+     if (gfx::enhanced::note_draw(cache.config, state.drawClass, vtxCount, drawData)) {
+       return; // debug: hidden
+@@ -687,7 +864,16 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
+ // draw actually references, growing the uploaded range when a later draw needs more.
+ static std::unordered_map<const void*, gfx::Range> sDynamicUploads;
+ 
+-void reset_dynamic_arrays() noexcept { sDynamicUploads.clear(); }
++void reset_dynamic_arrays() noexcept {
++  sDynamicUploads.clear();
++  // Once per recorded frame: the draw debug log's frame boundary.
++  sDbgFrame.fetch_add(1, std::memory_order_relaxed);
++  if (sDbgDraw != 0 && draw_debug().file != nullptr) {
++    std::fprintf(draw_debug().file, "---- end of frame %u (%u draws)\n", sDbgFrame.load() - 1, sDbgDraw);
++    std::fflush(draw_debug().file);
++  }
++  sDbgDraw = 0;
++}
+ 
+ static void size_dynamic_arrays(GXVtxFmt fmt, const u8* vtx, u16 vtxCount, u32 vtxSize) noexcept {
+   const auto& vtxFmt = g_gxState.vtxFmts[fmt];

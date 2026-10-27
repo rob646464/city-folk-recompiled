@@ -1,0 +1,398 @@
+0211: enhanced lighting GPU cost, same picture
+
+- Incremental masks: a frame's second light-shadow/AO mask (a later EFB pass with new opaque
+  draws) adds only the new draws to the depth pre-pass (also with AO alone, which re-rendered
+  every draw) and recomputes the AO and shadow-map mask texels only within one 8x8 tile of where
+  the pre-pass depth changed (fs_dirty: tile flags from the previous and new depth snapshots);
+  the rest keeps the frame's previous mask. Only the later pass's own draws read that mask, at
+  their own (depth-matched) texels. AURORA_ENH_MASK_FULL=1: every mask complete (A/B).
+- Ambient occlusion: no second load of each sample's depth (mask_view_pos re-read it), same in
+  the 4x4 blur.
+- Shadow-map mask: each light's face matrix is loaded once, not per filter tap.
+- Realistic flashlight: the shadow map's 2x2 footprint per step is two gathers (the key's bytes)
+  instead of four loads; periodic hash modulo by a power of two is a bit mask.
+
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -373,6 +373,39 @@
+   let d = textureLoad(tdepth, clamp(vec2i(mp), vec2i(0), dims - vec2i(1)), 0).r;
+   return view_pos((floor(mp) + vec2f(0.5)) * fx.pp.y, d);
+ }
++// 0210: incremental masks. A second mask in a frame only serves the opaque draws of the later EFB
++// pass, which read it where they are (4x4 tent, depth-matched to their own surface): mask texels
++// are recomputed only within a tile of where those new draws changed the pre-pass depth (t1 =
++// 8x8 tile flags from fs_dirty, fx.ao.z = 8), the rest keeps the frame's previous mask.
++@group(0) @binding(9) var tdepthold: texture_2d<f32>;
++fn mask_needed(mp: vec2f) -> bool {
++  if (fx.ao.z < 0.5) { return true; }
++  let td = vec2i(textureDimensions(t1));
++  let t = vec2i(mp) / vec2i(8);
++  for (var y = -1; y <= 1; y++) {
++    for (var x = -1; x <= 1; x++) {
++      let c = clamp(t + vec2i(x, y), vec2i(0), td - vec2i(1));
++      if (textureLoad(t1, c, 0).r > 0.5) { return true; }
++    }
++  }
++  return false;
++}
++// One texel per 8x8 mask texels: 1 where the pre-pass depth differs from the previous mask's.
++// 2x2 gathers (clamp to edge: texels past the edge repeat the edge, which compares the same).
++@group(0) @binding(10) var psamp: sampler;
++@fragment
++fn fs_dirty(in: VsOut) -> @location(0) vec4f {
++  let inv = 1.0 / vec2f(textureDimensions(tdepth));
++  let t = floor(in.pos.xy) * 8.0 + vec2f(1.0);
++  var diff = false;
++  for (var y = 0; y < 4; y++) {
++    for (var x = 0; x < 4; x++) {
++      let uv = (t + vec2f(f32(x), f32(y)) * 2.0) * inv;
++      diff = diff || any(textureGather(0, tdepth, psamp, uv) != textureGather(0, tdepthold, psamp, uv));
++    }
++  }
++  return vec4f(select(0.0, 1.0, diff));
++}
+ @fragment
+ fn fs_xlshadow(in: VsOut) -> @location(0) vec4f {
+   let mp = floor(in.pos.xy);
+@@ -480,9 +513,10 @@
+ }
+ var<private> dbg: vec4f;
+ // Atlas pixel position and depth of a view-space point in face record b.
+-fn cube_proj(b: u32, w: vec3f, adims: vec2f) -> vec3f {
++// 0210: the face record's four matrix rows are loaded once per light (m), not per filter tap.
++fn cube_proj(m: mat4x4f, w: vec3f, adims: vec2f) -> vec3f {
+   let v = vec4f(w, 1.0);
+-  let c = vec4f(dot(v, xrow(b)), dot(v, xrow(b + 4u)), dot(v, xrow(b + 8u)), dot(v, xrow(b + 12u)));
++  let c = vec4f(dot(v, m[0]), dot(v, m[1]), dot(v, m[2]), dot(v, m[3]));
+   let nd = c.xyz / max(c.w, 1e-4);
+   return vec3f((nd.x * 0.5 + 0.5) * adims.x, (0.5 - nd.y * 0.5) * adims.y, nd.z);
+ }
+@@ -507,7 +541,8 @@
+   let f = cube_face(d);
+   let b = (s * 6u + f) * 24u;
+   let qv = vec4f(q, 1.0);
+-  let clip = vec4f(dot(qv, xrow(b)), dot(qv, xrow(b + 4u)), dot(qv, xrow(b + 8u)), dot(qv, xrow(b + 12u)));
++  let fm = mat4x4f(xrow(b), xrow(b + 4u), xrow(b + 8u), xrow(b + 12u));
++  let clip = vec4f(dot(qv, fm[0]), dot(qv, fm[1]), dot(qv, fm[2]), dot(qv, fm[3]));
+   if (clip.w <= 1e-4) { return 0.0; }
+   let ndc = clip.xyz / clip.w;
+   let adims = fx.xl[32].xy;
+@@ -540,7 +575,7 @@
+     var cnt = 0.0;
+     for (var k = 0u; k < ns; k++) {
+       let o = vogel(k, ns, rot + 1.7) * search;
+-      let t = cube_proj(b, q + tu * o.x + tv * o.y, adims);
++      let t = cube_proj(fm, q + tu * o.x + tv * o.y, adims);
+       let z = textureLoad(tatlas, vec2i(clamp(t.xy, lo, hi)), 0);
+       if (atlas_blocks(z, t.z)) {
+         sum = sum + atlas_axis(z, lq.x);
+@@ -557,7 +592,7 @@
+   var lit = 0.0;
+   for (var k = 0u; k < taps; k++) {
+     let o = vogel(k, taps, rot) * radius;
+-    let t = cube_proj(b, q + tu * o.x + tv * o.y, adims);
++    let t = cube_proj(fm, q + tu * o.x + tv * o.y, adims);
+     lit = lit + textureSampleCompareLevel(tatlas, tcmp, clamp(t.xy, lo, hi) / adims, t.z);
+   }
+   return 1.0 - lit / f32(taps);
+@@ -565,6 +600,7 @@
+ @fragment
+ fn fs_xlcube(in: VsOut) -> MaskOut {
+   let mp = floor(in.pos.xy);
++  if (!mask_needed(mp)) { discard; }
+   let d0 = textureLoad(tdepth, vec2i(mp), 0).r;
+   var o: MaskOut;
+   o.a = vec4f(0.0);
+@@ -618,7 +654,8 @@
+     if (any(sp < vec2f(0.0)) || any(sp >= dims)) { continue; }
+     let sd = textureLoad(tdepth, vec2i(sp), 0).r;
+     if (sd <= 1e-7) { continue; }
+-    let o = mask_view_pos(sp);
++    // 0210: = mask_view_pos(sp) (sp is inside the mask) without loading the depth a second time.
++    let o = view_pos((floor(sp) + vec2f(0.5)) * fx.pp.y, sd);
+     let diff = o.z - q.z;
+     if (diff > bias) {
+       // 0187: only occluders within the radius of the receiving point count (3D distance, hard
+@@ -635,6 +672,7 @@
+ @fragment
+ fn fs_aomask(in: VsOut) -> @location(0) vec4f {
+   let mp = floor(in.pos.xy);
++  if (!mask_needed(mp)) { discard; }
+   let d0 = textureLoad(tdepth, vec2i(mp), 0).r;
+   if (d0 <= 1e-7) { return vec4f(0.0); } // nothing drawn (cleared to far)
+   let p = view_pos((mp + vec2f(0.5)) * fx.pp.y, d0);
+@@ -645,10 +683,11 @@
+ @fragment
+ fn fs_aoblur4(in: VsOut) -> @location(0) vec4f {
+   let mp = floor(in.pos.xy);
++  if (!mask_needed(mp)) { discard; }
+   let dims = vec2i(textureDimensions(tdepth));
+   let d0 = textureLoad(tdepth, vec2i(mp), 0).r;
+   if (d0 <= 1e-7) { return vec4f(0.0); }
+-  let z0 = mask_view_pos(mp).z;
++  let z0 = view_pos((mp + vec2f(0.5)) * fx.pp.y, d0).z; // 0210: = mask_view_pos(mp).z
+   let tol = 2.0 + abs(z0) * 0.015;
+   var sum = 0.0;
+   var ws = 0.0;
+@@ -656,8 +695,9 @@
+     for (var x = -2; x < 2; x++) {
+       let c = vec2i(mp) + vec2i(x, y);
+       if (any(c < vec2i(0)) || any(c >= dims)) { continue; }
+-      if (textureLoad(tdepth, c, 0).r <= 1e-7) { continue; }
+-      let z = mask_view_pos(vec2f(c)).z;
++      let dc = textureLoad(tdepth, c, 0).r;
++      if (dc <= 1e-7) { continue; }
++      let z = view_pos((vec2f(c) + vec2f(0.5)) * fx.pp.y, dc).z; // 0210: = mask_view_pos(vec2f(c)).z, one load
+       let w = 1.0 - smoothstep(tol, tol * 3.0, abs(z - z0));
+       sum = sum + textureLoad(t0, c, 0).r * w;
+       ws = ws + w;
+@@ -758,6 +798,14 @@
+   let v = round(clamp(t, vec4f(0.0), vec4f(1.0)) * 255.0);
+   return v[sg] * 256.0 + v[sr];
+ }
++fn beam_gather(c: u32, uv: vec2f) -> vec4f {
++  switch c {
++    case 0u: { return textureGather(0, t0, samp, uv); }
++    case 1u: { return textureGather(1, t0, samp, uv); }
++    case 2u: { return textureGather(2, t0, samp, uv); }
++    default: { return textureGather(3, t0, samp, uv); }
++  }
++}
+ // Fraction of the flashlight reaching view-space point p (2x2 bilinear PCF on the shadow map).
+ fn beam_vis(p: vec3f) -> f32 {
+   if (fx.beam[5].x < 0.5) { return 1.0; }
+@@ -775,12 +823,15 @@
+   let f = uv * dims - vec2f(0.5);
+   let b = floor(f);
+   let w = f - b;
+-  var v = vec4f(0.0);
+-  for (var k = 0u; k < 4u; k++) {
+-    let c = clamp(vec2i(b) + vec2i(i32(k & 1u), i32(k >> 1u)), vec2i(0), vec2i(dims) - vec2i(1));
+-    v[k] = select(1.0, 0.0, recv - 48.0 > beam_key(textureLoad(t0, c, 0), sr, sg));
+-  }
+-  return mix(mix(v.x, v.y, w.x), mix(v.z, v.w, w.x), w.y);
++  // 0210: the 2x2 footprint as two gathers (the key's two bytes) instead of four loads; sampled
++  // at the footprint's shared corner, so the hardware picks exactly texels b .. b + 1, and the
++  // clamp-to-edge sampler repeats the edge texels as the clamped loads did.
++  // Gather order: x (0, 1), y (1, 1), z (1, 0), w (0, 0).
++  let guv = (b + vec2f(1.0)) / dims;
++  let keys = round(clamp(beam_gather(sg, guv), vec4f(0.0), vec4f(1.0)) * 255.0) * 256.0 +
++             round(clamp(beam_gather(sr, guv), vec4f(0.0), vec4f(1.0)) * 255.0);
++  let v = select(vec4f(1.0), vec4f(0.0), vec4f(recv - 48.0) > keys);
++  return mix(mix(v.w, v.z, w.x), mix(v.x, v.y, w.x), w.y);
+ }
+ fn beam_inside(p: vec3f, a: vec3f, cosc: f32) -> bool {
+   let v = p - fx.lpos.xyz;
+@@ -846,7 +897,9 @@
+   return v;
+ }
+ fn beam_hash3p(c: vec3i, period: i32) -> vec3f {
+-  let m = ((c % vec3i(period)) + vec3i(period)) % vec3i(period);
++  // 0210: every period is a power of two (8, 16, 32): the positive modulo is a bit mask (the same
++  // values for negative cells too, two's complement), without three integer divisions.
++  let m = c & vec3i(period - 1);
+   return vec3f(beam_pcg3(vec3u(m))) * (1.0 / 4294967296.0);
+ }
+ fn beam_hashp(c: vec3i, period: i32) -> f32 { return beam_hash3p(c, period).x; }
+@@ -1218,6 +1271,12 @@
+   // 0196 realistic flashlight
+   wgpu::RenderPipeline beam, beamBlur;
+   Tex beamTex, beamTmp;
++  // 0210: incremental masks (fs_dirty): the previous pre-pass depth and the 8x8 tile flags
++  Tex maskDepthPrev, dirty;
++  wgpu::BindGroupLayout dirtyBgl;
++  wgpu::PipelineLayout dirtyLayout;
++  wgpu::RenderPipeline dirtyPipe;
++  wgpu::Sampler pointSampler;
+ };
+ Gpu g_gpu;
+ 
+@@ -1492,6 +1551,8 @@
+   size_t firstNew = 0;
+   // 0032: point = light shadows in this mask (planes 1-2), ao = ambient occlusion (plane 3).
+   bool point = true, ao = false;
++  // 0210: firstNew > 0 with shadow maps or AO: recompute only around changed pre-pass depth.
++  bool incremental = false;
+ };
+ 
+ // GPU timing of the light-shadow passes (AURORA_ENH_GPU_TIMING=1, needs TimestampQuery): camera
+@@ -1555,10 +1616,14 @@
+   if (g_gpu.cubePipe) {
+     return true;
+   }
+-  std::array<wgpu::BindGroupLayoutEntry, 5> e{};
++  std::array<wgpu::BindGroupLayoutEntry, 6> e{};
+   e[0] = {.binding = 0,
+           .visibility = wgpu::ShaderStage::Fragment | wgpu::ShaderStage::Vertex,
+           .buffer = {.type = wgpu::BufferBindingType::Uniform, .minBindingSize = sizeof(FxUniform)}};
++  // 0210: tile flags of an incremental mask (mask_needed)
++  e[5] = {.binding = 3,
++          .visibility = wgpu::ShaderStage::Fragment,
++          .texture = {.sampleType = wgpu::TextureSampleType::Float, .viewDimension = wgpu::TextureViewDimension::e2D}};
+   e[1] = {.binding = 5,
+           .visibility = wgpu::ShaderStage::Fragment,
+           .texture = {.sampleType = wgpu::TextureSampleType::UnfilterableFloat, .viewDimension = wgpu::TextureViewDimension::e2D}};
+@@ -1636,6 +1701,42 @@
+   }
+ }
+ 
++// 0210: tile-flag pass of incremental masks (fs_dirty: two unfilterable depth snapshots).
++bool init_dirty() {
++  if (g_gpu.dirtyPipe) {
++    return true;
++  }
++  std::array<wgpu::BindGroupLayoutEntry, 3> e{};
++  for (uint32_t i = 0; i < 2; ++i) {
++    e[i] = {.binding = i == 0 ? 5u : 9u,
++            .visibility = wgpu::ShaderStage::Fragment,
++            .texture = {.sampleType = wgpu::TextureSampleType::UnfilterableFloat, .viewDimension = wgpu::TextureViewDimension::e2D}};
++  }
++  e[2] = {.binding = 10, .visibility = wgpu::ShaderStage::Fragment, .sampler = {.type = wgpu::SamplerBindingType::NonFiltering}};
++  const wgpu::SamplerDescriptor sd{.label = "Enhanced mask tile flags",
++                                   .addressModeU = wgpu::AddressMode::ClampToEdge,
++                                   .addressModeV = wgpu::AddressMode::ClampToEdge};
++  g_gpu.pointSampler = webgpu::g_device.CreateSampler(&sd);
++  const wgpu::BindGroupLayoutDescriptor bglDesc{.label = "Enhanced mask tile flags", .entryCount = e.size(), .entries = e.data()};
++  g_gpu.dirtyBgl = webgpu::g_device.CreateBindGroupLayout(&bglDesc);
++  const wgpu::PipelineLayoutDescriptor plDesc{.label = "Enhanced mask tile flags", .bindGroupLayoutCount = 1, .bindGroupLayouts = &g_gpu.dirtyBgl};
++  g_gpu.dirtyLayout = webgpu::g_device.CreatePipelineLayout(&plDesc);
++  const wgpu::ColorTargetState target{.format = wgpu::TextureFormat::R8Unorm, .writeMask = wgpu::ColorWriteMask::All};
++  const wgpu::FragmentState fragment{.module = g_gpu.module, .entryPoint = "fs_dirty", .targetCount = 1, .targets = &target};
++  const wgpu::RenderPipelineDescriptor desc{
++      .label = "Enhanced mask tile flags",
++      .layout = g_gpu.dirtyLayout,
++      .vertex = {.module = g_gpu.module, .entryPoint = "vs_main"},
++      .primitive = {.topology = wgpu::PrimitiveTopology::TriangleList},
++      .fragment = &fragment,
++  };
++  g_gpu.dirtyPipe = webgpu::g_device.CreateRenderPipeline(&desc);
++  if (!g_gpu.dirtyPipe) {
++    Log.error("Enhanced mask tile-flag pass failed to build");
++  }
++  return bool(g_gpu.dirtyPipe);
++}
++
+ // Extra-light shadow mask, before the EFB pass whose world draws read it: depth pre-pass of the
+ // opaque world draws at mask resolution, ray march, copy into the storage buffer.
+ void encode_mask(const wgpu::CommandEncoder& cmd, const MaskJob& job) {
+@@ -1691,7 +1792,46 @@
+     pass.End();
+     reset_bound_pipeline();
+   }
++  // 0210: an incremental mask (this frame's previous mask, same lights/layout, only new draws
++  // added to the pre-pass) recomputes its planes only around the texels whose pre-pass depth
++  // changed (mask_needed); the previous depth snapshot is kept for the comparison.
++  const bool incremental = job.incremental && init_dirty();
++  bool incrementalValid = false;
++  if (incremental) {
++    std::swap(g_gpu.maskDepthR, g_gpu.maskDepthPrev);
++    incrementalValid = fromDepth > 0 && g_gpu.maskDepthPrev.texture && g_gpu.maskDepthPrev.width == w &&
++                       g_gpu.maskDepthPrev.height == h;
++    ensure_tex(g_gpu.maskDepthR, w, h, wgpu::TextureFormat::R32Float,
++               wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopySrc,
++               "Enhanced light-shadow depth R");
++  }
+   tex_copy_conv::snapshot_depth(cmd, g_gpu.maskDepth.view, 1, g_gpu.maskDepthR.view);
++  if (incremental) {
++    ensure_tex(g_gpu.dirty, (w + 7) / 8, (h + 7) / 8, wgpu::TextureFormat::R8Unorm,
++               wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding, "Enhanced mask tile flags");
++    const wgpu::RenderPassColorAttachment att{.view = g_gpu.dirty.view,
++                                              .loadOp = wgpu::LoadOp::Clear,
++                                              .storeOp = wgpu::StoreOp::Store,
++                                              .clearValue = {1, 1, 1, 1}};
++    const wgpu::RenderPassDescriptor desc{.label = "Enhanced mask tile flags", .colorAttachmentCount = 1, .colorAttachments = &att,
++                                          .timestampWrites = webgpu::gpu_prof::pass_writes("Enhanced mask tile flags")};
++    const auto pass = cmd.BeginRenderPass(&desc);
++    if (incrementalValid) {
++      // Otherwise (the textures were just created) every tile stays flagged: a full mask.
++      const std::array<wgpu::BindGroupEntry, 3> entries{
++          wgpu::BindGroupEntry{.binding = 5, .textureView = g_gpu.maskDepthR.view},
++          wgpu::BindGroupEntry{.binding = 9, .textureView = g_gpu.maskDepthPrev.view},
++          wgpu::BindGroupEntry{.binding = 10, .sampler = g_gpu.pointSampler},
++      };
++      const wgpu::BindGroupDescriptor bgDesc{.layout = g_gpu.dirtyBgl, .entryCount = entries.size(), .entries = entries.data()};
++      pass.SetPipeline(g_gpu.dirtyPipe);
++      pass.SetBindGroup(0, webgpu::g_device.CreateBindGroup(&bgDesc));
++      pass.Draw(3);
++    }
++    pass.End();
++  }
++  const wgpu::TextureView dirtyView = incremental ? g_gpu.dirty.view : wgpu::TextureView{};
++  const auto maskLoad = incremental ? wgpu::LoadOp::Load : wgpu::LoadOp::Clear;
+   const wgpu::Extent3D extent{w, h, 1};
+   {
+     // 0186: the pre-pass depth goes with the mask: a receiver only takes the mask texels that
+@@ -1722,24 +1862,24 @@
+     }
+     {
+       const wgpu::RenderPassColorAttachment att{.view = g_gpu.maskAoRaw.view,
+-                                                .loadOp = wgpu::LoadOp::Clear,
++                                                .loadOp = maskLoad,
+                                                 .storeOp = wgpu::StoreOp::Store,
+                                                 .clearValue = {0, 0, 0, 0}};
+       const wgpu::RenderPassDescriptor desc{.label = "Ambient occlusion mask", .colorAttachmentCount = 1, .colorAttachments = &att,
+                                             .timestampWrites = webgpu::gpu_prof::pass_writes("Ambient occlusion mask")};
+       const auto pass = cmd.BeginRenderPass(&desc);
+       pass.SetPipeline(g_gpu.aoMaskPipe);
+-      pass.SetBindGroup(0, bind(job.uniform, {}, {}, {}, g_gpu.maskDepthR.view));
++      pass.SetBindGroup(0, bind(job.uniform, {}, dirtyView, {}, g_gpu.maskDepthR.view));
+       pass.Draw(3);
+       pass.End();
+     }
+     const wgpu::RenderPassColorAttachment att{
+-        .view = g_gpu.maskAo.view, .loadOp = wgpu::LoadOp::Clear, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}};
++        .view = g_gpu.maskAo.view, .loadOp = maskLoad, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}};
+     const wgpu::RenderPassDescriptor desc{.label = "Ambient occlusion blur", .colorAttachmentCount = 1, .colorAttachments = &att,
+                                           .timestampWrites = webgpu::gpu_prof::pass_writes("Ambient occlusion blur")};
+     const auto pass = cmd.BeginRenderPass(&desc);
+     pass.SetPipeline(g_gpu.aoBlur4Pipe);
+-    pass.SetBindGroup(0, bind(job.uniform, g_gpu.maskAoRaw.view, {}, {}, g_gpu.maskDepthR.view));
++    pass.SetBindGroup(0, bind(job.uniform, g_gpu.maskAoRaw.view, dirtyView, {}, g_gpu.maskDepthR.view));
+     pass.Draw(3);
+     pass.End();
+     const wgpu::TexelCopyTextureInfo src3{.texture = g_gpu.maskAo.texture};
+@@ -1793,20 +1933,21 @@
+     g_statLights.store(job.lights, std::memory_order_relaxed);
+     g_statCasters.store(drawn, std::memory_order_relaxed);
+     g_statSkipped.store(skipped, std::memory_order_relaxed);
+-    const std::array<wgpu::BindGroupEntry, 5> entries{
++    const std::array<wgpu::BindGroupEntry, 6> entries{
+         wgpu::BindGroupEntry{.binding = 0, .buffer = detail::resources().uniformBuffer, .offset = job.uniform.offset, .size = sizeof(FxUniform)},
+         wgpu::BindGroupEntry{.binding = 5, .textureView = g_gpu.maskDepthR.view},
+         wgpu::BindGroupEntry{.binding = 6, .textureView = g_gpu.atlas.view},
+         wgpu::BindGroupEntry{.binding = 7, .sampler = g_gpu.cmpSampler},
+         wgpu::BindGroupEntry{.binding = 8, .buffer = detail::resources().storageBuffer, .offset = job.records.offset, .size = job.records.size},
++        wgpu::BindGroupEntry{.binding = 3, .textureView = dirtyView ? dirtyView : g_gpu.dummy.view},
+     };
+     const wgpu::BindGroupDescriptor bgDesc{.layout = g_gpu.cubeBgl, .entryCount = entries.size(), .entries = entries.data()};
+     const auto bg = webgpu::g_device.CreateBindGroup(&bgDesc);
+     const std::array<wgpu::RenderPassColorAttachment, 4> att{
+-        wgpu::RenderPassColorAttachment{.view = g_gpu.mask.view, .loadOp = wgpu::LoadOp::Clear, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}},
+-        wgpu::RenderPassColorAttachment{.view = g_gpu.mask2.view, .loadOp = wgpu::LoadOp::Clear, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}},
+-        wgpu::RenderPassColorAttachment{.view = g_gpu.mask3.view, .loadOp = wgpu::LoadOp::Clear, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}},
+-        wgpu::RenderPassColorAttachment{.view = g_gpu.mask4.view, .loadOp = wgpu::LoadOp::Clear, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}},
++        wgpu::RenderPassColorAttachment{.view = g_gpu.mask.view, .loadOp = maskLoad, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}},
++        wgpu::RenderPassColorAttachment{.view = g_gpu.mask2.view, .loadOp = maskLoad, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}},
++        wgpu::RenderPassColorAttachment{.view = g_gpu.mask3.view, .loadOp = maskLoad, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}},
++        wgpu::RenderPassColorAttachment{.view = g_gpu.mask4.view, .loadOp = maskLoad, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}},
+     };
+     const wgpu::RenderPassDescriptor desc{.label = "Shadow-map mask",
+                                           .colorAttachmentCount = att.size(),
+@@ -2980,6 +3121,16 @@
+              u.size[1], u.vp[0], u.vp[1], u.vp[2], u.vp[3], u.proj[0], u.proj[1], u.proj[2], u.proj[3], u.projz[0],
+              u.projz[1], u.projz[2], u.projz[3], u.dr[0], u.dr[1], u.pass[0], u.pass[1], u.pass[2]);
+   }
++  if (!(job.point && shadow_maps())) {
++    // 0210: without light shadow maps (ambient occlusion only), a later mask of this frame with the
++    // same layout also adds only its new draws to the pre-pass (was: every draw again).
++    const uint64_t key = uint64_t(1) << 63 | uint64_t(g_maskW) << 16 | uint64_t(g_maskH);
++    job.firstNew = key == g_maskKey && !job.point ? flushedBefore : 0;
++    g_maskKey = key;
++  }
++  static const bool sFull = std::getenv("AURORA_ENH_MASK_FULL") != nullptr; // A/B: every mask complete
++  job.incremental = job.firstNew > 0 && (job.ao || job.cube) && !sFull;
++  u.ao[2] = job.incremental ? 8.f : 0.f;
+   job.uniform = push_uniform(reinterpret_cast<const uint8_t*>(&u), sizeof(u));
+   std::vector<efb_ram::PassOp> ops;
+   ops.emplace_back([job = std::move(job)](const wgpu::CommandEncoder& cmd, detail::FramePacket&) {

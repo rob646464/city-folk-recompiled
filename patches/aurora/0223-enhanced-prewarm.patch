@@ -1,0 +1,732 @@
+diff --git a/lib/aurora.cpp b/lib/aurora.cpp
+index b34fe66..612d411 100644
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -375,6 +375,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3u) {
+     const auto module = g_device.CreateShaderModule(&md);
+     const wgpu::ComputePipelineDescriptor pd{.label = "GPU keep-warm",
+                                              .compute = wgpu::ComputeState{.module = module, .entryPoint = "cs_main"}};
++    const ::aurora::webgpu::CreateTimer createTimer_378{"pipeline aurora.cpp:378"}; // 0223 (AURORA_CREATE_LOG)
+     g_warm.pipeline = g_device.CreateComputePipeline(&pd);
+     const wgpu::BufferDescriptor bd{.label = "GPU keep-warm data",
+                                     .usage = wgpu::BufferUsage::Storage,
+diff --git a/lib/gfx/clear.cpp b/lib/gfx/clear.cpp
+index 8b224f7..4c8e465 100644
+--- a/lib/gfx/clear.cpp
++++ b/lib/gfx/clear.cpp
+@@ -135,6 +135,7 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config, const RenderT
+       .multisample = wgpu::MultisampleState{.count = layout.sampleCount},
+       .fragment = &fragmentState,
+   };
++  const ::aurora::webgpu::CreateTimer createTimer_138{"pipeline clear.cpp:138"}; // 0223 (AURORA_CREATE_LOG)
+   return g_device.CreateRenderPipeline(&pipelineDescriptor);
+ }
+ 
+diff --git a/lib/gfx/depth_peek.cpp b/lib/gfx/depth_peek.cpp
+index 08f7743..6ae6114 100644
+--- a/lib/gfx/depth_peek.cpp
++++ b/lib/gfx/depth_peek.cpp
+@@ -160,6 +160,7 @@ wgpu::ComputePipeline create_pipeline(const wgpu::BindGroupLayout& bindGroupLayo
+               .entryPoint = "cs_main",
+           },
+   };
++  const ::aurora::webgpu::CreateTimer createTimer_163{"pipeline depth_peek.cpp:163"}; // 0223 (AURORA_CREATE_LOG)
+   return g_device.CreateComputePipeline(&pipelineDescriptor);
+ }
+ 
+diff --git a/lib/gfx/efb_blend6.cpp b/lib/gfx/efb_blend6.cpp
+index 94a3ae7..406f56a 100644
+--- a/lib/gfx/efb_blend6.cpp
++++ b/lib/gfx/efb_blend6.cpp
+@@ -120,6 +120,7 @@ const Pipeline& pipeline_for(const PipelineKey& key) {
+       .multisample = {.count = key.samples},
+       .fragment = &fragment,
+   };
++  const ::aurora::webgpu::CreateTimer createTimer_123{"pipeline efb_blend6.cpp:123"}; // 0223 (AURORA_CREATE_LOG)
+   p.pipeline = g_device.CreateRenderPipeline(&desc);
+   return g_pipelines.emplace(key, std::move(p)).first->second;
+ }
+diff --git a/lib/gfx/efb_ram.cpp b/lib/gfx/efb_ram.cpp
+index 2cb8408..ac9bfd5 100644
+--- a/lib/gfx/efb_ram.cpp
++++ b/lib/gfx/efb_ram.cpp
+@@ -562,6 +562,7 @@ void initialize() {
+         .layout = g_device.CreatePipelineLayout(&plDesc),
+         .compute = {.module = module, .entryPoint = "cs_main"},
+     };
++    const ::aurora::webgpu::CreateTimer createTimer_565{"pipeline efb_ram.cpp:565"}; // 0223 (AURORA_CREATE_LOG)
+     g_encodePipeline = g_device.CreateComputePipeline(&desc);
+   }
+   {
+@@ -594,6 +595,7 @@ void initialize() {
+         .primitive = {.topology = wgpu::PrimitiveTopology::TriangleList},
+         .fragment = &fragment,
+     };
++    const ::aurora::webgpu::CreateTimer createTimer_597{"pipeline efb_ram.cpp:597"}; // 0223 (AURORA_CREATE_LOG)
+     g_decodePipeline = g_device.CreateRenderPipeline(&desc);
+   }
+ }
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+index e42a521..4d9e409 100644
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -25,6 +25,7 @@
+ #include <cstring>
+ #include <mutex>
+ #include <string>
++#include <thread>
+ #include <tuple>
+ #include <unordered_map>
+ #include <vector>
+@@ -175,6 +176,7 @@ std::vector<GlowDraw> g_glowDraws;
+ constexpr uint32_t MaxShadowLights = 16; // 0187: was 8 (shadow maps; screen-space stays at 4)
+ std::array<uint32_t, MaxExtraLights> g_shadowSlot{};
+ uint32_t g_shadowCount = 0;
++uint32_t g_atlasCols = 0, g_atlasRows = 0, g_atlasS = 0; // 0223: shadow-map atlas grid (FIFO thread; rows only grow)
+ std::vector<GlowDraw> g_depthDraws;
+ bool g_maskReserved = false; // this frame
+ size_t g_depthFlushed = 0;   // g_depthDraws already resolved and in a queued mask
+@@ -1296,8 +1298,17 @@ struct Gpu {
+   wgpu::Sampler pointSampler;
+ };
+ Gpu g_gpu;
++// 0223: the lazily built pipelines and render targets (init_*, the pipelines created in the encode
++// functions, ensure_tex) are also built ahead of their first use by prewarm() on a background thread
++// during the startup precache hold, so the first scene with enhanced lighting (the foyer) does not
++// build them on the render thread. Everything that creates or replaces them takes this lock.
++std::recursive_mutex g_initMutex;
++// An enhanced pass was encoded: from then on prewarm() leaves the render targets alone (the encode
++// functions swap and resize them without the lock).
++std::atomic<bool> g_encoded{false};
+ 
+ void ensure_tex(Tex& t, uint32_t w, uint32_t h, wgpu::TextureFormat format, wgpu::TextureUsage usage, const char* label) {
++  const std::lock_guard initLock{g_initMutex}; // 0223
+   w = std::max(w, 1u);
+   h = std::max(h, 1u);
+   if (t.texture && t.width == w && t.height == h && t.format == format) {
+@@ -1316,6 +1327,7 @@ void ensure_tex(Tex& t, uint32_t w, uint32_t h, wgpu::TextureFormat format, wgpu
+   if (sLog) {
+     Log.info("texture '{}' {}x{} (was {}x{}) scene {}", label, w, h, t.width, t.height, g_sceneEnds);
+   }
++  const webgpu::CreateTimer createTimer{label}; // 0223 (AURORA_CREATE_LOG)
+   t.texture = webgpu::g_device.CreateTexture(&desc);
+   t.view = t.texture.CreateView();
+   t.width = w;
+@@ -1344,10 +1356,12 @@ wgpu::RenderPipeline make_pipeline(const char* entry, wgpu::TextureFormat format
+       .multisample = {.count = samples},
+       .fragment = &fragment,
+   };
++  const ::aurora::webgpu::CreateTimer createTimer{entry}; // 0223 (AURORA_CREATE_LOG)
+   return webgpu::g_device.CreateRenderPipeline(&desc);
+ }
+ 
+ bool init_gpu() {
++  const std::lock_guard initLock{g_initMutex}; // 0223
+   if (g_gpu.initialized) {
+     return !g_gpu.failed;
+   }
+@@ -1454,6 +1468,41 @@ std::pair<uint32_t, uint32_t> bloom_base_size(uint32_t width, uint32_t height) n
+   return {w, h};
+ }
+ 
++// The extra-light shadow / AO mask's size for a render target size (0223: shared with prewarm()).
++std::pair<uint32_t, uint32_t> mask_size(uint32_t width, uint32_t height, const AuroraEnhancedConfig& c) noexcept {
++  uint32_t w, h;
++  if (c.extraShadowMode == 1 && c.extraShadowQuality >= 2) {
++    w = std::max(width, 1u);
++    h = std::max(height, 1u);
++    if (h > 1440) {
++      w = std::max(w * 1440 / h, 1u);
++      h = 1440;
++    }
++  } else {
++    std::tie(w, h) = bloom_base_size(width, height);
++  }
++  // 0186: planes for the light shadows (0187: four, 16 lights), ambient occlusion, and the
++  // pre-pass depth that the receivers compare their own depth with (MaskDepthPlane).
++  while (uint64_t(AURORA_ALIGN(w * 4, 256)) * h * MaskPlanes > MaskBufferSize) {
++    w = std::max(w * 7 / 8, 1u);
++    h = std::max(h * 7 / 8, 1u);
++  }
++  return {w, h};
++}
++
++// The realistic flashlight's target size (0223: shared with prewarm()). Beam target: 1/2
++// resolution up to 540 / 720 lines (medium / high), full resolution up to 1080 lines (ultra).
++std::pair<uint32_t, uint32_t> beam_size(uint32_t width, uint32_t height, uint32_t q) noexcept {
++  const uint32_t div = 2;
++  uint32_t bw = std::max(width / div, 1u), bh = std::max(height / div, 1u);
++  const uint32_t cap = q == 1 ? 540u : q == 2 ? 720u : 1080u;
++  if (bh > cap) {
++    bw = std::max(bw * cap / bh, 1u);
++    bh = cap;
++  }
++  return {bw, bh};
++}
++
+ struct SceneJob {
+   uint32_t mask = 0; // 1 bloom, 2 volumetric, 4 ambient occlusion, 32 realistic flashlight (0196)
+   uint32_t bloomLevels = 0;
+@@ -1478,10 +1527,36 @@ struct GlowFlush {
+ };
+ bool g_glowValid = false; // FIFO thread: the glow buffer holds this frame's draws (any flush)
+ 
++// 0223: the glow buffer's depth pipeline (prewarm() or the first glow flush).
++void ensure_glow_depth_pipe() {
++  const std::lock_guard initLock{g_initMutex};
++  if (g_gpu.glowDepthPipe) {
++    return;
++  }
++  const auto depthFormat = webgpu::g_graphicsConfig.depthFormat;
++  const wgpu::DepthStencilState ds{
++      .format = depthFormat,
++      .depthWriteEnabled = true,
++      .depthCompare = wgpu::CompareFunction::Always,
++  };
++  const wgpu::FragmentState fragment{.module = g_gpu.module, .entryPoint = "fs_glowdepth", .targetCount = 0};
++  const wgpu::RenderPipelineDescriptor desc{
++      .label = "Enhanced glow depth",
++      .layout = g_gpu.layout,
++      .vertex = {.module = g_gpu.module, .entryPoint = "vs_main"},
++      .primitive = {.topology = wgpu::PrimitiveTopology::TriangleList},
++      .depthStencil = &ds,
++      .fragment = &fragment,
++  };
++  const ::aurora::webgpu::CreateTimer createTimer{"pipeline Enhanced glow depth"}; // 0223 (AURORA_CREATE_LOG)
++  g_gpu.glowDepthPipe = webgpu::g_device.CreateRenderPipeline(&desc);
++}
++
+ void encode_glow(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, const GlowFlush& job) {
+   if (!init_gpu()) {
+     return;
+   }
++  g_encoded.store(true); // 0223
+   const auto rt = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
+   const auto [gw, gh] = bloom_base_size(t.width, t.height);
+   ensure_tex(g_gpu.glow, gw, gh, GlowFormat, rt, "Enhanced glow");
+@@ -1489,23 +1564,7 @@ void encode_glow(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, con
+   tex_copy_conv::snapshot_depth(cmd, t.depthSource, t.msaa, g_gpu.glowSrcDepth.view);
+   const auto depthFormat = webgpu::g_graphicsConfig.depthFormat;
+   ensure_tex(g_gpu.glowDepth, gw, gh, depthFormat, wgpu::TextureUsage::RenderAttachment, "Enhanced glow depth");
+-  if (!g_gpu.glowDepthPipe) {
+-    const wgpu::DepthStencilState ds{
+-        .format = depthFormat,
+-        .depthWriteEnabled = true,
+-        .depthCompare = wgpu::CompareFunction::Always,
+-    };
+-    const wgpu::FragmentState fragment{.module = g_gpu.module, .entryPoint = "fs_glowdepth", .targetCount = 0};
+-    const wgpu::RenderPipelineDescriptor desc{
+-        .label = "Enhanced glow depth",
+-        .layout = g_gpu.layout,
+-        .vertex = {.module = g_gpu.module, .entryPoint = "vs_main"},
+-        .primitive = {.topology = wgpu::PrimitiveTopology::TriangleList},
+-        .depthStencil = &ds,
+-        .fragment = &fragment,
+-    };
+-    g_gpu.glowDepthPipe = webgpu::g_device.CreateRenderPipeline(&desc);
+-  }
++  ensure_glow_depth_pipe();
+   {
+     const wgpu::RenderPassDepthStencilAttachment da{
+         .view = g_gpu.glowDepth.view,
+@@ -1634,6 +1693,7 @@ void timing_end(const wgpu::CommandEncoder& cmd) {
+ }
+ 
+ bool init_cube() {
++  const std::lock_guard initLock{g_initMutex}; // 0223
+   if (g_gpu.cubePipe) {
+     return true;
+   }
+@@ -1680,6 +1740,7 @@ bool init_cube() {
+       .primitive = {.topology = wgpu::PrimitiveTopology::TriangleList},
+       .fragment = &fragment,
+   };
++  const ::aurora::webgpu::CreateTimer createTimer{"pipeline Enhanced shadow-map mask"}; // 0223 (AURORA_CREATE_LOG)
+   g_gpu.cubePipe = webgpu::g_device.CreateRenderPipeline(&desc);
+   return bool(g_gpu.cubePipe);
+ }
+@@ -1727,6 +1788,7 @@ void render_casters(const wgpu::RenderPassEncoder& pass, const MaskJob& job, siz
+ 
+ // 0210: tile-flag pass of incremental masks (fs_dirty: two unfilterable depth snapshots).
+ bool init_dirty() {
++  const std::lock_guard initLock{g_initMutex}; // 0223
+   if (g_gpu.dirtyPipe) {
+     return true;
+   }
+@@ -1754,6 +1816,7 @@ bool init_dirty() {
+       .primitive = {.topology = wgpu::PrimitiveTopology::TriangleList},
+       .fragment = &fragment,
+   };
++  const ::aurora::webgpu::CreateTimer createTimer{"pipeline Enhanced mask tile flags"}; // 0223 (AURORA_CREATE_LOG)
+   g_gpu.dirtyPipe = webgpu::g_device.CreateRenderPipeline(&desc);
+   if (!g_gpu.dirtyPipe) {
+     Log.error("Enhanced mask tile-flag pass failed to build");
+@@ -1763,10 +1826,25 @@ bool init_dirty() {
+ 
+ // Extra-light shadow mask, before the EFB pass whose world draws read it: depth pre-pass of the
+ // opaque world draws at mask resolution, ray march, copy into the storage buffer.
++// 0223: the mask pass pipeline, with `ao` also the ambient occlusion mask + blur.
++void ensure_mask_pipes(bool ao) {
++  const std::lock_guard initLock{g_initMutex};
++  if (!g_gpu.maskPipe) {
++    g_gpu.maskPipe = make_pipeline("fs_xlshadow", wgpu::TextureFormat::RGBA8Unorm, 1, nullptr, wgpu::ColorWriteMask::All);
++  }
++  if (ao && !g_gpu.aoMaskPipe) {
++    g_gpu.aoMaskPipe = make_pipeline("fs_aomask", wgpu::TextureFormat::RGBA8Unorm, 1, nullptr, wgpu::ColorWriteMask::All);
++  }
++  if (ao && !g_gpu.aoBlur4Pipe) {
++    g_gpu.aoBlur4Pipe = make_pipeline("fs_aoblur4", wgpu::TextureFormat::RGBA8Unorm, 1, nullptr, wgpu::ColorWriteMask::All);
++  }
++}
++
+ void encode_mask(const wgpu::CommandEncoder& cmd, const MaskJob& job) {
+   if (!init_gpu()) {
+     return;
+   }
++  g_encoded.store(true); // 0223
+   timing_begin();
+   const uint32_t w = job.maskW, h = job.maskH;
+   const auto depthFormat = webgpu::g_graphicsConfig.depthFormat;
+@@ -1780,9 +1858,7 @@ void encode_mask(const wgpu::CommandEncoder& cmd, const MaskJob& job) {
+   ensure_tex(g_gpu.mask, w, h, wgpu::TextureFormat::RGBA8Unorm,
+              wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc | wgpu::TextureUsage::TextureBinding,
+              "Enhanced light-shadow mask");
+-  if (!g_gpu.maskPipe) {
+-    g_gpu.maskPipe = make_pipeline("fs_xlshadow", wgpu::TextureFormat::RGBA8Unorm, 1, nullptr, wgpu::ColorWriteMask::All);
+-  }
++  ensure_mask_pipes(false);
+   {
+     const wgpu::RenderPassDepthStencilAttachment da{
+         .view = g_gpu.maskDepth.view,
+@@ -1878,12 +1954,7 @@ void encode_mask(const wgpu::CommandEncoder& cmd, const MaskJob& job) {
+                "Enhanced ambient occlusion mask");
+     ensure_tex(g_gpu.maskAoRaw, w, h, wgpu::TextureFormat::RGBA8Unorm,
+                wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding, "Enhanced ambient occlusion raw");
+-    if (!g_gpu.aoMaskPipe) {
+-      g_gpu.aoMaskPipe = make_pipeline("fs_aomask", wgpu::TextureFormat::RGBA8Unorm, 1, nullptr, wgpu::ColorWriteMask::All);
+-    }
+-    if (!g_gpu.aoBlur4Pipe) {
+-      g_gpu.aoBlur4Pipe = make_pipeline("fs_aoblur4", wgpu::TextureFormat::RGBA8Unorm, 1, nullptr, wgpu::ColorWriteMask::All);
+-    }
++    ensure_mask_pipes(true);
+     {
+       const wgpu::RenderPassColorAttachment att{.view = g_gpu.maskAoRaw.view,
+                                                 .loadOp = maskLoad,
+@@ -2105,10 +2176,26 @@ void beam_timing_after_submit() {
+   }
+ }
+ 
++// 0223: the composite pipeline for the EFB's color format and sample count.
++void ensure_composite(wgpu::TextureFormat format, uint32_t msaa) {
++  const std::lock_guard initLock{g_initMutex};
++  if (!g_gpu.composite || g_gpu.compositeFormat != format || g_gpu.compositeSamples != msaa) {
++    static const wgpu::BlendState blend{
++        .color = {.operation = wgpu::BlendOperation::Add, .srcFactor = wgpu::BlendFactor::One, .dstFactor = wgpu::BlendFactor::SrcAlpha},
++        .alpha = {.operation = wgpu::BlendOperation::Add, .srcFactor = wgpu::BlendFactor::Zero, .dstFactor = wgpu::BlendFactor::One},
++    };
++    g_gpu.composite = make_pipeline("fs_composite", format, msaa, &blend,
++                                    wgpu::ColorWriteMask::Red | wgpu::ColorWriteMask::Green | wgpu::ColorWriteMask::Blue);
++    g_gpu.compositeFormat = format;
++    g_gpu.compositeSamples = msaa;
++  }
++}
++
+ void encode_scene(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, const SceneJob& job) {
+   if (!init_gpu()) {
+     return;
+   }
++  g_encoded.store(true); // 0223
+   const auto rt = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
+   ensure_tex(g_gpu.depth, t.width, t.height, wgpu::TextureFormat::R32Float, rt, "Enhanced scene depth");
+   // 0213: the bloom bright pass samples the single-sample scene color (the EFB's copy source,
+@@ -2186,16 +2273,7 @@ void encode_scene(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, co
+   }
+ 
+   // Composite onto the EFB.
+-  if (!g_gpu.composite || g_gpu.compositeFormat != t.colorFormat || g_gpu.compositeSamples != t.msaa) {
+-    static const wgpu::BlendState blend{
+-        .color = {.operation = wgpu::BlendOperation::Add, .srcFactor = wgpu::BlendFactor::One, .dstFactor = wgpu::BlendFactor::SrcAlpha},
+-        .alpha = {.operation = wgpu::BlendOperation::Add, .srcFactor = wgpu::BlendFactor::Zero, .dstFactor = wgpu::BlendFactor::One},
+-    };
+-    g_gpu.composite = make_pipeline("fs_composite", t.colorFormat, t.msaa, &blend,
+-                                    wgpu::ColorWriteMask::Red | wgpu::ColorWriteMask::Green | wgpu::ColorWriteMask::Blue);
+-    g_gpu.compositeFormat = t.colorFormat;
+-    g_gpu.compositeSamples = t.msaa;
+-  }
++  ensure_composite(t.colorFormat, t.msaa);
+   const wgpu::RenderPassColorAttachment att{
+       .view = t.colorView,
+       .resolveTarget = t.resolveView,
+@@ -2355,23 +2433,7 @@ DrawUniform draw_uniform() noexcept {
+       // (sharp contact edges) up to 1440 lines, within the mask buffer (two planes; 0032: a
+       // third for ambient occlusion).
+       const auto size = get_render_target_size();
+-      uint32_t w, h;
+-      if (shadow_maps() && g_cfg.extraShadowQuality >= 2) {
+-        w = std::max(size.x, 1u);
+-        h = std::max(size.y, 1u);
+-        if (h > 1440) {
+-          w = std::max(w * 1440 / h, 1u);
+-          h = 1440;
+-        }
+-      } else {
+-        std::tie(w, h) = bloom_base_size(size.x, size.y);
+-      }
+-      // 0186: planes for the light shadows (0187: four, 16 lights), ambient occlusion, and the
+-      // pre-pass depth that the receivers compare their own depth with (MaskDepthPlane).
+-      while (uint64_t(AURORA_ALIGN(w * 4, 256)) * h * MaskPlanes > MaskBufferSize) {
+-        w = std::max(w * 7 / 8, 1u);
+-        h = std::max(h * 7 / 8, 1u);
+-      }
++      const auto [w, h] = mask_size(size.x, size.y, g_cfg);
+       g_maskW = w;
+       g_maskH = h;
+       g_maskPitch = AURORA_ALIGN(w * 4, 256) / 4;
+@@ -3219,8 +3281,20 @@ void flush_shadows() noexcept {
+   if (job.point && shadow_maps()) {
+     // Atlas: per light 3x2 faces of S texels. 0187: up to 16 lights in a roughly square grid
+     // (cols x 3 ~ rows x 2), within the device's texture size limit (was two columns and 8192).
++    // 0223: the grid's columns follow the configured number of shadow-casting lights, not this
++    // frame's count, and the atlas only grows (rows): it was sized for the frame's count and
++    // reallocated (up to 6144x4096 depth) whenever a light gained or lost its shadow slot (5-6
++    // times while the foyer's candles fade in on the first arrival). Tiles keep their size S.
+     const uint32_t k = g_shadowCount;
+-    const uint32_t cols = std::max(1u, std::min(k, uint32_t(std::lround(std::sqrt(double(k) * 2.0 / 3.0))))),
++    static const bool sOldAtlas = [] { // AURORA_ENH_ATLAS_GROW=0 (A/B): sized for this frame's count
++      const char* v = std::getenv("AURORA_ENH_ATLAS_GROW");
++      return v != nullptr && std::atoi(v) == 0;
++    }();
++    if (sOldAtlas) {
++      g_atlasRows = 0;
++    }
++    const uint32_t kc = sOldAtlas ? k : std::max(k, std::min(g_cfg.extraShadowLights, MaxShadowLights));
++    const uint32_t cols = std::max(1u, std::min(kc, uint32_t(std::lround(std::sqrt(double(kc) * 2.0 / 3.0))))),
+                    rows = (k + cols - 1) / cols;
+     static const uint32_t sMaxTex = [] {
+       wgpu::Limits lim{};
+@@ -3231,8 +3305,14 @@ void flush_shadows() noexcept {
+     while (S > 128 && (cols * 3 * S > sMaxTex || rows * 2 * S > sMaxTex)) {
+       S /= 2;
+     }
++    if (cols != g_atlasCols || S != g_atlasS) {
++      g_atlasCols = cols;
++      g_atlasS = S;
++      g_atlasRows = 0;
++    }
++    g_atlasRows = std::max(g_atlasRows, std::min(std::max(rows, 1u), std::max(sMaxTex / (2 * S), 1u)));
+     const float fS = float(S);
+-    const float W = float(cols * 3 * S), H = float(rows * 2 * S);
++    const float W = float(cols * 3 * S), H = float(std::max(g_atlasRows, rows) * 2 * S);
+     // Faces see a little more than 90 degrees, so a filter kernel near a face edge stays on the face.
+     const float t = 1.0f + 48.0f / fS;
+     static constexpr float kBasis[6][3][3] = {
+@@ -3492,15 +3572,7 @@ void fill_beam(FxUniform& u, SceneJob& job, uint32_t width, uint32_t height) noe
+   u.beam[11][0] = q >= 2 ? 1.f : 0.6f;
+   u.beam[11][1] = 40.f * 40.f;
+   u.beam[11][2] = 650.f * 650.f;
+-  // Beam target: 1/2 resolution up to 540 / 720 lines (medium / high), full resolution up to
+-  // 1080 lines (ultra).
+-  const uint32_t div = 2;
+-  uint32_t bw = std::max(width / div, 1u), bh = std::max(height / div, 1u);
+-  const uint32_t cap = q == 1 ? 540u : q == 2 ? 720u : 1080u;
+-  if (bh > cap) {
+-    bw = std::max(bw * cap / bh, 1u);
+-    bh = cap;
+-  }
++  const auto [bw, bh] = beam_size(width, height, q);
+   job.beamW = bw;
+   job.beamH = bh;
+   const float vpH = std::max(g_camera.vp.height, 1.f) * float(bh) / float(std::max(height, 1u));
+@@ -3702,6 +3774,133 @@ void scene_end() noexcept {
+   push_scene_op([job](const wgpu::CommandEncoder& cmd, const ScenePassTargets& t) { encode_scene(cmd, t, job); });
+ }
+ 
++// 0223: prewarm (see g_initMutex). The first scene with enhanced lighting built all of this on the
++// render thread: the effect module's ten passes, the shadow-map mask, the tile flags and glow depth
++// pipelines (1.5 s on the user's first foyer arrival with a fresh shader cache, 50-70 ms warm) and
++// some 20 render targets; the GX shaders were precached but these are not GX pipelines.
++namespace {
++std::mutex g_prewarmMutex; // g_prewarmThread
++std::thread g_prewarmThread;
++
++struct PrewarmJob {
++  AuroraEnhancedConfig cfg{};
++  uint32_t width = 0, height = 0; // EFB render target
++  wgpu::TextureFormat format = wgpu::TextureFormat::Undefined;
++  uint32_t msaa = 1;
++};
++
++void run_prewarm(const PrewarmJob& j) {
++  const auto start = std::chrono::steady_clock::now();
++  if (!init_gpu()) {
++    return;
++  }
++  const auto& c = j.cfg;
++  const bool ao = c.ssao && !g_aoPost && c.ssaoIntensity > 0.f;
++  const bool shadows = c.extraLights && c.extraShadows;
++  ensure_composite(j.format, j.msaa);
++  ensure_glow_depth_pipe();
++  if (shadows || ao) {
++    ensure_mask_pipes(ao);
++    init_dirty();
++  }
++  if (shadows && c.extraShadowMode == 1) {
++    init_cube();
++  }
++  // Render targets at the current size, unless the passes already run (they resize and swap
++  // them without the lock; a later resize recreates them anyway).
++  uint32_t textures = 0;
++  if (!g_encoded.load() && j.width > 0 && j.height > 0) {
++    const std::lock_guard initLock{g_initMutex};
++    const auto rt = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
++    const auto depthFormat = webgpu::g_graphicsConfig.depthFormat;
++    const auto make = [&](Tex& t, uint32_t w, uint32_t h, wgpu::TextureFormat f, wgpu::TextureUsage u, const char* label) {
++      if (!t.texture) {
++        ensure_tex(t, w, h, f, u, label);
++        ++textures;
++      }
++    };
++    make(g_gpu.depth, j.width, j.height, wgpu::TextureFormat::R32Float, rt, "Enhanced scene depth");
++    const auto [gw, gh] = bloom_base_size(j.width, j.height);
++    if (c.bloom && c.bloomEmissive > 0.f) {
++      make(g_gpu.glow, gw, gh, GlowFormat, rt, "Enhanced glow");
++      make(g_gpu.glowSrcDepth, j.width, j.height, wgpu::TextureFormat::R32Float, rt, "Enhanced glow scene depth");
++      make(g_gpu.glowDepth, gw, gh, depthFormat, wgpu::TextureUsage::RenderAttachment, "Enhanced glow depth");
++    }
++    if (c.bloom && c.bloomIntensity > 0.f) {
++      uint32_t w = gw, h = gh;
++      for (uint32_t i = 0; i < MaxBloomLevels; ++i) {
++        make(g_gpu.bloom[i], w, h, HdrFormat, rt, "Enhanced bloom");
++        w = std::max(w / 2, 1u);
++        h = std::max(h / 2, 1u);
++      }
++    }
++    if (c.realisticFlashlight != 0) {
++      const auto [bw, bh] = beam_size(j.width, j.height, std::clamp(c.realisticFlashlight, 1u, 3u));
++      make(g_gpu.beamTex, bw, bh, HdrFormat, rt, "Realistic flashlight");
++      make(g_gpu.beamTmp, bw, bh, HdrFormat, rt, "Realistic flashlight blur");
++    }
++    if (shadows || ao) {
++      const auto [w, h] = mask_size(j.width, j.height, c);
++      const auto maskUse = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc | wgpu::TextureUsage::TextureBinding;
++      make(g_gpu.maskDepth, w, h, depthFormat, rt, "Enhanced light-shadow depth");
++      make(g_gpu.maskDepthR, w, h, wgpu::TextureFormat::R32Float, rt | wgpu::TextureUsage::CopySrc, "Enhanced light-shadow depth R");
++      make(g_gpu.mask, w, h, wgpu::TextureFormat::RGBA8Unorm, maskUse, "Enhanced light-shadow mask");
++      // the incremental mask swaps the depth snapshot with its previous one (encode_mask)
++      make(g_gpu.maskDepthPrev, w, h, wgpu::TextureFormat::R32Float, rt | wgpu::TextureUsage::CopySrc, "Enhanced light-shadow depth R");
++      make(g_gpu.dirty, (w + 7) / 8, (h + 7) / 8, wgpu::TextureFormat::R8Unorm, rt, "Enhanced mask tile flags");
++      if (shadows && c.extraShadowMode == 1) {
++        make(g_gpu.mask2, w, h, wgpu::TextureFormat::RGBA8Unorm, maskUse, "Enhanced light-shadow mask 2");
++        make(g_gpu.mask3, w, h, wgpu::TextureFormat::RGBA8Unorm, maskUse, "Enhanced light-shadow mask 3");
++        make(g_gpu.mask4, w, h, wgpu::TextureFormat::RGBA8Unorm, maskUse, "Enhanced light-shadow mask 4");
++      }
++      if (ao) {
++        make(g_gpu.maskAo, w, h, wgpu::TextureFormat::RGBA8Unorm, maskUse, "Enhanced ambient occlusion mask");
++        make(g_gpu.maskAoRaw, w, h, wgpu::TextureFormat::RGBA8Unorm, rt, "Enhanced ambient occlusion raw");
++      }
++    }
++  }
++  Log.info("prewarm: enhanced lighting passes ready in {:.1f} ms ({} render targets at {}x{})",
++           std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(), textures,
++           j.width, j.height);
++}
++} // namespace
++
++bool start_prewarm(std::function<void()> done) noexcept {
++  PrewarmJob j;
++  {
++    std::lock_guard lock{g_cfgMutex};
++    j.cfg = g_pending;
++  }
++  // AURORA_ENH_PREWARM=0 (A/B): build them on first use again.
++  static const bool sOff = [] {
++    const char* v = std::getenv("AURORA_ENH_PREWARM");
++    return v != nullptr && std::atoi(v) == 0;
++  }();
++  if (!j.cfg.enabled || sOff || !webgpu::g_device) {
++    return false;
++  }
++  j.width = webgpu::g_frameBuffer.size.width;
++  j.height = webgpu::g_frameBuffer.size.height;
++  j.format = webgpu::g_graphicsConfig.surfaceConfiguration.format;
++  j.msaa = std::max(webgpu::g_graphicsConfig.msaaSamples, 1u);
++  std::lock_guard lock{g_prewarmMutex};
++  if (g_prewarmThread.joinable()) {
++    g_prewarmThread.join();
++  }
++  g_prewarmThread = std::thread([j, done = std::move(done)] {
++    run_prewarm(j);
++    done();
++  });
++  return true;
++}
++
++void stop_prewarm() noexcept {
++  std::lock_guard lock{g_prewarmMutex};
++  if (g_prewarmThread.joinable()) {
++    g_prewarmThread.join();
++  }
++}
++
+ } // namespace aurora::gfx::enhanced
+ 
+ extern "C" {
+diff --git a/lib/gfx/enhanced.hpp b/lib/gfx/enhanced.hpp
+index c00b97a..b8dd5cf 100644
+--- a/lib/gfx/enhanced.hpp
++++ b/lib/gfx/enhanced.hpp
+@@ -71,6 +71,11 @@ void begin_frame() noexcept;
+ void after_submit() noexcept;
+ 
+ // --- pipeline precache (any thread) ---
++// 0223: builds the scene-end passes' pipelines and (before the first enhanced pass) render
++// targets of the latest set configuration on a background thread, then calls `done` there. False
++// (nothing started, `done` not called) when enhanced lighting is off. stop_prewarm joins it.
++bool start_prewarm(std::function<void()> done) noexcept;
++void stop_prewarm() noexcept;
+ // 0214: the enhanced passes' render targets a known config is drawn into (written to `out`, at most
+ // 2; returns the count); `sceneToo` false when the config is never drawn into the scene.
+ size_t precache_layouts(const gx::PipelineConfig& c, RenderTargetLayout* out, bool& sceneToo) noexcept;
+diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
+index 6dcacc8..1296526 100644
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -2015,6 +2015,12 @@ void rebuild_pipeline_cache() {
+         pipeline.config);
+   }
+   g_inRebuild = false;
++  // 0223: enhanced lighting's own passes (not GX pipelines) are built alongside; the startup hold
++  // (rebuildPending) waits for them too.
++  ++g_rebuildPending;
++  if (!enhanced::start_prewarm([] { --g_rebuildPending; })) {
++    --g_rebuildPending;
++  }
+   Log.info("Pipeline precache: {} known configs -> {} configs for accuracy {:#x} enhanced {:#x}, {} new pipelines queued",
+            known.size(), seen.size(), accuracy, enhBits, g_precacheTotal.load() - before);
+   if (g_gpuCachePruneArmed) {
+@@ -2063,6 +2069,7 @@ void initialize_pipeline_cache() {
+ }
+ 
+ void shutdown_pipeline_cache() {
++  enhanced::stop_prewarm(); // 0223
+   if (g_hasPipelineThread) {
+     {
+       std::lock_guard lock{g_pipelineMutex};
+diff --git a/lib/gfx/tex_copy_conv.cpp b/lib/gfx/tex_copy_conv.cpp
+index 90d6abc..7d15198 100644
+--- a/lib/gfx/tex_copy_conv.cpp
++++ b/lib/gfx/tex_copy_conv.cpp
+@@ -480,6 +480,7 @@ static wgpu::RenderPipeline create_depth_snapshot_pipeline(const std::string_vie
+           },
+       .fragment = &fragmentState,
+   };
++  const ::aurora::webgpu::CreateTimer createTimer_483{"pipeline tex_copy_conv.cpp:483"}; // 0223 (AURORA_CREATE_LOG)
+   return g_device.CreateRenderPipeline(&pipelineDescriptor);
+ }
+ 
+@@ -529,6 +530,7 @@ static wgpu::RenderPipeline create_pipeline(const ConvPipeline& conv, const std:
+           },
+       .fragment = &fragmentState,
+   };
++  const ::aurora::webgpu::CreateTimer createTimer_532{"pipeline tex_copy_conv.cpp:532"}; // 0223 (AURORA_CREATE_LOG)
+   return g_device.CreateRenderPipeline(&pipelineDescriptor);
+ }
+ 
+diff --git a/lib/gfx/tex_palette_conv.cpp b/lib/gfx/tex_palette_conv.cpp
+index 392dcc8..a7ec92b 100644
+--- a/lib/gfx/tex_palette_conv.cpp
++++ b/lib/gfx/tex_palette_conv.cpp
+@@ -175,6 +175,7 @@ static PipelineInfo create_pipeline(std::string_view fragBindingsAndShader, wgpu
+       .fragment = &fragmentState,
+   };
+ 
++  const ::aurora::webgpu::CreateTimer createTimer{"pipeline tex_palette_conv"}; // 0223 (AURORA_CREATE_LOG)
+   return PipelineInfo{
+       .pipeline = g_device.CreateRenderPipeline(&pipelineDescriptor),
+       .bindGroupLayout = std::move(bindGroupLayout),
+diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
+index cc68211..fa9fbe5 100644
+--- a/lib/webgpu/gpu.cpp
++++ b/lib/webgpu/gpu.cpp
+@@ -1,6 +1,9 @@
+ #include "gpu.hpp"
+ 
+ #include <algorithm>
++#include <chrono>
++#include <thread>
++#include <cstdlib>
+ #include <atomic>
+ #include <array>
+ #include <cmath>
+@@ -40,6 +43,24 @@ void clear_offscreen_cache();
+ namespace aurora::webgpu {
+ static Module Log("aurora::gpu");
+ 
++bool create_log_enabled() {
++  static const bool on = std::getenv("AURORA_CREATE_LOG") != nullptr;
++  return on;
++}
++static int64_t create_now_ns() {
++  return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++}
++CreateTimer::CreateTimer(const char* w) : what(w), t0(create_log_enabled() ? create_now_ns() : 0) {}
++CreateTimer::~CreateTimer() {
++  if (!create_log_enabled()) {
++    return;
++  }
++  const double ms = double(create_now_ns() - t0) / 1e6;
++  if (ms >= 0.5) {
++    Log.info("create: {} took {:.2f} ms (thread {:x})", what, ms, std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0xFFFF);
++  }
++}
++
+ wgpu::Device g_device;
+ wgpu::Queue g_queue;
+ wgpu::Surface g_surface;
+@@ -546,6 +567,7 @@ fn fs_premultiplied_alpha(in: VertexOutput) -> @location(0) vec4<f32> {
+             },
+         .fragment = &fragmentState,
+     };
++    const ::aurora::webgpu::CreateTimer createTimer_569{"pipeline gpu.cpp:569"}; // 0223 (AURORA_CREATE_LOG)
+     return g_device.CreateRenderPipeline(&pipelineDescriptor);
+   };
+   g_CopyPipeline = make_copy_pipeline("XFB Copy Pipeline", "fs_opaque", nullptr);
+@@ -642,6 +664,7 @@ void create_resample_pipeline() {
+           },
+       .fragment = &fragmentState,
+   };
++  const ::aurora::webgpu::CreateTimer createTimer_665{"pipeline gpu.cpp:665"}; // 0223 (AURORA_CREATE_LOG)
+   g_ResamplePipeline = g_device.CreateRenderPipeline(&pipelineDescriptor);
+ 
+   const wgpu::BufferDescriptor uniformBufferDescriptor{
+diff --git a/lib/webgpu/gpu.hpp b/lib/webgpu/gpu.hpp
+index 1f5aab1..073eada 100644
+--- a/lib/webgpu/gpu.hpp
++++ b/lib/webgpu/gpu.hpp
+@@ -89,4 +89,14 @@ void cache_delete_files();
+ // Called once before the Dawn cache is first opened (the pipeline crash journal check).
+ extern void (*g_cacheOpenHook)();
+ 
++// 0223: AURORA_CREATE_LOG=1 (debug aid): every synchronous pipeline / large texture creation that
++// took over 0.5 ms, with what it was and the thread (first-use hitches, e.g. the first foyer frame).
++struct CreateTimer {
++  const char* what;
++  int64_t t0;
++  explicit CreateTimer(const char* w);
++  ~CreateTimer();
++};
++bool create_log_enabled();
++
+ } // namespace aurora::webgpu
+diff --git a/lib/webgpu/postfx.cpp b/lib/webgpu/postfx.cpp
+index 5170120..5fce79e 100644
+--- a/lib/webgpu/postfx.cpp
++++ b/lib/webgpu/postfx.cpp
+@@ -192,6 +192,7 @@ std::pair<wgpu::RenderPipeline, wgpu::BindGroupLayout> get_pipeline(const PassDe
+       .multisample = {.count = 1, .mask = UINT32_MAX},
+       .fragment = &fragment,
+   };
++  const ::aurora::webgpu::CreateTimer createTimer_195{"pipeline postfx.cpp:195"}; // 0223 (AURORA_CREATE_LOG)
+   auto pipeline = g_device.CreateRenderPipeline(&pipelineDesc);
+   auto result = std::make_pair(std::move(pipeline), std::move(layout));
+   g_pipelineCache.emplace(key, result);

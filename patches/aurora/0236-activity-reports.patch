@@ -1,0 +1,369 @@
+Activity reports for hang diagnostics (issue #11): what Aurora's own threads are doing.
+
+A Steam Deck log (Linux, Vulkan, Gamescope) showed the game running on at the file select while
+nothing was presented any more, and said nothing about where the display loop stopped. Each Aurora
+thread kind (the application's host thread inside aurora_begin_frame/aurora_end_frame, the render
+worker, the GX FIFO thread, the present-timing waiter) now keeps "what it is doing since when" in a
+slot (lib/activity.hpp: two relaxed atomic stores per scope, nested scopes restore the outer one):
+waiting for a frame slot or a staging buffer, draining the FIFO, encoding a frame, acquiring the
+swap chain texture, submitting, presenting, processing Dawn events, after-submit callbacks, building
+the post-process chain, processing GX commands, waiting for a pipeline. aurora_describe_activity()
+formats every slot busy for at least N ms into one line for the application's hang watchdog.
+
+The present-timing waiter also counts frames whose GPU completion it gave up on after 5 s
+(aurora_present_timing_timeouts, logged at the first and every 100th): without completions the
+application's frame-ahead wait (aurora_wait_frame_done) can only end by its timeout.
+
+Test aid AURORA_TEST_ACQUIRE_STALL=<frame>[,<seconds>]: that frame's swap chain acquire takes <seconds>
+(default 40), like a swap chain that hands out no image.
+
+diff --git a/include/aurora/present_timing.h b/include/aurora/present_timing.h
+--- a/include/aurora/present_timing.h
++++ b/include/aurora/present_timing.h
+@@ -27,6 +27,14 @@
+ // 0215: filler GPU work per frame (0 = none, at most 400; one unit is one read pass over a 64 MiB
+ // buffer, about 0.06 ms on a fast GPU at full clocks), so a light frame does not let the GPU clock down.
+ void aurora_set_gpu_keep_warm(uint32_t units);
++// 0236: what Aurora's threads (host frame calls, render worker, GX FIFO thread, present-timing
++// waiter) have been doing for at least `minMs` in one call, as one line, e.g. "render worker:
++// acquiring the swap chain texture (GetCurrentTexture) for 15.2 s; host: waiting for a frame slot
++// (render worker busy) for 15.1 s". Returns the length written (0: nothing that long).
++size_t aurora_describe_activity(char* out, size_t size, uint32_t minMs);
++// 0236: frames whose GPU completion the present-timing waiter gave up on (no completion within 5 s);
++// a backend whose completion events never arrive makes this grow with every frame.
++uint64_t aurora_present_timing_timeouts(void);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/lib/aurora.cpp b/lib/aurora.cpp
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -1,11 +1,16 @@
+ #include <aurora/aurora.h>
+ #include <aurora/time.hpp>
+ #include <aurora/present_timing.h>
++#include "activity.hpp"
+ 
+ #include <algorithm>
+ #include <atomic>
+ #include <chrono>
+ #include <condition_variable>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <utility>
+ #include <deque>
+ #include <mutex>
+ #include <thread>
+@@ -337,6 +342,7 @@
+ std::atomic<bool> g_enabled{false};
+ std::atomic<uint64_t> g_counter{0};
+ std::atomic<uint64_t> g_lastDone{0};
++std::atomic<uint64_t> g_timeouts{0}; // 0236: frames whose completion the waiter gave up on
+ std::mutex g_mutex;
+ std::condition_variable g_cv;
+ struct Pending {
+@@ -372,6 +378,7 @@
+     // 28 to 18.5 fps at 4K with this record on. A zero-timeout poll every ~0.25 ms takes the lock
+     // only briefly; the stamp is up to that late.
+     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
++    const activity::Scope busy{activity::Thread::PresentWaiter, "polling a frame's GPU completion (OnSubmittedWorkDone)"};
+     while (!ok && std::chrono::steady_clock::now() < deadline) {
+       ok = webgpu::g_instance.WaitAny(p.future, 0) == wgpu::WaitStatus::Success;
+       if (g_stop) {
+@@ -382,6 +389,14 @@
+       }
+     }
+     p.t.doneNs = ok ? now_ns() : 0;
++    if (!ok) {
++      // 0236: say so (once, then every 100th): without completions the application's frame-ahead
++      // wait (aurora_wait_frame_done) only ends by its timeout.
++      const uint64_t n = g_timeouts.fetch_add(1, std::memory_order_relaxed) + 1;
++      if (n == 1 || n % 100 == 0) {
++        Log.warn("Present timing: frame {} not reported finished by the GPU within 5 s ({} such frames)", p.t.frame, n);
++      }
++    }
+     {
+       std::lock_guard lk(g_mutex);
+       g_pending.pop_front();
+@@ -514,6 +529,7 @@
+ bool begin_frame() noexcept {
+   ZoneScoped;
+ #ifdef AURORA_ENABLE_GX
++  const activity::Scope busy{activity::Thread::Host, "aurora_begin_frame"};
+   {
+     if (!window::is_presentable()) {
+       webgpu::release_surface();
+@@ -543,6 +559,7 @@
+ void end_frame() noexcept {
+   ZoneScoped;
+ #ifdef AURORA_ENABLE_GX
++  const activity::Scope busy{activity::Thread::Host, "aurora_end_frame"};
+   gx::fifo::drain();
+   gx::fifo::end_frame();
+   gx::texture::end_frame();
+@@ -574,6 +591,7 @@
+     // every readback of the frame by that long; the present blit goes in a second command buffer.
+     // AURORA_LATE_SUBMIT=1: the previous single submission after the acquire (A/B).
+     static const bool sLateSubmit = std::getenv("AURORA_LATE_SUBMIT") != nullptr;
++    const activity::Scope busy{activity::Thread::RenderWorker, "finishing the frame (keep-warm, submit)"};
+     present_timing::encode_keep_warm(encoder);  // 0215: after the frame's own work
+     shot_encode(encoder);                       // 0224 test aid
+     if (!sLateSubmit) {
+@@ -599,6 +617,21 @@
+       if (window::is_presentable() && g_surface) {
+         ZoneScopedN("Acquire texture");
+         wgpu::SurfaceTexture surfaceTexture;
++        const activity::Scope acquire{activity::Thread::RenderWorker,
++                                      "acquiring the swap chain texture (GetCurrentTexture)"};
++        // AURORA_TEST_ACQUIRE_STALL=<frame>[,<seconds>] (test aid): the acquire of that frame takes
++        // <seconds> (default 40), like a swap chain that hands out no image (hang reports).
++        static const std::pair<uint64_t, int> sStall = [] {
++          const char* e = std::getenv("AURORA_TEST_ACQUIRE_STALL");
++          if (e == nullptr) {
++            return std::pair<uint64_t, int>{0, 0};
++          }
++          const char* comma = std::strchr(e, ',');
++          return std::pair<uint64_t, int>{std::strtoull(e, nullptr, 10), comma != nullptr ? std::atoi(comma + 1) : 40};
++        }();
++        if (sStall.first != 0 && timingFrame == sStall.first) {
++          std::this_thread::sleep_for(std::chrono::seconds(sStall.second));
++        }
+         g_surface.GetCurrentTexture(&surfaceTexture);
+         surfaceStatus = surfaceTexture.status;
+         if (surfaceStatus == wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal) {
+@@ -679,6 +712,7 @@
+     const auto buffer = encoder.Finish(&cmdBufDescriptor);
+     {
+       ZoneScopedN("Queue Submit");
++      const activity::Scope submit{activity::Thread::RenderWorker, "submitting the present blit (Queue::Submit)"};
+       g_queue.Submit(1, &buffer);
+     }
+     const int64_t timingSubmitNs = present_timing::now_ns();
+@@ -689,6 +723,7 @@
+       {
+         window::SurfaceLock surfaceLock;
+         if (window::is_presentable()) {
++          const activity::Scope present{activity::Thread::RenderWorker, "presenting (Surface::Present)"};
+           status = g_surface.Present();
+         }
+       }
+@@ -727,12 +762,15 @@
+         break;
+       }
+     }
+-    for (auto& callback : afterSubmitCallbacks) {
+-      if (callback) {
+-        callback();
+-      }
+-    }
+-    gfx::after_submit();
++    {
++      const activity::Scope after{activity::Thread::RenderWorker, "after-submit callbacks (readback maps)"};
++      for (auto& callback : afterSubmitCallbacks) {
++        if (callback) {
++          callback();
++        }
++      }
++      gfx::after_submit();
++    }
+ 
+     TracyPlotConfig("aurora: lastVertSize", tracy::PlotFormatType::Memory, false, true, 0);
+     TracyPlotConfig("aurora: lastUniformSize", tracy::PlotFormatType::Memory, false, true, 0);
+@@ -778,6 +816,33 @@
+   }
+   return n;
+ }
++uint64_t aurora_present_timing_timeouts() {
++  return aurora::present_timing::g_timeouts.load(std::memory_order_relaxed);
++}
++size_t aurora_describe_activity(char* out, size_t size, uint32_t minMs) {
++  using namespace aurora::activity;
++  static constexpr const char* Names[] = {"host", "render worker", "GX FIFO thread", "present-timing waiter"};
++  if (out == nullptr || size == 0) {
++    return 0;
++  }
++  out[0] = 0;
++  size_t len = 0;
++  const int64_t now = now_ns();
++  for (size_t i = 0; i < static_cast<size_t>(Thread::Count); ++i) {
++    const char* what = g_slots[i].what.load(std::memory_order_acquire);
++    const int64_t since = g_slots[i].sinceNs.load(std::memory_order_relaxed);
++    if (what == nullptr || since == 0 || now - since < int64_t(minMs) * 1'000'000) {
++      continue;
++    }
++    const int n = std::snprintf(out + len, size - len, "%s%s: %s for %.1f s", len ? "; " : "", Names[i], what,
++                                double(now - since) * 1e-9);
++    if (n < 0 || size_t(n) >= size - len) {
++      break;
++    }
++    len += size_t(n);
++  }
++  return len;
++}
+ bool aurora_wait_frame_done(uint64_t frame, int64_t timeoutNs) {
+   using namespace aurora::present_timing;
+   if (g_lastDone.load(std::memory_order_acquire) >= frame) {
+diff --git a/lib/gfx/frame.cpp b/lib/gfx/frame.cpp
+--- a/lib/gfx/frame.cpp
++++ b/lib/gfx/frame.cpp
+@@ -11,6 +11,7 @@
+ #include "tex_palette_conv.hpp"
+ #include "texture_replacement.hpp"
+ #include "../gx/gx.hpp"
++#include "../activity.hpp"
+ #ifdef AURORA_ENABLE_RMLUI
+ #include "../rmlui/pipeline.hpp"
+ #endif
+@@ -616,6 +617,7 @@
+ 
+ size_t acquire_frame_slot() {
+   ZoneScopedN("Acquire frame slot");
++  const activity::Scope busy{activity::Thread::Host, "waiting for a frame slot (the render worker still has two frames)"};
+   const auto waitStart = PresentClock::now();
+   while (true) {
+     if (const auto slot = g_frameSlots.try_acquire()) {
+@@ -630,6 +632,7 @@
+ 
+ std::optional<size_t> acquire_mapped_staging_buffer() {
+   ZoneScopedN("Acquire mapped staging buffer");
++  const activity::Scope busy{activity::Thread::Host, "waiting for a staging buffer (its GPU frame to finish and map)"};
+   while (true) {
+     if (auto slot = g_stagingSlots.try_acquire()) {
+       if (wait_for_staging_buffer(*slot)) {
+@@ -723,6 +726,7 @@
+     g_frameSlots.release(frameSlot);
+     expire_cached_bind_groups();
+     map_staging_buffer(stagingSlot, true);
++    const activity::Scope events{activity::Thread::RenderWorker, "processing Dawn events (Instance::ProcessEvents)"};
+     process_events();
+   });
+ }
+diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -1,3 +1,4 @@
++#include "../activity.hpp"
+ #include "pipeline_cache.hpp"
+ 
+ #include "clear.hpp"
+@@ -1742,6 +1743,7 @@
+ // made objects vanish for a few frames whenever a new shader was first needed.
+ static bool wait_for_pending_pipeline(PipelineRef ref, CompiledPipeline& out) {
+   const uint64_t start = now_ns();
++  const activity::Scope busy{activity::Thread::Fifo, "waiting for a pipeline to be created"};
+   std::unique_lock lock{g_pipelineMutex};
+   if (!g_pendingPipelines.contains(ref)) {
+     return false;
+diff --git a/lib/gfx/render_worker.cpp b/lib/gfx/render_worker.cpp
+--- a/lib/gfx/render_worker.cpp
++++ b/lib/gfx/render_worker.cpp
+@@ -1,5 +1,6 @@
+ #include "render_worker.hpp"
+ 
++#include "../activity.hpp"
+ #include "../thread.hpp"
+ 
+ #include <algorithm>
+@@ -46,6 +47,7 @@
+ 
+     if (item->work) {
+       ZoneScopedN("QueueItem work");
++      const activity::Scope busy{activity::Thread::RenderWorker, "encoding a frame"};
+       item->work();
+     }
+     complete_sync(item->sync);
+diff --git a/lib/gx/fifo.cpp b/lib/gx/fifo.cpp
+--- a/lib/gx/fifo.cpp
++++ b/lib/gx/fifo.cpp
+@@ -1,6 +1,7 @@
+ #include "fifo.hpp"
+ 
+ #include "../thread.hpp"
++#include "../activity.hpp"
+ #include "command_processor.hpp"
+ 
+ #include <algorithm>
+@@ -96,6 +97,7 @@
+       if (kWorkerDelayUs != 0) {
+         std::this_thread::sleep_for(std::chrono::microseconds(kWorkerDelayUs));
+       }
++      const activity::Scope busy{activity::Thread::Fifo, "processing GX commands"};
+       process_to(published, std::memory_order_release);
+       continue;
+     }
+@@ -299,6 +301,7 @@
+   case ProcessingMode::Thread: {
+     sPublished.store(target, std::memory_order_release);
+     wake_worker();
++    const activity::Scope busy{activity::Thread::Host, "waiting for the GX FIFO thread (drain)"};
+ 
+     uint64_t processed = sProcessed.load(std::memory_order_acquire);
+     if (processed < target) {
+diff --git a/lib/webgpu/postfx.cpp b/lib/webgpu/postfx.cpp
+--- a/lib/webgpu/postfx.cpp
++++ b/lib/webgpu/postfx.cpp
+@@ -1,4 +1,5 @@
+ // Post-process chain applied at present time. See include/aurora/postfx.h.
++#include "../activity.hpp"
+ #include "postfx.hpp"
+ 
+ #include <aurora/postfx.h>
+@@ -328,6 +329,7 @@
+   {
+     std::lock_guard lock{g_mutex};
+     if (g_builtGeneration != g_pendingGeneration) {
++      const activity::Scope busy{activity::Thread::RenderWorker, "building the post-process chain"};
+       g_builtGeneration = g_pendingGeneration;
+       g_ready = build(g_pendingSource, g_pendingPasses);
+       g_failed = !g_ready && !g_pendingPasses.empty();
+diff --git a/lib/activity.hpp b/lib/activity.hpp
+new file mode 100644
+--- /dev/null
++++ b/lib/activity.hpp
+@@ -0,0 +1,45 @@
++#pragma once
++// 0236: what Aurora's own threads are doing right now, for an application's hang watchdog
++// (aurora_describe_activity, present_timing.h). Each thread kind has one slot: a string literal
++// and the time it was set. Scopes nest (the outer activity comes back when an inner one ends).
++// Setting a slot is two relaxed atomic stores, cheap enough for every frame.
++#include <atomic>
++#include <chrono>
++#include <cstdint>
++
++namespace aurora::activity {
++enum class Thread : uint8_t { Host, RenderWorker, Fifo, PresentWaiter, Count };
++
++struct Slot {
++  std::atomic<const char*> what{nullptr};
++  std::atomic<int64_t> sinceNs{0};
++};
++inline Slot g_slots[static_cast<size_t>(Thread::Count)];
++
++inline int64_t now_ns() noexcept {
++  return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
++      .count();
++}
++
++class Scope {
++public:
++  Scope(Thread thread, const char* what) noexcept : m_slot(g_slots[static_cast<size_t>(thread)]) {
++    m_prevWhat = m_slot.what.load(std::memory_order_relaxed);
++    m_prevSince = m_slot.sinceNs.load(std::memory_order_relaxed);
++    m_slot.sinceNs.store(now_ns(), std::memory_order_relaxed);
++    m_slot.what.store(what, std::memory_order_release);
++  }
++  ~Scope() {
++    // The outer activity resumes; its clock restarts (how long it has been in it again).
++    m_slot.sinceNs.store(m_prevWhat != nullptr ? now_ns() : m_prevSince, std::memory_order_relaxed);
++    m_slot.what.store(m_prevWhat, std::memory_order_release);
++  }
++  Scope(const Scope&) = delete;
++  Scope& operator=(const Scope&) = delete;
++
++private:
++  Slot& m_slot;
++  const char* m_prevWhat;
++  int64_t m_prevSince;
++};
++} // namespace aurora::activity
