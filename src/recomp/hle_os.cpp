@@ -194,6 +194,8 @@ void armAlarm(u32 alarm, u64 ticks, u32 handler, u64 period) {
 }
 }  // namespace
 
+static u64 gameClock();  // the clock the game reads (below)
+
 // RVL OSAlarm is 0x30 bytes: the GameCube layout plus user data at +0x28.
 HLE(OSSetAlarmUserData) { wr32(c.r[3] + 0x28, c.r[4]); }
 HLE(OSGetAlarmUserData) { c.r[3] = rd32(c.r[3] + 0x28); }
@@ -206,7 +208,7 @@ HLE(OSCreateAlarm) {
 HLE(OSSetAlarm) { armAlarm(c.r[3], u64(c.r[5]) << 32 | c.r[6], c.r[7], 0); }
 HLE(OSSetPeriodicAlarm) {
     // (alarm, u64 start r5:r6, u64 period r7:r8, handler r9); start is absolute time.
-    const u64 now = timeBase(), start = u64(c.r[5]) << 32 | c.r[6], period = u64(c.r[7]) << 32 | c.r[8];
+    const u64 now = gameClock(), start = u64(c.r[5]) << 32 | c.r[6], period = u64(c.r[7]) << 32 | c.r[8];
     armAlarm(c.r[3], start > now ? start - now : 0, c.r[9], period ? period : 1);
 }
 HLE(OSCancelAlarm) {
@@ -417,15 +419,38 @@ static void logTimeCaller(const char* fn, u32 lr) {
     if (seen.insert(lr).second) log("[time] %s from lr %08X (guest frame %u)", fn, lr, game::guestFrames());
 }
 
+// Test aid CF_CLOCK_FRAMES=1 (scripted routes, with CF_CLOCK_START): the clock the game reads
+// (OSGetTime/OSGetTick) follows guest frames, 1/59.94 s per frame plus 1 us per read (reads within
+// a frame stay increasing; a loop waiting for time still ends), instead of host time. Dates, times
+// of day and clock-derived values are then the same at the same frame in every run (City Folk
+// builds the new town from them); host-side timing (alarms, IOS/DVD latency) stays real.
+static u64 gameClock() {
+    static const bool frameClock = std::getenv("CF_CLOCK_FRAMES") != nullptr;
+    if (!frameClock) return timeBase();
+    static std::mutex m;
+    static u64 base = 0, last = 0;
+    static bool init = false;
+    constexpr double kFrameTicks = kTimerClock / 59.94;
+    std::lock_guard lk(m);
+    const u32 f = game::guestFrames();
+    if (!init) {
+        init = true;
+        base = timeBase() - u64(double(f) * kFrameTicks);
+    }
+    const u64 frameNow = base + u64(double(f) * kFrameTicks);
+    last = std::max(last + u64(kTimerClock / 1e6), frameNow);
+    return last;
+}
+
 HLE(OSGetTime) {
     logTimeCaller("OSGetTime", c.lr);
-    const u64 t = timeBase();
+    const u64 t = gameClock();
     c.r[3] = u32(t >> 32);
     c.r[4] = u32(t);
 }
 HLE(OSGetTick) {
     logTimeCaller("OSGetTick", c.lr);
-    c.r[3] = u32(timeBase());
+    c.r[3] = u32(gameClock());
 }
 // OSCalendarTime {sec, min, hour, mday, mon (0-11), year, wday, yday, msec, usec} -> ticks since
 // 2000-01-01 (the inverse of OSTicksToCalendarTime; out-of-range fields carry over).

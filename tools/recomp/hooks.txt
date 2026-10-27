@@ -10,3 +10,5 @@
 
 # Random::setSeed(this, seed) (stw r4,0(r3)): CF_RNG_SEED test aid in src/game/cf_game.cpp.
 fn_802AA1A0
+# Random::next (LCG x*0x19660D+0x3C6EF35F): CF_RNG_SEED keeps other threads off the main stream.
+fn_802AA1A8

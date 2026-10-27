@@ -33,7 +33,9 @@ $vars = @{
     CF_NAND_DIR = $Nand; CF_OFFSCREEN = "1"; CF_BACKGROUND = "1"; CF_AUDIO = "0"; CF_QUIT_AFTER = "$Seconds";
     CF_INPUT_CLOCK = "frames"; AURORA_FIFO_INLINE = "1";
     SDL_JOYSTICK_HIDAPI = "0"; SDL_JOYSTICK_RAWINPUT = "0"; SDL_JOYSTICK_WGI = "0"; SDL_XINPUT_ENABLED = "0";
-    SDL_JOYSTICK_DIRECTINPUT = "0"; SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS = "0"
+    SDL_JOYSTICK_DIRECTINPUT = "0"; SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS = "0";
+    # Same town and clock every run (routes walk the town; -Env "CF_RNG_SEED=" for the real thing).
+    CF_RNG_SEED = "12345678"; CF_CLOCK_START = "2026-10-27 10:00"; CF_CLOCK_FRAMES = "1"
 }
 if ($Shots) { $vars.CF_SHOT = "$(Join-Path $run 'shots'),$Shots" }
 foreach ($kv in ($Env -split ';')) {
