@@ -27,11 +27,13 @@ Engine work for the Wii: docs/WII.md. This file tracks the phases and the user's
 - **Hemisphere toggle**: Northern (original) / Southern, seasons shifted by six months
   (weather, snow, flowers/trees, insects and fish, seasonal events where that makes sense; New
   Leaf is the reference for what moves and what keeps its date).
-- **Real-time weather** (off by default): the user enters a ZIP/postal code, the game looks up the
-  local weather over the internet (a key-free service such as Open-Meteo: postal code → place →
-  current conditions) and the town's weather follows it (clear / cloudy / rain / snow, within what
-  the game can show for the season). The tooltip says the postal code is sent to that service;
-  nothing is sent while it is off. Falls back to the game's own weather when offline.
+- **Real-time weather** (off by default): the user searches for their town or city by name
+  (a postal code also works where the service knows it) and picks it from a list; the game then
+  looks up the current weather there over the internet (a key-free service such as Open-Meteo)
+  and the town's weather follows it (clear / cloudy / rain / snow, within what the game can show
+  for the season). Only the chosen place's rounded coordinates (~10 km) are sent, and only while
+  the option is on; no automatic IP location (at most an explicit "use my approximate location"
+  button). Refreshed every 30-60 minutes; the game's own weather when offline.
 - **Online play restored** however possible: Nintendo WFC (DWC: visiting towns, friend codes,
   Wii Speak chat) through a revival server such as Wiimmfi, and WiiConnect24 (letters, Nintendo
   event distributions) through a revival service such as WiiLink/RiiConnect24, if they support
