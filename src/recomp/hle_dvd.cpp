@@ -142,6 +142,17 @@ s32 readFile(HostFile& f, void* dst, s32 len, s32 off, s32 prio) {
 HLE(DVDInit) {}
 HLE(DVDGetDriveStatus) { c.r[3] = 0; }
 HLE(DVDCheckDisk) { c.r[3] = 1; }
+// DVDCheckDiskAsync(DVDCommandBlock*, callback): the disc is always in the drive (the game asks
+// before a reset). The callback gets 1 (disc present) after a drive status round trip.
+HLE(DVDCheckDiskAsync) {
+    const u32 block = c.r[3], cb = c.r[4];
+    wr32(block + 0x0C, 1);  // busy
+    sched::postIrqAfter(0.001, [block, cb](Ctx& ic) {
+        wr32(block + 0x0C, 0);
+        if (cb) guestCall(ic, cb, 1, block);
+    });
+    c.r[3] = 1;
+}
 HLE(DVDGetCommandBlockStatus) { c.r[3] = rd32(c.r[3] + 0x0C); }
 HLE(DVDConvertPathToEntrynum) {
     const char* path = gstr(c.r[3]);

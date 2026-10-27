@@ -2,6 +2,7 @@
 // Drawn with Aurora's Dear ImGui on the host thread between the guest's present
 // and aurora_end_frame. While it is open the game receives neutral pad input.
 #include "recomp/menu.h"
+#include "recomp/system.h"
 #include "recomp/game.h"
 #include "recomp/gx_bridge.h"
 
@@ -27,6 +28,7 @@
 #include <dolphin/vi.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <chrono>
 #include <cstdlib>
@@ -59,7 +61,7 @@ ImGuiTabItemFlags envTab(const char* name) {
     return ImGuiTabItemFlags_SetSelected;
 }
 bool sDirty = false;
-bool sQuit = false;  // "Quit game" confirmed
+std::atomic<bool> sQuit{false};  // "Quit game" confirmed, or the game left (requestQuit)
 // The menu window. The ID after ### is the old title, so imgui.ini keeps the window's saved size
 // and place.
 constexpr const char* kMenuWindow = "Animal Crossing City Folk Recompiled  (F1)###Animal Crossing City Folk PC  (F1)";
@@ -772,21 +774,9 @@ void gameTab() {
         ImGui::SetItemTooltip("Restarts into the setup screen to add a USA or European disc image or replace one\n"
                               "(unsaved game progress is lost).");
     }
-    ImGui::Separator();
-    auto& e = port::settings().enhancements;
-    {
-        Gate g(port::palBaseFeature());
-        static const char* kLanguages[] = {"English", "Deutsch", "Francais", "Espanol", "Italiano"};
-        int lang = std::clamp(e.palLanguage, 1, 5) - 1;
-        if (ImGui::Combo("Language (European version)", &lang, kLanguages, 5)) {
-            e.palLanguage = lang + 1;
-            sDirty = true;
-        }
-        ImGui::SetItemTooltip("Text and voice language of the European game for a new save; an existing save keeps\n"
-                              "its own (changed in the game's Options).");
-    }
-    if (port::palBaseFeature() == port::Avail::Yes)
-        ImGui::TextDisabled("Used for a new save; an existing save keeps its language (in-game Options).");
+    // The Wii's own settings as the game reads them (SYSCONF; src/recomp/sysconf.cpp, docs/NAND.md).
+    ImGui::SeparatorText("Console");
+    sDirty |= recomp::sys::drawMenu();
     dataSection();
     updatesSection();
 }
@@ -1597,9 +1587,11 @@ void soundTab() {
     sDirty |= volumeSlider("Master volume", a.masterVolume);
     ImGui::SetItemTooltip("Everything the game plays.");
     sDirty |= volumeSlider("Music volume", a.musicVolume);
-    ImGui::SetItemTooltip("Background music: the game's music sequences and streamed music.");
+    ImGui::SetItemTooltip("Background music: the game's music sequences and streamed music.\n"
+                          "Not applied yet: music and effects are not told apart so far.");
     sDirty |= volumeSlider("Sound effects volume", a.sfxVolume);
-    ImGui::SetItemTooltip("Everything else: sound effects, voices, ambience.");
+    ImGui::SetItemTooltip("Everything else: sound effects, voices, ambience.\n"
+                          "Not applied yet: music and effects are not told apart so far.");
     ImGui::SeparatorText("Output");
     static const char* kOutputs[] = {"Stereo", "Mono", "Surround (matrix-encoded stereo)", "Surround 5.1 (discrete)",
                                      "Surround 7.1 (discrete)"};
@@ -1626,11 +1618,11 @@ void soundTab() {
                           "Off: SDL's resampler, slightly cheaper.");
     ImGui::SeparatorText("DSP accuracy");
     sDirty |= recomp::menu::Checkbox("Reverb / echo", &a.reverb);
-    ImGui::SetItemTooltip("The DSP's effect lines (feedback delays used as room echo) and its chorus bus.\n"
-                          "Off: dry sound only, slightly cheaper.");
+    ImGui::SetItemTooltip("The effect returns of the DSP's aux buses (the game's reverb / chorus / delay,\n"
+                          "which it still computes). Off: dry sound only.");
     sDirty |= recomp::menu::Checkbox("Voice filters", &a.voiceFilters);
-    ImGui::SetItemTooltip("Per-voice FIR / IIR / distortion stages the game asks the DSP for (muffled or\n"
-                          "distorted sounds). Off: those sounds play unfiltered, slightly cheaper.");
+    ImGui::SetItemTooltip("Per-voice low-pass and biquad filters the game asks the DSP for (muffled sounds,\n"
+                          "also on the Wii Remote speaker path). Off: those sounds play unfiltered.");
 }
 
 void generalEnhancementsTab() {
@@ -1715,6 +1707,7 @@ void openTreesForCheck() {
 
 bool isOpen() { return sOpen; }
 bool quitRequested() { return sQuit; }
+void requestQuit() { sQuit = true; }
 
 void shutdown() {
     // Settings are written when the menu closes; closing the window (or Alt+F4) while it is

@@ -1,15 +1,13 @@
-// HLE: audio interface (AI) and the JAudio DSP driver.
+// HLE: audio interface (AI) and the DSP task interface AX runs on.
 //
 // AI: the game hands finished 16-bit stereo blocks to AIInitDMA; a host thread
 // plays them through SDL3 (audio_out.cpp) and raises the AI DMA interrupt each
 // time a block starts, paced by the host device so the game's audio clock
 // follows the sound card. Without a device the interrupt runs off a timer.
 //
-// DSP: JAudio's DSP driver (jaudio/dspboot.c, dspproc.c) talks to its microcode
-// through a mailbox. Its entry points are hooked (tools/recomp/hooks.txt):
-// command packets go to our microcode stand-in (audio_dsp.cpp), and every
-// DSPReleaseHalt mixes one subframe and then raises the DSP interrupt that
-// JAudio's audio thread waits for. See docs/AUDIO.md.
+// DSP: AX (revolution/ax) runs its microcode as a DSP task and mails it one command
+// list per 3 ms frame from the AI interrupt; the DSP task SDK is HLE'd below and the
+// lists go to our microcode stand-in (audio_dsp.cpp). See docs/AUDIO.md.
 #include "port/settings.h"
 #include "recomp/audio.h"
 #include "recomp/cpu_qos.h"
@@ -43,8 +41,10 @@ std::thread sDmaThread;
 // tempo and pitch match the console (0.09% above the nominal 32000 Hz).
 double rateHz() { return sDspRate.load() ? audio::kConsoleRate48 : audio::kConsoleRate32; }
 
-// Set when the AI interrupt is raised, cleared once JAudio has mixed for it (Jac_imixcopy).
+// Set when the AI interrupt is raised, cleared once the DSP has mixed for it (the AX command
+// list sent from the interrupt).
 std::atomic<bool> sAwaitingMix{false};
+std::atomic<bool> sCallbackRan{false};  // CF_AUDIO_LOG: the last AI interrupt's callback has returned
 
 // JAudio's DSP overload check (UpdateDSPchannelAll) times its DSP updates: when a subframe
 // takes nearly as long as the gap before the frame's first one, it decides the DSP cannot
@@ -70,7 +70,7 @@ bool waitForGuestMix(double maxSeconds) {
     while ((sAwaitingMix.load() || audio::dspFrameBusy()) && clock::now() < deadline && !audio::outPaused())
         std::this_thread::sleep_for(std::chrono::microseconds(250));
     const bool mixed = !sAwaitingMix.load();
-    const auto quiet = std::min(audio::dspFrameEnd() + std::chrono::milliseconds(2), deadline);
+    const auto quiet = std::min(audio::dspFrameEnd(), deadline);
     if (clock::now() < quiet) std::this_thread::sleep_until(quiet);
     return mixed;
 }
@@ -228,8 +228,10 @@ void dmaThread() {
                                        : 0.1;
             mixed = waitForGuestMix(maxWait);
             if (!mixed && audio::g_log)
-                log("[audio] AI interrupt without the game's mix (waited %.1f ms, %.1f ms queued)", maxWait * 1e3,
-                    audio::outQueuedSeconds() * 1e3);
+                log("[audio] AI interrupt without the game's mix (waited %.1f ms, %.1f ms queued; callback %s, DSP "
+                    "frame %s)",
+                    maxWait * 1e3, audio::outQueuedSeconds() * 1e3, sCallbackRan.load() ? "ran" : "not run yet",
+                    audio::dspFrameBusy() ? "in flight" : "done");
         }
         if (audio::outHasDevice()) {
             const double queued = audio::outQueuedSeconds();
@@ -242,7 +244,24 @@ void dmaThread() {
         if (const u32 addr = sDmaAddr.load(); addr && len) audio::outPushGuestBlock(addr, len);
         if (cb) {
             sAwaitingMix = true;
-            sched::postIrq([cb](Ctx& ic) { guestCall(ic, cb); });
+            sCallbackRan = false;
+            sched::postIrq([cb](Ctx& ic) {
+                const auto t0 = clock::now();
+                guestCall(ic, cb);
+                sCallbackRan = true;
+                if (audio::g_log) {  // a slow AI callback holds every interrupt (with CF_TRACE=ring: its recent functions)
+                    const double ms = std::chrono::duration<double>(clock::now() - t0).count() * 1e3;
+                    if (ms > 20) {
+                        std::string s;
+                        for (u32 i = ic.ringPos > 24 ? ic.ringPos - 24 : 0; i < ic.ringPos; i++) {
+                            char b[12];
+                            std::snprintf(b, sizeof b, " %08X", ic.ring[i & 31]);
+                            s += b;
+                        }
+                        log("[audio] AI callback took %.1f ms; recent%s", ms, s.c_str());
+                    }
+                }
+            });
         }
     }
 }
@@ -297,21 +316,39 @@ HLE(AISetStreamTrigger) {}
 HLE(AIGetStreamSampleCount) { c.r[3] = 0; }
 HLE(AIGetStreamTrigger) { c.r[3] = 0; }
 
-// DSP task interface (dsp/dsp.c, dsp_task.c), as the RVL SDK's AX uses it. Boot stand-in until
-// the AX microcode stand-in exists (docs/WII.md "Audio"): a task added with DSPAddTask gets its
-// init callback at once (the "DSP" is ready), and every command list the CPU hands over (the
-// mail pair 0xBABExxxx + address that AX sends per audio frame) is "finished" a moment later
-// through the task's resume callback, so AX's frame loop and the callbacks NW4R's sound system
-// runs on keep going. No samples are mixed (silence).
+// DSP task interface (dsp/dsp.c, dsp_task.c), as the RVL SDK's AX uses it. The DSP itself is
+// our AX microcode stand-in (audio_dsp.cpp): a task added with DSPAddTask gets its init
+// callback at once (the microcode booted and mailed 0xDCD10000), and each command list the CPU
+// hands over (__AXOutNewFrame: mail 0xBABE<length>, then the list's address) is mixed right
+// there, writing the AI buffer, the aux uploads and the PBs back as the microcode does. The
+// list's END command yields the task (0xDCD10002); the CPU's resume callback
+// (__AXDSPResumeCallback) follows a little later, as on the console, where the DSP needs part
+// of the 3 ms frame. (Mixing at the mail is safe: AX synced the PBs before sending, and the
+// buffers the CPU touches until the next frame are not the ones this list writes.)
 // DSPTaskInfo: +0x00 state, +0x28 init_cb, +0x2C res_cb, +0x30 done_cb, +0x34 req_cb.
 namespace {
 std::atomic<u32> sDspTask{0};
 u32 sMailHi = 0;
 bool sDspInit = false;
-void callTaskCb(u32 task, u32 offset) {
+// How long the DSP "takes" for a command list before it yields (CF_AX_DSP_US, microseconds).
+double dspListSeconds() {
+    static const double v = [] {
+        const char* e = std::getenv("CF_AX_DSP_US");
+        return (e && *e ? std::atof(e) : 400.0) * 1e-6;
+    }();
+    return v;
+}
+void callTaskCb(u32 task, u32 offset, double delay, bool frameDone = false) {
     if (!task) return;
     const u32 cb = rd32(task + offset);
-    if (cb) sched::postIrqAfter(0.0005, [cb, task](Ctx& ic) { guestCall(ic, cb, task); });
+    if (!cb) {
+        if (frameDone) audio::axFrameDone();
+        return;
+    }
+    sched::postIrqAfter(delay, [cb, task, frameDone](Ctx& ic) {
+        if (frameDone) audio::axFrameDone();
+        guestCall(ic, cb, task);
+    });
 }
 }  // namespace
 HLE(DSPInit) { sDspInit = true; }
@@ -320,7 +357,7 @@ HLE(DSPAddTask) {
     const u32 task = c.r[3];
     sDspTask = task;
     wr32(task, 1);  // DSP_TASK_STATE_INIT: running
-    callTaskCb(task, 0x28);
+    callTaskCb(task, 0x28, 0.0005);
     c.r[3] = task;
 }
 HLE(DSPAssertTask) { c.r[3] = c.r[3]; }
@@ -330,7 +367,7 @@ HLE(DSPReadMailFromDSP) { c.r[3] = 0; }
 HLE(DSPSendMailToDSP) {
     const u32 mail = c.r[3];
     static int sLogged = 0;
-    if (sLogged < 4 && std::getenv("CF_AUDIO_LOG")) {
+    if (sLogged < 4 && audio::g_log) {
         sLogged++;
         log("[dsp] mail %08X (lr %08X)", mail, c.lr);
     }
@@ -338,9 +375,12 @@ HLE(DSPSendMailToDSP) {
         sMailHi = mail;
         return;
     }
-    if (sMailHi) {  // second word of a command list: finished at once
+    if (sMailHi) {  // second word of a command list
+        const u32 len = sMailHi & 0xFFFF;
         sMailHi = 0;
-        callTaskCb(sDspTask, 0x2C);  // res_cb: the task resumes after its command list
+        audio::axCommandList(mail, len);
+        audio::noteGuestMixed();  // the list's OUTPUT command filled the next AI block
+        callTaskCb(sDspTask, 0x2C, dspListSeconds(), true);  // res_cb: the task yielded after its list
     }
 }
 HLE(DSPAssertInt) {}

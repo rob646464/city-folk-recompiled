@@ -4,6 +4,7 @@
 #include "recomp/runtime.h"
 #include "recomp/sched.h"
 #include "recomp/game.h"
+#include "recomp/system.h"
 #include "port/recovery.h"
 
 #include <dolphin/gx.h>
@@ -485,8 +486,10 @@ void initTimeBase() {
 #endif
     g.tm_isdst = -1;
     const s64 tz = s64(now) - s64(std::mktime(&g));
-    const s64 secs = s64(now) + tz - 946684800;
-    sTbBias = u64(double(secs) * kTimerClock);
+    // The console clock: the host's local time plus the clock offset setting (time travel).
+    const s64 secs = s64(now) + tz - 946684800 + s64(sys::clockOffsetSeconds());
+    sTbBias = u64(double(std::max<s64>(secs, 0)) * kTimerClock);
+    if (sys::clockOffsetSeconds()) log("[time] console clock offset %lld s", (long long)sys::clockOffsetSeconds());
 }
 
 u64 timeBase() {
