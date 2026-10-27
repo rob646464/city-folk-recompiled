@@ -30,7 +30,8 @@
 //
 // Test aids: CF_WEATHER_FAKE=clear|cloudy|overcast|rain|heavyrain|storm|snow|heavysnow (no network;
 // applied at once, no hour latching), CF_WEATHER_TEST=<place name> (searches, takes the first match,
-// fetches and logs, for this run only), CF_WEATHER_LOG=1 (fetches, and every hourly answer that
+// fetches and logs, for this run only), CF_WEATHER_SEARCH=<text> (types it into the F1 search box
+// and presses Search once: the pick list), CF_WEATHER_LOG=1 (fetches, and every hourly answer that
 // differs from the game's own).
 #include "game/cf_calendar.h"
 
@@ -537,12 +538,22 @@ bool drawWeatherMenu() {
     static char sCc[3] = "";
     if (sCountry.size() <= 2 && sCc[0] == 0 && !sCountry.empty()) std::snprintf(sCc, sizeof(sCc), "%s", sCountry.c_str());
     ImGui::SetNextItemWidth(220 * ImGui::GetFontSize() / 13.0f);
-    const bool enter = ImGui::InputText("##weather_place", sQuery, sizeof(sQuery), ImGuiInputTextFlags_EnterReturnsTrue);
+    // Test aid CF_WEATHER_SEARCH=<text>: types the text into the box and presses Search once.
+    static const char* sTestSearch = std::getenv("CF_WEATHER_SEARCH");
+    bool testPress = false;
+    if (sTestSearch && *sTestSearch) {
+        std::snprintf(sQuery, sizeof(sQuery), "%s", sTestSearch);
+        sTestSearch = nullptr;
+        testPress = true;
+    }
+    const bool enter = ImGui::InputTextWithHint("##weather_place", "Town or city", sQuery, sizeof(sQuery),
+                                                ImGuiInputTextFlags_EnterReturnsTrue) ||
+                       testPress;
     ImGui::SetItemTooltip("Town or city name (English or local Latin spelling); postal codes work in some countries.\n"
                           "Sent to Open-Meteo's place search only when you press Search.");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(32 * ImGui::GetFontSize() / 13.0f);
-    if (ImGui::InputText("##weather_cc", sCc, sizeof(sCc), ImGuiInputTextFlags_CharsUppercase)) {
+    if (ImGui::InputTextWithHint("##weather_cc", "CC", sCc, sizeof(sCc), ImGuiInputTextFlags_CharsUppercase)) {
         sCountry = sCc;
         dirty = true;
     }
