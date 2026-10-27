@@ -40,9 +40,15 @@ std::array<uint8_t, 20> sha1(const uint8_t* data, size_t len) {
     };
     for (size_t chunk = 0; chunk < padded; chunk += 64) {
         uint32_t w[80];
-        for (int i = 0; i < 16; ++i) {
-            w[i] = (uint32_t(byteAt(chunk + i * 4)) << 24) | (uint32_t(byteAt(chunk + i * 4 + 1)) << 16) |
-                   (uint32_t(byteAt(chunk + i * 4 + 2)) << 8) | byteAt(chunk + i * 4 + 3);
+        if (chunk + 64 <= len) {  // whole block of the input (setup hashes every REL: keep it quick)
+            const uint8_t* q = data + chunk;
+            for (int i = 0; i < 16; ++i)
+                w[i] = (uint32_t(q[i * 4]) << 24) | (uint32_t(q[i * 4 + 1]) << 16) | (uint32_t(q[i * 4 + 2]) << 8) | q[i * 4 + 3];
+        } else {
+            for (int i = 0; i < 16; ++i) {
+                w[i] = (uint32_t(byteAt(chunk + i * 4)) << 24) | (uint32_t(byteAt(chunk + i * 4 + 1)) << 16) |
+                       (uint32_t(byteAt(chunk + i * 4 + 2)) << 8) | byteAt(chunk + i * 4 + 3);
+            }
         }
         for (int i = 16; i < 80; ++i) {
             w[i] = std::rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);

@@ -735,25 +735,25 @@ void gameTab() {
         ImGui::Text("Developer build: %s, recompiled at build time.", port::versionName(inst.running));
         ImGui::TextDisabled("CityFolkRecomp manages discs and versions (docs/SETUP.md).");
     } else {
-        auto row = [](const char* label, const std::string& path, bool ready) {
-            ImGui::Text("%s:", label);
+        for (port::GameVersion v : port::kVersions) {
+            ImGui::Text("%s disc:", port::regionName(v));
             ImGui::SameLine();
-            if (ready) ImGui::TextWrapped("%s", path.c_str());
+            if (inst.isReady(v)) ImGui::TextWrapped("%s", inst.discOf(v).c_str());
             else ImGui::TextDisabled("not installed");
-        };
-        row("USA disc", inst.usDisc, inst.usReady);
-        row("Europe disc", inst.palDisc, inst.palReady);
-        ImGui::Text("Playing: %s version", inst.running == port::GameVersion::PAL ? "European" : "USA");
-        if (inst.both()) {
+        }
+        ImGui::Text("Playing: %s version (%s)", port::regionName(inst.running), port::gameId(inst.running));
+        if (inst.readyCount() > 1) {
             int base = int(inst.base);
             ImGui::Text("Version to play:");
-            ImGui::SameLine();
-            bool changed = ImGui::RadioButton("USA", &base, int(port::GameVersion::USA));
-            ImGui::SameLine();
-            changed |= ImGui::RadioButton("Europe", &base, int(port::GameVersion::PAL));
+            bool changed = false;
+            for (port::GameVersion v : port::kVersions) {
+                if (!inst.isReady(v)) continue;
+                ImGui::SameLine();
+                changed |= ImGui::RadioButton(port::regionName(v), &base, int(v));
+            }
             ImGui::SameLine();
             ImGui::TextDisabled("(?)");
-            ImGui::SetItemTooltip("Which installed disc's game runs (both are installed). Takes a restart.");
+            ImGui::SetItemTooltip("Which installed disc's game runs. Takes a restart.");
             if (changed) {
                 inst.base = port::GameVersion(base);
                 port::saveInstall();
@@ -771,7 +771,7 @@ void gameTab() {
             port::saveSettings();
             port::relaunch(true);
         }
-        ImGui::SetItemTooltip("Restarts into the setup screen to add a USA or European disc image or replace one\n"
+        ImGui::SetItemTooltip("Restarts into the setup screen to add a USA, European or Japanese disc or replace one\n"
                               "(unsaved game progress is lost).");
     }
     // The Wii's own settings as the game reads them (SYSCONF; src/recomp/sysconf.cpp, docs/NAND.md).

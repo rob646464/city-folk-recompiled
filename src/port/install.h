@@ -8,41 +8,47 @@
 
 namespace port {
 
-enum class GameVersion { USA, PAL };  // RUUE01 / RUUP01 (Japan RUUJ01: later)
+// The three rev 1 releases (docs/SETUP.md "Discs"). Every disc carries every region's content,
+// so one disc of any region is a complete install; several can be installed side by side.
+enum class GameVersion { USA, PAL, JPN };  // RUUE01 / RUUP01 / RUUJ01
+constexpr int kVersionCount = 3;
+constexpr GameVersion kVersions[kVersionCount] = {GameVersion::USA, GameVersion::PAL, GameVersion::JPN};
 
-const char* gameId(GameVersion v);         // "RUUE01" / "RUUP01"
-const char* versionName(GameVersion v);    // "USA" / "PAL"
+const char* gameId(GameVersion v);       // "RUUE01" / "RUUP01" / "RUUJ01"
+const char* versionName(GameVersion v);  // "USA" / "PAL" / "JPN" (install.ini, logs)
+const char* regionName(GameVersion v);   // "USA" / "Europe" / "Japan" (what players read)
+// "RUUE01"... (also a disc's first 6 header bytes) -> version; false for anything else.
+bool versionFromId(const char* id, GameVersion& v);
 
 struct InstallState {
-    std::string usDisc;   // path to the user's US disc image (ISO/RVZ/...), empty if none
-    std::string palDisc;  // path to the PAL disc image, empty if none
-    GameVersion base = GameVersion::USA;  // which version runs (when both are installed)
+    // Path of the user's disc for each version (image or extracted folder, UTF-8), empty if none.
+    std::string disc[kVersionCount];
+    GameVersion base = GameVersion::USA;  // which version runs (when several are installed)
 
     // Filled at startup from the setup results (not persisted).
-    bool usReady = false;    // US game module built and current
-    bool palReady = false;   // PAL game module built and current
-    bool hmOverlayReady = false;  // PAL Hidden Mansion overlay for the US base (needs both discs)
+    bool ready[kVersionCount] = {};  // game module built and current
     GameVersion running = GameVersion::USA;  // version of the game that is running
 
     bool staticBuild = false;  // cfrecomp: one version linked in, no setup
 
-    bool both() const { return usReady && palReady; }
+    std::string& discOf(GameVersion v) { return disc[int(v)]; }
+    const std::string& discOf(GameVersion v) const { return disc[int(v)]; }
+    bool isReady(GameVersion v) const { return ready[int(v)]; }
+    int readyCount() const { return int(ready[0]) + int(ready[1]) + int(ready[2]); }
 };
 
-// Feature availability for the F1 menu (docs/SETUP.md, "Feature gating"). Only a
-// single-disc install greys features out; with both discs everything stays selectable and
-// options for the other version say where they apply.
+// Feature availability for the F1 menu (docs/SETUP.md, "Feature gating"). A feature written for
+// one version's game is greyed out when that version is not installed; with it installed but
+// another one running, it stays selectable and says where it applies.
 enum class Avail {
     Yes,           // works in the running game
-    OtherBase,     // works when the other version is the base (both discs installed)
-    NeedsUsDisc,   // single-disc install without the USA disc
-    NeedsPalDisc,  // single-disc install without the European disc
-    NotYet,        // both discs installed, but not implemented for the running base yet
+    OtherBase,     // works when the other version is the base (installed too)
+    NeedsUsDisc,   // the USA disc is not installed
+    NeedsPalDisc,  // the European disc is not installed
+    NotYet,        // installed, but not implemented for the running version yet
 };
 Avail usCodeFeature();      // enhancements written against the USA game's code/addresses
-Avail palBaseFeature();     // 50/60 Hz, language: options of the European game itself
-Avail hiddenMansionPal();   // the European Hidden Mansion rules
-Avail hiddenMansionUs();    // the USA Hidden Mansion rules
+Avail palBaseFeature();     // 50/60 Hz: options of the European game itself
 const char* availNote(Avail a);  // short explanation, nullptr for Yes
 
 InstallState& install();
@@ -50,8 +56,8 @@ InstallState& install();
 // Where the port writes (created on demand; docs/SETUP.md, docs/LINUX.md):
 //   Windows: all three are %APPDATA%\Animal Crossing City Folk Recompiled.
 //   Linux:   configDir  $XDG_CONFIG_HOME/Animal Crossing City Folk Recompiled (~/.config/...): settings.ini, install.ini
-//            dataDir    $XDG_DATA_HOME/Animal Crossing City Folk Recompiled (~/.local/share/...): game modules, Hidden
-//                       Mansion overlays, memory cards, screenshots
+//            dataDir    $XDG_DATA_HOME/Animal Crossing City Folk Recompiled (~/.local/share/...): game modules,
+//                       NAND, screenshots
 //            cacheDir   $XDG_CACHE_HOME/Animal Crossing City Folk Recompiled (~/.cache/...): GPU pipeline/shader caches
 //   Portable mode (both): all three are <program folder>/portable (the Windows layout).
 std::filesystem::path configDir();
@@ -89,9 +95,6 @@ std::string requestDataMove(bool toPortable);
 bool isPortableDataPath(const std::filesystem::path& relToExeDir);
 // An environment variable holding a path (read as UTF-16 on Windows, so any characters survive).
 std::filesystem::path envPath(const char* name);
-
-// PAL Hidden Mansion overlay built by setup for the US base: <dataDir>/hidden_mansion
-std::filesystem::path hiddenMansionOverlayDir();
 
 // Long paths on Windows (docs/SETUP.md "Long paths"). The executable's manifest declares
 // longPathAware, but Windows honours that only when the system policy (LongPathsEnabled) is on;
