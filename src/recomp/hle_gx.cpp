@@ -1020,6 +1020,10 @@ GXHLE(GXInit) {
     static u32 fifoObj = 0;
     if (!fifoObj) fifoObj = hleAlloc(128);
     GXInit(hostp(c.r[3]), c.r[4]);
+    // Game-built display lists and raw FIFO writes (NW4R g3d's shape lists set vertex array bases,
+    // EGG calls display lists) carry physical addresses: MEM1 at 0, MEM2 at 0x10000000 (Aurora 0300).
+    GXSetAuroraPhysicalMemoryRange(0, kMem1Size, g_mem);
+    GXSetAuroraPhysicalMemoryRange(0x10000000, kMem2Size, g_mem + kMem2Offset);
     sInd = {};
     c.r[3] = fifoObj;
 }
@@ -1228,6 +1232,18 @@ GXHLE(GXSetProjectionv) {
     sProj.type = ortho ? GX_ORTHOGRAPHIC : GX_PERSPECTIVE;
     sProjDirty = sProjSet = sRawCheck = true;
     if (!ws::adjusting()) emitProjection(ProjMode::Plain);
+}
+// GXGetProjectionv(f32 v[7]): the guest's own projection (not the widescreen-adjusted one).
+GXHLE_CPU(GXGetProjectionv) {
+    const u32 v = c.r[3];
+    const bool ortho = sProj.type == GX_ORTHOGRAPHIC;
+    wr32(v, bits32(ortho ? 1.0f : 0.0f));
+    wr32(v + 4, bits32(sProj.m[0][0]));
+    wr32(v + 8, bits32(ortho ? sProj.m[0][3] : sProj.m[0][2]));
+    wr32(v + 12, bits32(sProj.m[1][1]));
+    wr32(v + 16, bits32(ortho ? sProj.m[1][3] : sProj.m[1][2]));
+    wr32(v + 20, bits32(sProj.m[2][2]));
+    wr32(v + 24, bits32(sProj.m[2][3]));
 }
 // The scissor offset (RVL games set 0,0 around their passes): not modelled by Aurora yet.
 GXHLE(GXSetScissorBoxOffset) {

@@ -10,6 +10,9 @@
 #include "recomp/sched.h"
 #include "recomp/game.h"
 
+#include <dolphin/gx.h>
+#include <dolphin/vi.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -93,7 +96,41 @@ u32 hw::viRead(u32 addr, int size) {
 }
 
 HLE(VIInit) {}
-HLE(VIConfigure) {}
+// The render mode sizes Aurora's frame buffer (fbWidth x efbHeight): RVL games often draw
+// 456 or 528 lines instead of 480 (City Folk: 640x456), which Aurora otherwise shows as the top
+// of a 640x480 EFB with the clear colour below. GXRenderModeObj (guest, big-endian): viTVmode
+// u32 +0, fbWidth +4, efbHeight +6, xfbHeight +8, viXOrigin +A, viYOrigin +C, viWidth +E,
+// viHeight +10 (u16), xFBmode u32 +14, field_rendering +18, aa +19, sample_pattern[12][2] +1A,
+// vfilter[7] +32.
+HLE(VIConfigure) {
+    const u32 rm = c.r[3];
+    if (!rm) return;
+    GXRenderModeObj m{};
+    m.viTVmode = VITVMode(rd32(rm));
+    m.fbWidth = u16(rd16(rm + 4));
+    m.efbHeight = u16(rd16(rm + 6));
+    m.xfbHeight = u16(rd16(rm + 8));
+    m.viXOrigin = u16(rd16(rm + 0xA));
+    m.viYOrigin = u16(rd16(rm + 0xC));
+    m.viWidth = u16(rd16(rm + 0xE));
+    m.viHeight = u16(rd16(rm + 0x10));
+    m.xFBmode = VIXFBMode(rd32(rm + 0x14));
+    m.field_rendering = u8(rd8(rm + 0x18));
+    m.aa = u8(rd8(rm + 0x19));
+    for (int i = 0; i < 12; i++)
+        for (int j = 0; j < 2; j++) m.sample_pattern[i][j] = u8(rd8(rm + 0x1A + i * 2 + j));
+    for (int i = 0; i < 7; i++) m.vfilter[i] = u8(rd8(rm + 0x32 + i));
+    static u32 sLast = 0;
+    const u32 key = u32(m.fbWidth) << 16 | m.efbHeight;
+    if (key != sLast) {
+        log("[vi] VIConfigure: tv mode %u, fb %ux%u, xfb %u lines, vi %ux%u at (%u,%u), xfb mode %u, aa %u",
+            u32(m.viTVmode), m.fbWidth, m.efbHeight, m.xfbHeight, m.viWidth, m.viHeight, m.viXOrigin, m.viYOrigin,
+            u32(m.xFBmode), m.aa);
+        sLast = key;
+    }
+    if (m.fbWidth < 16 || m.fbWidth > 720 || m.efbHeight < 16 || m.efbHeight > 528) return;
+    ::VIConfigure(&m);
+}
 HLE(VIConfigurePan) {}
 HLE(VIFlush) {}
 HLE(VISetBlack) { sBlack = c.r[3] != 0; }
