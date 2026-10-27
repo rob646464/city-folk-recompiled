@@ -1,5 +1,5 @@
 // Inputs of first-run setup, embedded in the executable so they always match the runtime
-// they were built with: the function tables of all three releases (addresses and names only),
+// they were built with: the function tables of all four releases (addresses and names only),
 // the hook list, and the freestanding sources compiled into the game module. The arrays are
 // generated at build time by tools/recomp/cfembed.cpp (CMakeLists.txt, CF_EMBEDDED_FILES).
 #include "setup/embedded.h"
@@ -19,6 +19,7 @@ namespace data {
 CF_EMBEDDED_VERSION(RUUE01)
 CF_EMBEDDED_VERSION(RUUP01)
 CF_EMBEDDED_VERSION(RUUJ01)
+CF_EMBEDDED_VERSION(RUUK01)
 CF_EMBEDDED(kHooks)
 CF_EMBEDDED(kCtxHeader)
 CF_EMBEDDED(kModuleAbiHeader)
@@ -62,6 +63,7 @@ const Tables& tables(port::GameVersion v) {
         CF_TABLES(0, RUUE01)
         CF_TABLES(1, RUUP01)
         CF_TABLES(2, RUUJ01)
+        CF_TABLES(3, RUUK01)
 #undef CF_TABLES
     });
     return sTables[int(v)];

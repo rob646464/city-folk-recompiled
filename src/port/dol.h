@@ -14,8 +14,8 @@
 
 namespace port::dol {
 
-// Animal Crossing: City Folk, rev 1 discs: USA RUUE01, Europe RUUP01, Japan RUUJ01.
-enum class Version { Unknown, RUUE01, RUUP01, RUUJ01 };
+// Animal Crossing: City Folk: rev 1 discs USA RUUE01, Europe RUUP01, Japan RUUJ01, Korea RUUK01.
+enum class Version { Unknown, RUUE01, RUUP01, RUUJ01, RUUK01 };
 const char* versionId(Version v);  // "RUUE01", ..., "unknown"
 
 // Identifies a main.dol image by SHA-1 (Unknown if it is not a supported retail build).
