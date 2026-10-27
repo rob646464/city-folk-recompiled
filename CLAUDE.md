@@ -26,6 +26,8 @@
 - PowerShell wrappers: never name a parameter `$Input` (automatic pipeline variable: `--input` silently gets nothing). Wii Remote script tokens and `@x/y` pointer items: docs/CONTROLS.md "Test aids".
 - The user plays with a controller: every run sets `SDL_JOYSTICK_HIDAPI=0 SDL_JOYSTICK_RAWINPUT=0 SDL_JOYSTICK_WGI=0 SDL_XINPUT_ENABLED=0 SDL_JOYSTICK_DIRECTINPUT=0 SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=0`. No rumble tests unless asked.
 
+- **Rendering bugs are checked against Dolphin** before they are called bugs (user rule): Dolphin at `C:\Users\rmelv\Desktop\games\Dolphin-x64\Dolphin.exe`, always with its own scratch user folder (`-u <scratch dir>`, never the user's %APPDATA%\Dolphin Emulator config) and `-b -e <disc or US DATA/DATA/sys/main.dol>`, muted, window out of the way, only your own PID closed; compare the same scene. Used only as a visual reference (no GPL code copied). Without a Dolphin comparison, call a difference unverified.
+
 ## Gotchas (from LM/SMS)
 - Don't write C/C++ with `\n` escapes through bash heredocs/python-in-bash: use the Write/Edit tools. Python files with `encoding="utf-8"`.
 - Timing matters: instantaneous hardware completion breaks game assumptions (DVD/NAND/IPC replies need modelled latency).
