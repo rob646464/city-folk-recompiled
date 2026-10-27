@@ -5,6 +5,7 @@
 #include "recomp/system.h"
 #include "recomp/game.h"
 #include "recomp/gx_bridge.h"
+#include "game/cf_region.h"
 
 #include "port/install.h"
 #include "port/options.h"
@@ -1649,9 +1650,11 @@ void generalEnhancementsTab() {
     ImGui::SetItemTooltip("The game pauses (and goes quiet) while another window is in front.");
 }
 
-// Game features (docs/ROADMAP.md "Feature list"): none yet; every one will be off / original by
-// default.
-void gameplayTab() { ImGui::TextDisabled("Nothing here yet: the game's own options come later (docs/ROADMAP.md)."); }
+// Game features (docs/ROADMAP.md "Feature list"): every one off / original by default.
+void gameplayTab() {
+    // Content from other regions (src/game/cf_region.cpp).
+    sDirty |= recomp::region::menuSection();
+}
 
 // Debug: the game's debug entries (src/game).
 void debugTab() { recomp::game::debugMenu(); }

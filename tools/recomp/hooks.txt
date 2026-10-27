@@ -14,3 +14,16 @@
 # Dolby Pro Logic II mode: City Folk's `bl AxManager::SetOutputMode(STEREO)` right after
 # InitSoundSystem (in fn_801CE6B0) becomes a nop. Switched by hle_audio.cpp (SCGetSoundMode).
 patch 30 801CE714 60000000
+
+# Content from other regions (src/game/cf_region.cpp, docs/REGION_CONTENT.md "Content from other
+# regions in the port"): the event calendar's "event runs on this date" test (region mask + date
+# rule), Mother's Day and Father's Day date rules. Each version under its own address name.
+fn_80089890
+fn_800895E0
+fn_800897B0
+fn_800898B0 pal
+fn_80089600 pal
+fn_800897D0 pal
+fn_80089818 jp
+fn_80089568 jp
+fn_80089738 jp

@@ -1,6 +1,7 @@
 // Animal Crossing: City Folk: the game side of recomp/game.h. Nothing game-specific is hooked
 // yet (boot work, docs/WII.md "Order of work"); these defaults leave the game untouched.
 #include "recomp/game.h"
+#include "game/cf_region.h"
 
 #include <atomic>
 #include <cmath>
@@ -15,7 +16,7 @@ std::atomic<u32> sFrames{0};
 }  // namespace
 
 bool onGuestFrame(Ctx&) {
-    sFrames.fetch_add(1, std::memory_order_relaxed);
+    region::onGuestFrame(sFrames.fetch_add(1, std::memory_order_relaxed) + 1);
     return false;
 }
 u32 guestFrames() { return sFrames.load(std::memory_order_relaxed); }
