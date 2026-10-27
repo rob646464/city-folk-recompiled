@@ -115,6 +115,11 @@ void endTape(u32 retraceCount);   // closes it and hands it to the host (CF_INTE
 // `first` is the index of the first blended float in the block.
 u32 mark();
 void note(u32 at, Kind kind, u32 source, u32 slot, int nFloats, int first = 0);
+// The same for a matrix the GPU would read from the game's matrix array at `source` (an indexed
+// load sent as an immediate one): keyed by that address (the model's n-th node) instead of the GX
+// call site and its occurrence, so a load skipped or reordered by the game (NW4R g3d loads only
+// what changed in a slot) does not shift the pairing of every later one. CF_KEY_BY_SOURCE=0: A/B.
+void noteBySource(u32 at, Kind kind, u32 source, u32 slot, int nFloats);
 // While set, note() records nothing: the values are replayed exactly as captured (snapped to
 // the tape's own game frame). Used for the shadow map: its caster pass and the receivers'
 // shadow texture matrices must come from the same frame (shadows.cpp). Nests by count.
@@ -302,6 +307,9 @@ void drawStart(u32 start);
 void drawEnd(u32 end);
 // A draw with identity `id`: values noted since the previous draw belong to it.
 void noteDraw(u64 id);
+// Values noted since noteDraw (a display list's own colour writes, found while parsing it) belong
+// to that draw too, not to the next one.
+void claimForLastDraw();
 // The draw just noted reads indexed positions whose bounding box has centre `c` (model space).
 void noteDrawCentre(const float c[3]);
 // The same per position matrix slot (`mask`: the slots its vertices use by a direct PNMTXIDX).

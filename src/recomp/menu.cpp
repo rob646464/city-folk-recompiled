@@ -1559,19 +1559,8 @@ void visualsTab() {
             pending("next launch");
         }
     }
-    {
-        // The European game paces its frames with a timer, so 50 Hz does not change its speed;
-        // it is the console's PAL video timing (VI retrace and its callbacks).
-        Gate g(port::palBaseFeature());
-        int hz = v.pal60 ? 1 : 0;
-        static const char* kRates[] = {"50 Hz (original PAL)", "60 Hz (PAL60)"};
-        if (ImGui::Combo("PAL refresh rate", &hz, kRates, 2)) {
-            v.pal60 = hz == 1;
-            sDirty = true;
-        }
-        ImGui::SetItemTooltip("European game only: the console's video timing, 50 Hz PAL or 60 Hz PAL60. The game\n"
-                              "paces itself with a timer, so its speed is the same either way.");
-    }
+    // (The European game's 50 / 60 Hz is the console's EuRGB60 setting, F1 > Game > Console: the
+    // VI rate follows the TV mode the game configures, hle_vi.cpp.)
 
     ImGui::SeparatorText("CRT filter");
     sDirty |= recomp::crt::drawMenu();

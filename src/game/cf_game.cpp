@@ -4,6 +4,8 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 
 namespace recomp::vi {
 double fieldSeconds();  // hle_vi.cpp
@@ -21,7 +23,19 @@ bool onGuestFrame(Ctx&) {
 u32 guestFrames() { return sFrames.load(std::memory_order_relaxed); }
 void filterPad(PADStatus*, int) {}
 bool padHeld() { return false; }
-double retraceSpeed() { return 1.0; }
+// Test aid CF_FF=<guest frame>[,<speed>]: retraces (and alarms) up to `speed` x (default 4) faster
+// until that guest frame, e.g. through the scripted boot to the town (tools/routes) before a
+// measurement. Scripted input must use CF_INPUT_CLOCK=frames.
+double retraceSpeed() {
+    static const struct Ff {
+        u32 until = 0;
+        double speed = 4.0;
+        Ff() {
+            if (const char* v = std::getenv("CF_FF")) std::sscanf(v, "%u,%lf", &until, &speed);
+        }
+    } sFf;
+    return sFf.until && sFrames.load(std::memory_order_relaxed) < sFf.until ? sFf.speed : 1.0;
+}
 float audioGain() { return 1.0f; }
 bool audioMirrored() { return false; }
 // One GXCopyDisp per retrace in every scene measured (title, Rover's intro, bus, keyboards,

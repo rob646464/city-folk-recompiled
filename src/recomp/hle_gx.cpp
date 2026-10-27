@@ -918,26 +918,96 @@ bool indexedAsImmediate(int array, u32 index, u32 xfAddr, u32 n) {
     rawFifoWrite(GX_LOAD_XF_REG, 1);
     rawFifoWrite(((n - 1) << 16) | xfAddr, 4);
     for (u32 i = 0; i < n; i++) rawFifoWrite(rd32(src + 4 * i), 4);
-    if (array == 1) interp::note(at, interp::Kind::NrmMtx, src, (xfAddr - 0x400) / 3, int(n));
-    else if (array == 0 && xfAddr < 0x78 && n == 12) interp::note(at, interp::Kind::PosMtx, src, xfAddr / 4, 12);
-    else interp::note(at, interp::Kind::TexMtx, src, xfAddr / 4, int(n));
+    if (array == 1) interp::noteBySource(at, interp::Kind::NrmMtx, src, (xfAddr - 0x400) / 3, int(n));
+    else if (array == 0 && xfAddr < 0x78 && n == 12) interp::noteBySource(at, interp::Kind::PosMtx, src, xfAddr / 4, 12);
+    else interp::noteBySource(at, interp::Kind::TexMtx, src, xfAddr / 4, int(n));
     sIndexedConverted++;
     return true;
 }
 
 struct RawIndx;
 void rawIndxFlush();
+void rawCallFlush();
 void rawXfReset() {
     rawIndxFlush();
+    rawCallFlush();
     sRawXf.state = RawXf::Opcode;
 }
+u32 sRawCallsInlined = 0, sRawCallsLeft = 0;
+u32 sListLoadsConverted = 0;  // indexed loads in display lists made immediate (inlineDisplayList)
 // Once a minute of interpolated play: how the raw matrix loads were handled.
 void rawXfReport() {
     static u32 sFrames = 0;
     if (!interp::capturing() || ++sFrames % 3600 != 0) return;
-    log("[interp] raw XF matrix loads noted %u, indexed loads sent as immediate %u, raw commands not followed %u "
-        "(last 3600 game frames)", sRawXfNoted, sIndexedConverted, sRawXfLost);
-    sRawXfNoted = sIndexedConverted = sRawXfLost = 0;
+    log("[interp] raw XF matrix loads noted %u, indexed loads sent as immediate %u, raw commands not followed %u, "
+        "raw display list calls inlined %u (left as calls %u), indexed loads in display lists made immediate %u "
+        "(last 3600 game frames)", sRawXfNoted, sIndexedConverted, sRawXfLost, sRawCallsInlined, sRawCallsLeft,
+        sListLoadsConverted);
+    sRawXfNoted = sIndexedConverted = sRawXfLost = sRawCallsInlined = sRawCallsLeft = sListLoadsConverted = 0;
+}
+
+// Raw display list calls (GX_CMD_CALL_DL 0x40, physical address, size) written by game code
+// (NW4R g3d's material/shape lists, EGG): Aurora 0300 processes the called list in place when its
+// FIFO thread reaches it, i.e. when a tape is replayed, a game frame or more later, by which time
+// the game may have rewritten the list (g3d keeps material lists it patches every frame: colour
+// and texture animation results). While a tape is captured such a call is held back and made as
+// a GXCallDisplayList, so the list is inlined into the tape as it is now (what the console's GPU
+// reads) and parsed like any display list (its colour writes noted for blending, its draw
+// identified). Not while recording a display list (capture suspended there).
+struct RawCall {
+    bool active = false;
+    u32 need = 0;
+    u64 word = 0;
+} sRawCall;
+void rawCallFlush() {
+    auto& h = sRawCall;
+    if (!h.active) return;
+    h.active = false;
+    rawFifoWrite(GX_CMD_CALL_DL, 1);
+    const u32 got = 8 - h.need;  // bytes held after the opcode
+    for (u32 b = got; b-- > 0;) rawFifoWrite(u8(h.word >> (8 * b)), 1);
+}
+// Physical (or cached/uncached virtual) display list [a, a + n) -> guest virtual address of a, 0 if
+// it is not inside MEM1 or MEM2.
+u32 dlVirtual(u32 a, u32 n) {
+    const u64 p = a & 0x3FFFFFFFu;
+    if (p + n <= kMem1Size) return 0x80000000u | u32(p);
+    if (p >= 0x10000000u && p + n <= 0x10000000u + u64(kMem2Size)) return 0x90000000u | u32(p - 0x10000000u);
+    return 0;
+}
+void callDisplayListInline(u32 addr, u32 size);  // below (GXCallDisplayList's path)
+void inlineDisplayList(u32 addr, u32 size);
+bool rawCallWrite(u32 v, int size) {
+    auto& h = sRawCall;
+    if (!h.active) {
+        // CF_RAW_DL_INLINE=0 (A/B): raw calls left to Aurora (the list read when the tape is replayed).
+        static const bool sOff = [] { const char* e = std::getenv("CF_RAW_DL_INLINE"); return e && *e == '0'; }();
+        if (sOff) return false;
+        if (sRawXf.state != RawXf::Opcode || size != 1 || u8(v) != GX_CMD_CALL_DL) return false;
+        h = {true, 8, 0};
+        return true;
+    }
+    if (u32(size) > h.need) {  // misaligned: forward what was held, stop following this command
+        rawCallFlush();
+        sRawXf.state = RawXf::Lost;
+        return false;
+    }
+    h.word = h.word << (8 * size) | (size == 4 ? v : (v & ((1u << (8 * size)) - 1)));
+    h.need -= u32(size);
+    if (h.need) return true;
+    h.active = false;
+    const u32 addr = u32(h.word >> 32), n = u32(h.word);
+    const u32 virt = n && n <= (16u << 20) ? dlVirtual(addr, n) : 0;
+    if (!virt) {
+        rawFifoWrite(GX_CMD_CALL_DL, 1);
+        rawFifoWrite(addr, 4);
+        rawFifoWrite(n, 4);
+        sRawCallsLeft++;
+        return true;
+    }
+    callDisplayListInline(virt, n);
+    sRawCallsInlined++;
+    return true;
 }
 
 // Raw indexed loads (0x20 pos, 0x28 normal, 0x30 texture matrix; then index << 16 |
@@ -1066,6 +1136,7 @@ void hw::fifoWrite(u32 v, int size) {
             prepareDraw(drawMode(ProjMode::Scaled), "fifo");
         }
         if (rawIndxWrite(v, size)) return;
+        if (rawCallWrite(v, size)) return;
         rawXfBefore(v, size);
         rawFifoWrite(v, size);
         interp::vtxBytes(v, size);
@@ -1347,12 +1418,111 @@ GXHLE(GXCallDisplayList) {
                   guestChain(c).c_str());
     prepareDraw(drawMode(ProjMode::Scaled), "dlist");
     indNoteDraw(c, "dlist");
+    if (interp::capturing() && !sInDisplayList) {
+        if (interp::drawLogActive()) interp::drawLogCaller(guestChain(c));
+        inlineDisplayList(c.r[3], c.r[4]);
+        return;
+    }
     interp::snapDisplayList(hostp(c.r[3]), c.r[4]);
     GXCallDisplayList(hostp(c.r[3]), c.r[4]);
     interp::snapAfterDraw();
     if (interp::drawLogActive()) interp::drawLogCaller(guestChain(c));
     if (interp::capturing()) interp::vtxDisplayList(c.r[3], hostp(c.r[3]), c.r[4]);
 }
+namespace {
+// Indexed matrix loads inside a display list called while a tape is captured (NW4R g3d's shape
+// pre-primitive lists load their position/normal/texture matrices with LOAD_INDX_A/B/C from the
+// matrix arrays it rewrites every frame): replayed as they are, they read the arrays when the tape
+// is replayed (the tape's array copy: frame b's matrices, never blended, so a walking character's
+// parts were drawn a frame apart from the blended rest). The list is inlined as a copy in which
+// those loads are immediate loads of the values in memory now, noted for blending like the raw
+// stream's (indexedAsImmediate). The copy follows whole commands up to the first draw (or anything
+// it cannot size); the rest is copied unchanged. CF_DL_INDEXED=0: lists inlined as they are (A/B).
+struct ListLoad {
+    u32 off, src, xf, n;
+    int array;
+};
+std::vector<u8> sListCopy;
+std::vector<ListLoad> sListLoads;
+bool convertListIndexed(const u8* p, u32 size) {
+    static const bool sOff = [] { const char* v = std::getenv("CF_DL_INDEXED"); return v && *v == '0'; }();
+    if (sOff) return false;
+    auto be16 = [&](u32 o) { return u32(p[o] << 8 | p[o + 1]); };
+    auto be32 = [&](u32 o) { return u32(p[o]) << 24 | u32(p[o + 1]) << 16 | u32(p[o + 2]) << 8 | p[o + 3]; };
+    u32 base[3] = {sMtxArray[0], sMtxArray[1], sMtxArray[2]};
+    u32 stride[3] = {sMtxStride[0], sMtxStride[1], sMtxStride[2]};
+    sListCopy.clear();
+    sListLoads.clear();
+    u32 i = 0, copied = 0;
+    auto put32 = [](u32 v) {
+        for (int b = 3; b >= 0; b--) sListCopy.push_back(u8(v >> (8 * b)));
+    };
+    while (i < size) {
+        const u8 op = p[i];
+        u32 len;
+        if (op == 0x00 || op == 0x48) len = 1;
+        else if (op == 0x08) len = 6;
+        else if (op == 0x10) len = i + 5 <= size ? 5 + 4 * (((be32(i + 1) >> 16) & 0xFFFF) + 1) : 0;
+        else if (op == 0x20 || op == 0x28 || op == 0x30 || op == 0x38) len = 5;
+        else if (op == 0x40) len = 9;
+        else if (op == 0x61) len = 5;
+        else break;  // a draw or an unknown command: the rest as it is
+        if (len == 0 || i + len > size) break;
+        if (op == 0x08) {  // CP: matrix array base (0xAC-0xAE) / stride (0xBC-0xBE), physical addresses
+            const u8 reg = p[i + 1];
+            const u32 v = be32(i + 2);
+            if (reg >= 0xAC && reg <= 0xAE) base[reg - 0xAC] = dlVirtual(v, 4) ? dlVirtual(v, 4) : 0;
+            else if (reg >= 0xBC && reg <= 0xBE) stride[reg - 0xBC] = v & 0xFF;
+        }
+        if (op == 0x20 || op == 0x28 || op == 0x30) {
+            const int array = (op - 0x20) / 8;
+            const u32 idx = be16(i + 1), n = (be16(i + 3) >> 12) + 1, xf = be16(i + 3) & 0xFFF;
+            const u32 src = base[array] ? base[array] + idx * stride[array] : 0;
+            if (src && n <= 16 && dlVirtual(src, 4 * n)) {
+                sListCopy.insert(sListCopy.end(), p + copied, p + i);
+                sListLoads.push_back({u32(sListCopy.size()), src, xf, n, array});
+                sListCopy.push_back(GX_LOAD_XF_REG);
+                put32((n - 1) << 16 | xf);
+                for (u32 k = 0; k < n; k++) put32(rd32(src + 4 * k));
+                copied = i + len;
+            }
+        }
+        i += len;
+    }
+    if (sListLoads.empty()) return false;
+    sListCopy.insert(sListCopy.end(), p + copied, p + size);
+    return true;
+}
+
+// GXCallDisplayList's path while a tape is captured (the HLE and raw calls from the write-gather pipe).
+void inlineDisplayList(u32 addr, u32 size) {
+    if (!convertListIndexed(hostp(addr), size)) {
+        GXCallDisplayList(hostp(addr), size);
+        interp::vtxDisplayList(addr, hostp(addr), size);
+        return;
+    }
+    const u32 n = u32(sListCopy.size());
+    GXCallDisplayList(sListCopy.data(), n);
+    const u32 end = interp::mark();
+    if (end != ~0u && end >= n) {
+        const u32 at0 = end - n;
+        for (const ListLoad& l : sListLoads) {
+            const u32 at = at0 + l.off;
+            if (l.array == 1) interp::noteBySource(at, interp::Kind::NrmMtx, l.src, (l.xf - 0x400) / 3, int(l.n));
+            else if (l.array == 0 && l.xf < 0x78 && l.n == 12) interp::noteBySource(at, interp::Kind::PosMtx, l.src, l.xf / 4, 12);
+            else interp::noteBySource(at, interp::Kind::TexMtx, l.src, l.xf / 4, int(l.n));
+        }
+        sListLoadsConverted += u32(sListLoads.size());
+    }
+    interp::vtxDisplayList(addr, sListCopy.data(), n);
+}
+
+// A raw GX_CMD_CALL_DL from the write-gather pipe while a tape is captured (rawCallWrite).
+void callDisplayListInline(u32 addr, u32 size) {
+    prepareDraw(drawMode(ProjMode::Scaled), "dlist");
+    inlineDisplayList(addr, size);
+}
+}  // namespace
 // Display lists the game records (GXBeginDisplayList/GXEndDisplayList). Aurora's commands are not
 // all the console's size (texture and array loads are longer, draws carry a size), so a list sized
 // for the console can need more room than the game's buffer. Lists are recorded into a host buffer;

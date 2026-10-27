@@ -212,6 +212,7 @@ struct Tape {
     u16 mainView = 0xFFFF;     // the main camera (most 3D model matrices of the main pass)
     bool cut = false;          // the main camera jumped since pairedWith (or appeared): shown as is
     float camMove = 0, camTurn = 0;  // the main camera's eye move / turn (degrees) since pairedWith
+    float mainDepth = 0;  // median view-space distance of the main pass's model matrices (cut test)
     u32 paired = 0, unpaired = 0, untagged = 0;
     std::vector<std::pair<u32, u32>> lights;  // extra-light commands: offset of the first light, count
     std::vector<u64> lightKeys;               // per extra light (flattened, command order): identity, 0 none
@@ -366,6 +367,7 @@ std::map<u32, u32> sGen;  // tagged object address -> generation (ordered: freed
 u32 sGenEpoch = 0;        // added to every generation; bumped when the table is reset
 std::vector<SiteTag> sSiteTags;
 u32 sCallLr = 0;        // guest call site of the GX call being handled
+bool sKeyBySource = false;  // noteBySource: the value's key is its source address, not the call site
 // Call-site tag of the GX call being handled (a loop inside one game function: one item each).
 bool sVirtActive = false;
 TagFrame sVirt{};
@@ -482,19 +484,23 @@ u32 sLoggedSnaps[kKinds];
 // game frames with its key, category, call site, scope depth and, for untagged 3D values, the
 // guest call chain (to find draw code that still needs a tag scope).
 FILE* sTagLog = nullptr;
-u32 sTagLogFirst = ~0u, sTagLogLast = 0;
+u32 sTagLogFirst = ~0u, sTagLogLast = 0, sTagLogStep = 0;  // step: two consecutive frames every <step> (0: all)
 const bool sTagLogInit = [] {
     const char* v = std::getenv("CF_TAG_LOG");
     if (!v) return false;
     char path[512] = {};
-    u32 a = 0, b = 0;
-    const int n = std::sscanf(v, "%511[^,],%u,%u", path, &a, &b);
+    u32 a = 0, b = 0, s = 0;
+    const int n = std::sscanf(v, "%511[^,],%u,%u,%u", path, &a, &b, &s);
     if (n < 2) return false;
     sTagLog = std::fopen(path, "w");
     sTagLogFirst = a;
     sTagLogLast = n >= 3 ? b : a;
+    sTagLogStep = n >= 4 ? s : 0;
     return sTagLog != nullptr;
 }();
+bool tagLogWanted(u32 f) {
+    return sTagLog && f >= sTagLogFirst && f <= sTagLogLast && (sTagLogStep < 2 || (f - sTagLogFirst) % sTagLogStep < 2);
+}
 std::string sTagChain;  // guest call chain of the current GX call (only while logging)
 const bool sTagLogChains = std::getenv("CF_TAG_LOG_CHAINS") != nullptr;  // CF_TAG_LOG: call chains of tagged values too
 
@@ -974,6 +980,24 @@ void pairTapes(const Tape& a, Tape& b) {
     // A camera cut (or a new scene): the main camera jumped, or it has no counterpart in a.
     b.cut = false;
     if (b.mainView != 0xFFFF) {
+        // How far the scene is from the main camera: the median distance of the main pass's model
+        // matrices (view space). Cut thresholds in world units (250) were made for LM's scale; a cut
+        // in a small set (City Folk's bus, ~100 units from wide shot to close-up) is a large step
+        // relative to what the camera looks at.
+        {
+            static std::vector<float> d;
+            d.clear();
+            for (const Patch& p : b.patches)
+                if (p.kind == Kind::PosMtx && p.role == 0 && p.view == b.mainView && p.count == 12 &&
+                    (p.bundle >= b.bundlePass.size() || b.bundlePass[p.bundle] == 0)) {
+                    const float x = val(b, p, 3), y = val(b, p, 7), z = val(b, p, 11);
+                    d.push_back(std::sqrt(x * x + y * y + z * z));
+                }
+            if (!d.empty()) {
+                std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
+                b.mainDepth = d[d.size() / 2];
+            }
+        }
         const s32 qa = b.viewToA[b.mainView];
         float moved = 0, turned = 0;
         // b's main camera paired with a camera that was not a's main one: the view structure changed
@@ -1003,9 +1027,19 @@ void pairTapes(const Tape& a, Tape& b) {
             // hitched).
             // (Over 1500 units in one game frame is always a cut: a teleport whose camera first moved a
             // few hundred units passed the 3x test.)
-            b.cut = (moved > 250.0f && moved > 3.0f * a.camMove + 60.0f) || moved > 1500.0f ||
+            // Also relative to the scene's distance (mainDepth): City Folk's sets are small (the camera
+            // ~400-560 units from what it looks at), a 200-unit jump there is a new shot.
+            const float rel = b.mainDepth > 0 ? std::max(60.0f, 0.35f * b.mainDepth) : 250.0f;
+            b.cut = (moved > std::min(250.0f, rel) && moved > 3.0f * a.camMove + 20.0f) || moved > 1500.0f ||
                     (turned > 30.0f && turned > 3.0f * a.camTurn + 8.0f);
         }
+        // CF_CUT_LOG=1: every tape's main camera step (cut thresholds per game).
+        static const bool sCutLog = std::getenv("CF_CUT_LOG") != nullptr;
+        if (sCutLog)
+            log("[cut] tape %llu f%u: views %zu -> %zu, main %d -> %u (paired %d), moved %.1f turned %.1f (before %.1f %.1f), "
+                "depth %.0f, cut %d", (unsigned long long)b.seq, b.gameFrame, a.views.size(), b.views.size(),
+                a.mainView == 0xFFFF ? -1 : int(a.mainView), b.mainView, qa, moved, turned, a.camMove, a.camTurn, b.mainDepth,
+                int(b.cut));
         if (sTrace && (a.views.size() != b.views.size() || qa != s32(a.mainView)))
             log("[interp] tape %llu: views %zu -> %zu, main %d -> %u (paired with %d), moved %.0f turned %.0f, cut %d",
                 (unsigned long long)b.seq, a.views.size(), b.views.size(), a.mainView == 0xFFFF ? -1 : int(a.mainView),
@@ -1585,7 +1619,7 @@ void beginTape() {
     g_captureOpen = true;
     sSuspended = false;
     detail::vtxBeginTape();
-    sTagLogFrame = sTagLog && copyDispCount() + 1 >= sTagLogFirst && copyDispCount() + 1 <= sTagLogLast ? copyDispCount() + 1 : ~0ull;
+    sTagLogFrame = tagLogWanted(copyDispCount() + 1) ? copyDispCount() + 1 : ~0ull;
 }
 
 void endTape(u32 retraceCount) {
@@ -1682,7 +1716,7 @@ void endTape(u32 retraceCount) {
         checkIdentity(*sLastTape2, *sLastTape, *tape);
         tape->phaseUs[3] = usSince(tc);
     }
-    if (sTagLog && sLastTape && tape->dumpFrame >= sTagLogFirst && tape->dumpFrame <= sTagLogLast) {
+    if (sTagLog && sLastTape && tagLogWanted(tape->dumpFrame)) {
         u32 kinds[kKinds][3] = {};  // paired, unpaired, untagged
         for (u32 i = 0; i < tape->patches.size(); i++) {
             const Patch& p = tape->patches[i];
@@ -1966,9 +2000,23 @@ u64 valueKey(Kind kind, u32 source, u32 slot, TagCat& cat) {
     if (!tagged && kind != Kind::Light && kind != Kind::Projection) return 0;
     // Untagged lights/projections: the structural path (camera) only.
     const u64 scope = tagged ? t->inst : (t ? t->structural : rootInst());
-    u64 k = mix(scope ^ u64(kind) << 56 ^ u64(sCallLr) << 16 ^ u64(sPass) << 8);
+    u64 k;
+    if (sKeyBySource) {
+        // noteBySource: the matrix's own address in the game's matrix array (a model's n-th node),
+        // whatever loaded it and in which order (g3d skips loads already in place).
+        k = mix(scope ^ u64(kind) << 56 ^ u64(source) << 16 ^ u64(sPass) << 8 ^ 0x5C5Cull << 48);
+    } else {
+        k = mix(scope ^ u64(kind) << 56 ^ u64(sCallLr) << 16 ^ u64(sPass) << 8);
+    }
     if (kind == Kind::Light) k = mix(k ^ u64(source) << 24 ^ slot);
     return mix(k ^ u64(occurrence(sValOcc, k) + 1) << 40);
+}
+
+void noteBySource(u32 at, Kind kind, u32 source, u32 slot, int nFloats) {
+    static const bool sOff = [] { const char* v = std::getenv("CF_KEY_BY_SOURCE"); return v && *v == '0'; }();
+    sKeyBySource = !sOff && source != 0;
+    note(at, kind, source, slot, nFloats, 0);
+    sKeyBySource = false;
 }
 
 void note(u32 at, Kind kind, u32 source, u32 slot, int nFloats, int first) {
@@ -2961,6 +3009,14 @@ void detail::noteDraw(u64 id) {
         if (p.kind == Kind::Verts) continue;  // already belongs to its own draw
         p.bundle = bundle;
     }
+    sUngrouped = u32(sPatches.size());
+}
+
+void detail::claimForLastDraw() {
+    if (sBundleIds.empty()) return;
+    const u32 bundle = u32(sBundleIds.size() - 1);
+    for (u32 i = sUngrouped; i < sPatches.size(); i++)
+        if (sPatches[i].kind != Kind::Verts) sPatches[i].bundle = bundle;
     sUngrouped = u32(sPatches.size());
 }
 
@@ -4576,9 +4632,16 @@ void replayPair(const Tape* a, const Tape& b, float alpha, void* dump) {
                 // An untagged 2D colour: the draw it belongs to must be the same kind of draw.
                 const bool flatOk = p.posOffset == 1 && p.bundle < b.bundleIds.size() && qc.bundle < a->bundleIds.size() &&
                                     b.bundleIds[p.bundle] == a->bundleIds[qc.bundle];
+                // A draw with no matrices or vertices of its own (an NW4R g3d material display list:
+                // only its TEV / channel colours) is the same draw when it is the same list in the
+                // same tag scope.
+                const bool listOk = p.bundle < sBundleToA.size() && sBundleToA[p.bundle] == -1 && p.bundle < b.bundleIds.size() &&
+                                    qc.bundle < a->bundleIds.size() && b.bundleIds[p.bundle] == a->bundleIds[qc.bundle] &&
+                                    p.bundle < b.bundleKey.size() && qc.bundle < a->bundleKey.size() &&
+                                    b.bundleKey[p.bundle] != 0 && b.bundleKey[p.bundle] == a->bundleKey[qc.bundle];
                 if (p.posOffset == 1 ? !flatOk
                     : p.slot ? !lightOk
-                           : p.cat != TagCat::World &&
+                           : p.cat != TagCat::World && !listOk &&
                                  (p.bundle >= sBundleToA.size() || sBundleToA[p.bundle] < 0 || s32(qc.bundle) != sBundleToA[p.bundle])) {
                     sColorsSwitched++;
                     continue;

@@ -1,5 +1,5 @@
-// HLE: VI. A host timer raises the retrace interrupt at 59.94 Hz (the PAL game: 50 Hz,
-// or 59.94 Hz "PAL60" when chosen in the F1 menu); the game paces itself on it. VISetNextFrameBuffer marks a finished frame, which is
+// HLE: VI. A host timer raises the retrace interrupt at the rate of the TV mode the game configures
+// (VIConfigure: 59.94 Hz NTSC / MPAL / EuRGB60, 50 Hz PAL); the game paces itself on it. VISetNextFrameBuffer marks a finished frame, which is
 // handed to the host loop (see frame.h) before the game continues.
 #include "port/install.h"
 #include "port/settings.h"
@@ -9,6 +9,7 @@
 #include "recomp/runtime.h"
 #include "recomp/sched.h"
 #include "recomp/game.h"
+#include "recomp/system.h"
 
 #include <dolphin/gx.h>
 #include <dolphin/vi.h>
@@ -42,11 +43,20 @@ void retrace(Ctx& c) {
 
 bool palGame() { return port::install().running == port::GameVersion::PAL; }
 
-// VI rate: 50 Hz for the European game unless PAL60 (EuRGB60) is chosen. City Folk paces itself
-// on the retrace, so its frame rate follows (50 / 60 fps). Read every tick.
+// The TV format of the render mode the game last passed to VIConfigure (VI_NTSC 0, VI_PAL 1,
+// VI_MPAL 2, VI_DEBUG 3, VI_DEBUG_PAL 4, VI_EURGB60 5; -1 before the first call).
+std::atomic<int> sTvFormat{-1};
+bool fiftyHz(int fmt) { return fmt == 1 || fmt == 4; }
+
+// VI rate = the TV mode the game configures. The European game picks EuRGB60 (60 Hz) or PAL
+// (50 Hz) from the console setting (SYSCONF IPL.E60 = F1 > Game > Console "60 Hz mode
+// (EuRGB60)", sys::settings().eurgb60, default on); before its first VIConfigure that setting
+// decides. City Folk paces itself on the retrace, so its frame rate and speed follow. Read
+// every tick.
 double retraceHz() {
-    if (palGame() && !port::settings().video.pal60) return 50.0;
-    return 60000.0 / 1001.0;
+    const int fmt = sTvFormat.load(std::memory_order_relaxed);
+    const bool fifty = fmt >= 0 ? fiftyHz(fmt) : palGame() && !sys::settings().eurgb60;
+    return fifty ? 50.0 : 60000.0 / 1001.0;
 }
 
 }  // namespace
@@ -117,6 +127,10 @@ HLE(VIConfigure) {
     if (!rm) return;
     GXRenderModeObj m{};
     m.viTVmode = VITVMode(rd32(rm));
+    if (const int fmt = int(u32(m.viTVmode) >> 2); fmt != sTvFormat.load()) {
+        log("[vi] TV format %d (%s Hz)", fmt, fiftyHz(fmt) ? "50" : "59.94");
+        sTvFormat = fmt;
+    }
     m.fbWidth = u16(rd16(rm + 4));
     m.efbHeight = u16(rd16(rm + 6));
     m.xfbHeight = u16(rd16(rm + 8));
@@ -147,7 +161,11 @@ HLE(VISetBlack) { sBlack = c.r[3] != 0; }
 HLE(VIGetRetraceCount) { c.r[3] = sRetraceCount.load(); }
 HLE(VIGetNextField) { c.r[3] = 1; }
 HLE(VIGetCurrentLine) { c.r[3] = 0; }
-HLE(VIGetTvFormat) { c.r[3] = palGame() ? 1 : 0; }  // VI_PAL / VI_NTSC
+// The configured format (VI_EURGB60 for the European game at 60 Hz); before VIConfigure the console's.
+HLE(VIGetTvFormat) {
+    const int fmt = sTvFormat.load();
+    c.r[3] = fmt >= 0 ? u32(fmt) : palGame() ? (sys::settings().eurgb60 ? 5u : 1u) : 0u;
+}
 HLE(VIGetDTVStatus) { c.r[3] = 0; }
 // RVL: screen burn-in dimming (the console darkens the picture after minutes without input).
 // VIGetDimmingCount = retraces left before dimming. The SDK resets the count on every Wii Remote
