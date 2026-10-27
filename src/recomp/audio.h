@@ -1,7 +1,7 @@
 #pragma once
-// Audio back end shared by hle_audio.cpp (AI/DSP SDK + JAudio driver hooks),
-// audio_dsp.cpp (our stand-in for the JAudio DSP microcode) and audio_out.cpp
-// (host output through SDL3, WAV capture). See docs/AUDIO.md.
+// Audio back end shared by hle_audio.cpp (AI and DSP-task SDK HLE), audio_dsp.cpp (our
+// stand-in for the AX DSP microcode) and audio_out.cpp (host output through SDL3, WAV
+// capture). See docs/AUDIO.md.
 #include "recomp/ctx.h"
 
 #include <chrono>
@@ -13,18 +13,21 @@ namespace recomp::audio {
 constexpr double kConsoleRate48 = 54000000.0 / 1124.0;      // 48042.7 Hz
 constexpr double kConsoleRate32 = kConsoleRate48 * 2 / 3;  // 32028.5 Hz
 
-// ---- DSP (audio_dsp.cpp) ----
-// One command packet from JAudio's DSPSendCommands(cmds, count).
-void dspCommand(const u32* words, u32 count);
-// DSPReleaseHalt: the CPU finished its per-subframe channel updates; mix the next
-// subframe. Returns true when a subframe was mixed (the DSP interrupt is due).
-bool dspRunSubframe();
-// Host thread safe: a DSP frame is being mixed (from its sync-frame command to its last
-// subframe), and the steady_clock time its last frame finished.
+// ---- DSP (audio_dsp.cpp): AX microcode stand-in ----
+// One AX command list of `bytes` bytes at guest address `addr` (the mail pair 0xBABE<bytes>,
+// addr that __AXOutNewFrame sends): mixes one 3 ms frame into the AI buffer it names.
+void axCommandList(u32 addr, u32 bytes);
+// The task's resume callback for that list (the DSP yielded) reached the CPU.
+void axFrameDone();
+// The last frame's 18 samples (6 kHz) for Wii Remote speaker 0-3, as written to the game's
+// remote buffers (hook for playing the remote speaker sound on the PC later).
+const s16* axRemoteFrame(int remote);
+// Host thread safe: a DSP frame is in flight (from its command list until the resume callback
+// was delivered), and the steady_clock time the last one ended.
 bool dspFrameBusy();
 std::chrono::steady_clock::time_point dspFrameEnd();
-// The game has mixed the DSP output into the next AI block for the last AI interrupt
-// (Jac_imixcopy; hle_audio.cpp waits for it before raising the next one).
+// The DSP has mixed the next AI block for the last AI interrupt (the AX command list sent from
+// that interrupt; hle_audio.cpp waits for it before raising the next one).
 void noteGuestMixed();
 
 // Per output sample of the DSP's stereo mix, the parts that did not come from the
@@ -36,7 +39,8 @@ void noteGuestMixed();
 struct SideSample {
     s16 lExtra = 0, rExtra = 0, c = 0, s = 0, rr = 0;
 };
-// Side data of the DSP output buffer pair starting at guest address bufL (n samples).
+// Side data of the DSP output buffer starting at guest address bufL (n samples). The AX
+// stand-in does not produce it yet (discrete 5.1/7.1 falls back to matrix-encoded stereo).
 // Returns false (and zeros) when the DSP has not mixed that buffer.
 bool dspSideData(u32 bufL, SideSample* out, u32 n);
 
