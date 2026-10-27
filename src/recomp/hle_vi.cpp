@@ -74,10 +74,20 @@ void startTimer() {
             next += period;
             if (clock::now() > next + period * 4) next = clock::now() + period;  // don't spiral after a stall
             if (frame::gamePaused()) continue;
-            sched::postIrq(&retrace);
+            // An RVL game's post-retrace callback can end the frame itself (EGG::AsyncDisplay calls
+            // VISetNextFrameBuffer there), so with no guest thread holding the CPU this thread may
+            // run present() and wait for the host; at shutdown that wait ends in ThreadExit.
+            try {
+                sched::postIrq(&retrace);
+            } catch (const sched::ThreadExit&) {
+                break;
+            }
         }
     });
 }
+// Shutdown: stopTimer() only after frame::stop(), which releases a present() the timer thread may
+// be waiting in (it used to wait there for the host forever while the main thread joined it).
+void requestStop() { sTimerRun = false; }
 void stopTimer() {
     sTimerRun = false;
     if (sTimer.joinable()) sTimer.join();

@@ -1,0 +1,84 @@
+0301: display aspect for the fit viewport policy (City Folk; generic)
+
+VISetDisplayAspect(aspect): the picture's display aspect when AURORA_VIEWPORT_FIT fits the frame
+into the window (0 = the frame buffer's ratio, as before). A Wii game's 640x456 frame buffer is
+anamorphic 16:9 (or 4:3): fitting it by 640/456 gave the wrong shape.
+
+diff --git a/include/dolphin/vi.h b/include/dolphin/vi.h
+index 377d952..fb9fe46 100644
+--- a/include/dolphin/vi.h
++++ b/include/dolphin/vi.h
+@@ -44,6 +44,9 @@ void VICenterWindow();
+  * A value of 0.0f means "Auto", which will use the underlying swapchain size (usually the window size).
+  */
+ void VISetFrameBufferScale(float scale);
++// 0301: display aspect ratio of the picture (e.g. 16:9 for an anamorphic Wii frame buffer), used
++// when the viewport policy fits the frame into the window; 0 (default) = the frame buffer's ratio.
++void VISetDisplayAspect(float aspect);
+ 
+ /**
+  * \brief Lock the GX framebuffer to a specific aspect ratio, without changing the native framebuffer.
+diff --git a/lib/dolphin/vi/vi.cpp b/lib/dolphin/vi/vi.cpp
+index 4c8dddc..1479309 100644
+--- a/lib/dolphin/vi/vi.cpp
++++ b/lib/dolphin/vi/vi.cpp
+@@ -52,4 +52,5 @@ void VISetWindowSize(uint32_t width, uint32_t height) { aurora::window::set_wind
+ void VISetWindowPosition(uint32_t x, uint32_t y) { aurora::window::set_window_position(x, y); }
+ void VICenterWindow() { aurora::window::center_window(); }
+ void VISetFrameBufferScale(float scale) { aurora::window::set_frame_buffer_scale(scale); }
++void VISetDisplayAspect(float aspect) { aurora::window::set_display_aspect(aspect); }
+ }
+diff --git a/lib/window.cpp b/lib/window.cpp
+index cf84de3..5958849 100644
+--- a/lib/window.cpp
++++ b/lib/window.cpp
+@@ -47,6 +47,8 @@ SDL_Window* g_window;
+ SDL_Renderer* g_renderer;
+ float g_frameBufferScale = 0.f;
+ bool g_frameBufferAspectFit = false;
++// 0301: display aspect of the picture for the fit policy (VISetDisplayAspect); 0 = the frame buffer's.
++std::atomic<float> g_displayAspect{0.f};
+ AuroraWindowSize g_windowSize;
+ std::vector<AuroraEvent> g_events;
+ std::deque<std::string> g_eventStrings;
+@@ -489,9 +491,10 @@ AuroraWindowSize get_window_size() {
+   }
+   if (g_frameBufferAspectFit) {
+     const auto [baseW, baseH] = vi::configured_fb_size();
+-    if (baseW > 0 && baseH > 0) {
+-      const auto [fitW, fitH] =
+-          fit_frame_buffer_to_aspect(fb_w, fb_h, static_cast<float>(baseW) / static_cast<float>(baseH));
++    const float display = g_displayAspect.load(std::memory_order_relaxed);
++    if (display > 0.f || (baseW > 0 && baseH > 0)) {
++      const auto [fitW, fitH] = fit_frame_buffer_to_aspect(
++          fb_w, fb_h, display > 0.f ? display : static_cast<float>(baseW) / static_cast<float>(baseH));
+       fb_w = fitW;
+       fb_h = fitH;
+     }
+@@ -612,6 +615,15 @@ void set_frame_buffer_aspect_fit(bool fit) {
+   request_frame_buffer_resize();
+ }
+ 
++void set_display_aspect(float aspect) {
++  if (!(aspect > 0.f)) {
++    aspect = 0.f;
++  }
++  if (g_displayAspect.exchange(aspect, std::memory_order_relaxed) != aspect) {
++    request_frame_buffer_resize();
++  }
++}
++
+ void set_background_input(bool value) { SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, value ? "1" : "0"); }
+ 
+ } // namespace aurora::window
+diff --git a/lib/window.hpp b/lib/window.hpp
+index 51257ea..1440a4a 100644
+--- a/lib/window.hpp
++++ b/lib/window.hpp
+@@ -50,5 +50,6 @@ void center_window();
+ void request_frame_buffer_resize();
+ void set_frame_buffer_scale(float scale);
+ void set_frame_buffer_aspect_fit(bool fit);
++void set_display_aspect(float aspect);  // 0301
+ void set_background_input(bool value);
+ }; // namespace aurora::window
