@@ -11,7 +11,7 @@
 - Aurora patches: same series as LM (same file names and contents), City Folk-only patches in the **0300+** range, kept generic so LM/SMS can adopt them.
 
 ## Release requirements
-- Same model as LM: ship the recompiler + bundled clang/lld; first run asks for the user's own disc image (Wii ISO/WBFS/RVZ/CISO, or a Dolphin "Extract Entire Disc" folder), recompiles the DOL and all RELs into a game module in AppData, validated by hash. End users never run scripts. Features needing a disc that wasn't provided (e.g. another region's content) are greyed out until it is added.
+- Same model as LM: ship the recompiler + bundled clang/lld; first run asks for the user's own disc image (Wii ISO/WBFS/RVZ/CISO, or a Dolphin "Extract Entire Disc" folder), recompiles the DOL and all RELs into a game module in AppData, validated by hash. End users never run scripts. Every disc already carries every region's holidays, event text and items (docs/REGION_CONTENT.md), so region content needs no second disc; only Korean names and Nintendo-distributed items come from elsewhere.
 
 ## Hard rules
 - Never commit game data (ISO/DOL/REL/extracted files/saves) or `build/`. The data folders are gitignored; never copy them elsewhere in the repo.
