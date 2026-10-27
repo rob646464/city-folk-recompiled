@@ -1,0 +1,19 @@
+# Game data: never commit (your own discs; extracted partitions live here)
+/US DATA/
+/PAL DATA/
+/JAPAN DATA/
+/orig/
+*.iso
+*.wbfs
+*.rvz
+*.ciso
+*.gcz
+*.wia
+*.dol
+*.rel
+*.bin.dump
+# Build output
+/build/
+/out/
+/.claude/
+*.log
