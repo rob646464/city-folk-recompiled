@@ -33,6 +33,7 @@
 #include "recomp/runtime.h"
 #include "recomp/sched.h"
 #include "recomp/widescreen.h"
+#include "recomp/wiimote.h"
 #ifndef CF_STATIC_MODULE
 #include "setup/setup.h"
 #endif
@@ -562,6 +563,7 @@ int main(int argc, char* argv[]) {
 
     port::setPhase("shutdown (releasing graphics objects, writing caches)");
     menu::shutdown();
+    wiimote::hidShutdown();  // real Wii Remotes: motor off, devices closed
     vi::requestStop();
     frame::stop();
     vi::stopTimer();

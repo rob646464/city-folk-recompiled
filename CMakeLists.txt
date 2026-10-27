@@ -65,6 +65,13 @@ target_include_directories(cf_recompiler PUBLIC src)
 add_executable(cfrecompile tools/recomp/cfrecompile.cpp)
 target_link_libraries(cfrecompile PRIVATE cf_recompiler)
 
+# Real Wii Remote protocol (src/recomp/wiimote_proto.cpp) against a fake HID device: no hardware,
+# no SDL (docs/CONTROLS.md "Real Wii Remotes"). ctest or build/<preset>/cf_wiimote_hid_test.
+add_executable(cf_wiimote_hid_test tools/tests/wiimote_hid_test.cpp src/recomp/wiimote_proto.cpp)
+target_include_directories(cf_wiimote_hid_test PRIVATE src)
+enable_testing()
+add_test(NAME wiimote_hid COMMAND cf_wiimote_hid_test)
+
 # Runtime shared by both executables: memory/CPU helpers, scheduler, HLE SDK, frame driver,
 # audio, menu, and the game-specific parts in src/game. module_rt.cpp belongs to the game
 # module, not the runtime.
