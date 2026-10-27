@@ -41,8 +41,10 @@ std::thread sDmaThread;
 // tempo and pitch match the console (0.09% above the nominal 32000 Hz).
 double rateHz() { return sDspRate.load() ? audio::kConsoleRate48 : audio::kConsoleRate32; }
 
-// Set when the AI interrupt is raised, cleared once JAudio has mixed for it (Jac_imixcopy).
+// Set when the AI interrupt is raised, cleared once the DSP has mixed for it (the AX command
+// list sent from the interrupt).
 std::atomic<bool> sAwaitingMix{false};
+std::atomic<bool> sCallbackRan{false};  // CF_AUDIO_LOG: the last AI interrupt's callback has returned
 
 // JAudio's DSP overload check (UpdateDSPchannelAll) times its DSP updates: when a subframe
 // takes nearly as long as the gap before the frame's first one, it decides the DSP cannot
@@ -226,8 +228,10 @@ void dmaThread() {
                                        : 0.1;
             mixed = waitForGuestMix(maxWait);
             if (!mixed && audio::g_log)
-                log("[audio] AI interrupt without the game's mix (waited %.1f ms, %.1f ms queued)", maxWait * 1e3,
-                    audio::outQueuedSeconds() * 1e3);
+                log("[audio] AI interrupt without the game's mix (waited %.1f ms, %.1f ms queued; callback %s, DSP "
+                    "frame %s)",
+                    maxWait * 1e3, audio::outQueuedSeconds() * 1e3, sCallbackRan.load() ? "ran" : "not run yet",
+                    audio::dspFrameBusy() ? "in flight" : "done");
         }
         if (audio::outHasDevice()) {
             const double queued = audio::outQueuedSeconds();
@@ -240,7 +244,24 @@ void dmaThread() {
         if (const u32 addr = sDmaAddr.load(); addr && len) audio::outPushGuestBlock(addr, len);
         if (cb) {
             sAwaitingMix = true;
-            sched::postIrq([cb](Ctx& ic) { guestCall(ic, cb); });
+            sCallbackRan = false;
+            sched::postIrq([cb](Ctx& ic) {
+                const auto t0 = clock::now();
+                guestCall(ic, cb);
+                sCallbackRan = true;
+                if (audio::g_log) {  // a slow AI callback holds every interrupt (with CF_TRACE=ring: its recent functions)
+                    const double ms = std::chrono::duration<double>(clock::now() - t0).count() * 1e3;
+                    if (ms > 20) {
+                        std::string s;
+                        for (u32 i = ic.ringPos > 24 ? ic.ringPos - 24 : 0; i < ic.ringPos; i++) {
+                            char b[12];
+                            std::snprintf(b, sizeof b, " %08X", ic.ring[i & 31]);
+                            s += b;
+                        }
+                        log("[audio] AI callback took %.1f ms; recent%s", ms, s.c_str());
+                    }
+                }
+            });
         }
     }
 }

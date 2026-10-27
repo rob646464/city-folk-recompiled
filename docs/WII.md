@@ -102,12 +102,19 @@ game calls directly.
 
 ## Audio
 
-- **AX** (DSP microcode, different from LM's JAudio microcode): command lists and voice parameter
-  blocks in RAM; ADPCM/PCM voices, sample-rate conversion, volume ramps, low-pass, main/aux A-C
-  sends with surround (Dolby Pro Logic II), remote-speaker outputs. Plan: an AX microcode stand-in
-  (like LM's audio_dsp.cpp) so the game's own AX/AXFX/NW4R snd code runs unchanged; written from
-  public documentation, not Dolphin's code. AXFX reverb/chorus/delay are game-side code.
-- AI pacing by the SDL3 audio device as in LM (docs/AUDIO.md there).
+- **AX** (DSP microcode, different from LM's JAudio microcode): **done** (branch ax-audio,
+  docs/AUDIO.md). `src/recomp/audio_dsp.cpp` stands in for the game's AX microcode (image at
+  0x80542900, read with LM's DSP disassembler): the 3 ms command lists (SETUP, surround fold,
+  PROCESS, aux A/B/C round trips incl. DPL2, compressor, OUTPUT, Wii Remote output) and the 0x140-
+  byte PBs (accelerator ADPCM/PCM16/PCM8 with loop context, polyphase/linear SRC, envelope,
+  low-pass, biquad, mixer with ramps and depop, ITD, remote SRC/sends) as the microcode does them;
+  the DSP task HLE mixes at the list's mail and resumes AX through the task's resume callback.
+  NW4R snd, AX and AXFX (reverb/chorus/delay on the aux buses) run unchanged as game code. Only the
+  polyphase coefficient ROM is ours. Title stream and bus-scene music/speech play (pitch, levels,
+  stereo checked; the stream bit-exact against an independent decode). Not done: music/SFX split
+  for the volume sliders, discrete surround side data, playing the Wii Remote speaker sound on the
+  PC (the 6 kHz remote buffers are filled; `audio::axRemoteFrame` is the hook).
+- AI pacing by the SDL3 audio device as in LM (docs/AUDIO.md there); 0x180-byte (3 ms) AI blocks.
 
 ## Other SDK parts
 
@@ -138,7 +145,7 @@ game calls directly.
    dialogue. Stand-ins, not the final HLE: IOS at IPC level (NAND files from a host folder,
    `/dev/fs` ioctls, ES title id, STM event hook never answered, other devices ENOENT), no
    SYSCONF (SC reads fail: defaults), DSP task stand-in (AX command lists "finished" at once, no
-   mixing), Wii Remote stand-in (`hle_wpad.cpp`: channel 0 buttons from the host pad, no pointer/
+   mixing; replaced by the AX stand-in on branch ax-audio), Wii Remote stand-in (`hle_wpad.cpp`: channel 0 buttons from the host pad, no pointer/
    Nunchuk, so the game shows "Communications with the Wii Remote have been interrupted").
    Open: the bus interior's 3D does not show (black behind the dialogue), a blue band under the
    456-line EFB copy (VIConfigure is a no-op: VI/XFB size not taken from the render mode), exit

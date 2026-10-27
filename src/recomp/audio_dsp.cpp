@@ -405,9 +405,25 @@ void logVoiceStart(u32 addr, const Pb& p) {
         p.u(pb::kRmtMixerCtrl));
 }
 
+// CF_AX_TRACE=<PB address>: that voice's state at the start of each frame and its first and
+// last output samples (frame-to-frame continuity checks).
+u32 traceAddr() {
+    static const u32 v = [] {
+        const char* e = std::getenv("CF_AX_TRACE");
+        return e && *e ? u32(std::strtoul(e, nullptr, 16)) : 0u;
+    }();
+    return v;
+}
+
 void processVoice(Pb& p, u32 addr) {
     const auto& as = port::settings().audio;
     sVoiceStats.voices++;
+    const bool trace = addr == traceAddr() && p.u(pb::kState) == 1;
+    if (trace)
+        log("[ax] trace %08X: cur %08X ps %02X yn %d %d frac %04X last %d %d %d %d ve %04X%+d vL %04X%+d vR %04X%+d",
+            addr, p.u32at(pb::kCurAddr), p.u(pb::kPredScale), p.s(pb::kYn1), p.s(pb::kYn2), p.u(pb::kFrac),
+            p.s(pb::kLast), p.s(pb::kLast + 2), p.s(pb::kLast + 4), p.s(pb::kLast + 6), p.u(pb::kVeVol),
+            int(p.s(pb::kVeDelta)), p.u(0x14), int(p.s(0x16)), p.u(0x18), int(p.s(0x1A)));
     if (g_log) {
         static u8 sWasOn[256];  // by voice index (PBs are 0x140 apart)
         const u32 idx = (addr / kPbSize) & 255;
@@ -452,6 +468,8 @@ void processVoice(Pb& p, u32 addr) {
             for (int i = 0; i < kFrame; i++) v[i] = sat16((s64(v[i]) * u16(ve + i * d)) >> 15);
             p.set(pb::kVeVol, u16(ve + kFrame * d));
         }
+        if (trace)
+            log("[ax] trace %08X: out %d %d %d .. %d %d %d", addr, v[0], v[1], v[2], v[93], v[94], v[95]);
         if (as.voiceFilters) {
             if (p.u(pb::kLpfOn)) lowPass(p, pb::kLpfYn1, v, v, kFrame);
             if (p.u(pb::kBiqOn)) biquad(p, pb::kBiqXn1, v, v, kFrame);

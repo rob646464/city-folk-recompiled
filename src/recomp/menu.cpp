@@ -1596,9 +1596,11 @@ void soundTab() {
     sDirty |= volumeSlider("Master volume", a.masterVolume);
     ImGui::SetItemTooltip("Everything the game plays.");
     sDirty |= volumeSlider("Music volume", a.musicVolume);
-    ImGui::SetItemTooltip("Background music: the game's music sequences and streamed music.");
+    ImGui::SetItemTooltip("Background music: the game's music sequences and streamed music.\n"
+                          "Not applied yet: music and effects are not told apart so far.");
     sDirty |= volumeSlider("Sound effects volume", a.sfxVolume);
-    ImGui::SetItemTooltip("Everything else: sound effects, voices, ambience.");
+    ImGui::SetItemTooltip("Everything else: sound effects, voices, ambience.\n"
+                          "Not applied yet: music and effects are not told apart so far.");
     ImGui::SeparatorText("Output");
     static const char* kOutputs[] = {"Stereo", "Mono", "Surround (matrix-encoded stereo)", "Surround 5.1 (discrete)",
                                      "Surround 7.1 (discrete)"};
@@ -1625,11 +1627,11 @@ void soundTab() {
                           "Off: SDL's resampler, slightly cheaper.");
     ImGui::SeparatorText("DSP accuracy");
     sDirty |= recomp::menu::Checkbox("Reverb / echo", &a.reverb);
-    ImGui::SetItemTooltip("The DSP's effect lines (feedback delays used as room echo) and its chorus bus.\n"
-                          "Off: dry sound only, slightly cheaper.");
+    ImGui::SetItemTooltip("The effect returns of the DSP's aux buses (the game's reverb / chorus / delay,\n"
+                          "which it still computes). Off: dry sound only.");
     sDirty |= recomp::menu::Checkbox("Voice filters", &a.voiceFilters);
-    ImGui::SetItemTooltip("Per-voice FIR / IIR / distortion stages the game asks the DSP for (muffled or\n"
-                          "distorted sounds). Off: those sounds play unfiltered, slightly cheaper.");
+    ImGui::SetItemTooltip("Per-voice low-pass and biquad filters the game asks the DSP for (muffled sounds,\n"
+                          "also on the Wii Remote speaker path). Off: those sounds play unfiltered.");
 }
 
 void generalEnhancementsTab() {
