@@ -65,6 +65,7 @@ def write(name):
 
 
 write("town.txt")
+base = list(items)
 # town_walk.txt: the same, then walking in the town from frame 16700 (pointer away so the
 # HUD is not clicked): 90-frame legs up / right / down / left with a pause, repeated to ~21000.
 items.append("16690:@off*1")
@@ -75,3 +76,17 @@ while f < 21000:
         items.append(f"{f}:{leg}*90")
         f += 110
 write("town_walk.txt")
+# grass_walk.txt (docs/FEATURES.md "Grass wear"): town.txt, A presses for the map tutorial that
+# follows the arrival, then the same square (left, down, right, up from the bus stop) run with B
+# held (60-frame legs) and walked (80-frame legs, about the same distance), alternating, to ~21000.
+items[:] = base
+items.append("16690:@off*1")
+for f in range(16700, 17101, 60):
+    press(f)
+f = 17200
+while f < 21000:
+    for b, n in (("+B", 60), ("", 80)):
+        for leg in ("STICKLEFT", "STICKDOWN", "STICKRIGHT", "STICKUP"):
+            items.append(f"{f}:{leg}{b}*{n}")
+            f += n + 10
+write("grass_walk.txt")
