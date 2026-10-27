@@ -14,7 +14,7 @@ revolution/kpr/kpr_lib.c:
 	.text       start:0x801FA690 end:0x801FA8DC
 
 revolution/vf/pf_entry.c:
-	.text       start:0x802058A8 end:0x80205E94
+	.text       start:0x802058A8 end:0x80206274
 
 revolution/ipc/ipcMain.c:
 	.text       start:0x8022197C end:0x802219C4
@@ -278,7 +278,7 @@ nw4r/g3d/g3d_calcvtx.cpp:
 	.text       start:0x80258558 end:0x80258D50
 
 nw4r/snd/snd_AxVoice.cpp:
-	.text       start:0x8025C5C0 end:0x8025D5B4
+	.text       start:0x8025C36C end:0x8025D5B4
 
 nw4r/snd/snd_AxVoiceManager.cpp:
 	.text       start:0x8025D5B4 end:0x8025DD3C
@@ -467,7 +467,7 @@ nw4r/ef/drawstrategy/ef_drawdirectionalstrategy.cpp:
 	.text       start:0x80291F30 end:0x80292274
 
 nw4r/ef/drawstrategy/ef_drawsmoothstripestrategy.cpp:
-	.text       start:0x8029A1FC end:0x8029AF30
+	.text       start:0x802996F4 end:0x8029AF30
 
 nw4r/lyt/lyt_pane.cpp:
 	.text       start:0x8029DD08 end:0x8029E810
@@ -1229,7 +1229,7 @@ revolution/wpad/debug_msg.c:
 	.text       start:0x803BD0A4 end:0x803BD0F4
 
 revolution/kpad/KPAD.c:
-	.text       start:0x803BD0F4 end:0x803BFDF4
+	.text       start:0x803BD0F4 end:0x803C0148
 
 revolution/usb/usb.c:
 	.text       start:0x803C0154 end:0x803C143C
@@ -1677,6 +1677,9 @@ revolution/so/SO_unsplit.o#2:
 
 egg/core/eggDvdFile.cpp:
 	.text       start:0x8043EC14 end:0x8043EFC8
+
+egg/core/eggDvdRipper.cpp:
+	.text       start:0x8043EFC8 end:0x8043F23C
 
 egg/core/eggAssertHeap.cpp:
 	.text       start:0x80440C18 end:0x80440C44

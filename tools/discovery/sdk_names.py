@@ -182,13 +182,16 @@ def walk(ours, ref, oi, ri, step, props, srcname):
         # size mismatch: resync on 3 equal sizes after skipping in either list
         best = None
         for di, dj in ((1, 1), (1, 0), (0, 1), (2, 1), (1, 2), (2, 0), (0, 2), (2, 2), (3, 0), (0, 3)):
-            ok = True
-            for k in range(3):
+            # 3 equal sizes in a row, or 2 that are large enough to be distinctive
+            k = 0
+            run_bytes = 0
+            while k < 3:
                 a, b = i + step * (di + k), j + step * (dj + k)
                 if not (0 <= a < n and 0 <= b < m) or not ref.funcs[b][3] or ours[a][1] != ref.funcs[b][0]:
-                    ok = False
                     break
-            if ok:
+                run_bytes += ours[a][1]
+                k += 1
+            if k == 3 or (k == 2 and run_bytes >= 0x200):
                 best = (di, dj)
                 break
         if best is None:

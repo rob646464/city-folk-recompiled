@@ -32,3 +32,4 @@
 
 ## Status (keep updated)
 - 2026-10-27: project started. Plan in docs/WII.md (engine work for Wii) and docs/ROADMAP.md (phases + enhancements).
+- Function tables (branch discovery; docs/DISCOVERY.md): `config/<RUUE01|RUUP01|RUUJ01>/symbols.txt` (DOL, LM format) + `rels/<module>.txt` (187 RELs, section-relative) + `modules.txt`, jump tables and interior entries included, verified against the discs (`tools/discovery/verify.py`). 6149 DOL functions named (SDK, NW4R, EGG, MSL, HBM, GameSpy) from decomp-toolkit signatures + CC0 Wii decomp symbol maps; HLE targets with addresses in docs/SDK_NAMES.md; PAL/Japan names carried by function matching (all USA names matched). Rebuild: `tools/discovery/run_all.py` (needs decomp-toolkit, dev only).
