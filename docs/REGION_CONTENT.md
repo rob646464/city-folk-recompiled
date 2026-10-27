@@ -6,7 +6,8 @@ contains, and what it takes to offer every region's content in every version (RO
 
 Versions: USA **RUUE01** "Animal Crossing: City Folk", Europe/Australia **RUUP01** "Animal
 Crossing: Let's Go to the City", Japan **RUUJ01** "Machi e Ikou yo: Doubutsu no Mori", Korea
-**RUUK01** (2010; we don't have it). Our discs are rev 1 of RUUE/RUUP/RUUJ.
+**RUUK01** (2010). Our discs are rev 1 of RUUE/RUUP/RUUJ/RUUK; the Korean disc is described in
+section 8 (it corrects the Korea guesses below).
 
 Confidence tags: **[disc]** = checked in our extracted discs (method in "How this was checked");
 **[web-high/medium/low]** = from fan wikis, not checked on the disc. Web sources are untrusted
@@ -250,3 +251,121 @@ KR"); where two enabled events fall on one day (e.g. JP Bean Day Feb 3 and a lun
 or Mother's Day and KR Parent's Day in the same week) a priority rule is needed: the disc's own
 event wins, the other event is skipped that year. Which events can share a day has to be checked
 against the event scheduler once it is found (unverified).
+
+## 8. Korean disc (RUUK01)
+
+[disc] unless tagged. Branch korea-1, 2026-10-27: the user's Korean disc, extracted at
+`KOREA DATA/DATA` and as the original RVZ. This section supersedes the earlier guesses about
+Korea above ("we don't have it", "Korea presumably 3/9", "the Korean disc must carry its own
+table", "Korean-language anything needs the KR disc (Hangul font)"): where they disagree, this
+section wins. Scratch scripts (not committed): whole-tree MD5 diff of the four discs, item.bin and
+BMG comparisons with `tools/research/` readers, a brfnt character-map reader.
+
+### 8.1 Which disc it is (revision)
+
+- Title "타운으로 놀러가요 동물의 숲" (Tauneuro Nolleogayo: Dongmurui Sup), (c)2008-2010, game id
+  `RUUK01`, maker 01. **Revision 1**: the outer disc header (image header, `DATA/disc/header.bin`)
+  has version byte 1, DolphinTool reports Revision 1 and the RVZ's MD5 matches GameTDB's RUUK01
+  Rev 1. Only the game partition's own header (`DATA/sys/boot.bin`) says 0; on US/PAL/JP both say 1.
+  Setup reads the outer header (docs/SETUP.md "Discs").
+- Other evidence of the build: TMD title version 0 (also 0 on the other three, so it does not
+  separate revisions), title id 00010000-5255554B, **IOS 48** (the other three: IOS 38),
+  apploader dated 2008/02/29 (others 2007/10/03), the Korean `MMSRevision.txt` reads 8465
+  (the KR disc's JPN folder 479175, as on the JP disc). The DOL's newest library build strings:
+  `RVL_SDK - ENC` Jun 17 2009, `NWC24`/`MP`/`MPDL` Apr 16 2009, RevoEX 2.1plus5 (REL
+  090416104702), a Korea-only `RVL_SDK - FA` (Mar 4 2009), `SC` Feb 22 2008 (others: ENC/SC
+  Aug 8 2007, NWC24/MP Aug 6 2008, RevoEX 2.1plus4). Build path in `RVFOREST1NP.str`:
+  `d:\Project\Revolution\RVFOREST1\KR\PRD\RVL\bin\` (JP disc: `...\JP\...`).
+- Code: docs/DISCOVERY.md "Korea (RUUK01) against Japan and USA" (function differences: KPR,
+  ENC, DWC/RevoEX, text spots in 30 RELs; `d_insect_fieldNP` is the international one, not
+  Japan's).
+
+### 8.2 Region and language values
+
+- Region getter (US 0x801069D0) at **0x80106A50: `li r3,3`** (JP 0, US 1, EU 2, KR 3, as guessed).
+- Language index function (US 0x801069D8) at **0x80106A58: `li r3,9`**: the Korean game always
+  uses index 9 (Korean), whatever the console language. The next function maps the index through
+  a 10-entry table at 0x8047EDE8 (out of range -> 4).
+- The setup gives it a Korean console (country 136, language Korean, setting.txt `AREA=KOR`,
+  `GAME=KR`); the game boots to Rover's bus in Korean (docs/SETUP.md "Korea").
+
+### 8.3 File tree against the other discs
+
+7,251 files (US 9,055, PAL 12,653, JP 5,451). 3,451 paths are byte-identical on all four discs
+(models, textures, sky, effects, sound including `Sound/rv_forest.brsar`, `Str/`, `FgObj/`, NPC
+models, the town sign textures incl. `KorKor`). Differences:
+
+| What | KR disc | Notes |
+|---|---|---|
+| `Script/KOR/` (1,799 files + `script.arc`) | **only on KR** | the Korean text (8.5) |
+| `Script/JPN/` | byte-identical to the JP disc's | the Korean disc carries the full Japanese text too (unused by its fixed language index 9; unverified whether anything reads it) |
+| `Layout/title_kr.arc` | **only on KR** | the Korean logo layout (shown at the title, 8.2) |
+| `Strap/strapSampleKR.arc` | **only on KR** (no `strapSample.arc`) | Korean wrist-strap screen |
+| `Prc/K.bin` (1,443 B) | **only on KR** (no `J.bin`) | Korean profanity list |
+| `Font/Anml_HummingStd_B_28_I4.brfnt` / `.brfna` | differs | same font plus 6 symbols (U+2033 ″, U+2103 ℃, U+226A/B ≪≫, U+300A/B 《》): 4,347 codes vs 4,341. **Every disc's font already has the 2,355 Hangul syllables and 94 jamo** (plus 167 kana, 1,022 kanji): Korean text renders with the US/PAL/JP font; only those 6 symbols would show as missing |
+| `Layout/keyboard_free.arc` (44,832 vs 29,920 B), `Layout/sofkeybd.arc` (690,560 B; US/PAL 675,520, JP 656,320), `Layout/board.arc` (78,688 vs 74,976 B) | differ | Korean text-entry keyboards (Hangul composition) and the bulletin board layout |
+| `Item/item.arc` | differs only in `item/item.bin` | Korean names (8.4) |
+| `Item/Ftr/Ftr412.brres` | differs | the bath pail's texture: `int_kns_bth_pail` (US/PAL/JP) replaced by `int_nsb_bth_pail` (a Korea-safe print; the JP/US one is identical) |
+| `Npc/Normal/Setup/pack.bin` | 2 bytes (0x11E08) | one field next to the UTF-16 string "Karin": 0xFF12 -> 0x0032; meaning unknown |
+| `DSApp/*.srl`, `opening.bnr`, `RVFOREST1NP.str`, `rels/*.rel` | differ | Korean DS download apps and banner; module path strings; code (DISCOVERY.md) |
+
+Nothing else is Korea-only: there are no Korean-only models, textures, sounds or events on the
+disc beyond the files listed.
+
+### 8.4 item.bin: Korean names
+
+Same 2,581 records and field layout. The Korean column (10th) on the KR disc: **2,392 Hangul
+names** (US/PAL/JP discs: 1,810 Hangul names + 766 `ブランクかんこく` placeholders). 583
+placeholders got a name, 99 existing Korean names were corrected (full-width digits to ASCII,
+spacing, renames such as T.K.매치 -> T.K.행진곡). 183 records stay `ブランクかんこく`: 178 are
+records that are blank in every language, plus 5 real items without a Korean name (paper bag #14,
+bulletin paper #383, grape hat #1324, laurel wreath #1368, cookie #2563; presumably not offered
+in Korea, unverified). Other columns: 6 differences, the same typo fixes as on the US/PAL discs
+(EU French #227, #234-#236, Italian #1445, #236), and 2 records with changed attributes (#236
+mush stand, #1391 King Tut mask; also as on US/PAL).
+
+Every region-event item now has a Korean name, e.g. #1384/#1385 빨간/파란 도깨비 가면 (ogre
+masks), #2276 인형 장식 (hinaningyo), #2291 무지개떡 (rice cake), #2292 달맞이떡 (dango), #2293
+소원성취 대나무 (bamboo grass), #2294 도루묵씨 모형 (Resetti model), #2298 보리 다발 (wheat
+bundle), #2302 채소 바구니 (veggie basket), #2303 윷놀이 세트 (yut), #2304 무궁화 (hibiscus),
+#2305 부럼 (bureom), #1466 빨간 카네이션 (red carnation), #2274/#2275 새해맞이 대나무 / 찰떡
+(kadomatsu / kagamimochi).
+
+**No item has a Korean name but no English one**: every KR item already has US and EU English
+names on every disc. There are no Korea-only items on the disc (the Korea-only items were
+distributed, section 3).
+
+### 8.5 Korean text (Script/KOR)
+
+Same 2,230 message files as the other languages (loose and in `script.arc`), the same 36,840
+messages per language as US English, same `MsgList.txt` size. The Korean set is
+complete for every region's events: `NPC_soncho_1.bmg` (Tortimer's event lines, 581 messages),
+the BBS notices and the moon talk for all four regions (`*_FreeA_Moon{USA,EUR,JPN,KOR}.bmg`) are
+filled. Differences with English (message 0, the source name, not counted):
+- 370 messages are filled in English and empty in Korean. Mostly content Korea does not use:
+  Mother's Day letters `MAIL_ETC_MotherAlways/Season/Day` (130; Korea has Parent's Day instead,
+  `MAIL_ETC_MotherEvent` 10 more), the mysterious letter talk `*_ApA_Letter` (24), Harvest
+  Festival talk `*_FreeH_Harvest` (22), some letters of the KO personality, a few `NPC_tel`,
+  `SYS_Start`, `NPC_jonny` lines. 246 of the 370 are filled in the Japanese set on the same disc.
+  Whether Harvest Festival / Mother's Day run on the Korean game is therefore probably "no"
+  (unverified in play).
+- 49 messages are filled in Korean and empty in English: the Korean chat phrases
+  (`SYS_2D_Chat` #91-#107), Korean letter "From"/"To" formats and town-name suffixes (마을), and
+  `STR_Mailcheck` #27-#31 (Korean word lists of the letter checker). None is event or item text:
+  **nothing on the Korean disc needs translating for English players.**
+
+### 8.6 What this gives the "Content from other regions" options
+
+- Korean event dialogue and items need no Korean disc for English/other-language players: the
+  text exists in every language on every disc (section 1.1) and the items have English names.
+- Korean-language play needs the Korean disc: the Korean text, Korean item names, the Korean
+  keyboards and title are only there. With the Korean disc installed as the base the game runs in
+  Korean (supported region since korea-1).
+- Korean item names on other discs (e.g. a "show Korean names" option, or the Korean column for a
+  KR save) would come from the Korean disc's `item.bin` column 10; the fonts of every disc can
+  draw them.
+- Korea's own region rules (region 3: Korean house sets = JP's, KR events, Parent's/Teacher's
+  Day, no autumn moon) are what the US/EU/JP games would have to emulate per event; the Korean
+  game's code is the reference for those rules (same RELs, region value 3).
+- Still not on any disc: the Korea-only distributed items (section 3, ~11 items; their names and
+  letters would be Korean only).

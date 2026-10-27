@@ -120,8 +120,9 @@ HLE target in docs/SDK_NAMES.md has an address in RUUK01.
 
 ### Korea (RUUK01) against Japan and USA
 
-The Korean disc (2010, the only Korean release, revision 0) is a later build than the other
-three: its DOL is 93 KB larger and matches the USA DOL slightly better than the Japanese one
+The Korean disc (2010, the only Korean release, revision 1) is a later build than the other
+three (newest library build string: ENC, Jun 17 2009; RevoEX 2.1plus5 of Apr 16 2009, the
+others have 2.1plus4 of Aug 2008): its DOL is 93 KB larger and matches the USA DOL slightly better than the Japanese one
 (24097 vs 24095 functions matched). Function differences (`scratchpad` comparison with
 `version_map.align`, base Japan; the USA comparison gives the same runs):
 
@@ -129,11 +130,11 @@ three: its DOL is 93 KB larger and matches the USA DOL slightly better than the 
 |---|---|---|
 | 0x800C982C-0x800CB290 | 5 new (Japan has 13 of its own there) | game code (not identified; Japan's own functions there are gone) |
 | 0x801F990C | 1 new; `KPRInitRegionUS` gone | KPR (USB keyboard input) region init: a Korean one replaces the US/JP one |
-| 0x80220400-0x80222394 | 11 new (Japan has 6 of its own, USA others) | unnamed library code between VF and IPC, region-specific in every version (probably the ENC character-encoding converter: Japan and USA each have their own functions here too) |
+| 0x80220400-0x80222394 | 11 new (Japan has 6 of its own, USA others) | unnamed library code between VF and IPC, region-specific in every version (probably the ENC character-encoding library: Korea links a newer ENC, `<< RVL_SDK - ENC` Jun 17 2009 vs Aug 8 2007; Japan and USA each have their own functions here too) |
 | 0x802258F0-0x80225FE4 | 6 new | after the IPC profile code (unnamed library) |
-| 0x802E72A4-0x80321260 | ~110 new, ~100 changed in place (`order`) | DWC (Nintendo Wi-Fi Connection, unnamed in every version): a newer DWC revision; the HBM and GameSpy parts around it are unchanged |
+| 0x802E72A4-0x80321260 | ~110 new, ~100 changed in place (`order`) | DWC / RevoEX network libraries (unnamed in every version): RevoEX 2.1plus5 (Apr 2009) instead of 2.1plus4; the HBM and GameSpy parts around it are unchanged |
 | 0x803760DC | 1 new | GameSpy server browsing (after `SBListThink`) |
-| 0x8040131C-0x80402390 | 9 new | after WENC, before TPL (unnamed library) |
+| 0x8040131C-0x80402390 | 9 new | after WENC, before TPL: probably `RVL_SDK - FA` (Mar 4 2009), a library only the Korean DOL links |
 
 Every SDK library the HLE replaces (OS, GX, VI, DVD, IPC/IOS, NAND, SC, WPAD/KPAD, AX/AI/DSP,
 NWC24 ...) is hash-identical to the other versions apart from addresses. The 187 RELs keep
