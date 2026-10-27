@@ -17,3 +17,5 @@
 /out/
 /.claude/
 *.log
+__pycache__/
+*.pyc
