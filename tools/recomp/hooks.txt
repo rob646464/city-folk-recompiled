@@ -14,3 +14,19 @@
 # Dolby Pro Logic II mode: City Folk's `bl AxManager::SetOutputMode(STEREO)` right after
 # InitSoundSystem (in fn_801CE6B0) becomes a nop. Switched by hle_audio.cpp (SCGetSoundMode).
 patch 30 801CE714 60000000
+
+# Grass wear (src/game/cf_grass.cpp, docs/FEATURES.md "Grass wear"): the step wear (player steps and
+# town generation) and the daily regrowth.
+fn_8008D6B4
+fn_800A7F9C
+fn_8008D6D4 pal
+fn_800A7FBC pal
+fn_8008D63C jp
+fn_800A7F24 jp
+
+# Skin tone (src/game/cf_skin.cpp, docs/FEATURES.md "Skin tone"): the player's skin palette index
+# (d_a_playerNP, same offset in all versions) and the daily tan update.
+d_a_playerNP::fn_80_2080 us pal jp
+fn_80137D34
+fn_801379E4 pal
+fn_80137924 jp

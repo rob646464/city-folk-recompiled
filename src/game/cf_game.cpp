@@ -2,6 +2,8 @@
 // yet (boot work, docs/WII.md "Order of work"); these defaults leave the game untouched.
 #include "recomp/game.h"
 
+#include "game/cf_features.h"
+
 #include <atomic>
 #include <cmath>
 
@@ -14,15 +16,17 @@ namespace {
 std::atomic<u32> sFrames{0};
 }  // namespace
 
-bool onGuestFrame(Ctx&) {
+bool onGuestFrame(Ctx& c) {
     sFrames.fetch_add(1, std::memory_order_relaxed);
-    return false;
+    cf::grassOnFrame(c);  // cf_grass.cpp, cf_skin.cpp (docs/FEATURES.md)
+    cf::skinOnFrame(c);
+    return cf::devOnGuestFrame(c);  // CF_FF fast-forward and other test aids (cf_devaids.cpp)
 }
 u32 guestFrames() { return sFrames.load(std::memory_order_relaxed); }
 void filterPad(PADStatus*, int) {}
 bool padHeld() { return false; }
-double retraceSpeed() { return 1.0; }
-float audioGain() { return 1.0f; }
+double retraceSpeed() { return cf::devRetraceSpeed(); }
+float audioGain() { return cf::devRetraceSpeed() > 1.0 ? 0.0f : 1.0f; }
 bool audioMirrored() { return false; }
 // One GXCopyDisp per retrace in every scene measured (title, Rover's intro, bus, keyboards,
 // town, town map; docs/WII.md "Frame rate"): 60 fps, 50 for a European game at 50 Hz.

@@ -1648,6 +1648,14 @@ void Recompiler::run(Output& out, const std::string& version) {
             t += fmt("    {0x%08Xu, &", a) + dolSpace.fname(a) + "_orig},\n";
             origCount++;
         }
+    // Hooked REL functions ("<module>::<name>" in hooks.txt): keyed by relfmt::relOrigKey (rel_format.h), which no
+    // DOL address can equal, so callOriginal finds REL originals in the same table (no ABI change).
+    for (Space& rs : relSpaces)
+        for (auto& [k, f] : rs.funcs)
+            if (rs.hooked.count(k)) {
+                t += fmt("    {0x%08Xu, &", relfmt::relOrigKey(rs.mod->id, keySec(k), keyOff(k))) + rs.fname(k) + "_orig},\n";
+                origCount++;
+            }
     if (!origCount) t += "    {0, nullptr},\n";
     t += "};\n";
     // REL modules: per module its functions by key (section << 24 | offset), sorted, and names.
