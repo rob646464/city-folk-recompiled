@@ -17,21 +17,27 @@ Engine work for the Wii: docs/WII.md. This file tracks the phases and the user's
 - **Normal controller menu navigation**: select and interact in menus with stick/D-pad and
   buttons, without being forced to use the pointer. (First check what the game's own Classic
   Controller support covers, if it has one.)
-- **Grass wear**: Original (game default) / New Leaf style / Off.
+- **Grass wear**: Original (game default) / New Leaf style / Off (spec and the New Leaf values
+  that are our estimate: docs/FEATURE_RESEARCH.md).
 - **Skin tone picker** in F1: applies only to the player currently being played (the game has
   up to four residents per town).
 - **Region-exclusive content in every version**: holidays, furniture, events, items etc. from the
   other regions, including translated item names and dialogue where needed. Research:
-  docs/REGION_CONTENT.md. Needs the matching discs where content is only on another region's
-  disc (greyed out otherwise).
+  docs/REGION_CONTENT.md. Research result: every disc already carries all regions' event
+  dialogue (in all its languages), items and models; the region is a runtime value in
+  main.dol, so this is event-calendar hooks, not data copies or translation. Only the
+  Nintendo-distributed items are on no disc (WiiConnect24 downloads; docs/ONLINE.md).
 - **Hemisphere toggle**: Northern (original) / Southern, seasons shifted by six months
-  (weather, snow, flowers/trees, insects and fish, seasonal events where that makes sense; New
-  Leaf is the reference for what moves and what keeps its date).
-- **Real-time weather** (off by default): the user enters a ZIP/postal code, the game looks up the
-  local weather over the internet (a key-free service such as Open-Meteo: postal code → place →
-  current conditions) and the town's weather follows it (clear / cloudy / rain / snow, within what
-  the game can show for the season). The tooltip says the postal code is sent to that service;
-  nothing is sent while it is off. Falls back to the game's own weather when offline.
+  (weather, snow, flowers/trees, insects and fish, seasonal events where that makes sense).
+  New Leaf has no hemispheres: New Horizons is the reference for what moves and what keeps
+  its date (docs/FEATURE_RESEARCH.md).
+- **Real-time weather** (off by default): the user searches for their town or city by name
+  (a postal code also works where the service knows it) and picks it from a list; the game then
+  looks up the current weather there over the internet (a key-free service such as Open-Meteo)
+  and the town's weather follows it (clear / cloudy / rain / snow, within what the game can show
+  for the season). Only the chosen place's rounded coordinates (~10 km) are sent, and only while
+  the option is on; no automatic IP location (at most an explicit "use my approximate location"
+  button). Refreshed every 30-60 minutes; the game's own weather when offline.
 - **Online play restored** however possible: Nintendo WFC (DWC: visiting towns, friend codes,
   Wii Speak chat) through a revival server such as Wiimmfi, and WiiConnect24 (letters, Nintendo
   event distributions) through a revival service such as WiiLink/RiiConnect24, if they support

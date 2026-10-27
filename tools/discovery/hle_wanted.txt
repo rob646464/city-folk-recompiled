@@ -7,7 +7,7 @@
 [Runtime / MSL]
 __start __init_registers __init_data __init_hardware __flush_cache __init_user __init_cpp
 __fini_cpp exit? _ExitProcess? abort? __register_global_object __destroy_global_chain
-_savegpr_14 _restgpr_14 _savefpr_14 _restfpr_14 __ptmf_scall __div2i __div2u __mod2i __mod2u
+__save_gpr __restore_gpr __save_fpr __restore_fpr __ptmf_scall __div2i __div2u __mod2i __mod2u
 __shl2i __shr2i __shr2u __cvt_fp2unsigned __cvt_dbl_ull? __cvt_ull_dbl? __cvt_sll_flt? __cvt_ull_flt?
 memcpy memset memmove memcmp __fill_mem strlen strcpy strncpy strcmp strncmp strcat strncat? strchr strrchr strstr
 sprintf snprintf vsprintf vsnprintf printf? vprintf sscanf? atoi strtol strtoul tolower toupper wcslen?

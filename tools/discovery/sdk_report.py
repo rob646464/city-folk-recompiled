@@ -76,8 +76,11 @@ def make_diag(refdir, base):
             if not between:
                 return f"not linked: {ref.funcs[lo][1][:40]} and {ref.funcs[hi][1][:40]} are adjacent here ({ref.name})"
             unnamed = [f"{o[0]:08X}(0x{o[1]:X})" for o in between if sdk_names.GENERIC.match(o[2])]
-            return (f"slot between {ref.funcs[lo][1][:40]} and {ref.funcs[hi][1][:40]}: "
-                    f"{len(between)} functions, unnamed {' '.join(unnamed) or 'none'} (ref size 0x{ref.funcs[j][0]:X}, {ref.name})")
+            if not unnamed:
+                return (f"not linked: the functions between {ref.funcs[lo][1][:40]} and {ref.funcs[hi][1][:40]} "
+                        f"all have other names ({ref.name})")
+            return (f"candidates between {ref.funcs[lo][1][:40]} and {ref.funcs[hi][1][:40]}: "
+                    f"{' '.join(unnamed)} (ref size 0x{ref.funcs[j][0]:X}, {ref.name})")
         return "no reference places it"
     return diag
 
