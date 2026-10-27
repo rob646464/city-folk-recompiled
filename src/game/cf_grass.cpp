@@ -29,8 +29,8 @@
 //                each tile wears at most once per game day (6 AM to 6 AM) as well as once per
 //                load; the wear is halved (rounded up); the daily regrowth runs twice.
 //   2 Off        steps never wear; regrowth unchanged, so existing bare patches heal.
-// F1 also has "Regrow all grass now" (every tile of the loaded town to its maximum through the
-// game's own setter, saved with the town at the next save).
+// F1 also has "Regrow all grass now" (every worn tile, health 1..254, of the loaded town to 255
+// through the game's own setter, saved with the town at the next save).
 //
 // Test aids: CF_GRASS_WEAR_X=<n> (steps wear n times as much), CF_GRASS_REGROW_AT=<frame> (the
 // "Regrow all grass now" button at that guest frame), CF_GRASS_LOG=1: every player step wear (tile, amount, player speed, decision,
@@ -258,9 +258,12 @@ void grassOnFrame(Ctx& c) {
     }
     int bare0 = 0, bare1 = 0;
     const long long s0 = grassSum(bare0);
-    // Every tile of the town's 5 x 5 acres (acres 1..5 of the 8 x 8 grid) through the game's own
-    // setter, which clamps to the tile's maximum (0 under buildings, plaza, ...) and writes the
-    // saved copy too. This runs at the end of a frame inside an HLE call: keep its registers.
+    // Every worn tile (health 1..254) of the town's 5 x 5 acres (acres 1..5 of the 8 x 8 grid) to
+    // 255 through the game's own setter (clamped to the tile's maximum, written to the saved copy
+    // too). Tiles at 0 are left alone: the town generation sets the ground under buildings, the
+    // plaza and other objects to 0, and the setter's clamp does not protect it (a first version
+    // that raised every tile grew grass over them). This runs at the end of a frame inside an HLE
+    // call: keep its registers.
     u32 r[32];
     std::memcpy(r, c.r, sizeof r);
     const u32 lr = c.lr, ctr = c.ctr;
@@ -268,6 +271,8 @@ void grassOnFrame(Ctx& c) {
     std::memcpy(cr, c.cr, sizeof cr);
     for (u32 y = 16; y < 16 * 6; y++)
         for (u32 x = 16; x < 16 * 6; x++) {
+            const u8 v = u8(rd8(tileAddr(buf, x, y)));
+            if (v == 0 || v == 255) continue;
             c.r[7] = 0;  // no per-tile data cache flush
             guestCall(c, addrs().setTile, addrs().mgr, x, y, 255);
         }
@@ -298,7 +303,8 @@ void grassMenu(bool& dirty) {
         "Off: grass never wears; existing bare patches grow back as usual.");
     if (ImGui::Button("Regrow all grass now")) sRegrowAll = true;
     ImGui::SetItemTooltip(
-        "Gives every grass tile of the town full health right away (bare paths disappear).\n"
+        "Gives every worn grass tile of the town full health right away. Completely bare ground\n"
+        "(under buildings and objects, the plaza, tiles worn all the way down) is left as it is.\n"
         "Saved with the town the next time the game saves. Only while the town is loaded.");
 }
 

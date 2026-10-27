@@ -252,7 +252,7 @@ void skinOnFrame(Ctx& c) {
     }
     if (sActor && rd32(sActor + kActorPlayerNo) == 0 && rd32(sActor + kActorSkin) == sActorSkin)
         cur.shown = int(sActorSkin);
-    readSwatches(c);
+    if (cur.valid) readSwatches(c);  // the palette archive is loaded once a player exists
 
     std::memcpy(c.r, r, sizeof r);
     c.lr = lr;
