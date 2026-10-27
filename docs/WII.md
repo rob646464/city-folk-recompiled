@@ -112,7 +112,7 @@ game calls directly.
 
 1. Repo scaffold from LM's generic code (as SMS did); Wii disc reading (nod: Wii partitions +
    extracted folders); MEM1/MEM2 guest memory.
-2. Function discovery for the DOL and all RELs (USA rev 1), SDK names.
+2. Function discovery for the DOL and all RELs (USA rev 1), SDK names. **Done** (docs/DISCOVERY.md, config/; PAL and Japan too).
 3. Recompiler REL support + OSLink HLE; boot through OS init (low-memory globals, IOS stubs).
 4. NAND/ES/SC/DVD HLE → title screen; GX frames on screen.
 5. KPAD/WPAD HLE with mouse pointer → into the game; NAND save/load.
