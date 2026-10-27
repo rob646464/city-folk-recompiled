@@ -10,7 +10,7 @@ function between two size-matched neighbours, own size differs (another SDK revi
 `gap` = same position between two named functions in a reference with the same number
 of functions in between; `str` = the function's own "X() was called" trace string;
 `manual` = config/<id>/names_manual.txt; `map` = carried over from the USA table by
-function matching (PAL/Japan, tools/discovery/version_map.py).
+function matching (PAL/Japan/Korea, tools/discovery/version_map.py).
 
 ## Summary (USA)
 
@@ -112,919 +112,919 @@ All named DOL functions (RUUE01): 6149; by confidence: high 5328, gap 412, dtk 3
 
 ## Runtime / MSL
 
-| Function | RUUE01 | RUUP01 | RUUJ01 | confidence |
-|---|---|---|---|---|
-| __start | `8000403C` | `8000403C` | `8000403C` | dtk |
-| __init_registers | `800041A8` | `800041A8` | `800041A8` | dtk |
-| __init_data | `80004238` | `80004238` | `80004238` | dtk |
-| __init_hardware | `800042E0` | `800042E0` | `800042E0` | dtk |
-| __flush_cache | `80004304` | `80004304` | `80004304` | dtk |
-| __init_user | `80388A5C` | `803888AC` | `80388998` | dtk |
-| __init_cpp | `80388A7C` | `803888CC` | `803889B8` | dtk |
-| __fini_cpp | **missing** | **missing** | **missing** | - |
-| exit (optional) | `80388AC4` | `80388914` | `80388A00` | dtk |
-| abort (optional) | `8045BCB0` | `8045BC94` | `8045BBE4` | high |
-| __register_global_object | `8044DFE4` | `8044DFC8` | `8044DF18` | dtk |
-| __destroy_global_chain | `8044DFFC` | `8044DFE0` | `8044DF30` | dtk |
-| __save_gpr | `8044EA70` | `8044EA54` | `8044E9A4` | dtk |
-| __restore_gpr | `8044EABC` | `8044EAA0` | `8044E9F0` | dtk |
-| __save_fpr | `8044E9D8` | `8044E9BC` | `8044E90C` | dtk |
-| __restore_fpr | `8044EA24` | `8044EA08` | `8044E958` | dtk |
-| __ptmf_scall | `8044E6AC` | `8044E690` | `8044E5E0` | high |
-| __div2i | `8044EBF4` | `8044EBD8` | `8044EB28` | high |
-| __div2u | `8044EB08` | `8044EAEC` | `8044EA3C` | dtk |
-| __mod2i | `8044EE10` | `8044EDF4` | `8044ED44` | high |
-| __mod2u | `8044ED2C` | `8044ED10` | `8044EC60` | dtk |
-| __shl2i | `8044EF1C` | `8044EF00` | `8044EE50` | high |
-| __shr2i | **missing** | **missing** | **missing** | - |
-| __shr2u | `8044EF40` | `8044EF24` | `8044EE74` | high |
-| __cvt_fp2unsigned | `8044E97C` | `8044E960` | `8044E8B0` | high |
-| __cvt_dbl_ull (optional) | `8044F018` | `8044EFFC` | `8044EF4C` | high |
-| memcpy | `80004338` | `80004338` | `80004338` | dtk |
-| memset | `8000443C` | `8000443C` | `8000443C` | dtk |
-| memmove | `804531B4` | `80453198` | `804530E8` | dtk |
-| memcmp | `804532D8` | `804532BC` | `8045320C` | high |
-| __fill_mem | `80004388` | `80004388` | `80004388` | dtk |
-| strlen | `8044DF00` | `8044DEE4` | `8044DE34` | dtk |
-| strcpy | `804572E0` | `804572C4` | `80457214` | dtk |
-| strncpy | `804573A0` | `80457384` | `804572D4` | high |
-| strcmp | `8045745C` | `80457440` | `80457390` | high |
-| strncmp | `80457578` | `8045755C` | `804574AC` | high |
-| strcat | `804573E4` | `804573C8` | `80457318` | high |
-| strncat (optional) | `80457410` | `804573F4` | `80457344` | high |
-| strchr | `804575B8` | `8045759C` | `804574EC` | dtk |
-| strrchr | **missing** | **missing** | **missing** | - |
-| strstr | `804577B0` | `80457794` | `804576E4` | high |
-| sprintf | `80455A5C` | `80455A40` | `80455990` | dtk |
-| snprintf | `80455984` | `80455968` | `804558B8` | high |
-| vsprintf | `80455904` | `804558E8` | `80455838` | high |
-| vsnprintf | `80455880` | `80455864` | `804557B4` | dtk |
-| printf (optional) | `80455740` | `80455724` | `80455674` | high |
-| vprintf | `802AA19C` | `802A9FEC` | `802AA218` | dtk |
-| sscanf (optional) | `80457168` | `8045714C` | `8045709C` | high |
-| atoi | `8045971C` | `80459700` | `80459650` | high |
-| strtol | `80459630` | `80459614` | `80459564` | high |
-| strtoul | `80459588` | `8045956C` | `804594BC` | high |
-| tolower | **missing** | **missing** | **missing** | - |
-| toupper | **missing** | **missing** | **missing** | - |
-| wcslen (optional) | `8045BA2C` | `8045BA10` | `8045B960` | high |
-| sqrt (optional) | `80460150` | `80460134` | `80460084` | high |
-| sin | `8045FD9C` | `8045FD80` | `8045FCD0` | high |
-| cos | `8045F894` | `8045F878` | `8045F7C8` | high |
-| tan | `8045FE74` | `8045FE58` | `8045FDA8` | high |
-| atan | `8045F4E8` | `8045F4CC` | `8045F41C` | high |
-| atan2 | `8045FEF4` | `8045FED8` | `8045FE28` | high |
-| acos | `8045FEEC` | `8045FED0` | `8045FE20` | high |
-| asin | `8045FEF0` | `8045FED4` | `8045FE24` | high |
-| exp | **missing** | **missing** | **missing** | - |
-| log | **missing** | **missing** | **missing** | - |
-| log10 | `8045FEFC` | `8045FEE0` | `8045FE30` | gap |
-| pow | `8045FF00` | `8045FEE4` | `8045FE34` | high |
-| fmod | `8045FEF8` | `8045FEDC` | `8045FE2C` | high |
-| floor | `8045F968` | `8045F94C` | `8045F89C` | high |
-| ceil | `8045F728` | `8045F70C` | `8045F65C` | high |
-| frexp | `8045FAAC` | `8045FA90` | `8045F9E0` | high |
-| ldexp | `8045FB34` | `8045FB18` | `8045FA68` | high |
-| modf | `8045FCA0` | `8045FC84` | `8045FBD4` | high |
-| __fini_cpp | no reference places it | | | |
-| __shr2i | not linked: the functions between __shl2i and __cvt_dbl_ull all have other names (ss_SOUE01) | | | |
-| strrchr | not linked: the functions between strchr and strstr all have other names (smg_RMGE01) | | | |
-| tolower | not linked: __flush_buffer and __fwrite are adjacent here (smg_RMGE01) | | | |
-| toupper | no reference places it | | | |
-| exp | not linked: atan2 and fmod are adjacent here (tp_RZDE01_02) | | | |
-| log | no reference places it | | | |
+| Function | RUUE01 | RUUP01 | RUUJ01 | RUUK01 | confidence |
+|---|---|---|---|---|---|
+| __start | `8000403C` | `8000403C` | `8000403C` | `8000403C` | dtk |
+| __init_registers | `800041A8` | `800041A8` | `800041A8` | `800041A8` | dtk |
+| __init_data | `80004238` | `80004238` | `80004238` | `80004238` | dtk |
+| __init_hardware | `800042E0` | `800042E0` | `800042E0` | `800042E0` | dtk |
+| __flush_cache | `80004304` | `80004304` | `80004304` | `80004304` | dtk |
+| __init_user | `80388A5C` | `803888AC` | `80388998` | `8039137C` | dtk |
+| __init_cpp | `80388A7C` | `803888CC` | `803889B8` | `8039139C` | dtk |
+| __fini_cpp | **missing** | **missing** | **missing** | **missing** | - |
+| exit (optional) | `80388AC4` | `80388914` | `80388A00` | `803913E4` | dtk |
+| abort (optional) | `8045BCB0` | `8045BC94` | `8045BBE4` | `80465628` | high |
+| __register_global_object | `8044DFE4` | `8044DFC8` | `8044DF18` | `8045795C` | dtk |
+| __destroy_global_chain | `8044DFFC` | `8044DFE0` | `8044DF30` | `80457974` | dtk |
+| __save_gpr | `8044EA70` | `8044EA54` | `8044E9A4` | `804583E8` | dtk |
+| __restore_gpr | `8044EABC` | `8044EAA0` | `8044E9F0` | `80458434` | dtk |
+| __save_fpr | `8044E9D8` | `8044E9BC` | `8044E90C` | `80458350` | dtk |
+| __restore_fpr | `8044EA24` | `8044EA08` | `8044E958` | `8045839C` | dtk |
+| __ptmf_scall | `8044E6AC` | `8044E690` | `8044E5E0` | `80458024` | high |
+| __div2i | `8044EBF4` | `8044EBD8` | `8044EB28` | `8045856C` | high |
+| __div2u | `8044EB08` | `8044EAEC` | `8044EA3C` | `80458480` | dtk |
+| __mod2i | `8044EE10` | `8044EDF4` | `8044ED44` | `80458788` | high |
+| __mod2u | `8044ED2C` | `8044ED10` | `8044EC60` | `804586A4` | dtk |
+| __shl2i | `8044EF1C` | `8044EF00` | `8044EE50` | `80458894` | high |
+| __shr2i | **missing** | **missing** | **missing** | **missing** | - |
+| __shr2u | `8044EF40` | `8044EF24` | `8044EE74` | `804588B8` | high |
+| __cvt_fp2unsigned | `8044E97C` | `8044E960` | `8044E8B0` | `804582F4` | high |
+| __cvt_dbl_ull (optional) | `8044F018` | `8044EFFC` | `8044EF4C` | `80458990` | high |
+| memcpy | `80004338` | `80004338` | `80004338` | `80004338` | dtk |
+| memset | `8000443C` | `8000443C` | `8000443C` | `8000443C` | dtk |
+| memmove | `804531B4` | `80453198` | `804530E8` | `8045CB2C` | dtk |
+| memcmp | `804532D8` | `804532BC` | `8045320C` | `8045CC50` | high |
+| __fill_mem | `80004388` | `80004388` | `80004388` | `80004388` | dtk |
+| strlen | `8044DF00` | `8044DEE4` | `8044DE34` | `80457878` | dtk |
+| strcpy | `804572E0` | `804572C4` | `80457214` | `80460C58` | dtk |
+| strncpy | `804573A0` | `80457384` | `804572D4` | `80460D18` | high |
+| strcmp | `8045745C` | `80457440` | `80457390` | `80460DD4` | high |
+| strncmp | `80457578` | `8045755C` | `804574AC` | `80460EF0` | high |
+| strcat | `804573E4` | `804573C8` | `80457318` | `80460D5C` | high |
+| strncat (optional) | `80457410` | `804573F4` | `80457344` | `80460D88` | high |
+| strchr | `804575B8` | `8045759C` | `804574EC` | `80460F30` | dtk |
+| strrchr | **missing** | **missing** | **missing** | **missing** | - |
+| strstr | `804577B0` | `80457794` | `804576E4` | `80461128` | high |
+| sprintf | `80455A5C` | `80455A40` | `80455990` | `8045F3D4` | dtk |
+| snprintf | `80455984` | `80455968` | `804558B8` | `8045F2FC` | high |
+| vsprintf | `80455904` | `804558E8` | `80455838` | `8045F27C` | high |
+| vsnprintf | `80455880` | `80455864` | `804557B4` | `8045F1F8` | dtk |
+| printf (optional) | `80455740` | `80455724` | `80455674` | `8045F0B8` | high |
+| vprintf | `802AA19C` | `802A9FEC` | `802AA218` | `802AB758` | dtk |
+| sscanf (optional) | `80457168` | `8045714C` | `8045709C` | `80460AE0` | high |
+| atoi | `8045971C` | `80459700` | `80459650` | `80463094` | high |
+| strtol | `80459630` | `80459614` | `80459564` | `80462FA8` | high |
+| strtoul | `80459588` | `8045956C` | `804594BC` | `80462F00` | high |
+| tolower | **missing** | **missing** | **missing** | **missing** | - |
+| toupper | **missing** | **missing** | **missing** | **missing** | - |
+| wcslen (optional) | `8045BA2C` | `8045BA10` | `8045B960` | `804653A4` | high |
+| sqrt (optional) | `80460150` | `80460134` | `80460084` | `80469AC8` | high |
+| sin | `8045FD9C` | `8045FD80` | `8045FCD0` | `80469714` | high |
+| cos | `8045F894` | `8045F878` | `8045F7C8` | `8046920C` | high |
+| tan | `8045FE74` | `8045FE58` | `8045FDA8` | `804697EC` | high |
+| atan | `8045F4E8` | `8045F4CC` | `8045F41C` | `80468E60` | high |
+| atan2 | `8045FEF4` | `8045FED8` | `8045FE28` | `8046986C` | high |
+| acos | `8045FEEC` | `8045FED0` | `8045FE20` | `80469864` | high |
+| asin | `8045FEF0` | `8045FED4` | `8045FE24` | `80469868` | high |
+| exp | **missing** | **missing** | **missing** | **missing** | - |
+| log | **missing** | **missing** | **missing** | **missing** | - |
+| log10 | `8045FEFC` | `8045FEE0` | `8045FE30` | `80469874` | gap |
+| pow | `8045FF00` | `8045FEE4` | `8045FE34` | `80469878` | high |
+| fmod | `8045FEF8` | `8045FEDC` | `8045FE2C` | `80469870` | high |
+| floor | `8045F968` | `8045F94C` | `8045F89C` | `804692E0` | high |
+| ceil | `8045F728` | `8045F70C` | `8045F65C` | `804690A0` | high |
+| frexp | `8045FAAC` | `8045FA90` | `8045F9E0` | `80469424` | high |
+| ldexp | `8045FB34` | `8045FB18` | `8045FA68` | `804694AC` | high |
+| modf | `8045FCA0` | `8045FC84` | `8045FBD4` | `80469618` | high |
+| __fini_cpp | no reference places it | | | | |
+| __shr2i | not linked: the functions between __shl2i and __cvt_dbl_ull all have other names (ss_SOUE01) | | | | |
+| strrchr | not linked: the functions between strchr and strstr all have other names (smg_RMGE01) | | | | |
+| tolower | not linked: __flush_buffer and __fwrite are adjacent here (smg_RMGE01) | | | | |
+| toupper | no reference places it | | | | |
+| exp | not linked: atan2 and fmod are adjacent here (tp_RZDE01_02) | | | | |
+| log | no reference places it | | | | |
 
 Optional, not found (probably not linked, or still unnamed): _ExitProcess, __cvt_ull_dbl, __cvt_sll_flt, __cvt_ull_flt, fabs
 
 ## OS
 
-| Function | RUUE01 | RUUP01 | RUUJ01 | confidence |
-|---|---|---|---|---|
-| OSInit | `8037AC00` | `8037AA50` | `8037AB3C` | dtk |
-| __OSInitAudioSystem (optional) | `8037C2F0` | `8037C140` | `8037C22C` | dtk |
-| OSGetConsoleType | `8037A2D4` | `8037A124` | `8037A210` | dtk |
-| __OSGetIOSRev | `8037A268` | `8037A0B8` | `8037A1A4` | dtk |
-| OSRegisterVersion | `8037B49C` | `8037B2EC` | `8037B3D8` | dtk |
-| OSReport | `802AA110` | `802A9F60` | `802AA18C` | dtk |
-| OSPanic | `8037D43C` | `8037D28C` | `8037D378` | dtk |
-| OSFatal | `8037F570` | `8037F3C0` | `8037F4AC` | dtk |
-| OSSetErrorHandler | `8037D568` | `8037D3B8` | `8037D4A4` | dtk |
-| __OSUnhandledException | `8037D7F0` | `8037D640` | `8037D72C` | dtk |
-| OSGetArenaHi | `8037C04C` | `8037BE9C` | `8037BF88` | dtk |
-| OSGetArenaLo | `8037C064` | `8037BEB4` | `8037BFA0` | dtk |
-| OSSetArenaHi | `8037C07C` | `8037BECC` | `8037BFB8` | high |
-| OSSetArenaLo | `8037C094` | `8037BEE4` | `8037BFD0` | high |
-| OSGetMEM1ArenaHi | `8037C03C` | `8037BE8C` | `8037BF78` | dtk |
-| OSGetMEM1ArenaLo | `8037C054` | `8037BEA4` | `8037BF90` | dtk |
-| OSSetMEM1ArenaHi | `8037C06C` | `8037BEBC` | `8037BFA8` | dtk |
-| OSSetMEM1ArenaLo | `8037C084` | `8037BED4` | `8037BFC0` | dtk |
-| OSGetMEM2ArenaHi | `8037C044` | `8037BE94` | `8037BF80` | dtk |
-| OSGetMEM2ArenaLo | `8037C05C` | `8037BEAC` | `8037BF98` | dtk |
-| OSSetMEM2ArenaHi | `8037C074` | `8037BEC4` | `8037BFB0` | dtk |
-| OSSetMEM2ArenaLo | `8037C08C` | `8037BEDC` | `8037BFC8` | dtk |
-| OSAllocFromMEM1ArenaLo | `8037C09C` | `8037BEEC` | `8037BFD8` | high |
-| OSGetPhysicalMem1Size (optional) | `80381DE4` | `80381C34` | `80381D20` | high |
-| OSGetPhysicalMem2Size (optional) | `80381DF0` | `80381C40` | `80381D2C` | dtk |
-| OSGetConsoleSimulatedMem1Size (optional) | `80381DFC` | `80381C4C` | `80381D38` | dtk |
-| OSGetConsoleSimulatedMem2Size (optional) | `80381E08` | `80381C58` | `80381D44` | dtk |
-| OSDisableInterrupts | `80380A50` | `803808A0` | `8038098C` | dtk |
-| OSEnableInterrupts | `80380A64` | `803808B4` | `803809A0` | dtk |
-| OSRestoreInterrupts | `80380A78` | `803808C8` | `803809B4` | dtk |
-| __OSSetInterruptHandler | `80380A9C` | `803808EC` | `803809D8` | dtk |
-| __OSGetInterruptHandler | `80380AB0` | `80380900` | `803809EC` | high |
-| __OSInterruptInit | `80380AC0` | `80380910` | `803809FC` | dtk |
-| __OSMaskInterrupts | `80380DE0` | `80380C30` | `80380D1C` | dtk |
-| __OSUnmaskInterrupts | `80380E60` | `80380CB0` | `80380D9C` | dtk |
-| __OSDispatchInterrupt (optional) | `80380EE0` | `80380D30` | `80380E1C` | high |
-| OSGetCurrentContext | `8037CE64` | `8037CCB4` | `8037CDA0` | high |
-| OSSetCurrentContext | `8037CE08` | `8037CC58` | `8037CD44` | dtk |
-| OSSaveContext | `8037CE70` | `8037CCC0` | `8037CDAC` | high |
-| OSLoadContext | `8037CEF0` | `8037CD40` | `8037CE2C` | dtk |
-| OSClearContext | `8037D030` | `8037CE80` | `8037CF6C` | dtk |
-| OSInitContext | `8037D054` | `8037CEA4` | `8037CF90` | high |
-| OSSwitchFPUContext (optional) | `8037D370` | `8037D1C0` | `8037D2AC` | dtk |
-| __OSContextInit | `8037D3F4` | `8037D244` | `8037D330` | dtk |
-| OSCreateThread | `8038495C` | `803847AC` | `80384898` | high |
-| OSExitThread | `80384BC8` | `80384A18` | `80384B04` | high |
-| OSCancelThread | `80384CAC` | `80384AFC` | `80384BE8` | dtk |
-| OSJoinThread | `80384E84` | `80384CD4` | `80384DC0` | high |
-| OSDetachThread | `80384FC4` | `80384E14` | `80384F00` | high |
-| OSResumeThread | `80385064` | `80384EB4` | `80384FA0` | high |
-| OSSuspendThread | `803852FC` | `8038514C` | `80385238` | high |
-| OSSleepThread | `80385490` | `803852E0` | `803853CC` | dtk |
-| OSWakeupThread | `8038557C` | `803853CC` | `803854B8` | high |
-| OSYieldThread | `80384920` | `80384770` | `8038485C` | high |
-| OSGetCurrentThread | `80384374` | `803841C4` | `803842B0` | high |
-| OSSetThreadPriority | `80385670` | `803854C0` | `803855AC` | high |
-| OSGetThreadPriority | `8038575C` | `803855AC` | `80385698` | high |
-| OSIsThreadTerminated | `80384394` | `803841E4` | `803842D0` | high |
-| OSIsThreadSuspended | `80384380` | `803841D0` | `803842BC` | high |
-| OSDisableScheduler | `803843C0` | `80384210` | `803842FC` | dtk |
-| OSEnableScheduler | `803843FC` | `8038424C` | `80384338` | dtk |
-| OSInitThreadQueue | `80384364` | `803841B4` | `803842A0` | dtk |
-| OSSetSwitchThreadCallback | `80384070` | `80383EC0` | `80383FAC` | high |
-| __OSThreadInit | `803840E0` | `80383F30` | `8038401C` | dtk |
-| __OSReschedule | `80384908` | `80384758` | `80384844` | dtk |
-| OSSleepTicks (optional) | `80385788` | `803855D8` | `803856C4` | high |
-| OSInitMessageQueue | `80381BE0` | `80381A30` | `80381B1C` | high |
-| OSSendMessage | `80381C40` | `80381A90` | `80381B7C` | high |
-| OSReceiveMessage | `80381D08` | `80381B58` | `80381C44` | high |
-| OSJamMessage | **missing** | **missing** | **missing** | - |
-| OSInitMutex | `803825F8` | `80382448` | `80382534` | high |
-| OSLockMutex | `80382630` | `80382480` | `8038256C` | high |
-| OSUnlockMutex | `8038270C` | `8038255C` | `80382648` | high |
-| OSTryLockMutex | `80382840` | `80382690` | `8038277C` | high |
-| __OSUnlockAllMutex | `803827D4` | `80382624` | `80382710` | high |
-| OSInitCond | `803828FC` | `8038274C` | `80382838` | high |
-| OSWaitCond | `80382900` | `80382750` | `8038283C` | high |
-| OSSignalCond | `803829DC` | `8038282C` | `80382918` | high |
-| OSCreateAlarm | `8037B5A8` | `8037B3F8` | `8037B4E4` | dtk |
-| OSSetAlarm | `8037B808` | `8037B658` | `8037B744` | dtk |
-| OSSetPeriodicAlarm | `8037B878` | `8037B6C8` | `8037B7B4` | high |
-| OSCancelAlarm | `8037B8FC` | `8037B74C` | `8037B838` | high |
-| __OSInitAlarm | `8037B550` | `8037B3A0` | `8037B48C` | dtk |
-| OSSetAlarmTag (optional) | `8037BC90` | `8037BAE0` | `8037BBCC` | high |
-| OSSetAlarmUserData (optional) | `8037BD24` | `8037BB74` | `8037BC60` | high |
-| OSGetAlarmUserData (optional) | `8037BD2C` | `8037BB7C` | `8037BC68` | high |
-| OSGetTime | `8038583C` | `8038568C` | `80385778` | dtk |
-| OSGetTick | `80385854` | `803856A4` | `80385790` | dtk |
-| __OSGetSystemTime | `8038585C` | `803856AC` | `80385798` | dtk |
-| OSTicksToCalendarTime | `80385A88` | `803858D8` | `803859C4` | high |
-| OSCalendarTimeToTicks (optional) | `80385C50` | `80385AA0` | `80385B8C` | high |
-| __OSTimeToSystemTime (optional) | `803858C0` | `80385710` | `803857FC` | high |
-| DCEnable | `8037C584` | `8037C3D4` | `8037C4C0` | dtk |
-| DCInvalidateRange | `8037C598` | `8037C3E8` | `8037C4D4` | dtk |
-| DCFlushRange | `8037C5C4` | `8037C414` | `8037C500` | dtk |
-| DCStoreRange | `8037C5F4` | `8037C444` | `8037C530` | high |
-| DCFlushRangeNoSync | `8037C624` | `8037C474` | `8037C560` | dtk |
-| DCStoreRangeNoSync | `8037C650` | `8037C4A0` | `8037C58C` | high |
-| DCZeroRange | `8037C67C` | `8037C4CC` | `8037C5B8` | dtk |
-| ICInvalidateRange | `8037C6A8` | `8037C4F8` | `8037C5E4` | dtk |
-| ICFlashInvalidate | `8037C6DC` | `8037C52C` | `8037C618` | dtk |
-| ICEnable | `8037C6EC` | `8037C53C` | `8037C628` | dtk |
-| LCEnable | `8037C7CC` | `8037C61C` | `8037C708` | high |
-| LCDisable | `8037C804` | `8037C654` | `8037C740` | dtk |
-| LCStoreBlocks | `8037C850` | `8037C6A0` | `8037C78C` | high |
-| LCLoadBlocks | `8037C82C` | `8037C67C` | `8037C768` | high |
-| LCQueueWait (optional) | `8037C920` | `8037C770` | `8037C85C` | high |
-| __OSCacheInit | `8037CA7C` | `8037C8CC` | `8037C9B8` | dtk |
-| OSLink | `80381790` | `803815E0` | `803816CC` | high |
-| OSLinkFixed | `80381798` | `803815E8` | `803816D4` | high |
-| OSUnlink | `803819F8` | `80381848` | `80381934` | high |
-| OSSetStringTable (optional) | `803811E4` | `80381034` | `80381120` | high |
-| __OSModuleInit | `80381BC8` | `80381A18` | `80381B04` | dtk |
-| OSNotifyLink | `803811D4` | `80381024` | `80381110` | high |
-| OSNotifyUnlink | `803811D8` | `80381028` | `80381114` | high |
-| OSNotifyPreLink (optional) | `803811DC` | `8038102C` | `80381118` | gap |
-| OSNotifyPostLink (optional) | `803811E0` | `80381030` | `8038111C` | gap |
-| OSResetSystem | `803833CC` | `8038321C` | `80383308` | dtk |
-| OSRestart | `80382F90` | `80382DE0` | `80382ECC` | high |
-| OSReturnToMenu | `80383164` | `80382FB4` | `803830A0` | dtk |
-| OSRebootSystem | `80382D94` | `80382BE4` | `80382CD0` | high |
-| OSShutdownSystem | `80382E74` | `80382CC4` | `80382DB0` | high |
-| OSGetResetCode | `8038339C` | `803831EC` | `803832D8` | dtk |
-| OSRegisterShutdownFunction | `80382A60` | `803828B0` | `8038299C` | dtk |
-| OSSetResetCallback (optional) | `80386150` | `80385FA0` | `8038608C` | high |
-| OSSetPowerCallback (optional) | `8038623C` | `8038608C` | `80386178` | high |
-| __OSShutdownDevices | `80382B98` | `803829E8` | `80382AD4` | dtk |
-| __OSHotReset (optional) | `803864B8` | `80386308` | `803863F4` | dtk |
-| __OSInitSTM | `80386328` | `80386178` | `80386264` | dtk |
-| __OSShutdownToSBY (optional) | `80386440` | `80386290` | `8038637C` | high |
-| __OSSetVIForceDimming (optional) | `80386528` | `80386378` | `80386464` | high |
-| __OSUnRegisterStateEvent (optional) | `80386660` | `803864B0` | `8038659C` | dtk |
-| __OSInitNet (optional) | `80387148` | `80386F98` | `80387084` | dtk |
-| __OSInitPlayTime (optional) | `80387B44` | `80387994` | `80387A80` | dtk |
-| __OSStartPlayRecord (optional) | `80386D00` | `80386B50` | `80386C3C` | dtk |
-| OSPlayTimeIsLimited (optional) | `80387404` | `80387254` | `80387340` | high |
-| __OSWriteStateFlags | `80386F3C` | `80386D8C` | `80386E78` | dtk |
-| __OSReadStateFlags | `80387020` | `80386E70` | `80386F5C` | dtk |
-| OSGetSaveRegion (optional) | `80382A4C` | `8038289C` | `80382988` | high |
-| OSGetWirelessID (optional) | `80383B34` | `80383984` | `80383A70` | high |
-| __OSGetRTCFlags (optional) | `80383C48` | `80383A98` | `80383B84` | dtk |
-| __OSPSInit | `8037B438` | `8037B288` | `8037B374` | dtk |
-| __OSFPRInit | `8037A140` | `80379F90` | `8037A07C` | dtk |
-| __OSInitIPCBuffer | `80386138` | `80385F88` | `80386074` | dtk |
-| __OSInitSram (optional) | `80383520` | `80383370` | `8038345C` | dtk |
-| __OSReadROM (optional) | `80383A10` | `80383860` | `8038394C` | high |
-| __OSInitMemoryProtection | `80382548` | `80382398` | `80382484` | dtk |
-| OSSetFontEncode (optional) | `80380060` | `8037FEB0` | `8037FF9C` | dtk |
-| OSUTF32toSJIS (optional) | `803860E8` | `80385F38` | `80386024` | high |
-| PPCHalt | `8037A010` | `80379E60` | `80379F4C` | dtk |
-| PPCMfmsr | `80379FD0` | `80379E20` | `80379F0C` | dtk |
-| PPCMtmsr | `80379FD8` | `80379E28` | `80379F14` | dtk |
-| PPCMfhid2 | `8037A09C` | `80379EEC` | `80379FD8` | dtk |
-| PPCMthid2 | `8037A0A4` | `80379EF4` | `80379FE0` | dtk |
-| PPCMffpscr | `8037A054` | `80379EA4` | `80379F90` | dtk |
-| PPCMtfpscr | `8037A074` | `80379EC4` | `80379FB0` | dtk |
-| PPCSync (optional) | `8037A008` | `80379E58` | `80379F44` | high |
-| PPCDisableSpeculation | `8037A0C0` | `80379F10` | `80379FFC` | dtk |
-| PPCSetFpNonIEEEMode | `8037A0E8` | `80379F38` | `8037A024` | dtk |
-| OSJamMessage | not linked: OSReceiveMessage and OSGetPhysicalMem1Size are adjacent here (smg_RMGE01) | | | |
+| Function | RUUE01 | RUUP01 | RUUJ01 | RUUK01 | confidence |
+|---|---|---|---|---|---|
+| OSInit | `8037AC00` | `8037AA50` | `8037AB3C` | `80383520` | dtk |
+| __OSInitAudioSystem (optional) | `8037C2F0` | `8037C140` | `8037C22C` | `80384C10` | dtk |
+| OSGetConsoleType | `8037A2D4` | `8037A124` | `8037A210` | `80382BF4` | dtk |
+| __OSGetIOSRev | `8037A268` | `8037A0B8` | `8037A1A4` | `80382B88` | dtk |
+| OSRegisterVersion | `8037B49C` | `8037B2EC` | `8037B3D8` | `80383DBC` | dtk |
+| OSReport | `802AA110` | `802A9F60` | `802AA18C` | `802AB6CC` | dtk |
+| OSPanic | `8037D43C` | `8037D28C` | `8037D378` | `80385D5C` | dtk |
+| OSFatal | `8037F570` | `8037F3C0` | `8037F4AC` | `80387E90` | dtk |
+| OSSetErrorHandler | `8037D568` | `8037D3B8` | `8037D4A4` | `80385E88` | dtk |
+| __OSUnhandledException | `8037D7F0` | `8037D640` | `8037D72C` | `80386110` | dtk |
+| OSGetArenaHi | `8037C04C` | `8037BE9C` | `8037BF88` | `8038496C` | dtk |
+| OSGetArenaLo | `8037C064` | `8037BEB4` | `8037BFA0` | `80384984` | dtk |
+| OSSetArenaHi | `8037C07C` | `8037BECC` | `8037BFB8` | `8038499C` | high |
+| OSSetArenaLo | `8037C094` | `8037BEE4` | `8037BFD0` | `803849B4` | high |
+| OSGetMEM1ArenaHi | `8037C03C` | `8037BE8C` | `8037BF78` | `8038495C` | dtk |
+| OSGetMEM1ArenaLo | `8037C054` | `8037BEA4` | `8037BF90` | `80384974` | dtk |
+| OSSetMEM1ArenaHi | `8037C06C` | `8037BEBC` | `8037BFA8` | `8038498C` | dtk |
+| OSSetMEM1ArenaLo | `8037C084` | `8037BED4` | `8037BFC0` | `803849A4` | dtk |
+| OSGetMEM2ArenaHi | `8037C044` | `8037BE94` | `8037BF80` | `80384964` | dtk |
+| OSGetMEM2ArenaLo | `8037C05C` | `8037BEAC` | `8037BF98` | `8038497C` | dtk |
+| OSSetMEM2ArenaHi | `8037C074` | `8037BEC4` | `8037BFB0` | `80384994` | dtk |
+| OSSetMEM2ArenaLo | `8037C08C` | `8037BEDC` | `8037BFC8` | `803849AC` | dtk |
+| OSAllocFromMEM1ArenaLo | `8037C09C` | `8037BEEC` | `8037BFD8` | `803849BC` | high |
+| OSGetPhysicalMem1Size (optional) | `80381DE4` | `80381C34` | `80381D20` | `8038A704` | high |
+| OSGetPhysicalMem2Size (optional) | `80381DF0` | `80381C40` | `80381D2C` | `8038A710` | dtk |
+| OSGetConsoleSimulatedMem1Size (optional) | `80381DFC` | `80381C4C` | `80381D38` | `8038A71C` | dtk |
+| OSGetConsoleSimulatedMem2Size (optional) | `80381E08` | `80381C58` | `80381D44` | `8038A728` | dtk |
+| OSDisableInterrupts | `80380A50` | `803808A0` | `8038098C` | `80389370` | dtk |
+| OSEnableInterrupts | `80380A64` | `803808B4` | `803809A0` | `80389384` | dtk |
+| OSRestoreInterrupts | `80380A78` | `803808C8` | `803809B4` | `80389398` | dtk |
+| __OSSetInterruptHandler | `80380A9C` | `803808EC` | `803809D8` | `803893BC` | dtk |
+| __OSGetInterruptHandler | `80380AB0` | `80380900` | `803809EC` | `803893D0` | high |
+| __OSInterruptInit | `80380AC0` | `80380910` | `803809FC` | `803893E0` | dtk |
+| __OSMaskInterrupts | `80380DE0` | `80380C30` | `80380D1C` | `80389700` | dtk |
+| __OSUnmaskInterrupts | `80380E60` | `80380CB0` | `80380D9C` | `80389780` | dtk |
+| __OSDispatchInterrupt (optional) | `80380EE0` | `80380D30` | `80380E1C` | `80389800` | high |
+| OSGetCurrentContext | `8037CE64` | `8037CCB4` | `8037CDA0` | `80385784` | high |
+| OSSetCurrentContext | `8037CE08` | `8037CC58` | `8037CD44` | `80385728` | dtk |
+| OSSaveContext | `8037CE70` | `8037CCC0` | `8037CDAC` | `80385790` | high |
+| OSLoadContext | `8037CEF0` | `8037CD40` | `8037CE2C` | `80385810` | dtk |
+| OSClearContext | `8037D030` | `8037CE80` | `8037CF6C` | `80385950` | dtk |
+| OSInitContext | `8037D054` | `8037CEA4` | `8037CF90` | `80385974` | high |
+| OSSwitchFPUContext (optional) | `8037D370` | `8037D1C0` | `8037D2AC` | `80385C90` | dtk |
+| __OSContextInit | `8037D3F4` | `8037D244` | `8037D330` | `80385D14` | dtk |
+| OSCreateThread | `8038495C` | `803847AC` | `80384898` | `8038D27C` | high |
+| OSExitThread | `80384BC8` | `80384A18` | `80384B04` | `8038D4E8` | high |
+| OSCancelThread | `80384CAC` | `80384AFC` | `80384BE8` | `8038D5CC` | dtk |
+| OSJoinThread | `80384E84` | `80384CD4` | `80384DC0` | `8038D7A4` | high |
+| OSDetachThread | `80384FC4` | `80384E14` | `80384F00` | `8038D8E4` | high |
+| OSResumeThread | `80385064` | `80384EB4` | `80384FA0` | `8038D984` | high |
+| OSSuspendThread | `803852FC` | `8038514C` | `80385238` | `8038DC1C` | high |
+| OSSleepThread | `80385490` | `803852E0` | `803853CC` | `8038DDB0` | dtk |
+| OSWakeupThread | `8038557C` | `803853CC` | `803854B8` | `8038DE9C` | high |
+| OSYieldThread | `80384920` | `80384770` | `8038485C` | `8038D240` | high |
+| OSGetCurrentThread | `80384374` | `803841C4` | `803842B0` | `8038CC94` | high |
+| OSSetThreadPriority | `80385670` | `803854C0` | `803855AC` | `8038DF90` | high |
+| OSGetThreadPriority | `8038575C` | `803855AC` | `80385698` | `8038E07C` | high |
+| OSIsThreadTerminated | `80384394` | `803841E4` | `803842D0` | `8038CCB4` | high |
+| OSIsThreadSuspended | `80384380` | `803841D0` | `803842BC` | `8038CCA0` | high |
+| OSDisableScheduler | `803843C0` | `80384210` | `803842FC` | `8038CCE0` | dtk |
+| OSEnableScheduler | `803843FC` | `8038424C` | `80384338` | `8038CD1C` | dtk |
+| OSInitThreadQueue | `80384364` | `803841B4` | `803842A0` | `8038CC84` | dtk |
+| OSSetSwitchThreadCallback | `80384070` | `80383EC0` | `80383FAC` | `8038C990` | high |
+| __OSThreadInit | `803840E0` | `80383F30` | `8038401C` | `8038CA00` | dtk |
+| __OSReschedule | `80384908` | `80384758` | `80384844` | `8038D228` | dtk |
+| OSSleepTicks (optional) | `80385788` | `803855D8` | `803856C4` | `8038E0A8` | high |
+| OSInitMessageQueue | `80381BE0` | `80381A30` | `80381B1C` | `8038A500` | high |
+| OSSendMessage | `80381C40` | `80381A90` | `80381B7C` | `8038A560` | high |
+| OSReceiveMessage | `80381D08` | `80381B58` | `80381C44` | `8038A628` | high |
+| OSJamMessage | **missing** | **missing** | **missing** | **missing** | - |
+| OSInitMutex | `803825F8` | `80382448` | `80382534` | `8038AF18` | high |
+| OSLockMutex | `80382630` | `80382480` | `8038256C` | `8038AF50` | high |
+| OSUnlockMutex | `8038270C` | `8038255C` | `80382648` | `8038B02C` | high |
+| OSTryLockMutex | `80382840` | `80382690` | `8038277C` | `8038B160` | high |
+| __OSUnlockAllMutex | `803827D4` | `80382624` | `80382710` | `8038B0F4` | high |
+| OSInitCond | `803828FC` | `8038274C` | `80382838` | `8038B21C` | high |
+| OSWaitCond | `80382900` | `80382750` | `8038283C` | `8038B220` | high |
+| OSSignalCond | `803829DC` | `8038282C` | `80382918` | `8038B2FC` | high |
+| OSCreateAlarm | `8037B5A8` | `8037B3F8` | `8037B4E4` | `80383EC8` | dtk |
+| OSSetAlarm | `8037B808` | `8037B658` | `8037B744` | `80384128` | dtk |
+| OSSetPeriodicAlarm | `8037B878` | `8037B6C8` | `8037B7B4` | `80384198` | high |
+| OSCancelAlarm | `8037B8FC` | `8037B74C` | `8037B838` | `8038421C` | high |
+| __OSInitAlarm | `8037B550` | `8037B3A0` | `8037B48C` | `80383E70` | dtk |
+| OSSetAlarmTag (optional) | `8037BC90` | `8037BAE0` | `8037BBCC` | `803845B0` | high |
+| OSSetAlarmUserData (optional) | `8037BD24` | `8037BB74` | `8037BC60` | `80384644` | high |
+| OSGetAlarmUserData (optional) | `8037BD2C` | `8037BB7C` | `8037BC68` | `8038464C` | high |
+| OSGetTime | `8038583C` | `8038568C` | `80385778` | `8038E15C` | dtk |
+| OSGetTick | `80385854` | `803856A4` | `80385790` | `8038E174` | dtk |
+| __OSGetSystemTime | `8038585C` | `803856AC` | `80385798` | `8038E17C` | dtk |
+| OSTicksToCalendarTime | `80385A88` | `803858D8` | `803859C4` | `8038E3A8` | high |
+| OSCalendarTimeToTicks (optional) | `80385C50` | `80385AA0` | `80385B8C` | `8038E570` | high |
+| __OSTimeToSystemTime (optional) | `803858C0` | `80385710` | `803857FC` | `8038E1E0` | high |
+| DCEnable | `8037C584` | `8037C3D4` | `8037C4C0` | `80384EA4` | dtk |
+| DCInvalidateRange | `8037C598` | `8037C3E8` | `8037C4D4` | `80384EB8` | dtk |
+| DCFlushRange | `8037C5C4` | `8037C414` | `8037C500` | `80384EE4` | dtk |
+| DCStoreRange | `8037C5F4` | `8037C444` | `8037C530` | `80384F14` | high |
+| DCFlushRangeNoSync | `8037C624` | `8037C474` | `8037C560` | `80384F44` | dtk |
+| DCStoreRangeNoSync | `8037C650` | `8037C4A0` | `8037C58C` | `80384F70` | high |
+| DCZeroRange | `8037C67C` | `8037C4CC` | `8037C5B8` | `80384F9C` | dtk |
+| ICInvalidateRange | `8037C6A8` | `8037C4F8` | `8037C5E4` | `80384FC8` | dtk |
+| ICFlashInvalidate | `8037C6DC` | `8037C52C` | `8037C618` | `80384FFC` | dtk |
+| ICEnable | `8037C6EC` | `8037C53C` | `8037C628` | `8038500C` | dtk |
+| LCEnable | `8037C7CC` | `8037C61C` | `8037C708` | `803850EC` | high |
+| LCDisable | `8037C804` | `8037C654` | `8037C740` | `80385124` | dtk |
+| LCStoreBlocks | `8037C850` | `8037C6A0` | `8037C78C` | `80385170` | high |
+| LCLoadBlocks | `8037C82C` | `8037C67C` | `8037C768` | `8038514C` | high |
+| LCQueueWait (optional) | `8037C920` | `8037C770` | `8037C85C` | `80385240` | high |
+| __OSCacheInit | `8037CA7C` | `8037C8CC` | `8037C9B8` | `8038539C` | dtk |
+| OSLink | `80381790` | `803815E0` | `803816CC` | `8038A0B0` | high |
+| OSLinkFixed | `80381798` | `803815E8` | `803816D4` | `8038A0B8` | high |
+| OSUnlink | `803819F8` | `80381848` | `80381934` | `8038A318` | high |
+| OSSetStringTable (optional) | `803811E4` | `80381034` | `80381120` | `80389B04` | high |
+| __OSModuleInit | `80381BC8` | `80381A18` | `80381B04` | `8038A4E8` | dtk |
+| OSNotifyLink | `803811D4` | `80381024` | `80381110` | `80389AF4` | high |
+| OSNotifyUnlink | `803811D8` | `80381028` | `80381114` | `80389AF8` | high |
+| OSNotifyPreLink (optional) | `803811DC` | `8038102C` | `80381118` | `80389AFC` | gap |
+| OSNotifyPostLink (optional) | `803811E0` | `80381030` | `8038111C` | `80389B00` | gap |
+| OSResetSystem | `803833CC` | `8038321C` | `80383308` | `8038BCEC` | dtk |
+| OSRestart | `80382F90` | `80382DE0` | `80382ECC` | `8038B8B0` | high |
+| OSReturnToMenu | `80383164` | `80382FB4` | `803830A0` | `8038BA84` | dtk |
+| OSRebootSystem | `80382D94` | `80382BE4` | `80382CD0` | `8038B6B4` | high |
+| OSShutdownSystem | `80382E74` | `80382CC4` | `80382DB0` | `8038B794` | high |
+| OSGetResetCode | `8038339C` | `803831EC` | `803832D8` | `8038BCBC` | dtk |
+| OSRegisterShutdownFunction | `80382A60` | `803828B0` | `8038299C` | `8038B380` | dtk |
+| OSSetResetCallback (optional) | `80386150` | `80385FA0` | `8038608C` | `8038EA70` | high |
+| OSSetPowerCallback (optional) | `8038623C` | `8038608C` | `80386178` | `8038EB5C` | high |
+| __OSShutdownDevices | `80382B98` | `803829E8` | `80382AD4` | `8038B4B8` | dtk |
+| __OSHotReset (optional) | `803864B8` | `80386308` | `803863F4` | `8038EDD8` | dtk |
+| __OSInitSTM | `80386328` | `80386178` | `80386264` | `8038EC48` | dtk |
+| __OSShutdownToSBY (optional) | `80386440` | `80386290` | `8038637C` | `8038ED60` | high |
+| __OSSetVIForceDimming (optional) | `80386528` | `80386378` | `80386464` | `8038EE48` | high |
+| __OSUnRegisterStateEvent (optional) | `80386660` | `803864B0` | `8038659C` | `8038EF80` | dtk |
+| __OSInitNet (optional) | `80387148` | `80386F98` | `80387084` | `8038FA68` | dtk |
+| __OSInitPlayTime (optional) | `80387B44` | `80387994` | `80387A80` | `80390464` | dtk |
+| __OSStartPlayRecord (optional) | `80386D00` | `80386B50` | `80386C3C` | `8038F620` | dtk |
+| OSPlayTimeIsLimited (optional) | `80387404` | `80387254` | `80387340` | `8038FD24` | high |
+| __OSWriteStateFlags | `80386F3C` | `80386D8C` | `80386E78` | `8038F85C` | dtk |
+| __OSReadStateFlags | `80387020` | `80386E70` | `80386F5C` | `8038F940` | dtk |
+| OSGetSaveRegion (optional) | `80382A4C` | `8038289C` | `80382988` | `8038B36C` | high |
+| OSGetWirelessID (optional) | `80383B34` | `80383984` | `80383A70` | `8038C454` | high |
+| __OSGetRTCFlags (optional) | `80383C48` | `80383A98` | `80383B84` | `8038C568` | dtk |
+| __OSPSInit | `8037B438` | `8037B288` | `8037B374` | `80383D58` | dtk |
+| __OSFPRInit | `8037A140` | `80379F90` | `8037A07C` | `80382A60` | dtk |
+| __OSInitIPCBuffer | `80386138` | `80385F88` | `80386074` | `8038EA58` | dtk |
+| __OSInitSram (optional) | `80383520` | `80383370` | `8038345C` | `8038BE40` | dtk |
+| __OSReadROM (optional) | `80383A10` | `80383860` | `8038394C` | `8038C330` | high |
+| __OSInitMemoryProtection | `80382548` | `80382398` | `80382484` | `8038AE68` | dtk |
+| OSSetFontEncode (optional) | `80380060` | `8037FEB0` | `8037FF9C` | `80388980` | dtk |
+| OSUTF32toSJIS (optional) | `803860E8` | `80385F38` | `80386024` | `8038EA08` | high |
+| PPCHalt | `8037A010` | `80379E60` | `80379F4C` | `80382930` | dtk |
+| PPCMfmsr | `80379FD0` | `80379E20` | `80379F0C` | `803828F0` | dtk |
+| PPCMtmsr | `80379FD8` | `80379E28` | `80379F14` | `803828F8` | dtk |
+| PPCMfhid2 | `8037A09C` | `80379EEC` | `80379FD8` | `803829BC` | dtk |
+| PPCMthid2 | `8037A0A4` | `80379EF4` | `80379FE0` | `803829C4` | dtk |
+| PPCMffpscr | `8037A054` | `80379EA4` | `80379F90` | `80382974` | dtk |
+| PPCMtfpscr | `8037A074` | `80379EC4` | `80379FB0` | `80382994` | dtk |
+| PPCSync (optional) | `8037A008` | `80379E58` | `80379F44` | `80382928` | high |
+| PPCDisableSpeculation | `8037A0C0` | `80379F10` | `80379FFC` | `803829E0` | dtk |
+| PPCSetFpNonIEEEMode | `8037A0E8` | `80379F38` | `8037A024` | `80382A08` | dtk |
+| OSJamMessage | not linked: OSReceiveMessage and OSGetPhysicalMem1Size are adjacent here (smg_RMGE01) | | | | |
 
 Optional, not found (probably not linked, or still unnamed): OSVReport, OSAllocFromMEM1ArenaHi, OSFillFPUContext, OSSetIdleFunction, OSInitSemaphore, OSWaitSemaphore, OSSignalSemaphore, OSTryWaitSemaphore, OSCancelAlarms, OSGetSystemTime, DCTouchRange, ICSync, OSRegisterResetFunction, OSExec, OSLaunchTitle, OSSetSaveRegion, OSGetProgressiveMode, OSSetProgressiveMode, OSGetLanguage, OSGetSoundMode, OSSetSoundMode, OSGetEuRgb60Mode, __OSGetRTC, __OSSetRTC, OSInitFastCast, OSProtectRange, OSGetFontEncode, OSInitFont, OSGetFontTexture, OSGetFontWidth, OSSJIStoUTF32
 
 ## EXI / SI / DB
 
-| Function | RUUE01 | RUUP01 | RUUJ01 | confidence |
-|---|---|---|---|---|
-| EXIInit | `80389C38` | `80389A88` | `80389B74` | dtk |
-| EXILock | `80389DFC` | `80389C4C` | `80389D38` | dtk |
-| EXIUnlock | `80389EF8` | `80389D48` | `80389E34` | dtk |
-| EXISelect | `80389668` | `803894B8` | `803895A4` | dtk |
-| EXIDeselect | `80389798` | `803895E8` | `803896D4` | dtk |
-| EXIImm | `80388C00` | `80388A50` | `80388B3C` | dtk |
-| EXIImmEx | `80388E7C` | `80388CCC` | `80388DB8` | high |
-| EXIDma | `80388F20` | `80388D70` | `80388E5C` | dtk |
-| EXISync | `80389018` | `80388E68` | `80388F54` | dtk |
-| EXIProbe | **missing** | **missing** | **missing** | - |
-| EXIGetID | `80389FF8` | `80389E48` | `80389F34` | dtk |
-| EXIAttach (optional) | `80389498` | `803892E8` | `803893D4` | high |
-| EXIDetach (optional) | `803895B0` | `80389400` | `803894EC` | high |
-| SIInit | `8038AF7C` | `8038ADCC` | `8038AEB8` | dtk |
-| SIIsChanBusy (optional) | `8038A864` | `8038A6B4` | `8038A7A0` | high |
-| SIGetType (optional) | `8038B994` | `8038B7E4` | `8038B8D0` | dtk |
-| SIGetTypeAsync (optional) | `8038BB48` | `8038B998` | `8038BA84` | high |
-| SISetSamplingRate (optional) | `8038BC58` | `8038BAA8` | `8038BB94` | dtk |
-| SIRefreshSamplingRate (optional) | `8038BD30` | `8038BB80` | `8038BC6C` | high |
-| SITransfer (optional) | `8038B578` | `8038B3C8` | `8038B4B4` | dtk |
-| SISetCommand (optional) | `8038B264` | `8038B0B4` | `8038B1A0` | high |
-| SIEnablePolling (optional) | `8038B2D4` | `8038B124` | `8038B210` | high |
-| SIDisablePolling (optional) | `8038B35C` | `8038B1AC` | `8038B298` | high |
-| SIGetResponse (optional) | `8038B3C8` | `8038B218` | `8038B304` | high |
-| DBInit (optional) | `8038BD38` | `8038BB88` | `8038BC74` | dtk |
-| __DBIsExceptionMarked (optional) | `8038BDB8` | `8038BC08` | `8038BCF4` | dtk |
-| DBPrintf (optional) | `8038BDD0` | `8038BC20` | `8038BD0C` | dtk |
-| EXIProbe | not linked: __EXIProbe and EXIAttach are adjacent here (tp_RZDE01_02) | | | |
+| Function | RUUE01 | RUUP01 | RUUJ01 | RUUK01 | confidence |
+|---|---|---|---|---|---|
+| EXIInit | `80389C38` | `80389A88` | `80389B74` | `80392558` | dtk |
+| EXILock | `80389DFC` | `80389C4C` | `80389D38` | `8039271C` | dtk |
+| EXIUnlock | `80389EF8` | `80389D48` | `80389E34` | `80392818` | dtk |
+| EXISelect | `80389668` | `803894B8` | `803895A4` | `80391F88` | dtk |
+| EXIDeselect | `80389798` | `803895E8` | `803896D4` | `803920B8` | dtk |
+| EXIImm | `80388C00` | `80388A50` | `80388B3C` | `80391520` | dtk |
+| EXIImmEx | `80388E7C` | `80388CCC` | `80388DB8` | `8039179C` | high |
+| EXIDma | `80388F20` | `80388D70` | `80388E5C` | `80391840` | dtk |
+| EXISync | `80389018` | `80388E68` | `80388F54` | `80391938` | dtk |
+| EXIProbe | **missing** | **missing** | **missing** | **missing** | - |
+| EXIGetID | `80389FF8` | `80389E48` | `80389F34` | `80392918` | dtk |
+| EXIAttach (optional) | `80389498` | `803892E8` | `803893D4` | `80391DB8` | high |
+| EXIDetach (optional) | `803895B0` | `80389400` | `803894EC` | `80391ED0` | high |
+| SIInit | `8038AF7C` | `8038ADCC` | `8038AEB8` | `8039389C` | dtk |
+| SIIsChanBusy (optional) | `8038A864` | `8038A6B4` | `8038A7A0` | `80393184` | high |
+| SIGetType (optional) | `8038B994` | `8038B7E4` | `8038B8D0` | `803942B4` | dtk |
+| SIGetTypeAsync (optional) | `8038BB48` | `8038B998` | `8038BA84` | `80394468` | high |
+| SISetSamplingRate (optional) | `8038BC58` | `8038BAA8` | `8038BB94` | `80394578` | dtk |
+| SIRefreshSamplingRate (optional) | `8038BD30` | `8038BB80` | `8038BC6C` | `80394650` | high |
+| SITransfer (optional) | `8038B578` | `8038B3C8` | `8038B4B4` | `80393E98` | dtk |
+| SISetCommand (optional) | `8038B264` | `8038B0B4` | `8038B1A0` | `80393B84` | high |
+| SIEnablePolling (optional) | `8038B2D4` | `8038B124` | `8038B210` | `80393BF4` | high |
+| SIDisablePolling (optional) | `8038B35C` | `8038B1AC` | `8038B298` | `80393C7C` | high |
+| SIGetResponse (optional) | `8038B3C8` | `8038B218` | `8038B304` | `80393CE8` | high |
+| DBInit (optional) | `8038BD38` | `8038BB88` | `8038BC74` | `80394658` | dtk |
+| __DBIsExceptionMarked (optional) | `8038BDB8` | `8038BC08` | `8038BCF4` | `803946D8` | dtk |
+| DBPrintf (optional) | `8038BDD0` | `8038BC20` | `8038BD0C` | `803946F0` | dtk |
+| EXIProbe | not linked: __EXIProbe and EXIAttach are adjacent here (tp_RZDE01_02) | | | | |
 
 Optional, not found (probably not linked, or still unnamed): EXIProbeEx, SIBusy
 
 ## PAD
 
-| Function | RUUE01 | RUUP01 | RUUJ01 | confidence |
-|---|---|---|---|---|
-| PADInit | **missing** | **missing** | **missing** | - |
-| PADRead | `803AE9A4` | `803AE7F4` | `803AE8E0` | gap |
-| PADReset | `803AE89C` | `803AE6EC` | `803AE7D8` | high |
-| PADControlMotor | **missing** | **missing** | **missing** | - |
-| PADClampCircle | `803ADF58` | `803ADDA8` | `803ADE94` | high |
-| PADInit | not linked: PADReset and PADRead are adjacent here (mkw_RMCP01) | | | |
-| PADControlMotor | not linked: PADRead and SPEC2_MakeStatus are adjacent here (mkw_RMCP01) | | | |
+| Function | RUUE01 | RUUP01 | RUUJ01 | RUUK01 | confidence |
+|---|---|---|---|---|---|
+| PADInit | **missing** | **missing** | **missing** | **missing** | - |
+| PADRead | `803AE9A4` | `803AE7F4` | `803AE8E0` | `803B72E8` | gap |
+| PADReset | `803AE89C` | `803AE6EC` | `803AE7D8` | `803B71E0` | high |
+| PADControlMotor | **missing** | **missing** | **missing** | **missing** | - |
+| PADClampCircle | `803ADF58` | `803ADDA8` | `803ADE94` | `803B689C` | high |
+| PADInit | not linked: PADReset and PADRead are adjacent here (mkw_RMCP01) | | | | |
+| PADControlMotor | not linked: PADRead and SPEC2_MakeStatus are adjacent here (mkw_RMCP01) | | | | |
 
 Optional, not found (probably not linked, or still unnamed): PADRecalibrate, PADSetSpec, PADClamp, PADSetSamplingCallback, PADSetAnalogMode
 
 ## IPC / IOS / ES / FS
 
-| Function | RUUE01 | RUUP01 | RUUJ01 | confidence |
-|---|---|---|---|---|
-| IPCInit | `80221930` | `80221780` | `802219AC` | dtk |
-| IPCCltInit | `80221E2C` | `80221C7C` | `80221EA8` | dtk |
-| IPCReadReg | `802219C4` | `80221814` | `80221A40` | dtk |
-| IPCWriteReg | `802219D4` | `80221824` | `80221A50` | dtk |
-| __ios_Ipc2 | `80221F60` | `80221DB0` | `80221FDC` | dtk |
-| IPCInterruptHandler | `80221C80` | `80221AD0` | `80221CFC` | dtk |
-| IOS_Open | `80222530` | `80222380` | `802225AC` | dtk |
-| IOS_OpenAsync | `80222418` | `80222268` | `80222494` | dtk |
-| IOS_Close | `8022282C` | `8022267C` | `802228A8` | gap |
-| IOS_CloseAsync | `8022276C` | `802225BC` | `802227E8` | gap |
-| IOS_Read | `80222A78` | `802228C8` | `80222AF4` | high |
-| IOS_ReadAsync | `80222978` | `802227C8` | `802229F4` | high |
-| IOS_Write | `80222C80` | `80222AD0` | `80222CFC` | high |
-| IOS_WriteAsync | `80222B80` | `802229D0` | `80222BFC` | high |
-| IOS_Seek | `80222E68` | `80222CB8` | `80222EE4` | high |
-| IOS_SeekAsync | `80222D88` | `80222BD8` | `80222E04` | high |
-| IOS_Ioctl | `80223088` | `80222ED8` | `80223104` | high |
-| IOS_IoctlAsync | `80222F50` | `80222DA0` | `80222FCC` | dtk |
-| IOS_Ioctlv | `802233D8` | `80223228` | `80223454` | dtk |
-| IOS_IoctlvAsync | `802232F4` | `80223144` | `80223370` | high |
-| IOS_IoctlvReboot (optional) | `802234B4` | `80223304` | `80223530` | high |
-| iosCreateHeap | `802237B0` | `80223600` | `8022382C` | dtk |
-| iosAllocAligned | `80223AEC` | `8022393C` | `80223B68` | dtk |
-| iosFree | `80223AF0` | `80223940` | `80223B6C` | dtk |
-| ESP_InitLib (optional) | `803A6C40` | `803A6A90` | `803A6B7C` | dtk |
-| ESP_CloseLib (optional) | `803A6C94` | `803A6AE4` | `803A6BD0` | dtk |
-| ESP_GetTitleId | `803A71C8` | `803A7018` | `803A7104` | dtk |
-| ESP_GetDataDir (optional) | `803A7130` | `803A6F80` | `803A706C` | dtk |
-| ESP_GetTicketViews (optional) | `803A6D70` | `803A6BC0` | `803A6CAC` | high |
-| ESP_LaunchTitle (optional) | `803A6CDC` | `803A6B2C` | `803A6C18` | high |
-| ESP_DiGetTicketView (optional) | `803A6E88` | `803A6CD8` | `803A6DC4` | dtk |
-| ESP_DiGetTmd (optional) | `803A6F2C` | `803A6D7C` | `803A6E68` | dtk |
-| ESP_GetConsumption (optional) | `803A7260` | `803A70B0` | `803A719C` | high |
-| ISFS_OpenLib | `803F4304` | `803F4154` | `803F4240` | dtk |
-| ISFS_Open | `803F5594` | `803F53E4` | `803F54D0` | dtk |
-| ISFS_OpenAsync | `803F565C` | `803F54AC` | `803F5598` | dtk |
-| ISFS_Close | `803F5ABC` | `803F590C` | `803F59F8` | high |
-| ISFS_CloseAsync | `803F5AC0` | `803F5910` | `803F59FC` | high |
-| ISFS_Read | `803F5934` | `803F5784` | `803F5870` | high |
-| ISFS_ReadAsync | `803F5954` | `803F57A4` | `803F5890` | high |
-| ISFS_Write | `803F59F8` | `803F5848` | `803F5934` | high |
-| ISFS_WriteAsync | `803F5A18` | `803F5868` | `803F5954` | high |
-| ISFS_Seek | `803F58A4` | `803F56F4` | `803F57E0` | high |
-| ISFS_SeekAsync | `803F58A8` | `803F56F8` | `803F57E4` | high |
-| ISFS_CreateFile | `803F53AC` | `803F51FC` | `803F52E8` | high |
-| ISFS_CreateFileAsync | `803F54A0` | `803F52F0` | `803F53DC` | high |
-| ISFS_Delete | `803F4EC4` | `803F4D14` | `803F4E00` | high |
-| ISFS_DeleteAsync | `803F4F9C` | `803F4DEC` | `803F4ED8` | high |
-| ISFS_CreateDir | `803F45AC` | `803F43FC` | `803F44E8` | high |
-| ISFS_CreateDirAsync | `803F46A0` | `803F44F0` | `803F45DC` | high |
-| ISFS_ReadDir | `803F4794` | `803F45E4` | `803F46D0` | high |
-| ISFS_ReadDirAsync | `803F48E8` | `803F4738` | `803F4824` | high |
-| ISFS_GetAttr | `803F4C38` | `803F4A88` | `803F4B74` | high |
-| ISFS_GetAttrAsync | `803F4D90` | `803F4BE0` | `803F4CCC` | high |
-| ISFS_Rename | `803F506C` | `803F4EBC` | `803F4FA8` | high |
-| ISFS_RenameAsync | `803F5170` | `803F4FC0` | `803F50AC` | high |
-| ISFS_GetUsage | `803F5274` | `803F50C4` | `803F51B0` | high |
-| ISFS_GetUsageAsync | **missing** | **missing** | **missing** | - |
-| ISFS_GetFileStats | `803F5714` | `803F5564` | `803F5650` | high |
-| ISFS_GetFileStatsAsync | `803F57E4` | `803F5634` | `803F5720` | high |
-| ISFS_ShutdownAsync (optional) | `803F5B44` | `803F5994` | `803F5A80` | high |
-| ISFS_GetUsageAsync | not linked: the functions between ISFS_RenameAsync and ISFS_CreateFile all have other names (spm_EU0) | | | |
+| Function | RUUE01 | RUUP01 | RUUJ01 | RUUK01 | confidence |
+|---|---|---|---|---|---|
+| IPCInit | `80221930` | `80221780` | `802219AC` | `80223374` | dtk |
+| IPCCltInit | `80221E2C` | `80221C7C` | `80221EA8` | `80223870` | dtk |
+| IPCReadReg | `802219C4` | `80221814` | `80221A40` | `80223408` | dtk |
+| IPCWriteReg | `802219D4` | `80221824` | `80221A50` | `80223418` | dtk |
+| __ios_Ipc2 | `80221F60` | `80221DB0` | `80221FDC` | `802239A4` | dtk |
+| IPCInterruptHandler | `80221C80` | `80221AD0` | `80221CFC` | `802236C4` | dtk |
+| IOS_Open | `80222530` | `80222380` | `802225AC` | `80223F74` | dtk |
+| IOS_OpenAsync | `80222418` | `80222268` | `80222494` | `80223E5C` | dtk |
+| IOS_Close | `8022282C` | `8022267C` | `802228A8` | `80224270` | gap |
+| IOS_CloseAsync | `8022276C` | `802225BC` | `802227E8` | `802241B0` | gap |
+| IOS_Read | `80222A78` | `802228C8` | `80222AF4` | `802244BC` | high |
+| IOS_ReadAsync | `80222978` | `802227C8` | `802229F4` | `802243BC` | high |
+| IOS_Write | `80222C80` | `80222AD0` | `80222CFC` | `802246C4` | high |
+| IOS_WriteAsync | `80222B80` | `802229D0` | `80222BFC` | `802245C4` | high |
+| IOS_Seek | `80222E68` | `80222CB8` | `80222EE4` | `802248AC` | high |
+| IOS_SeekAsync | `80222D88` | `80222BD8` | `80222E04` | `802247CC` | high |
+| IOS_Ioctl | `80223088` | `80222ED8` | `80223104` | `80224ACC` | high |
+| IOS_IoctlAsync | `80222F50` | `80222DA0` | `80222FCC` | `80224994` | dtk |
+| IOS_Ioctlv | `802233D8` | `80223228` | `80223454` | `80224E1C` | dtk |
+| IOS_IoctlvAsync | `802232F4` | `80223144` | `80223370` | `80224D38` | high |
+| IOS_IoctlvReboot (optional) | `802234B4` | `80223304` | `80223530` | `80224EF8` | high |
+| iosCreateHeap | `802237B0` | `80223600` | `8022382C` | `802251F4` | dtk |
+| iosAllocAligned | `80223AEC` | `8022393C` | `80223B68` | `80225530` | dtk |
+| iosFree | `80223AF0` | `80223940` | `80223B6C` | `80225534` | dtk |
+| ESP_InitLib (optional) | `803A6C40` | `803A6A90` | `803A6B7C` | `803AF584` | dtk |
+| ESP_CloseLib (optional) | `803A6C94` | `803A6AE4` | `803A6BD0` | `803AF5D8` | dtk |
+| ESP_GetTitleId | `803A71C8` | `803A7018` | `803A7104` | `803AFB0C` | dtk |
+| ESP_GetDataDir (optional) | `803A7130` | `803A6F80` | `803A706C` | `803AFA74` | dtk |
+| ESP_GetTicketViews (optional) | `803A6D70` | `803A6BC0` | `803A6CAC` | `803AF6B4` | high |
+| ESP_LaunchTitle (optional) | `803A6CDC` | `803A6B2C` | `803A6C18` | `803AF620` | high |
+| ESP_DiGetTicketView (optional) | `803A6E88` | `803A6CD8` | `803A6DC4` | `803AF7CC` | dtk |
+| ESP_DiGetTmd (optional) | `803A6F2C` | `803A6D7C` | `803A6E68` | `803AF870` | dtk |
+| ESP_GetConsumption (optional) | `803A7260` | `803A70B0` | `803A719C` | `803AFBA4` | high |
+| ISFS_OpenLib | `803F4304` | `803F4154` | `803F4240` | `803FCC48` | dtk |
+| ISFS_Open | `803F5594` | `803F53E4` | `803F54D0` | `803FDED8` | dtk |
+| ISFS_OpenAsync | `803F565C` | `803F54AC` | `803F5598` | `803FDFA0` | dtk |
+| ISFS_Close | `803F5ABC` | `803F590C` | `803F59F8` | `803FE400` | high |
+| ISFS_CloseAsync | `803F5AC0` | `803F5910` | `803F59FC` | `803FE404` | high |
+| ISFS_Read | `803F5934` | `803F5784` | `803F5870` | `803FE278` | high |
+| ISFS_ReadAsync | `803F5954` | `803F57A4` | `803F5890` | `803FE298` | high |
+| ISFS_Write | `803F59F8` | `803F5848` | `803F5934` | `803FE33C` | high |
+| ISFS_WriteAsync | `803F5A18` | `803F5868` | `803F5954` | `803FE35C` | high |
+| ISFS_Seek | `803F58A4` | `803F56F4` | `803F57E0` | `803FE1E8` | high |
+| ISFS_SeekAsync | `803F58A8` | `803F56F8` | `803F57E4` | `803FE1EC` | high |
+| ISFS_CreateFile | `803F53AC` | `803F51FC` | `803F52E8` | `803FDCF0` | high |
+| ISFS_CreateFileAsync | `803F54A0` | `803F52F0` | `803F53DC` | `803FDDE4` | high |
+| ISFS_Delete | `803F4EC4` | `803F4D14` | `803F4E00` | `803FD808` | high |
+| ISFS_DeleteAsync | `803F4F9C` | `803F4DEC` | `803F4ED8` | `803FD8E0` | high |
+| ISFS_CreateDir | `803F45AC` | `803F43FC` | `803F44E8` | `803FCEF0` | high |
+| ISFS_CreateDirAsync | `803F46A0` | `803F44F0` | `803F45DC` | `803FCFE4` | high |
+| ISFS_ReadDir | `803F4794` | `803F45E4` | `803F46D0` | `803FD0D8` | high |
+| ISFS_ReadDirAsync | `803F48E8` | `803F4738` | `803F4824` | `803FD22C` | high |
+| ISFS_GetAttr | `803F4C38` | `803F4A88` | `803F4B74` | `803FD57C` | high |
+| ISFS_GetAttrAsync | `803F4D90` | `803F4BE0` | `803F4CCC` | `803FD6D4` | high |
+| ISFS_Rename | `803F506C` | `803F4EBC` | `803F4FA8` | `803FD9B0` | high |
+| ISFS_RenameAsync | `803F5170` | `803F4FC0` | `803F50AC` | `803FDAB4` | high |
+| ISFS_GetUsage | `803F5274` | `803F50C4` | `803F51B0` | `803FDBB8` | high |
+| ISFS_GetUsageAsync | **missing** | **missing** | **missing** | **missing** | - |
+| ISFS_GetFileStats | `803F5714` | `803F5564` | `803F5650` | `803FE058` | high |
+| ISFS_GetFileStatsAsync | `803F57E4` | `803F5634` | `803F5720` | `803FE128` | high |
+| ISFS_ShutdownAsync (optional) | `803F5B44` | `803F5994` | `803F5A80` | `803FE488` | high |
+| ISFS_GetUsageAsync | not linked: the functions between ISFS_RenameAsync and ISFS_CreateFile all have other names (spm_EU0) | | | | |
 
 Optional, not found (probably not linked, or still unnamed): IOS_IoctlvRebootAsync, ESP_ReadContentFile, ESP_OpenContentFile, ISFS_GetStats
 
 ## NAND
 
-| Function | RUUE01 | RUUP01 | RUUJ01 | confidence |
-|---|---|---|---|---|
-| NANDInit | `803AA7CC` | `803AA61C` | `803AA708` | dtk |
-| NANDOpen | `803A8C94` | `803A8AE4` | `803A8BD0` | high |
-| NANDOpenAsync | `803A8DAC` | `803A8BFC` | `803A8CE8` | high |
-| NANDClose | `803A8F14` | `803A8D64` | `803A8E50` | high |
-| NANDCloseAsync | `803A8F80` | `803A8DD0` | `803A8EBC` | high |
-| NANDRead | `803A7E20` | `803A7C70` | `803A7D5C` | high |
-| NANDReadAsync | `803A7E88` | `803A7CD8` | `803A7DC4` | high |
-| NANDWrite | `803A7F00` | `803A7D50` | `803A7E3C` | high |
-| NANDWriteAsync | `803A7F68` | `803A7DB8` | `803A7EA4` | high |
-| NANDSeek | `803A7FE0` | `803A7E30` | `803A7F1C` | high |
-| NANDSeekAsync | `803A8080` | `803A7ED0` | `803A7FBC` | high |
-| NANDCreate | `803A7AB8` | `803A7908` | `803A79F4` | high |
-| NANDCreateAsync | **missing** | **missing** | **missing** | - |
-| NANDPrivateCreate | `803A7B2C` | `803A797C` | `803A7A68` | high |
-| NANDPrivateCreateAsync | `803A7BA0` | `803A79F0` | `803A7ADC` | high |
-| NANDDelete | `803A7C18` | `803A7A68` | `803A7B54` | high |
-| NANDDeleteAsync | **missing** | **missing** | **missing** | - |
-| NANDPrivateDelete | `803A7CC8` | `803A7B18` | `803A7C04` | high |
-| NANDPrivateDeleteAsync | `803A7D60` | `803A7BB0` | `803A7C9C` | high |
-| NANDCreateDir | **missing** | **missing** | **missing** | - |
-| NANDCreateDirAsync | **missing** | **missing** | **missing** | - |
-| NANDPrivateCreateDir | `803A825C` | `803A80AC` | `803A8198` | high |
-| NANDPrivateCreateDirAsync | `803A82D0` | `803A8120` | `803A820C` | gap |
-| NANDMove | `803A83BC` | `803A820C` | `803A82F8` | gap |
-| NANDMoveAsync | **missing** | **missing** | **missing** | - |
-| NANDGetLength | `803A8444` | `803A8294` | `803A8380` | high |
-| NANDGetLengthAsync | `803A8540` | `803A8390` | `803A847C` | high |
-| NANDGetStatus | `803A8878` | `803A86C8` | `803A87B4` | high |
-| NANDGetStatusAsync | **missing** | **missing** | **missing** | - |
-| NANDPrivateGetStatus (optional) | `803A88DC` | `803A872C` | `803A8818` | high |
-| NANDGetType | `803AB104` | `803AAF54` | `803AB040` | high |
-| NANDGetTypeAsync | **missing** | **missing** | **missing** | - |
-| NANDGetHomeDir | `803AADA0` | `803AABF0` | `803AACDC` | high |
-| NANDChangeDir (optional) | `803AAC64` | `803AAAB4` | `803AABA0` | high |
-| NANDGetCurrentDir (optional) | `803AAD24` | `803AAB74` | `803AAC60` | high |
-| NANDCheck | `803AB464` | `803AB2B4` | `803AB3A0` | high |
-| NANDCheckAsync | **missing** | **missing** | **missing** | - |
-| NANDPrivateOpen | `803A8D20` | `803A8B70` | `803A8C5C` | high |
-| NANDPrivateOpenAsync | `803A8E24` | `803A8C74` | `803A8D60` | dtk |
-| NANDSafeOpen | **missing** | **missing** | **missing** | - |
-| NANDSafeOpenAsync | **missing** | **missing** | **missing** | - |
-| NANDSafeClose | **missing** | **missing** | **missing** | - |
-| NANDSafeCloseAsync | `803A9BB4` | `803A9A04` | `803A9AF0` | high |
-| NANDSimpleSafeOpen (optional) | `803A9008` | `803A8E58` | `803A8F44` | high |
-| NANDSimpleSafeClose (optional) | `803A93BC` | `803A920C` | `803A92F8` | high |
-| NANDInitBanner (optional) | `803AB214` | `803AB064` | `803AB150` | high |
-| NANDCreateAsync | not linked: the functions between nandCreate and NANDPrivateCreateAsync all have other names (spm_EU0) | | | |
-| NANDDeleteAsync | not linked: the functions between NANDDelete and NANDPrivateDeleteAsync all have other names (spm_EU0) | | | |
-| NANDCreateDir | not linked: nandCreateDir and NANDPrivateCreateDir are adjacent here (mkw_RMCP01) | | | |
-| NANDCreateDirAsync | no reference places it | | | |
-| NANDMoveAsync | no reference places it | | | |
-| NANDGetStatusAsync | no reference places it | | | |
-| NANDGetTypeAsync | no reference places it | | | |
-| NANDCheckAsync | not linked: the functions between NANDInitBanner and SCInit all have other names (spm_EU0) | | | |
-| NANDSafeOpen | not linked: the functions between NANDCloseAsync and nandSafeOpen all have other names (mkw_RMCP01) | | | |
-| NANDSafeOpenAsync | not linked: the functions between NANDCloseAsync and nandSafeOpenAsync all have other names (spm_EU0) | | | |
-| NANDSafeClose | not linked: the functions between nandSafeOpen and NANDPrivateSafeOpenAsync all have other names (mkw_RMCP01) | | | |
+| Function | RUUE01 | RUUP01 | RUUJ01 | RUUK01 | confidence |
+|---|---|---|---|---|---|
+| NANDInit | `803AA7CC` | `803AA61C` | `803AA708` | `803B3110` | dtk |
+| NANDOpen | `803A8C94` | `803A8AE4` | `803A8BD0` | `803B15D8` | high |
+| NANDOpenAsync | `803A8DAC` | `803A8BFC` | `803A8CE8` | `803B16F0` | high |
+| NANDClose | `803A8F14` | `803A8D64` | `803A8E50` | `803B1858` | high |
+| NANDCloseAsync | `803A8F80` | `803A8DD0` | `803A8EBC` | `803B18C4` | high |
+| NANDRead | `803A7E20` | `803A7C70` | `803A7D5C` | `803B0764` | high |
+| NANDReadAsync | `803A7E88` | `803A7CD8` | `803A7DC4` | `803B07CC` | high |
+| NANDWrite | `803A7F00` | `803A7D50` | `803A7E3C` | `803B0844` | high |
+| NANDWriteAsync | `803A7F68` | `803A7DB8` | `803A7EA4` | `803B08AC` | high |
+| NANDSeek | `803A7FE0` | `803A7E30` | `803A7F1C` | `803B0924` | high |
+| NANDSeekAsync | `803A8080` | `803A7ED0` | `803A7FBC` | `803B09C4` | high |
+| NANDCreate | `803A7AB8` | `803A7908` | `803A79F4` | `803B03FC` | high |
+| NANDCreateAsync | **missing** | **missing** | **missing** | **missing** | - |
+| NANDPrivateCreate | `803A7B2C` | `803A797C` | `803A7A68` | `803B0470` | high |
+| NANDPrivateCreateAsync | `803A7BA0` | `803A79F0` | `803A7ADC` | `803B04E4` | high |
+| NANDDelete | `803A7C18` | `803A7A68` | `803A7B54` | `803B055C` | high |
+| NANDDeleteAsync | **missing** | **missing** | **missing** | **missing** | - |
+| NANDPrivateDelete | `803A7CC8` | `803A7B18` | `803A7C04` | `803B060C` | high |
+| NANDPrivateDeleteAsync | `803A7D60` | `803A7BB0` | `803A7C9C` | `803B06A4` | high |
+| NANDCreateDir | **missing** | **missing** | **missing** | **missing** | - |
+| NANDCreateDirAsync | **missing** | **missing** | **missing** | **missing** | - |
+| NANDPrivateCreateDir | `803A825C` | `803A80AC` | `803A8198` | `803B0BA0` | high |
+| NANDPrivateCreateDirAsync | `803A82D0` | `803A8120` | `803A820C` | `803B0C14` | gap |
+| NANDMove | `803A83BC` | `803A820C` | `803A82F8` | `803B0D00` | gap |
+| NANDMoveAsync | **missing** | **missing** | **missing** | **missing** | - |
+| NANDGetLength | `803A8444` | `803A8294` | `803A8380` | `803B0D88` | high |
+| NANDGetLengthAsync | `803A8540` | `803A8390` | `803A847C` | `803B0E84` | high |
+| NANDGetStatus | `803A8878` | `803A86C8` | `803A87B4` | `803B11BC` | high |
+| NANDGetStatusAsync | **missing** | **missing** | **missing** | **missing** | - |
+| NANDPrivateGetStatus (optional) | `803A88DC` | `803A872C` | `803A8818` | `803B1220` | high |
+| NANDGetType | `803AB104` | `803AAF54` | `803AB040` | `803B3A48` | high |
+| NANDGetTypeAsync | **missing** | **missing** | **missing** | **missing** | - |
+| NANDGetHomeDir | `803AADA0` | `803AABF0` | `803AACDC` | `803B36E4` | high |
+| NANDChangeDir (optional) | `803AAC64` | `803AAAB4` | `803AABA0` | `803B35A8` | high |
+| NANDGetCurrentDir (optional) | `803AAD24` | `803AAB74` | `803AAC60` | `803B3668` | high |
+| NANDCheck | `803AB464` | `803AB2B4` | `803AB3A0` | `803B3DA8` | high |
+| NANDCheckAsync | **missing** | **missing** | **missing** | **missing** | - |
+| NANDPrivateOpen | `803A8D20` | `803A8B70` | `803A8C5C` | `803B1664` | high |
+| NANDPrivateOpenAsync | `803A8E24` | `803A8C74` | `803A8D60` | `803B1768` | dtk |
+| NANDSafeOpen | **missing** | **missing** | **missing** | **missing** | - |
+| NANDSafeOpenAsync | **missing** | **missing** | **missing** | **missing** | - |
+| NANDSafeClose | **missing** | **missing** | **missing** | **missing** | - |
+| NANDSafeCloseAsync | `803A9BB4` | `803A9A04` | `803A9AF0` | `803B24F8` | high |
+| NANDSimpleSafeOpen (optional) | `803A9008` | `803A8E58` | `803A8F44` | `803B194C` | high |
+| NANDSimpleSafeClose (optional) | `803A93BC` | `803A920C` | `803A92F8` | `803B1D00` | high |
+| NANDInitBanner (optional) | `803AB214` | `803AB064` | `803AB150` | `803B3B58` | high |
+| NANDCreateAsync | not linked: the functions between nandCreate and NANDPrivateCreateAsync all have other names (spm_EU0) | | | | |
+| NANDDeleteAsync | not linked: the functions between NANDDelete and NANDPrivateDeleteAsync all have other names (spm_EU0) | | | | |
+| NANDCreateDir | not linked: nandCreateDir and NANDPrivateCreateDir are adjacent here (mkw_RMCP01) | | | | |
+| NANDCreateDirAsync | no reference places it | | | | |
+| NANDMoveAsync | no reference places it | | | | |
+| NANDGetStatusAsync | no reference places it | | | | |
+| NANDGetTypeAsync | no reference places it | | | | |
+| NANDCheckAsync | not linked: the functions between NANDInitBanner and SCInit all have other names (spm_EU0) | | | | |
+| NANDSafeOpen | not linked: the functions between NANDCloseAsync and nandSafeOpen all have other names (mkw_RMCP01) | | | | |
+| NANDSafeOpenAsync | not linked: the functions between NANDCloseAsync and nandSafeOpenAsync all have other names (spm_EU0) | | | | |
+| NANDSafeClose | not linked: the functions between nandSafeOpen and NANDPrivateSafeOpenAsync all have other names (mkw_RMCP01) | | | | |
 
 Optional, not found (probably not linked, or still unnamed): NANDReadDir, NANDPrivateReadDir, NANDSetStatus, NANDOpenDir, NANDCloseDir, NANDGetAvailableArea, NANDFreeBanner
 
 ## SC
 
-| Function | RUUE01 | RUUP01 | RUUJ01 | confidence |
-|---|---|---|---|---|
-| SCInit | `803ABB3C` | `803AB98C` | `803ABA78` | dtk |
-| SCCheckStatus | `803ABBDC` | `803ABA2C` | `803ABB18` | dtk |
-| SCFlush | **missing** | **missing** | **missing** | - |
-| SCFlushAsync | `803AD04C` | `803ACE9C` | `803ACF88` | high |
-| SCReloadConfFileAsync | `803ABCF8` | `803ABB48` | `803ABC34` | dtk |
-| SCGetAspectRatio | `803AD5A0` | `803AD3F0` | `803AD4DC` | high |
-| SCGetLanguage | `803AD6C8` | `803AD518` | `803AD604` | dtk |
-| SCGetProgressiveMode | `803AD740` | `803AD590` | `803AD67C` | high |
-| SCGetEuRgb60Mode | `803AD668` | `803AD4B8` | `803AD5A4` | high |
-| SCGetSoundMode | `803AD7E8` | `803AD638` | `803AD724` | high |
-| SCGetScreenSaverMode | `803AD794` | `803AD5E4` | `803AD6D0` | high |
-| SCGetDisplayOffsetH | `803AD5F4` | `803AD444` | `803AD530` | high |
-| SCGetBtDeviceInfoArray | `803AD88C` | `803AD6DC` | `803AD7C8` | high |
-| SCSetBtDeviceInfoArray | `803AD898` | `803AD6E8` | `803AD7D4` | high |
-| SCGetBtDpdSensibility | `803AD8BC` | `803AD70C` | `803AD7F8` | high |
-| SCGetWpadMotorMode | `803AD924` | `803AD774` | `803AD860` | high |
-| SCGetWpadSensorBarPosition | `803AD980` | `803AD7D0` | `803AD8BC` | high |
-| SCGetWpadSpeakerVolume | `803AD9D4` | `803AD824` | `803AD910` | high |
-| SCSetWpadSpeakerVolume | `803ADA28` | `803AD878` | `803AD964` | high |
-| SCGetIdleMode | `803AD6BC` | `803AD50C` | `803AD5F8` | high |
-| SCGetCounterBias | `803AD84C` | `803AD69C` | `803AD788` | high |
-| SCGetProductArea (optional) | `803ADC90` | `803ADAE0` | `803ADBCC` | high |
-| SCGetProductGameRegion (optional) | `803ADDB8` | `803ADC08` | `803ADCF4` | high |
-| SCGetParentalControl (optional) | `803AD734` | `803AD584` | `803AD670` | high |
-| SCFindByteArrayItem (optional) | `803AC97C` | `803AC7CC` | `803AC8B8` | high |
-| __SCF1 (optional) | `803ADB24` | `803AD974` | `803ADA60` | high |
-| SCGetProductSN (optional) | `803ADD50` | `803ADBA0` | `803ADC8C` | high |
-| SCFlush | not linked: __SCFlushSyncCallback and SCFlushAsync are adjacent here (tp_RZDE01_02) | | | |
+| Function | RUUE01 | RUUP01 | RUUJ01 | RUUK01 | confidence |
+|---|---|---|---|---|---|
+| SCInit | `803ABB3C` | `803AB98C` | `803ABA78` | `803B4480` | dtk |
+| SCCheckStatus | `803ABBDC` | `803ABA2C` | `803ABB18` | `803B4520` | dtk |
+| SCFlush | **missing** | **missing** | **missing** | **missing** | - |
+| SCFlushAsync | `803AD04C` | `803ACE9C` | `803ACF88` | `803B5990` | high |
+| SCReloadConfFileAsync | `803ABCF8` | `803ABB48` | `803ABC34` | `803B463C` | dtk |
+| SCGetAspectRatio | `803AD5A0` | `803AD3F0` | `803AD4DC` | `803B5EE4` | high |
+| SCGetLanguage | `803AD6C8` | `803AD518` | `803AD604` | `803B600C` | dtk |
+| SCGetProgressiveMode | `803AD740` | `803AD590` | `803AD67C` | `803B6084` | high |
+| SCGetEuRgb60Mode | `803AD668` | `803AD4B8` | `803AD5A4` | `803B5FAC` | high |
+| SCGetSoundMode | `803AD7E8` | `803AD638` | `803AD724` | `803B612C` | high |
+| SCGetScreenSaverMode | `803AD794` | `803AD5E4` | `803AD6D0` | `803B60D8` | high |
+| SCGetDisplayOffsetH | `803AD5F4` | `803AD444` | `803AD530` | `803B5F38` | high |
+| SCGetBtDeviceInfoArray | `803AD88C` | `803AD6DC` | `803AD7C8` | `803B61D0` | high |
+| SCSetBtDeviceInfoArray | `803AD898` | `803AD6E8` | `803AD7D4` | `803B61DC` | high |
+| SCGetBtDpdSensibility | `803AD8BC` | `803AD70C` | `803AD7F8` | `803B6200` | high |
+| SCGetWpadMotorMode | `803AD924` | `803AD774` | `803AD860` | `803B6268` | high |
+| SCGetWpadSensorBarPosition | `803AD980` | `803AD7D0` | `803AD8BC` | `803B62C4` | high |
+| SCGetWpadSpeakerVolume | `803AD9D4` | `803AD824` | `803AD910` | `803B6318` | high |
+| SCSetWpadSpeakerVolume | `803ADA28` | `803AD878` | `803AD964` | `803B636C` | high |
+| SCGetIdleMode | `803AD6BC` | `803AD50C` | `803AD5F8` | `803B6000` | high |
+| SCGetCounterBias | `803AD84C` | `803AD69C` | `803AD788` | `803B6190` | high |
+| SCGetProductArea (optional) | `803ADC90` | `803ADAE0` | `803ADBCC` | `803B65D4` | high |
+| SCGetProductGameRegion (optional) | `803ADDB8` | `803ADC08` | `803ADCF4` | `803B66FC` | high |
+| SCGetParentalControl (optional) | `803AD734` | `803AD584` | `803AD670` | `803B6078` | high |
+| SCFindByteArrayItem (optional) | `803AC97C` | `803AC7CC` | `803AC8B8` | `803B52C0` | high |
+| __SCF1 (optional) | `803ADB24` | `803AD974` | `803ADA60` | `803B6468` | high |
+| SCGetProductSN (optional) | `803ADD50` | `803ADBA0` | `803ADC8C` | `803B6694` | high |
+| SCFlush | not linked: __SCFlushSyncCallback and SCFlushAsync are adjacent here (tp_RZDE01_02) | | | | |
 
 Optional, not found (probably not linked, or still unnamed): SCGetSimpleAddressData, SCGetSimpleAddressRegionNameA, SCGetItem, SCFindIntegerItem, SCGetDvdOrder
 
 ## VI
 
-| Function | RUUE01 | RUUP01 | RUUJ01 | confidence |
-|---|---|---|---|---|
-| VIInit | `8038CB74` | `8038C9C4` | `8038CAB0` | high |
-| VIConfigure | `8038D63C` | `8038D48C` | `8038D578` | high |
-| VIConfigurePan (optional) | `8038DD20` | `8038DB70` | `8038DC5C` | high |
-| VIFlush | `8038E074` | `8038DEC4` | `8038DFB0` | high |
-| VISetNextFrameBuffer | `8038E188` | `8038DFD8` | `8038E0C4` | high |
-| VIWaitForRetrace | `8038D0BC` | `8038CF0C` | `8038CFF8` | high |
-| VISetBlack | `8038E1F4` | `8038E044` | `8038E130` | high |
-| VIGetRetraceCount | `8038E26C` | `8038E0BC` | `8038E1A8` | high |
-| VIGetNextField | **missing** | **missing** | **missing** | - |
-| VIGetCurrentLine | `8038E274` | `8038E0C4` | `8038E1B0` | high |
-| VIGetTvFormat | `8038E304` | `8038E154` | `8038E240` | dtk |
-| VIGetDTVStatus | `8038E364` | `8038E1B4` | `8038E2A0` | high |
-| VISetPreRetraceCallback | `8038C7C4` | `8038C614` | `8038C700` | high |
-| VISetPostRetraceCallback | `8038C808` | `8038C658` | `8038C744` | high |
-| VIResetDimmingCount (optional) | `8038E700` | `8038E550` | `8038E63C` | high |
-| __VIResetRFIdle (optional) | `8038E714` | `8038E564` | `8038E650` | high |
-| VIGetNextField | not linked: VIGetRetraceCount and VIGetCurrentLine are adjacent here (mkw_RMCP01) | | | |
+| Function | RUUE01 | RUUP01 | RUUJ01 | RUUK01 | confidence |
+|---|---|---|---|---|---|
+| VIInit | `8038CB74` | `8038C9C4` | `8038CAB0` | `80395494` | high |
+| VIConfigure | `8038D63C` | `8038D48C` | `8038D578` | `80395F5C` | high |
+| VIConfigurePan (optional) | `8038DD20` | `8038DB70` | `8038DC5C` | `80396640` | high |
+| VIFlush | `8038E074` | `8038DEC4` | `8038DFB0` | `80396994` | high |
+| VISetNextFrameBuffer | `8038E188` | `8038DFD8` | `8038E0C4` | `80396AA8` | high |
+| VIWaitForRetrace | `8038D0BC` | `8038CF0C` | `8038CFF8` | `803959DC` | high |
+| VISetBlack | `8038E1F4` | `8038E044` | `8038E130` | `80396B14` | high |
+| VIGetRetraceCount | `8038E26C` | `8038E0BC` | `8038E1A8` | `80396B8C` | high |
+| VIGetNextField | **missing** | **missing** | **missing** | **missing** | - |
+| VIGetCurrentLine | `8038E274` | `8038E0C4` | `8038E1B0` | `80396B94` | high |
+| VIGetTvFormat | `8038E304` | `8038E154` | `8038E240` | `80396C24` | dtk |
+| VIGetDTVStatus | `8038E364` | `8038E1B4` | `8038E2A0` | `80396C84` | high |
+| VISetPreRetraceCallback | `8038C7C4` | `8038C614` | `8038C700` | `803950E4` | high |
+| VISetPostRetraceCallback | `8038C808` | `8038C658` | `8038C744` | `80395128` | high |
+| VIResetDimmingCount (optional) | `8038E700` | `8038E550` | `8038E63C` | `80397020` | high |
+| __VIResetRFIdle (optional) | `8038E714` | `8038E564` | `8038E650` | `80397034` | high |
+| VIGetNextField | not linked: VIGetRetraceCount and VIGetCurrentLine are adjacent here (mkw_RMCP01) | | | | |
 
 Optional, not found (probably not linked, or still unnamed): VIGetNextFrameBuffer, VIGetCurrentFrameBuffer, VIGetScanMode, VISetTrapFilter, VISetGamma, VIEnableDimming, VIEnableDVDStopMotor, VIGetVSyncTimingTest
 
 ## GX
 
-| Function | RUUE01 | RUUP01 | RUUJ01 | confidence |
-|---|---|---|---|---|
-| GXInit | `80391FF8` | `80391E48` | `80391F34` | dtk |
-| GXInitFifoBase | `80392F70` | `80392DC0` | `80392EAC` | dtk |
-| GXInitFifoPtrs | **missing** | **missing** | **missing** | - |
-| GXSetCPUFifo | `803930F4` | `80392F44` | `80393030` | dtk |
-| GXSetGPFifo | `803932D4` | `80393124` | `80393210` | dtk |
-| GXGetCPUFifo | `803936B8` | `80393508` | `803935F4` | high |
-| GXGetGPFifo | **missing** | **missing** | **missing** | - |
-| GXSaveCPUFifo | **missing** | **missing** | **missing** | - |
-| GXGetFifoPtrs | **missing** | **missing** | **missing** | - |
-| GXSetDrawSync | **missing** | **missing** | **missing** | - |
-| GXSetDrawSyncCallback | `8039523C` | `8039508C` | `80395178` | high |
-| GXSetDrawDone | **missing** | **missing** | **missing** | - |
-| GXDrawDone | `80395064` | `80394EB4` | `80394FA0` | high |
-| GXWaitDrawDone | **missing** | **missing** | **missing** | - |
-| GXSetDrawDoneCallback | `80395304` | `80395154` | `80395240` | high |
-| GXFlush | `80394CBC` | `80394B0C` | `80394BF8` | high |
-| GXAbortFrame | `80394EB0` | `80394D00` | `80394DEC` | high |
-| GXPixModeSync | `80395124` | `80394F74` | `80395060` | high |
-| GXTexModeSync | **missing** | **missing** | **missing** | - |
-| GXSetBreakPtCallback (optional) | `80393758` | `803935A8` | `80393694` | high |
-| GXCopyDisp | `803961EC` | `8039603C` | `80396128` | high |
-| GXCopyTex | `80396328` | `80396178` | `80396264` | high |
-| GXSetDispCopySrc | `803959EC` | `8039583C` | `80395928` | high |
-| GXSetTexCopySrc | `80395A2C` | `8039587C` | `80395968` | high |
-| GXSetTexCopyDst | `80395A90` | `803958E0` | `803959CC` | high |
-| GXSetDispCopyDst | `80395A6C` | `803958BC` | `803959A8` | high |
-| GXSetCopyFilter | `80395FF4` | `80395E44` | `80395F30` | high |
-| GXSetCopyClear | `80395F7C` | `80395DCC` | `80395EB8` | high |
-| GXSetDispCopyGamma | `803961D8` | `80396028` | `80396114` | high |
-| GXClearBoundingBox (optional) | `80396480` | `803962D0` | `803963BC` | high |
-| GXPeekARGB | **missing** | **missing** | **missing** | - |
-| GXPokeARGB | **missing** | **missing** | **missing** | - |
-| GXPeekZ | **missing** | **missing** | **missing** | - |
-| GXPokeZ | **missing** | **missing** | **missing** | - |
-| GXSetGPMetric (optional) | `80399A84` | `803998D4` | `803999C0` | high |
-| GXClearGPMetric (optional) | `8039A2B0` | `8039A100` | `8039A1EC` | high |
-| GXSetZTexture | `80398578` | `803983C8` | `803984B4` | high |
-| GXInitTexObj | `80396DAC` | `80396BFC` | `80396CE8` | high |
-| GXInitTexObjCI | `80396FB8` | `80396E08` | `80396EF4` | high |
-| GXLoadTexObj | `80397438` | `80397288` | `80397374` | high |
-| GXInitTlutObj | `8039748C` | `803972DC` | `803973C8` | high |
-| GXLoadTlut | `803974B4` | `80397304` | `803973F0` | high |
-| GXInvalidateTexAll | `8039761C` | `8039746C` | `80397558` | high |
-| GXSetMisc | `80394C30` | `80394A80` | `80394B6C` | dtk |
-| GXGetProjectionv | `80399584` | `803993D4` | `803994C0` | high |
-| GXSetProjection | `803994D4` | `80399324` | `80399410` | high |
-| GXSetViewport | `8039986C` | `803996BC` | `803997A8` | high |
-| GXSetScissor | `803998E8` | `80399738` | `80399824` | high |
-| GXCallDisplayList | `8039941C` | `8039926C` | `80399358` | high |
-| GXBeginDisplayList | `803992B8` | `80399108` | `803991F4` | high |
-| GXEndDisplayList | `8039936C` | `803991BC` | `803992A8` | high |
-| GXGetYScaleFactor | `80395C80` | `80395AD0` | `80395BBC` | high |
-| GXGetNumXfbLines | `80395BF4` | `80395A44` | `80395B30` | high |
-| GXInitFifoPtrs | not linked: GXInitFifoBase and CPGPLinkCheck are adjacent here (tp_RZDE01_02) | | | |
-| GXGetGPFifo | not linked: GXGetCPUFifo and GXGetFifoCount are adjacent here (mkw_RMCP01) | | | |
-| GXSaveCPUFifo | no reference places it | | | |
-| GXGetFifoPtrs | not linked: GXGetCPUFifo and GXGetFifoCount are adjacent here (smg_RMGE01) | | | |
-| GXSetDrawSync | not linked: GXAbortFrame and GXDrawDone are adjacent here (smg_RMGE01) | | | |
-| GXSetDrawDone | not linked: GXAbortFrame and GXDrawDone are adjacent here (smg_RMGE01) | | | |
-| GXWaitDrawDone | no reference places it | | | |
-| GXTexModeSync | not linked: GXPixModeSync and GXPokeAlphaMode are adjacent here (smg_RMGE01) | | | |
-| GXPeekARGB | not linked: GXPokeZMode and GXSetDrawSyncCallback are adjacent here (smg_RMGE01) | | | |
-| GXPokeARGB | no reference places it | | | |
-| GXPeekZ | not linked: GXPokeZMode and GXSetDrawSyncCallback are adjacent here (smg_RMGE01) | | | |
-| GXPokeZ | no reference places it | | | |
+| Function | RUUE01 | RUUP01 | RUUJ01 | RUUK01 | confidence |
+|---|---|---|---|---|---|
+| GXInit | `80391FF8` | `80391E48` | `80391F34` | `8039A918` | dtk |
+| GXInitFifoBase | `80392F70` | `80392DC0` | `80392EAC` | `8039B890` | dtk |
+| GXInitFifoPtrs | **missing** | **missing** | **missing** | **missing** | - |
+| GXSetCPUFifo | `803930F4` | `80392F44` | `80393030` | `8039BA14` | dtk |
+| GXSetGPFifo | `803932D4` | `80393124` | `80393210` | `8039BBF4` | dtk |
+| GXGetCPUFifo | `803936B8` | `80393508` | `803935F4` | `8039BFD8` | high |
+| GXGetGPFifo | **missing** | **missing** | **missing** | **missing** | - |
+| GXSaveCPUFifo | **missing** | **missing** | **missing** | **missing** | - |
+| GXGetFifoPtrs | **missing** | **missing** | **missing** | **missing** | - |
+| GXSetDrawSync | **missing** | **missing** | **missing** | **missing** | - |
+| GXSetDrawSyncCallback | `8039523C` | `8039508C` | `80395178` | `8039DB5C` | high |
+| GXSetDrawDone | **missing** | **missing** | **missing** | **missing** | - |
+| GXDrawDone | `80395064` | `80394EB4` | `80394FA0` | `8039D984` | high |
+| GXWaitDrawDone | **missing** | **missing** | **missing** | **missing** | - |
+| GXSetDrawDoneCallback | `80395304` | `80395154` | `80395240` | `8039DC24` | high |
+| GXFlush | `80394CBC` | `80394B0C` | `80394BF8` | `8039D5DC` | high |
+| GXAbortFrame | `80394EB0` | `80394D00` | `80394DEC` | `8039D7D0` | high |
+| GXPixModeSync | `80395124` | `80394F74` | `80395060` | `8039DA44` | high |
+| GXTexModeSync | **missing** | **missing** | **missing** | **missing** | - |
+| GXSetBreakPtCallback (optional) | `80393758` | `803935A8` | `80393694` | `8039C078` | high |
+| GXCopyDisp | `803961EC` | `8039603C` | `80396128` | `8039EB0C` | high |
+| GXCopyTex | `80396328` | `80396178` | `80396264` | `8039EC48` | high |
+| GXSetDispCopySrc | `803959EC` | `8039583C` | `80395928` | `8039E30C` | high |
+| GXSetTexCopySrc | `80395A2C` | `8039587C` | `80395968` | `8039E34C` | high |
+| GXSetTexCopyDst | `80395A90` | `803958E0` | `803959CC` | `8039E3B0` | high |
+| GXSetDispCopyDst | `80395A6C` | `803958BC` | `803959A8` | `8039E38C` | high |
+| GXSetCopyFilter | `80395FF4` | `80395E44` | `80395F30` | `8039E914` | high |
+| GXSetCopyClear | `80395F7C` | `80395DCC` | `80395EB8` | `8039E89C` | high |
+| GXSetDispCopyGamma | `803961D8` | `80396028` | `80396114` | `8039EAF8` | high |
+| GXClearBoundingBox (optional) | `80396480` | `803962D0` | `803963BC` | `8039EDA0` | high |
+| GXPeekARGB | **missing** | **missing** | **missing** | **missing** | - |
+| GXPokeARGB | **missing** | **missing** | **missing** | **missing** | - |
+| GXPeekZ | **missing** | **missing** | **missing** | **missing** | - |
+| GXPokeZ | **missing** | **missing** | **missing** | **missing** | - |
+| GXSetGPMetric (optional) | `80399A84` | `803998D4` | `803999C0` | `803A23A4` | high |
+| GXClearGPMetric (optional) | `8039A2B0` | `8039A100` | `8039A1EC` | `803A2BD0` | high |
+| GXSetZTexture | `80398578` | `803983C8` | `803984B4` | `803A0E98` | high |
+| GXInitTexObj | `80396DAC` | `80396BFC` | `80396CE8` | `8039F6CC` | high |
+| GXInitTexObjCI | `80396FB8` | `80396E08` | `80396EF4` | `8039F8D8` | high |
+| GXLoadTexObj | `80397438` | `80397288` | `80397374` | `8039FD58` | high |
+| GXInitTlutObj | `8039748C` | `803972DC` | `803973C8` | `8039FDAC` | high |
+| GXLoadTlut | `803974B4` | `80397304` | `803973F0` | `8039FDD4` | high |
+| GXInvalidateTexAll | `8039761C` | `8039746C` | `80397558` | `8039FF3C` | high |
+| GXSetMisc | `80394C30` | `80394A80` | `80394B6C` | `8039D550` | dtk |
+| GXGetProjectionv | `80399584` | `803993D4` | `803994C0` | `803A1EA4` | high |
+| GXSetProjection | `803994D4` | `80399324` | `80399410` | `803A1DF4` | high |
+| GXSetViewport | `8039986C` | `803996BC` | `803997A8` | `803A218C` | high |
+| GXSetScissor | `803998E8` | `80399738` | `80399824` | `803A2208` | high |
+| GXCallDisplayList | `8039941C` | `8039926C` | `80399358` | `803A1D3C` | high |
+| GXBeginDisplayList | `803992B8` | `80399108` | `803991F4` | `803A1BD8` | high |
+| GXEndDisplayList | `8039936C` | `803991BC` | `803992A8` | `803A1C8C` | high |
+| GXGetYScaleFactor | `80395C80` | `80395AD0` | `80395BBC` | `8039E5A0` | high |
+| GXGetNumXfbLines | `80395BF4` | `80395A44` | `80395B30` | `8039E514` | high |
+| GXInitFifoPtrs | not linked: GXInitFifoBase and CPGPLinkCheck are adjacent here (tp_RZDE01_02) | | | | |
+| GXGetGPFifo | not linked: GXGetCPUFifo and GXGetFifoCount are adjacent here (mkw_RMCP01) | | | | |
+| GXSaveCPUFifo | no reference places it | | | | |
+| GXGetFifoPtrs | not linked: GXGetCPUFifo and GXGetFifoCount are adjacent here (smg_RMGE01) | | | | |
+| GXSetDrawSync | not linked: GXAbortFrame and GXDrawDone are adjacent here (smg_RMGE01) | | | | |
+| GXSetDrawDone | not linked: GXAbortFrame and GXDrawDone are adjacent here (smg_RMGE01) | | | | |
+| GXWaitDrawDone | no reference places it | | | | |
+| GXTexModeSync | not linked: GXPixModeSync and GXPokeAlphaMode are adjacent here (smg_RMGE01) | | | | |
+| GXPeekARGB | not linked: GXPokeZMode and GXSetDrawSyncCallback are adjacent here (smg_RMGE01) | | | | |
+| GXPokeARGB | no reference places it | | | | |
+| GXPeekZ | not linked: GXPokeZMode and GXSetDrawSyncCallback are adjacent here (smg_RMGE01) | | | | |
+| GXPokeZ | no reference places it | | | | |
 
 Optional, not found (probably not linked, or still unnamed): GXEnableBreakPt, GXDisableBreakPt, GXReadBoundingBox, GXReadPixMetric, GXReadMemMetric, GXReadGPMetric, GXReadXfRasMetric, GXAdjustForOverscan, GXSetVerifyLevel, GXSetVerifyCallback
 
 ## DVD
 
-| Function | RUUE01 | RUUP01 | RUUJ01 | confidence |
-|---|---|---|---|---|
-| DVDInit | `8039ADC0` | `8039AC10` | `8039ACFC` | dtk |
-| DVDOpen | `8039A660` | `8039A4B0` | `8039A59C` | high |
-| DVDFastOpen | `8039A5F8` | `8039A448` | `8039A534` | high |
-| DVDClose | `8039A90C` | `8039A75C` | `8039A848` | high |
-| DVDReadPrio | `8039ABD8` | `8039AA28` | `8039AB14` | high |
-| DVDReadAsyncPrio | `8039AAF0` | `8039A940` | `8039AA2C` | high |
-| DVDCancel | `8039F354` | `8039F1A4` | `8039F290` | high |
-| DVDCancelAsync | `8039EFF0` | `8039EE40` | `8039EF2C` | high |
-| DVDGetCommandBlockStatus | `8039EE2C` | `8039EC7C` | `8039ED68` | high |
-| DVDGetDriveStatus | `8039EEF4` | `8039ED44` | `8039EE30` | high |
-| DVDConvertPathToEntrynum | `8039A2F0` | `8039A140` | `8039A22C` | high |
-| DVDChangeDir | **missing** | **missing** | **missing** | - |
-| DVDOpenDir | **missing** | **missing** | **missing** | - |
-| DVDReadDir | **missing** | **missing** | **missing** | - |
-| DVDCloseDir | `8039AD00` | `8039AB50` | `8039AC3C` | high |
-| DVDGetCurrentDiskID | `8039F438` | `8039F288` | `8039F374` | high |
-| DVDCheckDiskAsync (optional) | `8039F554` | `8039F3A4` | `8039F490` | high |
-| DVDInquiryAsync | `8039ED54` | `8039EBA4` | `8039EC90` | dtk |
-| DVDResume (optional) | `8039EFA0` | `8039EDF0` | `8039EEDC` | high |
-| DVDSetAutoInvalidation (optional) | `8039EF90` | `8039EDE0` | `8039EECC` | high |
-| DVDSetAutoFatalMessaging (optional) | `803A0734` | `803A0584` | `803A0670` | dtk |
-| DVDLowInit | `803A0C18` | `803A0A68` | `803A0B54` | dtk |
-| DVDLowRead | `803A2700` | `803A2550` | `803A263C` | high |
-| DVDLowReadDiskID | `803A0E7C` | `803A0CCC` | `803A0DB8` | high |
-| DVDLowOpenPartition | `803A1004` | `803A0E54` | `803A0F40` | high |
-| DVDLowClosePartition | `803A1974` | `803A17C4` | `803A18B0` | high |
-| DVDLowGetCoverStatus | **missing** | **missing** | **missing** | - |
-| DVDLowReset | `803A20DC` | `803A1F2C` | `803A2018` | high |
-| DVDLowStopMotor (optional) | `803A1C6C` | `803A1ABC` | `803A1BA8` | high |
-| DVDLowInquiry | `803A1E00` | `803A1C50` | `803A1D3C` | high |
-| DVDLowRequestError | `803A1F68` | `803A1DB8` | `803A1EA4` | dtk |
-| DVDLowSetSpinupFlag (optional) | `803A20D0` | `803A1F20` | `803A200C` | high |
-| DVDLowUnmaskStatusInterrupts (optional) | `803A2D24` | `803A2B74` | `803A2C60` | dtk |
-| DVDLowGetImmBufferReg (optional) | `803A2D18` | `803A2B68` | `803A2C54` | dtk |
-| DVDLowClearCoverInterrupt (optional) | `803A2D34` | `803A2B84` | `803A2C70` | high |
-| __DVDLowTestAlarm (optional) | `803A2E98` | `803A2CE8` | `803A2DD4` | high |
-| DVDChangeDir | no reference places it | | | |
-| DVDOpenDir | not linked: DVDReadPrio and DVDCloseDir are adjacent here (smg_RMGE01) | | | |
-| DVDReadDir | not linked: DVDReadPrio and DVDCloseDir are adjacent here (smg_RMGE01) | | | |
-| DVDLowGetCoverStatus | no reference places it | | | |
+| Function | RUUE01 | RUUP01 | RUUJ01 | RUUK01 | confidence |
+|---|---|---|---|---|---|
+| DVDInit | `8039ADC0` | `8039AC10` | `8039ACFC` | `803A36E0` | dtk |
+| DVDOpen | `8039A660` | `8039A4B0` | `8039A59C` | `803A2F80` | high |
+| DVDFastOpen | `8039A5F8` | `8039A448` | `8039A534` | `803A2F18` | high |
+| DVDClose | `8039A90C` | `8039A75C` | `8039A848` | `803A322C` | high |
+| DVDReadPrio | `8039ABD8` | `8039AA28` | `8039AB14` | `803A34F8` | high |
+| DVDReadAsyncPrio | `8039AAF0` | `8039A940` | `8039AA2C` | `803A3410` | high |
+| DVDCancel | `8039F354` | `8039F1A4` | `8039F290` | `803A7C74` | high |
+| DVDCancelAsync | `8039EFF0` | `8039EE40` | `8039EF2C` | `803A7910` | high |
+| DVDGetCommandBlockStatus | `8039EE2C` | `8039EC7C` | `8039ED68` | `803A774C` | high |
+| DVDGetDriveStatus | `8039EEF4` | `8039ED44` | `8039EE30` | `803A7814` | high |
+| DVDConvertPathToEntrynum | `8039A2F0` | `8039A140` | `8039A22C` | `803A2C10` | high |
+| DVDChangeDir | **missing** | **missing** | **missing** | **missing** | - |
+| DVDOpenDir | **missing** | **missing** | **missing** | **missing** | - |
+| DVDReadDir | **missing** | **missing** | **missing** | **missing** | - |
+| DVDCloseDir | `8039AD00` | `8039AB50` | `8039AC3C` | `803A3620` | high |
+| DVDGetCurrentDiskID | `8039F438` | `8039F288` | `8039F374` | `803A7D58` | high |
+| DVDCheckDiskAsync (optional) | `8039F554` | `8039F3A4` | `8039F490` | `803A7E74` | high |
+| DVDInquiryAsync | `8039ED54` | `8039EBA4` | `8039EC90` | `803A7674` | dtk |
+| DVDResume (optional) | `8039EFA0` | `8039EDF0` | `8039EEDC` | `803A78C0` | high |
+| DVDSetAutoInvalidation (optional) | `8039EF90` | `8039EDE0` | `8039EECC` | `803A78B0` | high |
+| DVDSetAutoFatalMessaging (optional) | `803A0734` | `803A0584` | `803A0670` | `803A9078` | dtk |
+| DVDLowInit | `803A0C18` | `803A0A68` | `803A0B54` | `803A955C` | dtk |
+| DVDLowRead | `803A2700` | `803A2550` | `803A263C` | `803AB044` | high |
+| DVDLowReadDiskID | `803A0E7C` | `803A0CCC` | `803A0DB8` | `803A97C0` | high |
+| DVDLowOpenPartition | `803A1004` | `803A0E54` | `803A0F40` | `803A9948` | high |
+| DVDLowClosePartition | `803A1974` | `803A17C4` | `803A18B0` | `803AA2B8` | high |
+| DVDLowGetCoverStatus | **missing** | **missing** | **missing** | **missing** | - |
+| DVDLowReset | `803A20DC` | `803A1F2C` | `803A2018` | `803AAA20` | high |
+| DVDLowStopMotor (optional) | `803A1C6C` | `803A1ABC` | `803A1BA8` | `803AA5B0` | high |
+| DVDLowInquiry | `803A1E00` | `803A1C50` | `803A1D3C` | `803AA744` | high |
+| DVDLowRequestError | `803A1F68` | `803A1DB8` | `803A1EA4` | `803AA8AC` | dtk |
+| DVDLowSetSpinupFlag (optional) | `803A20D0` | `803A1F20` | `803A200C` | `803AAA14` | high |
+| DVDLowUnmaskStatusInterrupts (optional) | `803A2D24` | `803A2B74` | `803A2C60` | `803AB668` | dtk |
+| DVDLowGetImmBufferReg (optional) | `803A2D18` | `803A2B68` | `803A2C54` | `803AB65C` | dtk |
+| DVDLowClearCoverInterrupt (optional) | `803A2D34` | `803A2B84` | `803A2C70` | `803AB678` | high |
+| __DVDLowTestAlarm (optional) | `803A2E98` | `803A2CE8` | `803A2DD4` | `803AB7DC` | high |
+| DVDChangeDir | no reference places it | | | | |
+| DVDOpenDir | not linked: DVDReadPrio and DVDCloseDir are adjacent here (smg_RMGE01) | | | | |
+| DVDReadDir | not linked: DVDReadPrio and DVDCloseDir are adjacent here (smg_RMGE01) | | | | |
+| DVDLowGetCoverStatus | no reference places it | | | | |
 
 Optional, not found (probably not linked, or still unnamed): DVDEntrynumIsDir, DVDGetCurrentDir, DVDCheckDisk, DVDReset, DVDPrepareStreamAsync, DVDGetTransferredSize, __DVDInitWA
 
 ## ARC / TPL
 
-| Function | RUUE01 | RUUP01 | RUUJ01 | confidence |
-|---|---|---|---|---|
-| ARCInitHandle | `8037420C` | `8037405C` | `80374148` | high |
-| ARCOpen | `803742AC` | `803740FC` | `803741E8` | high |
-| ARCFastOpen | `80374550` | `803743A0` | `8037448C` | high |
-| ARCConvertPathToEntrynum | `803745A0` | `803743F0` | `803744DC` | high |
-| ARCGetStartAddrInMem | `803749CC` | `8037481C` | `80374908` | high |
-| ARCGetStartOffset | `803749E0` | `80374830` | `8037491C` | high |
-| ARCGetLength | `803749E8` | `80374838` | `80374924` | high |
-| ARCClose | `803749F0` | `80374840` | `8037492C` | high |
-| ARCChangeDir | `803749F8` | `80374848` | `80374934` | high |
-| ARCOpenDir | `80374A50` | `803748A0` | `8037498C` | high |
-| ARCReadDir | `80374ACC` | `8037491C` | `80374A08` | high |
-| ARCCloseDir | `80374B84` | `803749D4` | `80374AC0` | high |
-| TPLBind (optional) | `803F8AC8` | `803F8918` | `803F8A04` | high |
-| TPLGet (optional) | `803F8BDC` | `803F8A2C` | `803F8B18` | high |
+| Function | RUUE01 | RUUP01 | RUUJ01 | RUUK01 | confidence |
+|---|---|---|---|---|---|
+| ARCInitHandle | `8037420C` | `8037405C` | `80374148` | `8037CB2C` | high |
+| ARCOpen | `803742AC` | `803740FC` | `803741E8` | `8037CBCC` | high |
+| ARCFastOpen | `80374550` | `803743A0` | `8037448C` | `8037CE70` | high |
+| ARCConvertPathToEntrynum | `803745A0` | `803743F0` | `803744DC` | `8037CEC0` | high |
+| ARCGetStartAddrInMem | `803749CC` | `8037481C` | `80374908` | `8037D2EC` | high |
+| ARCGetStartOffset | `803749E0` | `80374830` | `8037491C` | `8037D300` | high |
+| ARCGetLength | `803749E8` | `80374838` | `80374924` | `8037D308` | high |
+| ARCClose | `803749F0` | `80374840` | `8037492C` | `8037D310` | high |
+| ARCChangeDir | `803749F8` | `80374848` | `80374934` | `8037D318` | high |
+| ARCOpenDir | `80374A50` | `803748A0` | `8037498C` | `8037D370` | high |
+| ARCReadDir | `80374ACC` | `8037491C` | `80374A08` | `8037D3EC` | high |
+| ARCCloseDir | `80374B84` | `803749D4` | `80374AC0` | `8037D4A4` | high |
+| TPLBind (optional) | `803F8AC8` | `803F8918` | `803F8A04` | `80402390` | high |
+| TPLGet (optional) | `803F8BDC` | `803F8A2C` | `803F8B18` | `804024A4` | high |
 
 Optional, not found (probably not linked, or still unnamed): ARCEntrynumIsDir, TPLGetGXTexObjFromPalette, TPLGetPalette
 
 ## MEM
 
-| Function | RUUE01 | RUUP01 | RUUJ01 | confidence |
-|---|---|---|---|---|
-| MEMInitList | `803A472C` | `803A457C` | `803A4668` | high |
-| MEMAppendListObject | `803A4744` | `803A4594` | `803A4680` | high |
-| MEMRemoveListObject | `803A47B4` | `803A4604` | `803A46F0` | high |
-| MEMGetNextListObject | `803A4820` | `803A4670` | `803A475C` | high |
-| MEMCreateExpHeapEx | `803A395C` | `803A37AC` | `803A3898` | high |
-| MEMDestroyExpHeap | `803A3A0C` | `803A385C` | `803A3948` | high |
-| MEMAllocFromExpHeapEx | `803A3A3C` | `803A388C` | `803A3978` | high |
-| MEMFreeToExpHeap | `803A3CEC` | `803A3B3C` | `803A3C28` | high |
-| MEMResizeForMBlockExpHeap | `803A3AEC` | `803A393C` | `803A3A28` | high |
-| MEMGetAllocatableSizeForExpHeapEx | `803A3E34` | `803A3C84` | `803A3D70` | high |
-| MEMGetTotalFreeSizeForExpHeap (optional) | `803A3DB8` | `803A3C08` | `803A3CF4` | high |
-| MEMCreateFrmHeapEx | `803A40E0` | `803A3F30` | `803A401C` | high |
-| MEMDestroyFrmHeap | `803A4164` | `803A3FB4` | `803A40A0` | high |
-| MEMAllocFromFrmHeapEx | `803A4194` | `803A3FE4` | `803A40D0` | high |
-| MEMFreeToFrmHeap | `803A42B4` | `803A4104` | `803A41F0` | high |
-| MEMInitAllocatorForExpHeap | `803A46F4` | `803A4544` | `803A4630` | high |
-| MEMAllocFromAllocator | `803A46D4` | `803A4524` | `803A4610` | high |
-| MEMFreeToAllocator | `803A46E4` | `803A4534` | `803A4620` | high |
-| MEMInitAllocatorForFrmHeap (optional) | `803A4710` | `803A4560` | `803A464C` | high |
+| Function | RUUE01 | RUUP01 | RUUJ01 | RUUK01 | confidence |
+|---|---|---|---|---|---|
+| MEMInitList | `803A472C` | `803A457C` | `803A4668` | `803AD070` | high |
+| MEMAppendListObject | `803A4744` | `803A4594` | `803A4680` | `803AD088` | high |
+| MEMRemoveListObject | `803A47B4` | `803A4604` | `803A46F0` | `803AD0F8` | high |
+| MEMGetNextListObject | `803A4820` | `803A4670` | `803A475C` | `803AD164` | high |
+| MEMCreateExpHeapEx | `803A395C` | `803A37AC` | `803A3898` | `803AC2A0` | high |
+| MEMDestroyExpHeap | `803A3A0C` | `803A385C` | `803A3948` | `803AC350` | high |
+| MEMAllocFromExpHeapEx | `803A3A3C` | `803A388C` | `803A3978` | `803AC380` | high |
+| MEMFreeToExpHeap | `803A3CEC` | `803A3B3C` | `803A3C28` | `803AC630` | high |
+| MEMResizeForMBlockExpHeap | `803A3AEC` | `803A393C` | `803A3A28` | `803AC430` | high |
+| MEMGetAllocatableSizeForExpHeapEx | `803A3E34` | `803A3C84` | `803A3D70` | `803AC778` | high |
+| MEMGetTotalFreeSizeForExpHeap (optional) | `803A3DB8` | `803A3C08` | `803A3CF4` | `803AC6FC` | high |
+| MEMCreateFrmHeapEx | `803A40E0` | `803A3F30` | `803A401C` | `803ACA24` | high |
+| MEMDestroyFrmHeap | `803A4164` | `803A3FB4` | `803A40A0` | `803ACAA8` | high |
+| MEMAllocFromFrmHeapEx | `803A4194` | `803A3FE4` | `803A40D0` | `803ACAD8` | high |
+| MEMFreeToFrmHeap | `803A42B4` | `803A4104` | `803A41F0` | `803ACBF8` | high |
+| MEMInitAllocatorForExpHeap | `803A46F4` | `803A4544` | `803A4630` | `803AD038` | high |
+| MEMAllocFromAllocator | `803A46D4` | `803A4524` | `803A4610` | `803AD018` | high |
+| MEMFreeToAllocator | `803A46E4` | `803A4534` | `803A4620` | `803AD028` | high |
+| MEMInitAllocatorForFrmHeap (optional) | `803A4710` | `803A4560` | `803A464C` | `803AD054` | high |
 
 Optional, not found (probably not linked, or still unnamed): MEMCreateUnitHeapEx, MEMAllocFromUnitHeap, MEMFreeToUnitHeap
 
 ## WPAD / KPAD / WUD
 
-| Function | RUUE01 | RUUP01 | RUUJ01 | confidence |
-|---|---|---|---|---|
-| WPADInit | `803B13B0` | `803B1200` | `803B12EC` | high |
-| WPADShutdown | **missing** | **missing** | **missing** | - |
-| WPADGetStatus | `803B1438` | `803B1288` | `803B1374` | high |
-| WPADProbe | `803B278C` | `803B25DC` | `803B26C8` | high |
-| WPADRead | `803B3088` | `803B2ED8` | `803B2FC4` | high |
-| WPADSetAutoSamplingBuf | `803B3228` | `803B3078` | `803B3164` | high |
-| WPADSetDataFormat | `803B2998` | `803B27E8` | `803B28D4` | high |
-| WPADGetDataFormat | `803B2950` | `803B27A0` | `803B288C` | high |
-| WPADControlMotor | `803B2CC0` | `803B2B10` | `803B2BFC` | high |
-| WPADEnableMotor (optional) | `803B2D8C` | `803B2BDC` | `803B2CC8` | high |
-| WPADIsMotorEnabled (optional) | `803B2DC0` | `803B2C10` | `803B2CFC` | high |
-| WPADSetConnectCallback | `803B2880` | `803B26D0` | `803B27BC` | high |
-| WPADSetExtensionCallback | `803B28E8` | `803B2738` | `803B2824` | high |
-| WPADSetSamplingCallback | `803B2818` | `803B2668` | `803B2754` | high |
-| WPADDisconnect | `803B26C8` | `803B2518` | `803B2604` | high |
-| WPADGetInfoAsync | `803B2AA0` | `803B28F0` | `803B29DC` | high |
-| WPADControlSpeaker | `803B362C` | `803B347C` | `803B3568` | high |
-| WPADSendStreamData | `803B4E88` | `803B4CD8` | `803B4DC4` | high |
-| WPADCanSendStreamData | `803B4E04` | `803B4C54` | `803B4D40` | high |
-| WPADIsSpeakerEnabled (optional) | `803B35E8` | `803B3438` | `803B3524` | high |
-| WPADGetSpeakerVolume | `803B4C48` | `803B4A98` | `803B4B84` | high |
-| WPADSetSpeakerVolume | `803B4C7C` | `803B4ACC` | `803B4BB8` | high |
-| WPADControlDpd | `803B5114` | `803B4F64` | `803B5050` | high |
-| WPADIsDpdEnabled | `803B50A0` | `803B4EF0` | `803B4FDC` | high |
-| WPADGetSensorBarPosition | `803B1480` | `803B12D0` | `803B13BC` | high |
-| WPADGetDpdSensitivity (optional) | `803B5098` | `803B4EE8` | `803B4FD4` | high |
-| WPADSetAcceptConnection (optional) | `803B14B4` | `803B1304` | `803B13F0` | high |
-| WPADGetAcceptConnection (optional) | `803B151C` | `803B136C` | `803B1458` | gap |
-| WPADRegisterAllocator | `803B1430` | `803B1280` | `803B136C` | high |
-| WPADGetWorkMemorySize | `803B1434` | `803B1284` | `803B1370` | high |
-| WPADGetRadioSensitivity | `803B143C` | `803B128C` | `803B1378` | high |
-| WPADGetAccGravityUnit | `803B25CC` | `803B241C` | `803B2508` | high |
-| WPADStopSimpleSync (optional) | `803B1428` | `803B1278` | `803B1364` | high |
-| WPADSetSimpleSyncCallback (optional) | `803B142C` | `803B127C` | `803B1368` | high |
-| WPADEnableMotor (optional) | `803B2D8C` | `803B2BDC` | `803B2CC8` | high |
-| WPADSaveConfig (optional) | `803B2FDC` | `803B2E2C` | `803B2F18` | high |
-| KPADInit | `803BFB00` | `803BF950` | `803BFA3C` | high |
-| KPADRead | `803BF3D4` | `803BF224` | `803BF310` | high |
-| KPADReset | **missing** | **missing** | **missing** | - |
-| KPADSetPosParam | `803BD108` | `803BCF58` | `803BD044` | high |
-| KPADSetHoriParam | `803BD124` | `803BCF74` | `803BD060` | high |
-| KPADSetDistParam | `803BD140` | `803BCF90` | `803BD07C` | high |
-| KPADSetAccParam | `803BD15C` | `803BCFAC` | `803BD098` | high |
-| KPADSetBtnRepeat | **missing** | **missing** | **missing** | - |
-| KPADSetSensorHeight | **missing** | **missing** | **missing** | - |
-| KPADSetObjInterval | **missing** | **missing** | **missing** | - |
-| KPADDisableDPD | **missing** | **missing** | **missing** | - |
-| KPADEnableDPD | **missing** | **missing** | **missing** | - |
-| KPADCalibrateDPD | **missing** | **missing** | **missing** | - |
-| KPADSetFSStickClamp (optional) | `803BD0F4` | `803BCF44` | `803BD030` | high |
-| WUDInit | `803C3B6C` | `803C39BC` | `803C3AA8` | high |
-| WUDShutdown | `803C3CB0` | `803C3B00` | `803C3BEC` | high |
-| WUDIsBusy | `803C565C` | `803C54AC` | `803C5598` | high |
-| WUDGetStatus | `803C3ED0` | `803C3D20` | `803C3E0C` | high |
-| WUDSetSniffMode | `803C3F54` | `803C3DA4` | `803C3E90` | high |
-| WUDRegisterAllocator | `803C3C64` | `803C3AB4` | `803C3BA0` | high |
-| WUDSetSyncSimpleCallback (optional) | `803C3FC0` | `803C3E10` | `803C3EFC` | high |
-| WUDGetBufferStatus (optional) | `803C3F0C` | `803C3D5C` | `803C3E48` | high |
-| WUDSetDisableChannel | `803C42E0` | `803C4130` | `803C421C` | high |
-| WUDSetVisibility (optional) | `803C4484` | `803C42D4` | `803C43C0` | high |
-| WUDCancelSyncDevice (optional) | `803C41A8` | `803C3FF8` | `803C40E4` | high |
-| WUDStartFastSyncSimple (optional) | `803C4168` | `803C3FB8` | `803C40A4` | high |
-| WPADShutdown | no reference places it | | | |
-| KPADReset | not linked: KPADInit and KPADiSamplingCallback are adjacent here (smg_RMGE01) | | | |
-| KPADSetBtnRepeat | not linked: KPADSetFSStickClamp and KPADSetPosParam are adjacent here (spm_EU0) | | | |
-| KPADSetSensorHeight | not linked: reset_kpad and calc_button_repeat are adjacent here (smg_RMGE01) | | | |
-| KPADSetObjInterval | not linked: KPADSetFSStickClamp and KPADSetPosParam are adjacent here (tp_RZDE01_02) | | | |
-| KPADDisableDPD | not linked: KPADInit and KPADiSamplingCallback are adjacent here (mkw_RMCP01) | | | |
-| KPADEnableDPD | not linked: KPADInit and KPADiSamplingCallback are adjacent here (mkw_RMCP01) | | | |
-| KPADCalibrateDPD | not linked: reset_kpad and calc_button_repeat are adjacent here (spm_EU0) | | | |
+| Function | RUUE01 | RUUP01 | RUUJ01 | RUUK01 | confidence |
+|---|---|---|---|---|---|
+| WPADInit | `803B13B0` | `803B1200` | `803B12EC` | `803B9CF4` | high |
+| WPADShutdown | **missing** | **missing** | **missing** | **missing** | - |
+| WPADGetStatus | `803B1438` | `803B1288` | `803B1374` | `803B9D7C` | high |
+| WPADProbe | `803B278C` | `803B25DC` | `803B26C8` | `803BB0D0` | high |
+| WPADRead | `803B3088` | `803B2ED8` | `803B2FC4` | `803BB9CC` | high |
+| WPADSetAutoSamplingBuf | `803B3228` | `803B3078` | `803B3164` | `803BBB6C` | high |
+| WPADSetDataFormat | `803B2998` | `803B27E8` | `803B28D4` | `803BB2DC` | high |
+| WPADGetDataFormat | `803B2950` | `803B27A0` | `803B288C` | `803BB294` | high |
+| WPADControlMotor | `803B2CC0` | `803B2B10` | `803B2BFC` | `803BB604` | high |
+| WPADEnableMotor (optional) | `803B2D8C` | `803B2BDC` | `803B2CC8` | `803BB6D0` | high |
+| WPADIsMotorEnabled (optional) | `803B2DC0` | `803B2C10` | `803B2CFC` | `803BB704` | high |
+| WPADSetConnectCallback | `803B2880` | `803B26D0` | `803B27BC` | `803BB1C4` | high |
+| WPADSetExtensionCallback | `803B28E8` | `803B2738` | `803B2824` | `803BB22C` | high |
+| WPADSetSamplingCallback | `803B2818` | `803B2668` | `803B2754` | `803BB15C` | high |
+| WPADDisconnect | `803B26C8` | `803B2518` | `803B2604` | `803BB00C` | high |
+| WPADGetInfoAsync | `803B2AA0` | `803B28F0` | `803B29DC` | `803BB3E4` | high |
+| WPADControlSpeaker | `803B362C` | `803B347C` | `803B3568` | `803BBF70` | high |
+| WPADSendStreamData | `803B4E88` | `803B4CD8` | `803B4DC4` | `803BD7CC` | high |
+| WPADCanSendStreamData | `803B4E04` | `803B4C54` | `803B4D40` | `803BD748` | high |
+| WPADIsSpeakerEnabled (optional) | `803B35E8` | `803B3438` | `803B3524` | `803BBF2C` | high |
+| WPADGetSpeakerVolume | `803B4C48` | `803B4A98` | `803B4B84` | `803BD58C` | high |
+| WPADSetSpeakerVolume | `803B4C7C` | `803B4ACC` | `803B4BB8` | `803BD5C0` | high |
+| WPADControlDpd | `803B5114` | `803B4F64` | `803B5050` | `803BDA58` | high |
+| WPADIsDpdEnabled | `803B50A0` | `803B4EF0` | `803B4FDC` | `803BD9E4` | high |
+| WPADGetSensorBarPosition | `803B1480` | `803B12D0` | `803B13BC` | `803B9DC4` | high |
+| WPADGetDpdSensitivity (optional) | `803B5098` | `803B4EE8` | `803B4FD4` | `803BD9DC` | high |
+| WPADSetAcceptConnection (optional) | `803B14B4` | `803B1304` | `803B13F0` | `803B9DF8` | high |
+| WPADGetAcceptConnection (optional) | `803B151C` | `803B136C` | `803B1458` | `803B9E60` | gap |
+| WPADRegisterAllocator | `803B1430` | `803B1280` | `803B136C` | `803B9D74` | high |
+| WPADGetWorkMemorySize | `803B1434` | `803B1284` | `803B1370` | `803B9D78` | high |
+| WPADGetRadioSensitivity | `803B143C` | `803B128C` | `803B1378` | `803B9D80` | high |
+| WPADGetAccGravityUnit | `803B25CC` | `803B241C` | `803B2508` | `803BAF10` | high |
+| WPADStopSimpleSync (optional) | `803B1428` | `803B1278` | `803B1364` | `803B9D6C` | high |
+| WPADSetSimpleSyncCallback (optional) | `803B142C` | `803B127C` | `803B1368` | `803B9D70` | high |
+| WPADEnableMotor (optional) | `803B2D8C` | `803B2BDC` | `803B2CC8` | `803BB6D0` | high |
+| WPADSaveConfig (optional) | `803B2FDC` | `803B2E2C` | `803B2F18` | `803BB920` | high |
+| KPADInit | `803BFB00` | `803BF950` | `803BFA3C` | `803C8444` | high |
+| KPADRead | `803BF3D4` | `803BF224` | `803BF310` | `803C7D18` | high |
+| KPADReset | **missing** | **missing** | **missing** | **missing** | - |
+| KPADSetPosParam | `803BD108` | `803BCF58` | `803BD044` | `803C5A4C` | high |
+| KPADSetHoriParam | `803BD124` | `803BCF74` | `803BD060` | `803C5A68` | high |
+| KPADSetDistParam | `803BD140` | `803BCF90` | `803BD07C` | `803C5A84` | high |
+| KPADSetAccParam | `803BD15C` | `803BCFAC` | `803BD098` | `803C5AA0` | high |
+| KPADSetBtnRepeat | **missing** | **missing** | **missing** | **missing** | - |
+| KPADSetSensorHeight | **missing** | **missing** | **missing** | **missing** | - |
+| KPADSetObjInterval | **missing** | **missing** | **missing** | **missing** | - |
+| KPADDisableDPD | **missing** | **missing** | **missing** | **missing** | - |
+| KPADEnableDPD | **missing** | **missing** | **missing** | **missing** | - |
+| KPADCalibrateDPD | **missing** | **missing** | **missing** | **missing** | - |
+| KPADSetFSStickClamp (optional) | `803BD0F4` | `803BCF44` | `803BD030` | `803C5A38` | high |
+| WUDInit | `803C3B6C` | `803C39BC` | `803C3AA8` | `803CC4B0` | high |
+| WUDShutdown | `803C3CB0` | `803C3B00` | `803C3BEC` | `803CC5F4` | high |
+| WUDIsBusy | `803C565C` | `803C54AC` | `803C5598` | `803CDFA0` | high |
+| WUDGetStatus | `803C3ED0` | `803C3D20` | `803C3E0C` | `803CC814` | high |
+| WUDSetSniffMode | `803C3F54` | `803C3DA4` | `803C3E90` | `803CC898` | high |
+| WUDRegisterAllocator | `803C3C64` | `803C3AB4` | `803C3BA0` | `803CC5A8` | high |
+| WUDSetSyncSimpleCallback (optional) | `803C3FC0` | `803C3E10` | `803C3EFC` | `803CC904` | high |
+| WUDGetBufferStatus (optional) | `803C3F0C` | `803C3D5C` | `803C3E48` | `803CC850` | high |
+| WUDSetDisableChannel | `803C42E0` | `803C4130` | `803C421C` | `803CCC24` | high |
+| WUDSetVisibility (optional) | `803C4484` | `803C42D4` | `803C43C0` | `803CCDC8` | high |
+| WUDCancelSyncDevice (optional) | `803C41A8` | `803C3FF8` | `803C40E4` | `803CCAEC` | high |
+| WUDStartFastSyncSimple (optional) | `803C4168` | `803C3FB8` | `803C40A4` | `803CCAAC` | high |
+| WPADShutdown | no reference places it | | | | |
+| KPADReset | not linked: KPADInit and KPADiSamplingCallback are adjacent here (smg_RMGE01) | | | | |
+| KPADSetBtnRepeat | not linked: KPADSetFSStickClamp and KPADSetPosParam are adjacent here (spm_EU0) | | | | |
+| KPADSetSensorHeight | not linked: reset_kpad and calc_button_repeat are adjacent here (smg_RMGE01) | | | | |
+| KPADSetObjInterval | not linked: KPADSetFSStickClamp and KPADSetPosParam are adjacent here (tp_RZDE01_02) | | | | |
+| KPADDisableDPD | not linked: KPADInit and KPADiSamplingCallback are adjacent here (mkw_RMCP01) | | | | |
+| KPADEnableDPD | not linked: KPADInit and KPADiSamplingCallback are adjacent here (mkw_RMCP01) | | | | |
+| KPADCalibrateDPD | not linked: reset_kpad and calc_button_repeat are adjacent here (spm_EU0) | | | | |
 
 Optional, not found (probably not linked, or still unnamed): WPADGetLatestIndexInBuf, WPADGetInfo, WPADIsUsedCallbackByKPAD, WPADSetCallbackByKPAD, WPADGetCLTriggerThreshold, WPADClampStick, WPADClampTrigger, WPADClampAcc, WPADStartMotor, WPADStopMotor, WPADRecalibrate, WPADGetBLCalibration, WPADSetPowerSaveMode, WPADGetSyncType, WPADStartSimpleSync, WPADPurgeBtDb, WPADEnableURCC, WPADEnableWBC, WPADSetDisableChannel, WPADIsEnabledURCC, WPADGetGameDataTimeStamp, KPADInitEx, KPADReadEx, KPADGetUnifiedWpadStatus, KPADSetConnectCallback, KPADSetControlDpdCallback, KPADSetReviseMode, KPADReviseAcc, KPADGetProjectionPos, KPADEnableAimingMode, KPADDisableAimingMode, KPADSetPosPlayMode, KPADSetHoriPlayMode, KPADSetDistPlayMode, KPADSetAccPlayMode, WUDStartSyncSimple, WUDStartSyncDevice
 
 ## AX / AXFX / AI / DSP
 
-| Function | RUUE01 | RUUP01 | RUUJ01 | confidence |
-|---|---|---|---|---|
-| AXInit | `80374B8C` | `803749DC` | `80374AC8` | high |
-| AXInitEx | **missing** | **missing** | **missing** | - |
-| AXQuit | **missing** | **missing** | **missing** | - |
-| AXRegisterCallback | `803769B0` | `80376800` | `803768EC` | high |
-| AXAcquireVoice | `80374E84` | `80374CD4` | `80374DC0` | high |
-| AXFreeVoice | `80374E08` | `80374C58` | `80374D44` | high |
-| AXSetVoicePriority | `80375004` | `80374E54` | `80374F40` | high |
-| AXSetVoiceState | `80377B84` | `803779D4` | `80377AC0` | gap |
-| AXSetVoiceAddr | `80377BF4` | `80377A44` | `80377B30` | gap |
-| AXSetVoiceType | **missing** | **missing** | **missing** | - |
-| AXSetVoiceMix | **missing** | **missing** | **missing** | - |
-| AXSetVoiceVe | **missing** | **missing** | **missing** | - |
-| AXSetVoiceSrc | **missing** | **missing** | **missing** | - |
-| AXSetVoiceSrcType | **missing** | **missing** | **missing** | - |
-| AXSetVoiceSrcRatio | **missing** | **missing** | **missing** | - |
-| AXSetVoiceAdpcm | **missing** | **missing** | **missing** | - |
-| AXSetVoiceAdpcmLoop | **missing** | **missing** | **missing** | - |
-| AXSetVoiceLoop | **missing** | **missing** | **missing** | - |
-| AXSetVoiceLoopAddr | **missing** | **missing** | **missing** | - |
-| AXSetVoiceEndAddr | **missing** | **missing** | **missing** | - |
-| AXSetVoiceCurrentAddr | **missing** | **missing** | **missing** | - |
-| AXSetMode | `803762EC` | `8037613C` | `80376228` | high |
-| AXGetMode | `803762F4` | `80376144` | `80376230` | high |
-| AXSetMasterVolume (optional) | `80376314` | `80376164` | `80376250` | high |
-| AXGetAuxAReturnVolume (optional) | `803762FC` | `8037614C` | `80376238` | high |
-| AXSetAuxAReturnVolume | `8037632C` | `8037617C` | `80376268` | high |
-| AXSetAuxBReturnVolume | `80376334` | `80376184` | `80376270` | high |
-| AXSetAuxCReturnVolume | `8037633C` | `8037618C` | `80376278` | high |
-| AXRegisterAuxACallback | `80375750` | `803755A0` | `8037568C` | high |
-| AXRegisterAuxBCallback | `803757B4` | `80375604` | `803756F0` | high |
-| AXRegisterAuxCCallback | `80375818` | `80375668` | `80375754` | high |
-| AXGetAuxACallback | `8037587C` | `803756CC` | `803757B8` | high |
-| AXGetAuxBCallback | `80375890` | `803756E0` | `803757CC` | high |
-| AXGetAuxCCallback | `803758A4` | `803756F4` | `803757E0` | high |
-| AXSetMaxDspCycles | `80377E20` | `80377C70` | `80377D5C` | high |
-| __AXOutInit (optional) | `803767B8` | `80376608` | `803766F4` | high |
-| AXFXReverbHiInit (optional) | `80377E70` | `80377CC0` | `80377DAC` | high |
-| AXFXSetHooks | `80379FB0` | `80379E00` | `80379EEC` | high |
-| AXFXGetHooks | `80379FBC` | `80379E0C` | `80379EF8` | high |
-| AIInit | `80373DBC` | `80373C0C` | `80373CF8` | high |
-| AIInitDMA | `80373CEC` | `80373B3C` | `80373C28` | high |
-| AIStartDMA | `80373D68` | `80373BB8` | `80373CA4` | high |
-| AIStopDMA | **missing** | **missing** | **missing** | - |
-| AIRegisterDMACallback | `80373CA8` | `80373AF8` | `80373BE4` | high |
-| AIGetDMAStartAddr | `80373D8C` | `80373BDC` | `80373CC8` | high |
-| AIGetDMABytesLeft | `80373D7C` | `80373BCC` | `80373CB8` | high |
-| AIGetDMALength (optional) | `80373DA4` | `80373BF4` | `80373CE0` | high |
-| AISetDSPSampleRate | **missing** | **missing** | **missing** | - |
-| AIGetDSPSampleRate | **missing** | **missing** | **missing** | - |
-| AICheckInit (optional) | `80373DB4` | `80373C04` | `80373CF0` | high |
-| DSPInit | `803A6168` | `803A5FB8` | `803A60A4` | high |
-| DSPCheckMailToDSP | `803A6120` | `803A5F70` | `803A605C` | high |
-| DSPCheckMailFromDSP | `803A6130` | `803A5F80` | `803A606C` | high |
-| DSPReadMailFromDSP | `803A6140` | `803A5F90` | `803A607C` | high |
-| DSPSendMailToDSP | `803A6154` | `803A5FA4` | `803A6090` | high |
-| DSPAssertInt | **missing** | **missing** | **missing** | - |
-| DSPCheckInit (optional) | `803A6228` | `803A6078` | `803A6164` | high |
-| DSPAddTask (optional) | `803A6230` | `803A6080` | `803A616C` | high |
-| __DSP_exec_task | `803A67E0` | `803A6630` | `803A671C` | high |
-| __DSP_boot_task | `803A6984` | `803A67D4` | `803A68C0` | high |
-| __DSPHandler | `803A63AC` | `803A61FC` | `803A62E8` | high |
-| __DSP_insert_task | `803A6B10` | `803A6960` | `803A6A4C` | high |
-| __DSP_remove_task | `803A6BAC` | `803A69FC` | `803A6AE8` | high |
-| AXInitEx | no reference places it | | | |
-| AXQuit | not linked: the functions between AXInit and __AXGetStackHead all have other names (spm_EU0) | | | |
-| AXSetVoiceType | no reference places it | | | |
-| AXSetVoiceMix | no reference places it | | | |
-| AXSetVoiceVe | no reference places it | | | |
-| AXSetVoiceSrc | no reference places it | | | |
-| AXSetVoiceSrcType | no reference places it | | | |
-| AXSetVoiceSrcRatio | no reference places it | | | |
-| AXSetVoiceAdpcm | no reference places it | | | |
-| AXSetVoiceAdpcmLoop | no reference places it | | | |
-| AXSetVoiceLoop | no reference places it | | | |
-| AXSetVoiceLoopAddr | no reference places it | | | |
-| AXSetVoiceEndAddr | no reference places it | | | |
-| AXSetVoiceCurrentAddr | no reference places it | | | |
-| AIStopDMA | not linked: the functions between AIStartDMA and AIGetDMAStartAddr all have other names (smg_RMGE01) | | | |
-| AISetDSPSampleRate | not linked: the functions between AIGetDMALength and AIInit all have other names (smg_RMGE01) | | | |
-| AIGetDSPSampleRate | not linked: the functions between AIGetDMABytesLeft and AIInit all have other names (mkw_RMCP01) | | | |
-| DSPAssertInt | not linked: DSPSendMailToDSP and DSPInit are adjacent here (smg_RMGE01) | | | |
+| Function | RUUE01 | RUUP01 | RUUJ01 | RUUK01 | confidence |
+|---|---|---|---|---|---|
+| AXInit | `80374B8C` | `803749DC` | `80374AC8` | `8037D4AC` | high |
+| AXInitEx | **missing** | **missing** | **missing** | **missing** | - |
+| AXQuit | **missing** | **missing** | **missing** | **missing** | - |
+| AXRegisterCallback | `803769B0` | `80376800` | `803768EC` | `8037F2D0` | high |
+| AXAcquireVoice | `80374E84` | `80374CD4` | `80374DC0` | `8037D7A4` | high |
+| AXFreeVoice | `80374E08` | `80374C58` | `80374D44` | `8037D728` | high |
+| AXSetVoicePriority | `80375004` | `80374E54` | `80374F40` | `8037D924` | high |
+| AXSetVoiceState | `80377B84` | `803779D4` | `80377AC0` | `803804A4` | gap |
+| AXSetVoiceAddr | `80377BF4` | `80377A44` | `80377B30` | `80380514` | gap |
+| AXSetVoiceType | **missing** | **missing** | **missing** | **missing** | - |
+| AXSetVoiceMix | **missing** | **missing** | **missing** | **missing** | - |
+| AXSetVoiceVe | **missing** | **missing** | **missing** | **missing** | - |
+| AXSetVoiceSrc | **missing** | **missing** | **missing** | **missing** | - |
+| AXSetVoiceSrcType | **missing** | **missing** | **missing** | **missing** | - |
+| AXSetVoiceSrcRatio | **missing** | **missing** | **missing** | **missing** | - |
+| AXSetVoiceAdpcm | **missing** | **missing** | **missing** | **missing** | - |
+| AXSetVoiceAdpcmLoop | **missing** | **missing** | **missing** | **missing** | - |
+| AXSetVoiceLoop | **missing** | **missing** | **missing** | **missing** | - |
+| AXSetVoiceLoopAddr | **missing** | **missing** | **missing** | **missing** | - |
+| AXSetVoiceEndAddr | **missing** | **missing** | **missing** | **missing** | - |
+| AXSetVoiceCurrentAddr | **missing** | **missing** | **missing** | **missing** | - |
+| AXSetMode | `803762EC` | `8037613C` | `80376228` | `8037EC0C` | high |
+| AXGetMode | `803762F4` | `80376144` | `80376230` | `8037EC14` | high |
+| AXSetMasterVolume (optional) | `80376314` | `80376164` | `80376250` | `8037EC34` | high |
+| AXGetAuxAReturnVolume (optional) | `803762FC` | `8037614C` | `80376238` | `8037EC1C` | high |
+| AXSetAuxAReturnVolume | `8037632C` | `8037617C` | `80376268` | `8037EC4C` | high |
+| AXSetAuxBReturnVolume | `80376334` | `80376184` | `80376270` | `8037EC54` | high |
+| AXSetAuxCReturnVolume | `8037633C` | `8037618C` | `80376278` | `8037EC5C` | high |
+| AXRegisterAuxACallback | `80375750` | `803755A0` | `8037568C` | `8037E070` | high |
+| AXRegisterAuxBCallback | `803757B4` | `80375604` | `803756F0` | `8037E0D4` | high |
+| AXRegisterAuxCCallback | `80375818` | `80375668` | `80375754` | `8037E138` | high |
+| AXGetAuxACallback | `8037587C` | `803756CC` | `803757B8` | `8037E19C` | high |
+| AXGetAuxBCallback | `80375890` | `803756E0` | `803757CC` | `8037E1B0` | high |
+| AXGetAuxCCallback | `803758A4` | `803756F4` | `803757E0` | `8037E1C4` | high |
+| AXSetMaxDspCycles | `80377E20` | `80377C70` | `80377D5C` | `80380740` | high |
+| __AXOutInit (optional) | `803767B8` | `80376608` | `803766F4` | `8037F0D8` | high |
+| AXFXReverbHiInit (optional) | `80377E70` | `80377CC0` | `80377DAC` | `80380790` | high |
+| AXFXSetHooks | `80379FB0` | `80379E00` | `80379EEC` | `803828D0` | high |
+| AXFXGetHooks | `80379FBC` | `80379E0C` | `80379EF8` | `803828DC` | high |
+| AIInit | `80373DBC` | `80373C0C` | `80373CF8` | `8037C6DC` | high |
+| AIInitDMA | `80373CEC` | `80373B3C` | `80373C28` | `8037C60C` | high |
+| AIStartDMA | `80373D68` | `80373BB8` | `80373CA4` | `8037C688` | high |
+| AIStopDMA | **missing** | **missing** | **missing** | **missing** | - |
+| AIRegisterDMACallback | `80373CA8` | `80373AF8` | `80373BE4` | `8037C5C8` | high |
+| AIGetDMAStartAddr | `80373D8C` | `80373BDC` | `80373CC8` | `8037C6AC` | high |
+| AIGetDMABytesLeft | `80373D7C` | `80373BCC` | `80373CB8` | `8037C69C` | high |
+| AIGetDMALength (optional) | `80373DA4` | `80373BF4` | `80373CE0` | `8037C6C4` | high |
+| AISetDSPSampleRate | **missing** | **missing** | **missing** | **missing** | - |
+| AIGetDSPSampleRate | **missing** | **missing** | **missing** | **missing** | - |
+| AICheckInit (optional) | `80373DB4` | `80373C04` | `80373CF0` | `8037C6D4` | high |
+| DSPInit | `803A6168` | `803A5FB8` | `803A60A4` | `803AEAAC` | high |
+| DSPCheckMailToDSP | `803A6120` | `803A5F70` | `803A605C` | `803AEA64` | high |
+| DSPCheckMailFromDSP | `803A6130` | `803A5F80` | `803A606C` | `803AEA74` | high |
+| DSPReadMailFromDSP | `803A6140` | `803A5F90` | `803A607C` | `803AEA84` | high |
+| DSPSendMailToDSP | `803A6154` | `803A5FA4` | `803A6090` | `803AEA98` | high |
+| DSPAssertInt | **missing** | **missing** | **missing** | **missing** | - |
+| DSPCheckInit (optional) | `803A6228` | `803A6078` | `803A6164` | `803AEB6C` | high |
+| DSPAddTask (optional) | `803A6230` | `803A6080` | `803A616C` | `803AEB74` | high |
+| __DSP_exec_task | `803A67E0` | `803A6630` | `803A671C` | `803AF124` | high |
+| __DSP_boot_task | `803A6984` | `803A67D4` | `803A68C0` | `803AF2C8` | high |
+| __DSPHandler | `803A63AC` | `803A61FC` | `803A62E8` | `803AECF0` | high |
+| __DSP_insert_task | `803A6B10` | `803A6960` | `803A6A4C` | `803AF454` | high |
+| __DSP_remove_task | `803A6BAC` | `803A69FC` | `803A6AE8` | `803AF4F0` | high |
+| AXInitEx | no reference places it | | | | |
+| AXQuit | not linked: the functions between AXInit and __AXGetStackHead all have other names (spm_EU0) | | | | |
+| AXSetVoiceType | no reference places it | | | | |
+| AXSetVoiceMix | no reference places it | | | | |
+| AXSetVoiceVe | no reference places it | | | | |
+| AXSetVoiceSrc | no reference places it | | | | |
+| AXSetVoiceSrcType | no reference places it | | | | |
+| AXSetVoiceSrcRatio | no reference places it | | | | |
+| AXSetVoiceAdpcm | no reference places it | | | | |
+| AXSetVoiceAdpcmLoop | no reference places it | | | | |
+| AXSetVoiceLoop | no reference places it | | | | |
+| AXSetVoiceLoopAddr | no reference places it | | | | |
+| AXSetVoiceEndAddr | no reference places it | | | | |
+| AXSetVoiceCurrentAddr | no reference places it | | | | |
+| AIStopDMA | not linked: the functions between AIStartDMA and AIGetDMAStartAddr all have other names (smg_RMGE01) | | | | |
+| AISetDSPSampleRate | not linked: the functions between AIGetDMALength and AIInit all have other names (smg_RMGE01) | | | | |
+| AIGetDSPSampleRate | not linked: the functions between AIGetDMABytesLeft and AIInit all have other names (mkw_RMCP01) | | | | |
+| DSPAssertInt | not linked: DSPSendMailToDSP and DSPInit are adjacent here (smg_RMGE01) | | | | |
 
 Optional, not found (probably not linked, or still unnamed): AXSetVoiceLpf, AXSetVoiceLpfCoefs, AXSetVoiceItdOn, AXSetVoiceRmtOn, AXSetVoiceRmtMix, AXSetVoiceRmtSrc, AXSetVoiceRmtIIR, AXSetVoiceBiquad, AXGetMasterVolume, AXGetDspCycles, AXGetMaxDspCycles, AXSetCompressor, AXSetStepMode, AXGetVoiceOffsets, AXSetVoiceOffsets, AXRegisterDSPCallback, AXGetCurrentParams, AXUserBegin, AXUserEnd, AIReset, DSPHalt, DSPReset
 
 ## NWC24 / SO / NCD / network
 
-| Function | RUUE01 | RUUP01 | RUUJ01 | confidence |
-|---|---|---|---|---|
-| NWC24OpenLib | `80404874` | `804046C4` | `804047B0` | high |
-| NWC24CloseLib | `80404A60` | `804048B0` | `8040499C` | high |
-| NWC24IsMsgLibOpened (optional) | `80404ACC` | `8040491C` | `80404A08` | high |
-| NWC24GetMyUserId | `80403E14` | `80403C64` | `80403D50` | high |
-| NWC24InitMsgObj (optional) | `804053A0` | `804051F0` | `804052DC` | high |
-| NWC24CommitMsg (optional) | `80408FE4` | `80408E34` | `80408F20` | gap |
-| NWC24SuspendScheduler | `8040CA44` | `8040C894` | `8040C980` | dtk |
-| NWC24ResumeScheduler | `8040CBF8` | `8040CA48` | `8040CB34` | high |
-| NWC24iRegister (optional) | `8040483C` | `8040468C` | `80404778` | high |
-| NWC24iOpenResourceManager | `8040FC48` | `8040FA98` | `8040FB84` | high |
-| NWC24iCloseResourceManager | `8040FCC0` | `8040FB10` | `8040FBFC` | high |
-| NWC24iIoctlResourceManager | `8040FCF4` | `8040FB44` | `8040FC30` | high |
-| NWC24CheckUserId (optional) | `8040F358` | `8040F1A8` | `8040F294` | high |
-| NWC24GetNumMsgs (optional) | `80405ED0` | `80405D20` | `80405E0C` | high |
-| NWC24iSynchronizeRtcCounter (optional) | `8040FBB4` | `8040FA04` | `8040FAF0` | dtk |
-| NWC24iRequestGenerateUserId (optional) | `8040CFE4` | `8040CE34` | `8040CF20` | high |
-| NWC24iPrepareShutdown (optional) | `80412710` | `80412560` | `8041264C` | dtk |
-| NWC24iSetRtcCounter (optional) | `8040FA6C` | `8040F8BC` | `8040F9A8` | high |
-| NWC24iConfigOpen (optional) | `80403F7C` | `80403DCC` | `80403EB8` | high |
-| NWC24iConfigFlush (optional) | `804040E8` | `80403F38` | `80404024` | high |
-| SOInit | `8043C0A4` | `8043BEF4` | `8043BFE0` | high |
-| SOStartup | `8043C368` | `8043C1B8` | `8043C2A4` | high |
-| SOCleanup (optional) | `8043C79C` | `8043C5EC` | `8043C6D8` | high |
-| SOFinish | `8043C26C` | `8043C0BC` | `8043C1A8` | high |
-| SOSocket | `8043D1D8` | `8043D028` | `8043D114` | high |
-| SOClose | `8043D2C8` | `8043D118` | `8043D204` | high |
-| SOConnect | `8043D454` | `8043D2A4` | `8043D390` | high |
-| SOBind | `8043D36C` | `8043D1BC` | `8043D2A8` | high |
-| SOListen | **missing** | **missing** | **missing** | - |
-| SOAccept | **missing** | **missing** | **missing** | - |
-| SORecv | `8043D660` | `8043D4B0` | `8043D59C` | high |
-| SORecvFrom | `8043D638` | `8043D488` | `8043D574` | high |
-| SOSend | `8043D6AC` | `8043D4FC` | `8043D5E8` | high |
-| SOSendTo | `8043D684` | `8043D4D4` | `8043D5C0` | high |
-| SOSetSockOpt | **missing** | **missing** | **missing** | - |
-| SOGetSockOpt | **missing** | **missing** | **missing** | - |
-| SOFcntl | `8043D6D0` | `8043D520` | `8043D60C` | high |
-| SOShutdown | `8043D800` | `8043D650` | `8043D73C` | high |
-| SOPoll | `8043D8B4` | `8043D704` | `8043D7F0` | high |
-| SOGetHostByName | **missing** | **missing** | **missing** | - |
-| SOGetHostID | **missing** | **missing** | **missing** | - |
-| SOInetAtoN | `8043DA10` | `8043D860` | `8043D94C` | high |
-| SOInetNtoA (optional) | `8043DB1C` | `8043D96C` | `8043DA58` | high |
-| NCDGetLinkStatus | **missing** | **missing** | **missing** | - |
-| SSLNew (optional) | `80318940` | `80318790` | `803189C0` | high |
-| SSLConnect (optional) | `80318A98` | `803188E8` | `80318B18` | high |
-| SSLRead (optional) | `80318C0C` | `80318A5C` | `80318C8C` | high |
-| SSLWrite (optional) | `80318EDC` | `80318D2C` | `80318F5C` | high |
-| SSLShutdown (optional) | `8031919C` | `80318FEC` | `8031921C` | high |
-| SSLSetBuiltinRootCA (optional) | `803194FC` | `8031934C` | `8031957C` | high |
-| SSLSetBuiltinClientCert (optional) | `803195C4` | `80319414` | `80319644` | high |
-| NHTTPStartup (optional) | `8041AFB0` | `8041AE00` | `8041AEEC` | high |
-| SOListen | no reference places it | | | |
-| SOAccept | no reference places it | | | |
-| SOSetSockOpt | no reference places it | | | |
-| SOGetSockOpt | no reference places it | | | |
-| SOGetHostByName | no reference places it | | | |
-| SOGetHostID | no reference places it | | | |
-| NCDGetLinkStatus | no reference places it | | | |
+| Function | RUUE01 | RUUP01 | RUUJ01 | RUUK01 | confidence |
+|---|---|---|---|---|---|
+| NWC24OpenLib | `80404874` | `804046C4` | `804047B0` | `8040E13C` | high |
+| NWC24CloseLib | `80404A60` | `804048B0` | `8040499C` | `8040E328` | high |
+| NWC24IsMsgLibOpened (optional) | `80404ACC` | `8040491C` | `80404A08` | `8040E394` | high |
+| NWC24GetMyUserId | `80403E14` | `80403C64` | `80403D50` | `8040D6DC` | high |
+| NWC24InitMsgObj (optional) | `804053A0` | `804051F0` | `804052DC` | `8040EC68` | high |
+| NWC24CommitMsg (optional) | `80408FE4` | `80408E34` | `80408F20` | `804128AC` | gap |
+| NWC24SuspendScheduler | `8040CA44` | `8040C894` | `8040C980` | `804163C4` | dtk |
+| NWC24ResumeScheduler | `8040CBF8` | `8040CA48` | `8040CB34` | `80416578` | high |
+| NWC24iRegister (optional) | `8040483C` | `8040468C` | `80404778` | `8040E104` | high |
+| NWC24iOpenResourceManager | `8040FC48` | `8040FA98` | `8040FB84` | `804195C8` | high |
+| NWC24iCloseResourceManager | `8040FCC0` | `8040FB10` | `8040FBFC` | `80419640` | high |
+| NWC24iIoctlResourceManager | `8040FCF4` | `8040FB44` | `8040FC30` | `80419674` | high |
+| NWC24CheckUserId (optional) | `8040F358` | `8040F1A8` | `8040F294` | `80418CD8` | high |
+| NWC24GetNumMsgs (optional) | `80405ED0` | `80405D20` | `80405E0C` | `8040F798` | high |
+| NWC24iSynchronizeRtcCounter (optional) | `8040FBB4` | `8040FA04` | `8040FAF0` | `80419534` | dtk |
+| NWC24iRequestGenerateUserId (optional) | `8040CFE4` | `8040CE34` | `8040CF20` | `80416964` | high |
+| NWC24iPrepareShutdown (optional) | `80412710` | `80412560` | `8041264C` | `8041C090` | dtk |
+| NWC24iSetRtcCounter (optional) | `8040FA6C` | `8040F8BC` | `8040F9A8` | `804193EC` | high |
+| NWC24iConfigOpen (optional) | `80403F7C` | `80403DCC` | `80403EB8` | `8040D844` | high |
+| NWC24iConfigFlush (optional) | `804040E8` | `80403F38` | `80404024` | `8040D9B0` | high |
+| SOInit | `8043C0A4` | `8043BEF4` | `8043BFE0` | `80445A24` | high |
+| SOStartup | `8043C368` | `8043C1B8` | `8043C2A4` | `80445CE8` | high |
+| SOCleanup (optional) | `8043C79C` | `8043C5EC` | `8043C6D8` | `8044611C` | high |
+| SOFinish | `8043C26C` | `8043C0BC` | `8043C1A8` | `80445BEC` | high |
+| SOSocket | `8043D1D8` | `8043D028` | `8043D114` | `80446B58` | high |
+| SOClose | `8043D2C8` | `8043D118` | `8043D204` | `80446C48` | high |
+| SOConnect | `8043D454` | `8043D2A4` | `8043D390` | `80446DD4` | high |
+| SOBind | `8043D36C` | `8043D1BC` | `8043D2A8` | `80446CEC` | high |
+| SOListen | **missing** | **missing** | **missing** | **missing** | - |
+| SOAccept | **missing** | **missing** | **missing** | **missing** | - |
+| SORecv | `8043D660` | `8043D4B0` | `8043D59C` | `80446FE0` | high |
+| SORecvFrom | `8043D638` | `8043D488` | `8043D574` | `80446FB8` | high |
+| SOSend | `8043D6AC` | `8043D4FC` | `8043D5E8` | `8044702C` | high |
+| SOSendTo | `8043D684` | `8043D4D4` | `8043D5C0` | `80447004` | high |
+| SOSetSockOpt | **missing** | **missing** | **missing** | **missing** | - |
+| SOGetSockOpt | **missing** | **missing** | **missing** | **missing** | - |
+| SOFcntl | `8043D6D0` | `8043D520` | `8043D60C` | `80447050` | high |
+| SOShutdown | `8043D800` | `8043D650` | `8043D73C` | `80447180` | high |
+| SOPoll | `8043D8B4` | `8043D704` | `8043D7F0` | `80447234` | high |
+| SOGetHostByName | **missing** | **missing** | **missing** | **missing** | - |
+| SOGetHostID | **missing** | **missing** | **missing** | **missing** | - |
+| SOInetAtoN | `8043DA10` | `8043D860` | `8043D94C` | `80447390` | high |
+| SOInetNtoA (optional) | `8043DB1C` | `8043D96C` | `8043DA58` | `8044749C` | high |
+| NCDGetLinkStatus | **missing** | **missing** | **missing** | **missing** | - |
+| SSLNew (optional) | `80318940` | `80318790` | `803189C0` | `80321260` | high |
+| SSLConnect (optional) | `80318A98` | `803188E8` | `80318B18` | `803213B8` | high |
+| SSLRead (optional) | `80318C0C` | `80318A5C` | `80318C8C` | `8032152C` | high |
+| SSLWrite (optional) | `80318EDC` | `80318D2C` | `80318F5C` | `803217FC` | high |
+| SSLShutdown (optional) | `8031919C` | `80318FEC` | `8031921C` | `80321ABC` | high |
+| SSLSetBuiltinRootCA (optional) | `803194FC` | `8031934C` | `8031957C` | `80321E1C` | high |
+| SSLSetBuiltinClientCert (optional) | `803195C4` | `80319414` | `80319644` | `80321EE4` | high |
+| NHTTPStartup (optional) | `8041AFB0` | `8041AE00` | `8041AEEC` | `80424930` | high |
+| SOListen | no reference places it | | | | |
+| SOAccept | no reference places it | | | | |
+| SOSetSockOpt | no reference places it | | | | |
+| SOGetSockOpt | no reference places it | | | | |
+| SOGetHostByName | no reference places it | | | | |
+| SOGetHostID | no reference places it | | | | |
+| NCDGetLinkStatus | no reference places it | | | | |
 
 Optional, not found (probably not linked, or still unnamed): NWC24OpenMsgBox, NWC24ReadMsgText, NWC24GetErrorCode, NWC24iCheckSchedulerStatus, NWC24GetSchedulerStat, NWC24Check, SOGetInterfaceOpt, SOGetAddrInfo, NCDGetCurrentIfConfig, NCDGetIfConfig, NCDReadConfig, NCDIsInterfaceDecided, NCDGetWirelessMacAddress, NCDiGetConfig, SSLInit, NHTTPCleanup
 
 ## DWC / HBM
 
-| Function | RUUE01 | RUUP01 | RUUJ01 | confidence |
-|---|---|---|---|---|
-| DWC_InitFriendsMatch | `8031D320` | `8031D170` | `8031D3A0` | str |
-| DWC_ShutdownFriendsMatch | `8031D590` | `8031D3E0` | `8031D610` | str |
-| DWC_ClearError (optional) | `80319AE8` | `80319938` | `80319B68` | high |
-| DWC_Init (optional) | `80319B30` | `80319980` | `80319BB0` | mid |
-| HBMCreate | `802C9FF0` | `802C9E40` | `802CA06C` | mid |
-| HBMDelete | **missing** | **missing** | **missing** | - |
-| HBMInit | `802CA118` | `802C9F68` | `802CA194` | high |
-| HBMCalc | `802CA148` | `802C9F98` | `802CA1C4` | high |
-| HBMDraw | `802CA184` | `802C9FD4` | `802CA200` | high |
-| HBMGetSelectBtnNum | **missing** | **missing** | **missing** | - |
-| HBMSetAdjustFlag | `802CA1A8` | `802C9FF8` | `802CA224` | high |
-| HBMStartBlackOut (optional) | `802CA1DC` | `802CA02C` | `802CA258` | high |
-| HBMCreateSound | `802CA288` | `802CA0D8` | `802CA304` | high |
-| HBMDeleteSound | **missing** | **missing** | **missing** | - |
-| HBMUpdateSound | `802CA2DC` | `802CA12C` | `802CA358` | high |
-| HBMSetBlackOutColor (optional) | `802CA200` | `802CA050` | `802CA27C` | high |
-| HBMSetVIBlack (optional) | `802CA254` | `802CA0A4` | `802CA2D0` | high |
-| HBMDelete | no reference places it | | | |
-| HBMGetSelectBtnNum | not linked: HBMDraw and HBMSetAdjustFlag are adjacent here (tp_RZDE01_02) | | | |
-| HBMDeleteSound | no reference places it | | | |
+| Function | RUUE01 | RUUP01 | RUUJ01 | RUUK01 | confidence |
+|---|---|---|---|---|---|
+| DWC_InitFriendsMatch | `8031D320` | `8031D170` | `8031D3A0` | `80325C40` | str |
+| DWC_ShutdownFriendsMatch | `8031D590` | `8031D3E0` | `8031D610` | `80325EB0` | str |
+| DWC_ClearError (optional) | `80319AE8` | `80319938` | `80319B68` | `80322408` | high |
+| DWC_Init (optional) | `80319B30` | `80319980` | `80319BB0` | `80322450` | mid |
+| HBMCreate | `802C9FF0` | `802C9E40` | `802CA06C` | `802CB5AC` | mid |
+| HBMDelete | **missing** | **missing** | **missing** | **missing** | - |
+| HBMInit | `802CA118` | `802C9F68` | `802CA194` | `802CB6D4` | high |
+| HBMCalc | `802CA148` | `802C9F98` | `802CA1C4` | `802CB704` | high |
+| HBMDraw | `802CA184` | `802C9FD4` | `802CA200` | `802CB740` | high |
+| HBMGetSelectBtnNum | **missing** | **missing** | **missing** | **missing** | - |
+| HBMSetAdjustFlag | `802CA1A8` | `802C9FF8` | `802CA224` | `802CB764` | high |
+| HBMStartBlackOut (optional) | `802CA1DC` | `802CA02C` | `802CA258` | `802CB798` | high |
+| HBMCreateSound | `802CA288` | `802CA0D8` | `802CA304` | `802CB844` | high |
+| HBMDeleteSound | **missing** | **missing** | **missing** | **missing** | - |
+| HBMUpdateSound | `802CA2DC` | `802CA12C` | `802CA358` | `802CB898` | high |
+| HBMSetBlackOutColor (optional) | `802CA200` | `802CA050` | `802CA27C` | `802CB7BC` | high |
+| HBMSetVIBlack (optional) | `802CA254` | `802CA0A4` | `802CA2D0` | `802CB810` | high |
+| HBMDelete | no reference places it | | | | |
+| HBMGetSelectBtnNum | not linked: HBMDraw and HBMSetAdjustFlag are adjacent here (tp_RZDE01_02) | | | | |
+| HBMDeleteSound | no reference places it | | | | |
 
 Optional, not found (probably not linked, or still unnamed): DWC_ProcessFriendsMatch, DWC_LoginAsync, DWC_GetLastError, DWC_InitForDevelopment, DWC_CreateUserData, DWC_CheckUserData, DWC_SetMemFunc, DWC_ProcessNasLogin, DWC_NASLoginAsync, DWC_CleanupInet, DWC_InitInet, DWC_ConnectInetAsync, DWC_ProcessInet, DWC_CheckInet, DWC_GetLinkLevel, HBMIsReassignedControllers, HBMGetBlackOutColor, HBMSetSoundVolume, HBMUpdateSoundArchive
 

@@ -90,7 +90,7 @@ HLE(OSInit) {
     // Disc header (boot.bin) at 0x80000000: game id, maker, disc number, version.
     std::memcpy(hostp(0x80000000), port::gameId(port::install().running), 6);
     wr8(0x80000006, 0);
-    wr8(0x80000007, 1);            // revision 1
+    wr8(0x80000007, u8(port::partitionRevision(port::install().running)));  // partition header: 1 (Korea 0)
     wr32(0x80000018, 0x5D1C9EA3);  // Wii disc magic
     wr32(0x8000001C, 0);
     wr32(0x80000020, 0x0D15EA5E);  // normal boot

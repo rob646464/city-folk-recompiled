@@ -78,7 +78,8 @@ add_test(NAME wiimote_hid COMMAND cf_wiimote_hid_test)
 file(GLOB RECOMP_RUNTIME_SOURCES CONFIGURE_DEPENDS src/recomp/*.cpp src/game/*.cpp)
 list(REMOVE_ITEM RECOMP_RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/src/recomp/module_rt.cpp)
 list(APPEND RECOMP_RUNTIME_SOURCES src/port/crash_handler.cpp src/port/options.cpp src/port/dol.cpp
-    src/port/settings.cpp src/port/install.cpp src/port/update.cpp src/port/recovery.cpp src/port/disc_folder.cpp)
+    src/port/settings.cpp src/port/install.cpp src/port/update.cpp src/port/recovery.cpp src/port/disc_folder.cpp
+    src/port/http.cpp)
 set_source_files_properties(src/port/update.cpp PROPERTIES COMPILE_DEFINITIONS "CF_VERSION=\"${PROJECT_VERSION}\"")
 
 function(cf_runtime_target tgt)
@@ -113,7 +114,7 @@ endfunction()
 
 # Function maps: the DOL's (config/<id>/symbols.txt) and one per REL module
 # (config/<id>/rels/<module>.txt). Missing ones are filled by the recompiler's own scan.
-set(CF_GAME_ID "RUUE01" CACHE STRING "Game id of CF_DISC (RUUE01 USA rev 1)")
+set(CF_GAME_ID "RUUE01" CACHE STRING "Game id of CF_DISC (RUUE01 USA rev 1; RUUP01, RUUJ01, RUUK01)")
 set(CF_CONFIG_DIR ${CMAKE_SOURCE_DIR}/config/${CF_GAME_ID})
 
 # CityFolkRecomp: what end users run. It contains the runtime, the recompiler and the setup UI;
@@ -134,7 +135,7 @@ set(CF_EMBEDDED_FILES
     kHooks=tools/recomp/hooks.txt kCtxHeader=src/recomp/ctx.h kModuleAbiHeader=src/recomp/module_abi.h
     kModuleRt=src/recomp/module_rt.cpp kRecompilerSource=src/recompiler/recompiler.cpp)
 set(_embed_deps)
-foreach (_id RUUE01 RUUP01 RUUJ01)
+foreach (_id RUUE01 RUUP01 RUUJ01 RUUK01)
     list(APPEND CF_EMBEDDED_FILES kSymbols_${_id}=config/${_id}/symbols.txt kSplits_${_id}=config/${_id}/splits.txt
         kModules_${_id}=config/${_id}/modules.txt)
     # The REL maps: one embedded blob of the whole folder (cfembed's folder mode).
@@ -145,7 +146,7 @@ foreach (_e ${CF_EMBEDDED_FILES})
     string(REGEX REPLACE "^[^=]*=" "${CMAKE_SOURCE_DIR}/" _f ${_e})
     list(APPEND _embed_deps ${_f})
 endforeach ()
-foreach (_id RUUE01 RUUP01 RUUJ01)
+foreach (_id RUUE01 RUUP01 RUUJ01 RUUK01)
     list(APPEND CF_EMBEDDED_FILES kRelMaps_${_id}=config/${_id}/rels)
 endforeach ()
 add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/embedded_data.cpp
