@@ -163,13 +163,15 @@ std::string resolve(const std::string& utf8Path) {
     if (!fs::is_directory(p, ec)) return {};
     if (isPart(p)) return u8(p);
     if (ieq(u8(p.filename()), "sys") && isPart(p.parent_path())) return u8(p.parent_path());
-    // A whole-disc extraction: DATA/ (Dolphin), else the one partition folder that is not UPDATE.
+    // A whole-disc extraction: DATA/ (Dolphin), else the one game-partition-named folder ("P-DATA",
+    // "P0", ...: other tools) that holds sys/ + files/; an arbitrary folder of other games is not searched.
     if (isPart(p / "DATA")) return u8(p / "DATA");
     std::string found;
     int n = 0;
     for (auto it = fs::directory_iterator(p, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
         const std::string name = u8(it->path().filename());
-        if (ieq(name, "UPDATE") || ieq(name, "CHANNEL") || !isPart(it->path())) continue;
+        const bool partName = (name.size() >= 2 && (name[0] == 'P' || name[0] == 'p') && (name[1] == '-' || std::isdigit(static_cast<unsigned char>(name[1]))));
+        if (!partName || ieq(name, "P-UPDATE") || ieq(name, "P-CHANNEL") || !isPart(it->path())) continue;
         found = u8(it->path());
         n++;
     }

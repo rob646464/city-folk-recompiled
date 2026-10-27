@@ -231,4 +231,9 @@ the HUD). Generator: a few lines of Python building the item list (one item per 
    own first save is still to be seen (no input past the title yet).
 6. AX microcode stand-in → sound.
 7. Enhancements (interpolation, widescreen, F1 menu) and game features (docs/ROADMAP.md).
-8. PAL and Japan bases (function matching), then setup flow + packaging.
+8. PAL and Japan bases (function matching), then setup flow + packaging. **Setup done** (branch
+   setup-1, docs/SETUP.md): CityFolkRecomp identifies USA/Europe/Japan rev 1 discs (ID, revision,
+   main.dol and REL hashes), reads images (ISO encrypted/decrypted, WBFS, RVZ, WIA, CISO, GCZ) and
+   extracted folders through one file system layer (port/disc_folder), builds each module with
+   the bundled clang/lld in about a minute; the European and Japanese games boot through the
+   title into Rover's bus dialogue with their own tables.

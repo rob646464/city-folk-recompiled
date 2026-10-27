@@ -87,7 +87,7 @@ bool Disc::open(const std::string& utf8Path, std::string& error) {
         }
         if (nod_disc_open(utf8Path.c_str(), nullptr, &disc_) != NOD_RESULT_OK) {
             const char* msg = nod_error_message();
-            error = std::string("Could not read the disc image") + (msg && *msg ? std::string(": ") + msg : ".") +
+            error = std::string("Could not read the disc image") + (msg && *msg ? std::string(": ") + msg + "." : ".") +
                     " Supported: Wii ISO, WBFS, RVZ, WIA, CISO, GCZ, NFS, or an extracted disc folder.";
             return false;
         }

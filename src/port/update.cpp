@@ -75,7 +75,7 @@ constexpr const char* kAssetHosts[] = {"github.com", "objects.githubusercontent.
 #ifdef _WIN32
 constexpr const char* kAssetSuffix = "-windows-x64.zip";
 constexpr const char* kExeName = "CityFolkRecomp.exe";
-const char* const kExpected[] = {"CityFolkRecomp.exe", "pipelines.bin", "llvm/bin/clang.exe",
+const char* const kExpected[] = {"CityFolkRecomp.exe", "llvm/bin/clang.exe",
                                  "llvm/bin/lld-link.exe"};
 #else
 #ifdef __APPLE__
@@ -87,7 +87,7 @@ constexpr const char* kAssetSuffix = "-linux-x86_64.tar.gz";
 constexpr const char* kLinkerFile = "llvm/bin/ld.lld";
 #endif
 constexpr const char* kExeName = "CityFolkRecomp";
-const char* const kExpected[] = {"CityFolkRecomp", "pipelines.bin", "llvm/bin/clang", kLinkerFile};
+const char* const kExpected[] = {"CityFolkRecomp", "llvm/bin/clang", kLinkerFile};
 constexpr const char* kLauncher = "CityFolkRecompiled.sh";
 #endif
 // Inside the install folder. Short, and the package's top folder is flattened into it, so the
@@ -976,9 +976,9 @@ bool isPackaged() {
     if (sExePath.empty()) return false;  // program path unknown: never update an unknown folder
     const fs::path d = installDir();
 #ifdef _WIN32
-    return fs::exists(d / "llvm" / "bin" / "clang.exe", ec) && fs::exists(d / "pipelines.bin", ec);
+    return fs::exists(d / "llvm" / "bin" / "clang.exe", ec);
 #else
-    return fs::exists(d / "llvm" / "bin" / "clang", ec) && fs::exists(d / "pipelines.bin", ec);
+    return fs::exists(d / "llvm" / "bin" / "clang", ec);
 #endif
 }
 

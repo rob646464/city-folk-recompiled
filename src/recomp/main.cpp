@@ -34,6 +34,7 @@
 #include "recomp/sched.h"
 #include "recomp/widescreen.h"
 #ifndef CF_STATIC_MODULE
+#include "setup/disc.h"
 #include "setup/setup.h"
 #endif
 
@@ -207,6 +208,19 @@ int main(int argc, char* argv[]) {
     port::setLaunchArgs(argc, argv);
     std::printf("Animal Crossing City Folk Recompiled %s\n", port::update::buildVersion());
     std::fflush(stdout);
+#ifndef CF_STATIC_MODULE
+    // --check-disc <path>: identify a disc the way setup does (game ID, revision, main.dol and REL
+    // hashes) and exit: 0 = a supported disc. No window, nothing written (docs/SETUP.md).
+    if (const std::string path = argValue(argc, argv, "--check-disc"); !path.empty()) {
+        port::GameVersion v{};
+        std::string err;
+        const bool ok = setup::probeDisc(path, v, err);
+        if (ok) std::printf("OK: %s\n", setup::describe(v).c_str());
+        else std::printf("REFUSED: %s\n", err.c_str());
+        std::fflush(stdout);
+        return ok ? 0 : 3;
+    }
+#endif
     // A game folder too deep for the graphics start-up (docs/SETUP.md "Long paths"): say so
     // instead of stopping without a word.
     if (const std::string p = port::installPathProblem(); !p.empty()) {
