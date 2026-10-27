@@ -549,7 +549,8 @@ void gx::applyAccuracySettings() {
                 // Interpolated presentation replays every frame on the host after the fact: the
                 // per-draw early-Z split cost ~20 ms per replay in the foyer (presentation fell to
                 // ~35 fps); merged split pairs keep it at ~4 ms. Original 30 keeps the exact split.
-                (r.earlyZAlphaDepth && (port::settings().video.matchDisplay || port::settings().video.targetFps > port::kMinFps)
+                (r.earlyZAlphaDepth && (port::settings().video.matchDisplay || port::settings().video.unlimitedFps ||
+                                        frame::targetFps() > std::max(port::kMinFps, game::nativeFps()))
                      ? GX_AURORA_ACCURACY_EARLY_Z_MERGE
                      : 0) |
                 (r.textureCopyFilter ? GX_AURORA_ACCURACY_COPY_FILTER : 0);
@@ -880,10 +881,197 @@ void gx::endPendingDraw() {
     interp::vtxEnd();
 }
 
+// Raw XF matrix loads from game code (NW4R g3d writes its model matrices straight into the
+// write-gather pipe: 0x10, (count - 1) << 16 | address, then the floats). While a tape is being
+// captured, the raw command stream outside immediate-mode draws is parsed so these loads are
+// noted like GXLoadPosMtxImm & co. (interpolation pairs and blends them). The parser follows
+// whole commands from the opcode on; it gives up on anything it cannot size (a raw primitive)
+// until the next GX HLE call, which always starts at a command boundary.
+namespace {
+struct RawXf {
+    enum State : u8 { Opcode, Skip, XfHeader, XfData, Lost } state = Opcode;
+    u32 need = 0;        // bytes still to come in this state
+    u32 header = 0;      // XF header bytes so far
+    u32 addr = 0, count = 0;
+    u32 at = 0;          // tape offset before the opcode
+    bool atValid = false;
+} sRawXf;
+u32 sRawXfNoted = 0, sRawXfLost = 0;
+
+// Matrix arrays (GXSetArray GX_POS_MTX_ARRAY..GX_LIGHT_ARRAY: CP arrays 12-15) for indexed loads.
+u32 sMtxArray[4] = {};
+u8 sMtxStride[4] = {};
+u32 sIndexedConverted = 0;
+
+// While a tape is captured, an indexed matrix load (XF reads the matrix from the array in memory
+// when the GPU processes the command) would read the array when the tape is replayed, a game
+// frame or more later, after the game has rewritten it: NW4R g3d computes its view-space matrices
+// into the same buffers every frame, so every model was drawn with the newest frame's matrices
+// and nothing could be blended. Such loads are sent as immediate loads of what is in memory now
+// (what the console's GPU reads) and noted for blending. Not inside display lists being recorded.
+bool indexedAsImmediate(int array, u32 index, u32 xfAddr, u32 n) {
+    if (!interp::capturing() || sInDisplayList || array < 0 || array > 2) return false;
+    const u32 base = sMtxArray[array];
+    if (!base || n == 0 || n > 16) return false;
+    const u32 src = base + index * sMtxStride[array];
+    const u32 at = mark3D();
+    rawFifoWrite(GX_LOAD_XF_REG, 1);
+    rawFifoWrite(((n - 1) << 16) | xfAddr, 4);
+    for (u32 i = 0; i < n; i++) rawFifoWrite(rd32(src + 4 * i), 4);
+    if (array == 1) interp::note(at, interp::Kind::NrmMtx, src, (xfAddr - 0x400) / 3, int(n));
+    else if (array == 0 && xfAddr < 0x78 && n == 12) interp::note(at, interp::Kind::PosMtx, src, xfAddr / 4, 12);
+    else interp::note(at, interp::Kind::TexMtx, src, xfAddr / 4, int(n));
+    sIndexedConverted++;
+    return true;
+}
+
+struct RawIndx;
+void rawIndxFlush();
+void rawXfReset() {
+    rawIndxFlush();
+    sRawXf.state = RawXf::Opcode;
+}
+// Once a minute of interpolated play: how the raw matrix loads were handled.
+void rawXfReport() {
+    static u32 sFrames = 0;
+    if (!interp::capturing() || ++sFrames % 3600 != 0) return;
+    log("[interp] raw XF matrix loads noted %u, indexed loads sent as immediate %u, raw commands not followed %u "
+        "(last 3600 game frames)", sRawXfNoted, sIndexedConverted, sRawXfLost);
+    sRawXfNoted = sIndexedConverted = sRawXfLost = 0;
+}
+
+// Raw indexed loads (0x20 pos, 0x28 normal, 0x30 texture matrix; then index << 16 |
+// (count - 1) << 12 | address) are held back and sent as immediate loads (indexedAsImmediate).
+struct RawIndx {
+    bool active = false;
+    u8 opcode = 0;
+    u32 need = 0, word = 0;
+} sRawIndx;
+void rawIndxFlush() {
+    auto& h = sRawIndx;
+    if (!h.active) return;
+    h.active = false;
+    rawFifoWrite(h.opcode, 1);
+    for (u32 b = 4 - h.need; b-- > 0;) rawFifoWrite(u8(h.word >> (8 * b)), 1);
+}
+// True when the write was consumed (held or converted).
+bool rawIndxWrite(u32 v, int size) {
+    auto& h = sRawIndx;
+    if (!h.active) {
+        if (sRawXf.state != RawXf::Opcode || size != 1) return false;
+        const u8 op = u8(v);
+        if (op != GX_LOAD_INDX_A && op != GX_LOAD_INDX_B && op != GX_LOAD_INDX_C) return false;
+        h = {true, op, 4, 0};
+        return true;
+    }
+    if (u32(size) > h.need) {  // misaligned: give up on it, forward what was held
+        h.active = false;
+        rawFifoWrite(h.opcode, 1);
+        for (u32 b = 4 - h.need; b-- > 0;) rawFifoWrite(u8(h.word >> (8 * b)), 1);
+        sRawXf.state = RawXf::Lost;  // the rest of this command is not followed
+        return false;
+    }
+    h.word = (size == 4 ? 0 : h.word << (8 * size)) | (size == 4 ? v : (v & ((1u << (8 * size)) - 1)));
+    h.need -= u32(size);
+    if (h.need) return true;
+    h.active = false;
+    const u32 index = h.word >> 16, n = ((h.word >> 12) & 0xF) + 1, addr = h.word & 0xFFF;
+    const int array = h.opcode == GX_LOAD_INDX_A ? 0 : h.opcode == GX_LOAD_INDX_B ? 1 : 2;
+    if (!indexedAsImmediate(array, index, addr, n)) {
+        rawFifoWrite(h.opcode, 1);
+        rawFifoWrite(h.word, 4);
+    }
+    return true;
+}
+
+void rawXfFinish() {
+    auto& p = sRawXf;
+    if (!p.atValid) return;
+    // XF memory: 0x000-0x077 position matrices (12 floats each), 0x078-0x0FF texture matrices,
+    // 0x400-0x45F normal matrices (9 floats), 0x500-0x5FF post-transform (dual texture) matrices.
+    if (p.addr + p.count <= 0x78 && p.count == 12 && p.addr % 4 == 0) {
+        interp::note(p.at, interp::Kind::PosMtx, 0, p.addr / 4, 12);
+        sRawXfNoted++;
+    } else if (p.addr >= 0x78 && p.addr + p.count <= 0x100 && (p.count == 8 || p.count == 12)) {
+        interp::note(p.at, interp::Kind::TexMtx, 0, p.addr / 4, int(p.count));
+        sRawXfNoted++;
+    } else if (p.addr >= 0x400 && p.addr + p.count <= 0x460 && p.count == 9) {
+        interp::note(p.at, interp::Kind::NrmMtx, 0, (p.addr - 0x400) / 3, 9);
+        sRawXfNoted++;
+    } else if (p.addr >= 0x500 && p.addr + p.count <= 0x600 && p.count == 12) {
+        interp::note(p.at, interp::Kind::TexMtx, 0, 64 + (p.addr - 0x500) / 3, 12);
+        sRawXfNoted++;
+    }
+}
+
+// Before the write (v, size) goes to the FIFO: a new XF command's opcode marks its tape offset.
+void rawXfBefore(u32 v, int size) {
+    if (sRawXf.state == RawXf::Opcode) {
+        sRawXf.atValid = u8(v >> (8 * (size - 1))) == GX_LOAD_XF_REG;
+        if (sRawXf.atValid) sRawXf.at = interp::mark();
+    }
+}
+// After it: advance the parser over its bytes; true when an XF load just completed.
+bool rawXfAfter(u32 v, int size) {
+    auto& p = sRawXf;
+    bool done = false;
+    for (int b = size - 1; b >= 0; b--) {
+        const u8 byte = u8(v >> (8 * b));
+        switch (p.state) {
+        case RawXf::Opcode:
+            if (b != size - 1) p.atValid = false;  // an opcode inside a wider write: not marked
+            switch (byte) {
+            case 0x00: case 0x48: break;                                   // NOP, invalidate vertex cache
+            case GX_LOAD_BP_REG: p.state = RawXf::Skip; p.need = 4; break;
+            case GX_LOAD_CP_REG: p.state = RawXf::Skip; p.need = 5; break;
+            case GX_LOAD_INDX_A: case GX_LOAD_INDX_B: case GX_LOAD_INDX_C: case GX_LOAD_INDX_D:
+                p.state = RawXf::Skip; p.need = 4; break;
+            case GX_CMD_CALL_DL: p.state = RawXf::Skip; p.need = 8; break;
+            case GX_LOAD_XF_REG: p.state = RawXf::XfHeader; p.need = 4; p.header = 0; break;
+            default: p.state = RawXf::Lost; sRawXfLost++; break;              // a raw primitive or unknown
+            }
+            break;
+        case RawXf::Skip:
+            if (--p.need == 0) p.state = RawXf::Opcode;
+            break;
+        case RawXf::XfHeader:
+            p.header = p.header << 8 | byte;
+            if (--p.need == 0) {
+                p.count = ((p.header >> 16) & 0xFFFF) + 1;
+                p.addr = p.header & 0xFFFF;
+                p.need = p.count * 4;
+                p.state = RawXf::XfData;
+            }
+            break;
+        case RawXf::XfData:
+            if (--p.need == 0) {
+                p.state = RawXf::Opcode;
+                done = true;
+            }
+            break;
+        case RawXf::Lost: break;
+        }
+    }
+    return done;
+}
+}  // namespace
+
 void hw::fifoWrite(u32 v, int size) {
     frame::gxWaitForGuestTurn();
     interp::joinCapture();
     if (dropDraw()) [[unlikely]] return;
+    if (!sHeld.active && !sInBegin && interp::capturing()) {
+        if (sRawCheck) {
+            sRawCheck = false;
+            prepareDraw(drawMode(ProjMode::Scaled), "fifo");
+        }
+        if (rawIndxWrite(v, size)) return;
+        rawXfBefore(v, size);
+        rawFifoWrite(v, size);
+        interp::vtxBytes(v, size);
+        if (rawXfAfter(v, size)) rawXfFinish();
+        return;
+    }
     if (sHeld.active) [[unlikely]] {
         if (interp::capturing()) interp::vtxBytes(v, size);  // (its tape offset: vtxDataAt when replayed)
         const u32 off = u32(sHeld.bytes.size());
@@ -973,6 +1161,7 @@ void beforeGxCall(const Ctx& c) {
     }
     gx::noteCallSite(c.lr);
     interp::gxCall(c);
+    rawXfReset();
 }
 }  // namespace
 
@@ -1101,6 +1290,10 @@ GXHLE(GXSetArray) {
     if (c.r[3] == GX_VA_POS) {
         sPosArray = c.r[4];
         sPosStride = u8(c.r[5]);
+    }
+    if (c.r[3] >= GX_POS_MTX_ARRAY && c.r[3] <= GX_LIGHT_ARRAY) {
+        sMtxArray[c.r[3] - GX_POS_MTX_ARRAY] = c.r[4];
+        sMtxStride[c.r[3] - GX_POS_MTX_ARRAY] = u8(c.r[5]);
     }
     const u32 at = interp::mark();
     GXSetArray(GXAttr(c.r[3]), ptr(c.r[4]), 0, u8(c.r[5]), false);
@@ -1316,8 +1509,12 @@ GXHLE(GXSetScissorBoxOffset) {
 }
 // Indexed matrix loads (NW4R g3d): the CP reads the matrix from the GX_POS_MTX_ARRAY /
 // GX_NRM_MTX_ARRAY arrays (GXSetArray). Not blended by frame interpolation yet.
-GXHLE(GXLoadPosMtxIndx) { GXLoadPosMtxIndx(u16(c.r[3]), c.r[4]); }
+GXHLE(GXLoadPosMtxIndx) {
+    if (indexedAsImmediate(0, u16(c.r[3]), c.r[4] * 4, 12)) return;
+    GXLoadPosMtxIndx(u16(c.r[3]), c.r[4]);
+}
 GXHLE(GXLoadNrmMtxIndx3x3) {
+    if (indexedAsImmediate(1, u16(c.r[3]), 0x400 + c.r[4] * 3, 9)) return;
     rawFifoWrite(GX_LOAD_INDX_B, 1);
     rawFifoWrite(u16(c.r[3]), 2);
     rawFifoWrite(((9u - 1) << 12) | (0x400u + c.r[4] * 3), 2);
@@ -1401,8 +1598,22 @@ static std::pair<f32, f32> setViewport(const Ctx& c) {
     if (!sVpFollow) return {sVp.left, sVp.wd};
     return {pillarX(sVp.left, sVpAnchor, sVpShift), sVp.wd * ws::factor()};
 }
+// GXSetZScaleOffset (RVL): __GXSetViewport writes the XF viewport Z as sz = (far - near) * S,
+// oz = far * S + O (S = 1 + 16777215 * scale in its units, O = 16777215 * offset), i.e. the depth
+// written is depth * scale + offset in normalized units. Sent as the viewport's depth range
+// (clamped to 0..1, which WebGPU requires; the hardware clamps per pixel to 24 bits instead).
+static f32 sZScale = 1.0f, sZOffset = 0.0f;
+static int sLastVpJitter = -1;  // -1: the last viewport was GXSetViewport, else the jitter field
+static f32 sLastVpX = 0, sLastVpW = 640;  // x/width as last sent
+static std::pair<f32, f32> zRange(f32 n, f32 f) {
+    if (sZScale == 1.0f && sZOffset == 0.0f) return {n, f};
+    return {std::clamp(n * sZScale + sZOffset, 0.0f, 1.0f), std::clamp(f * sZScale + sZOffset, 0.0f, 1.0f)};
+}
 GXHLE(GXSetViewport) {
+    sLastVpJitter = -1;
     const auto [x, w] = setViewport(c);
+    sLastVpX = x;
+    sLastVpW = w;
     const u32 vpAt = interp::mark();
     if (interp::tagLogOn()) {
         char buf[160];
@@ -1410,15 +1621,20 @@ GXHLE(GXSetViewport) {
                       farg(c, 4), x, w, c.lr);
         interp::tagLogMark(buf);
     }
-    GXSetViewport(x, farg(c, 2), w, farg(c, 4), farg(c, 5), farg(c, 6));
+    const auto [zn, zf] = zRange(farg(c, 5), farg(c, 6));
+    GXSetViewport(x, farg(c, 2), w, farg(c, 4), zn, zf);
     if (sVpFollow) interp::noteTextViewport(vpAt, ws::factor(), pillarX(0.0f, sVpAnchor));
     else interp::noteTextViewport(vpAt, 1.0f, 0.0f);
 }
 GXHLE(GXSetViewportJitter) {
     gxAudit("GXSetViewportJitter field=%u", c.r[3]);
+    sLastVpJitter = int(c.r[3] & 1);
     const auto [x, w] = setViewport(c);
+    sLastVpX = x;
+    sLastVpW = w;
     const u32 vpAt = interp::mark();
-    GXSetViewportJitter(x, farg(c, 2), w, farg(c, 4), farg(c, 5), farg(c, 6), c.r[3]);
+    const auto [zn, zf] = zRange(farg(c, 5), farg(c, 6));
+    GXSetViewportJitter(x, farg(c, 2), w, farg(c, 4), zn, zf, c.r[3]);
     if (sVpFollow) interp::noteTextViewport(vpAt, ws::factor(), pillarX(0.0f, sVpAnchor));
     else interp::noteTextViewport(vpAt, 1.0f, 0.0f);
 }
@@ -1742,18 +1958,6 @@ GXHLE(GXSetTevDirect) {
     GXSetTevDirect(GXTevStageID(c.r[3]));
 }
 GXHLE(GXSetTevIndWarp) {
-    // CF_IND_PATTERN=1 (test aid): replaces the noise in the Mario painting warp's 64x64 IA4
-    // indirect texture (US 0x803CFD40, filled with random intensities by fn_8005FD80 at boot) with
-    // a known pattern: intensity 15 (offset 0) in the left half, 0 (offset -5 texels in s and t)
-    // in the right half.
-    static const bool sPattern = [] { const char* e = std::getenv("CF_IND_PATTERN"); return e && e[0] == '1'; }();
-    if (const u32 img = sMapImage[sInd.order[c.r[4] & 3][1] & 7]; sPattern && img) {
-        u8* tex = hostp(0x80000000u | img);
-        for (u32 i = 0; i < 64 * 64; i++) {
-            const u32 tile = i / 32, bx = tile % 8, x = bx * 8 + i % 8;
-            tex[i] = x < 32 ? 0x0F : 0x00;
-        }
-    }
     // SDK: GXSetTevIndirect(stage, ind, ITF_8, signed ? ITB_STU : NONE, mtx, replace ? ITW_0 : OFF (s,t), 0, 0, 0)
     if (c.r[3] < 16)
         sInd.tev[c.r[3]] = indWord(c.r[4] & 3, 0, (c.r[5] & 0xFF) ? GX_ITB_STU : 0, c.r[7], (c.r[6] & 0xFF) ? GX_ITW_0 : 0,
@@ -1894,6 +2098,7 @@ GXHLE(GXSetCopyFilter) {
 }
 GXHLE(GXCopyDisp) {
     sDiagFrame++;
+    rawXfReport();
     if (void* dump = dropDraw() ? nullptr : efbcopy::dumpTarget(sDiagFrame)) {
         // CF_FRAME_DUMP: copy the finished EFB through the copy-to-RAM path, then restore
         // the game's texture-copy setup. The dump is the raw EFB: no copy filter (texture
@@ -2091,12 +2296,19 @@ GXHLE(GXSetFieldMask) {}
 GXHLE(GXSetFieldMode) {}
 GXHLE(GXSetDispCopyFrame2Field) {}
 GXHLE(GXResetWriteGatherPipe) {}
-// GXSetZScaleOffset (RVL): scales and offsets the depth the rasterizer writes. Not modelled yet.
+// GXSetZScaleOffset (RVL): see zRange (with the viewport HLE).
 GXHLE(GXSetZScaleOffset) {
+    if (farg(c, 1) == sZScale && farg(c, 2) == sZOffset) return;
     if (farg(c, 1) != 1.0f || farg(c, 2) != 0.0f) {
         static int sLogged = 0;
-        if (sLogged++ < 4) log("[gx] GXSetZScaleOffset(%f, %f) not applied (lr %08X)", farg(c, 1), farg(c, 2), c.lr);
+        if (sLogged++ < 4) log("[gx] GXSetZScaleOffset(%f, %f) (lr %08X)", farg(c, 1), farg(c, 2), c.lr);
     }
+    sZScale = farg(c, 1);
+    sZOffset = farg(c, 2);
+    // The SDK rewrites the viewport with the new Z terms at once.
+    const auto [zn, zf] = zRange(sGuestVp[4], sGuestVp[5]);
+    if (sLastVpJitter < 0) GXSetViewport(sLastVpX, sGuestVp[1], sLastVpW, sGuestVp[3], zn, zf);
+    else GXSetViewportJitter(sLastVpX, sGuestVp[1], sLastVpW, sGuestVp[3], zn, zf, u32(sLastVpJitter));
 }
 // EFB pokes (CPU writes to the EFB): their pixel-engine state; nothing pokes through it here.
 GXHLE_CPU(GXPokeAlphaMode) {}

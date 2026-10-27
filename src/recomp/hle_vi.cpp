@@ -42,9 +42,8 @@ void retrace(Ctx& c) {
 
 bool palGame() { return port::install().running == port::GameVersion::PAL; }
 
-// The European game paces its frames with an OSAlarm (N/60 s), not by counting retraces, so
-// its speed is the same at 50 and 60 Hz (measured: 29.7 / 29.9 game frames per second); the
-// option changes the VI timing the game sees. Read every tick, so it applies immediately.
+// VI rate: 50 Hz for the European game unless PAL60 (EuRGB60) is chosen. City Folk paces itself
+// on the retrace, so its frame rate follows (50 / 60 fps). Read every tick.
 double retraceHz() {
     if (palGame() && !port::settings().video.pal60) return 50.0;
     return 60000.0 / 1001.0;
@@ -187,22 +186,8 @@ HLE(VISetNextFrameBuffer) {
     frame::present(c, c.r[3], sBlack);
 }
 
-bool frame::presentOnCopy() { return palGame() || sCopyPresents.load(std::memory_order_relaxed); }
+bool frame::presentOnCopy() { return sCopyPresents.load(std::memory_order_relaxed); }
 
-// European double-buffered frame end (fn_80007844, called by LMChangeFrameBuffer): it copies
-// the frame only when the VI has picked up the previous one (lbl_804C5700, set by the
-// post-retrace callback fn_80007604 from lbl_804C56FC, the last copied buffer); otherwise the
-// frame is dropped and the EFB cleared. On the console a retrace always falls between two
-// 30 fps frames, but here the guest waits for the host inside GXCopyDisp (present), and the
-// alarm that paces the frames counts from its own expiry, so after a host wait two frames can
-// end with no retrace callback between them: about one frame in six was dropped (25 fps shown,
-// and interpolation tapes holding two frames). The port shows every copy itself (the XFB in
-// guest memory is never scanned out), so the previous buffer is reported as picked up.
-// European addresses: this function exists only in that release.
-HLE(palfn_80007844) {
-    wr32(0x804C5700, rd32(0x804C56FC));
-    callOriginal(c, "palfn_80007844");
-}
 bool frame::viBlack() { return sBlack; }
 
 }  // namespace recomp
@@ -210,16 +195,11 @@ bool frame::viBlack() { return sBlack; }
 namespace recomp {
 u32 viRetraceCount() { return sRetraceCount.load(); }
 
-// Time stamp of the frame being presented, in NTSC fields (1001/60000 s), for interpolation
-// (interp::endTape). The USA game paces itself on the retrace count. The European game paces
-// itself with an alarm of N/60 s (N at lbl_80390860 +4, read by its frame end fn_80007844 /
-// fn_80007940), so the retrace count (50 Hz, 1 or 2 fields per 30 fps frame) would make the
-// blend interval jitter between 16.7 and 33.4 ms; the frame's own N is used instead.
-u32 frameStamp() {
-    if (!palGame()) return sRetraceCount.load();
-    static u32 sStamp = 0;
-    const u32 n = rd32(0x80390864);
-    sStamp += n >= 1 && n <= 6 ? n : 2;
-    return sStamp;
-}
+// Time stamp of the frame being presented, in VI fields, for interpolation (interp::endTape):
+// City Folk paces its frames on the retrace (EGG::AsyncDisplay), one frame per field in every
+// region; a field lasts vi::fieldSeconds() (1001/60000 s, or 1/50 s for a 50 Hz European game).
+u32 frameStamp() { return sRetraceCount.load(); }
+namespace vi {
+double fieldSeconds() { return 1.0 / retraceHz(); }
+}  // namespace vi
 }  // namespace recomp
