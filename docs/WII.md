@@ -94,6 +94,11 @@ game calls directly.
   driver is not enough on its own (no IR pointer), so claim the device before SDL opens it.
 - **Remote speaker** (`WPADSendStreamData`, 4-bit ADPCM): decode and mix into PC output (option:
   separate volume).
+- Boot stand-in now (`src/recomp/hle_wpad.cpp`): WPADInit/KPADInit do nothing (the Bluetooth
+  stack never starts: BTA_Init would wait forever for the USB Bluetooth device), WPADGetStatus =
+  set up, channel 0 a core remote, KPADRead = buttons of host port 1 (`readHostPads`,
+  hle_pad.cpp). The real HLE replaces `remoteButtons()` with a per-port source feeding one remote
+  state (buttons, DPD pointer, acc, extension, rumble, speaker) as planned above.
 
 ## Audio
 
@@ -116,10 +121,28 @@ game calls directly.
 ## Order of work
 
 1. Repo scaffold from LM's generic code (as SMS did); Wii disc reading (nod: Wii partitions +
-   extracted folders); MEM1/MEM2 guest memory.
+   extracted folders); MEM1/MEM2 guest memory. **Done** (branch bootstrap): LM's runtime/HLE/
+   frame/settings/menu/controls/setup, Aurora at LM's commit 50e5be3 + LM's patch series; game
+   hooks behind `src/recomp/game.h` (`src/game/cf_game.cpp`); `cfrecomp` (dev) and
+   `CityFolkRecomp` (setup: images through nod's game partition, or extracted folders; DOL + all
+   RELs recompiled) build with `tools/build.ps1`. Extracted folders: `src/port/disc_folder.*` (FST
+   entry numbers from sys/fst.bin, data from files/). Guest memory: ctx.h (MEM1 + hole + MEM2, both
+   mirrors, 0xCD MMIO). Still LM-shaped: settings.h fields (Hidden Mansion, ghost/world lights,
+   gameplay), parts of the F1 menu, setup's USA/PAL slots.
 2. Function discovery for the DOL and all RELs (USA rev 1), SDK names. **Done** (docs/DISCOVERY.md, config/; PAL and Japan too).
 3. Recompiler REL support + OSLink HLE; boot through OS init (low-memory globals, IOS stubs).
-4. NAND/ES/SC/DVD HLE → title screen; GX frames on screen.
+   **Done** (docs/RECOMPILER.md "REL modules"; `src/recomp/rel.cpp`, `hle_os.cpp` OSInit,
+   `hle_ios.cpp`). 28 RELs link and run up to the new-game bus scene.
+4. NAND/ES/SC/DVD HLE → title screen; GX frames on screen. **Title screen reached** (2026-10-27):
+   wrist-strap screen, loading screen, "Press A" title, then the new-game bus with Rover's
+   dialogue. Stand-ins, not the final HLE: IOS at IPC level (NAND files from a host folder,
+   `/dev/fs` ioctls, ES title id, STM event hook never answered, other devices ENOENT), no
+   SYSCONF (SC reads fail: defaults), DSP task stand-in (AX command lists "finished" at once, no
+   mixing), Wii Remote stand-in (`hle_wpad.cpp`: channel 0 buttons from the host pad, no pointer/
+   Nunchuk, so the game shows "Communications with the Wii Remote have been interrupted").
+   Open: the bus interior's 3D does not show (black behind the dialogue), a blue band under the
+   456-line EFB copy (VIConfigure is a no-op: VI/XFB size not taken from the render mode), exit
+   hangs in shutdown (killed after the test).
 5. KPAD/WPAD HLE with mouse pointer → into the game; NAND save/load.
 6. AX microcode stand-in → sound.
 7. Enhancements (interpolation, widescreen, F1 menu) and game features (docs/ROADMAP.md).
