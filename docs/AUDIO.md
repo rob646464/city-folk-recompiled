@@ -183,6 +183,13 @@ NW4R's `AxVoiceParamBlock::SetVoiceSrcType` maps its types to srcSelect/coefSele
   sends) and Rover's speech (one-shot ADPCM syllables at ratio ~0.5); peaks around -10 dBFS, no
   clipping, nothing at the 96-sample frame edges (mean second difference flat over the frame phase).
 - AX's frame loop runs at real time: 333 frames per second against 60 guest frames per second.
+- A 5-minute run through the bus dialogue: no clipped sample, flat frame-phase profile; repeated
+  AI blocks only where the host stalled the guest (title appearing, the bus interior loading) and
+  at shutdown.
+- Device path (`CF_AUDIO=1` with `SDL_AUDIO_DRIVER=disk`, no speakers): 3 ms blocks paced by the
+  device, queue ~44 ms on average, runs dry only during those host stalls.
+- These runs used the render-1 branch merged locally (without it, Aurora's FIFO error at the title
+  often aborts the run before the bus scene); the AX code is the same on both.
 
 Tools (scratch, not in the repo): per-second level/clip/correlation stats, a frame-phase check and
 the brstm cross-check were small numpy scripts over `CF_AUDIO_WAV_RAW` captures.
