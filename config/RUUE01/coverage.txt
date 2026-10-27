@@ -1,7 +1,7 @@
-# DOL: 24195 functions (356 named), 91 interior entry labels, 395 jump tables, 4581296/4589504 code bytes in functions, 1652 non-zero bytes outside
+# DOL: 24195 functions (6134 named), 91 interior entry labels, 395 jump tables, 4581296/4589504 code bytes in functions, 1652 non-zero bytes outside
 # RELs (187): 16658 functions (659 named), 0 labels, 161 jump tables, 2366204/2366204 code bytes in functions, 0 non-zero bytes outside
 # <module> <name> functions labels jumptables named code_bytes in_functions zero_gap other_gap_bytes new(split/label/gap)
-0 main 24195 91 395 356 4589504 4581296 6556 1652 7/8/1
+0 main 24195 91 395 6134 4589504 4581296 6556 1652 7/8/1
 1 d_profileNP 5 0 0 3 128 128 0 0 0/0/0
 2 d_menu_desiNP 38 0 0 3 3792 3792 0 0 0/0/0
 3 d_menu_itemNP 64 0 0 3 6312 6312 0 0 0/0/0

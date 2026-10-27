@@ -1,0 +1,132 @@
+# SDK / runtime functions the HLE layer is expected to replace or hook, by library.
+# tools/discovery/sdk_report.py checks each against config/<id>/names.txt and writes
+# docs/SDK_NAMES.md. `?` after a name: optional (may not be linked into City Folk).
+# Taken from LM's HLE set (GameCube SDK) mapped to the RVL SDK, plus the Wii libraries
+# docs/WII.md lists.
+
+[Runtime / MSL]
+__start __init_registers __init_data __init_hardware __flush_cache __init_user __init_cpp
+__fini_cpp exit? _ExitProcess? abort? __register_global_object __destroy_global_chain
+_savegpr_14 _restgpr_14 _savefpr_14 _restfpr_14 __ptmf_scall __div2i __div2u __mod2i __mod2u
+__shl2i __shr2i __shr2u __cvt_fp2unsigned __cvt_dbl_ull? __cvt_ull_dbl? __cvt_sll_flt? __cvt_ull_flt?
+memcpy memset memmove memcmp __fill_mem strlen strcpy strncpy strcmp strncmp strcat strncat? strchr strrchr strstr
+sprintf snprintf vsprintf vsnprintf printf? vprintf sscanf? atoi strtol strtoul tolower toupper wcslen?
+sqrt? sin cos tan atan atan2 acos asin exp log log10 pow fmod floor ceil frexp ldexp modf fabs?
+
+[OS]
+OSInit __OSInitAudioSystem? OSGetConsoleType __OSGetIOSRev OSRegisterVersion
+OSReport OSPanic OSFatal OSVReport? OSSetErrorHandler __OSUnhandledException
+OSGetArenaHi OSGetArenaLo OSSetArenaHi OSSetArenaLo OSGetMEM1ArenaHi OSGetMEM1ArenaLo OSSetMEM1ArenaHi OSSetMEM1ArenaLo
+OSGetMEM2ArenaHi OSGetMEM2ArenaLo OSSetMEM2ArenaHi OSSetMEM2ArenaLo OSAllocFromMEM1ArenaLo OSAllocFromMEM1ArenaHi?
+OSGetPhysicalMem1Size? OSGetPhysicalMem2Size? OSGetConsoleSimulatedMem1Size? OSGetConsoleSimulatedMem2Size?
+OSDisableInterrupts OSEnableInterrupts OSRestoreInterrupts __OSSetInterruptHandler __OSGetInterruptHandler
+__OSInterruptInit __OSMaskInterrupts __OSUnmaskInterrupts __OSDispatchInterrupt? OSGetCurrentContext OSSetCurrentContext
+OSSaveContext OSLoadContext OSClearContext OSInitContext OSSwitchFPUContext? __OSContextInit OSFillFPUContext?
+OSCreateThread OSExitThread OSCancelThread OSJoinThread OSDetachThread OSResumeThread OSSuspendThread
+OSSleepThread OSWakeupThread OSYieldThread OSGetCurrentThread OSSetThreadPriority OSGetThreadPriority
+OSIsThreadTerminated OSIsThreadSuspended OSDisableScheduler OSEnableScheduler OSInitThreadQueue
+OSSetSwitchThreadCallback __OSThreadInit __OSReschedule OSSleepTicks? OSSetIdleFunction?
+OSInitMessageQueue OSSendMessage OSReceiveMessage OSJamMessage
+OSInitMutex OSLockMutex OSUnlockMutex OSTryLockMutex __OSUnlockAllMutex OSInitCond OSWaitCond OSSignalCond
+OSInitSemaphore? OSWaitSemaphore? OSSignalSemaphore? OSTryWaitSemaphore?
+OSCreateAlarm OSSetAlarm OSSetPeriodicAlarm OSCancelAlarm __OSInitAlarm OSSetAlarmTag? OSCancelAlarms? OSSetAlarmUserData? OSGetAlarmUserData?
+OSGetTime OSGetTick __OSGetSystemTime OSTicksToCalendarTime OSCalendarTimeToTicks? __OSTimeToSystemTime? OSGetSystemTime?
+DCEnable DCInvalidateRange DCFlushRange DCStoreRange DCFlushRangeNoSync DCStoreRangeNoSync DCZeroRange DCTouchRange?
+ICInvalidateRange ICFlashInvalidate ICEnable ICSync? LCEnable LCDisable LCStoreBlocks LCLoadBlocks LCQueueWait? __OSCacheInit
+OSLink OSLinkFixed OSUnlink OSSetStringTable? __OSModuleInit OSNotifyLink OSNotifyUnlink OSNotifyPreLink? OSNotifyPostLink?
+OSResetSystem OSRestart OSReturnToMenu OSRebootSystem OSShutdownSystem OSGetResetCode OSRegisterShutdownFunction
+OSRegisterResetFunction? OSSetResetCallback? OSSetPowerCallback? __OSShutdownDevices __OSHotReset? OSExec? OSLaunchTitle?
+__OSInitSTM __OSShutdownToSBY? __OSSetVIForceDimming? __OSUnRegisterStateEvent? __OSInitNet? __OSInitPlayTime? __OSStartPlayRecord?
+OSPlayTimeIsLimited? __OSWriteStateFlags __OSReadStateFlags OSGetSaveRegion? OSSetSaveRegion? OSGetProgressiveMode? OSSetProgressiveMode?
+OSGetLanguage? OSGetSoundMode? OSSetSoundMode? OSGetEuRgb60Mode? OSGetWirelessID? __OSGetRTC? __OSSetRTC? __OSGetRTCFlags?
+OSInitFastCast? __OSPSInit __OSFPRInit __OSInitIPCBuffer __OSInitSram? __OSReadROM? __OSInitMemoryProtection OSProtectRange?
+OSGetFontEncode? OSSetFontEncode? OSInitFont? OSGetFontTexture? OSGetFontWidth? OSUTF32toSJIS? OSSJIStoUTF32?
+PPCHalt PPCMfmsr PPCMtmsr PPCMfhid2 PPCMthid2 PPCMffpscr PPCMtfpscr PPCSync? PPCDisableSpeculation PPCSetFpNonIEEEMode
+
+[EXI / SI / DB]
+EXIInit EXILock EXIUnlock EXISelect EXIDeselect EXIImm EXIImmEx EXIDma EXISync EXIProbe EXIProbeEx? EXIGetID EXIAttach? EXIDetach?
+SIInit SIBusy? SIIsChanBusy? SIGetType? SIGetTypeAsync? SISetSamplingRate? SIRefreshSamplingRate? SITransfer? SISetCommand? SIEnablePolling? SIDisablePolling? SIGetResponse?
+DBInit? __DBIsExceptionMarked? DBPrintf?
+
+[PAD]
+PADInit PADRead PADReset PADRecalibrate? PADControlMotor PADSetSpec? PADClamp? PADClampCircle PADSetSamplingCallback? PADSetAnalogMode?
+
+[IPC / IOS / ES / FS]
+IPCInit IPCCltInit IPCReadReg IPCWriteReg __ios_Ipc2 IPCInterruptHandler
+IOS_Open IOS_OpenAsync IOS_Close IOS_CloseAsync IOS_Read IOS_ReadAsync IOS_Write IOS_WriteAsync IOS_Seek IOS_SeekAsync
+IOS_Ioctl IOS_IoctlAsync IOS_Ioctlv IOS_IoctlvAsync IOS_IoctlvReboot? IOS_IoctlvRebootAsync?
+iosCreateHeap iosAllocAligned iosFree
+ESP_InitLib? ESP_CloseLib? ESP_GetTitleId ESP_GetDataDir? ESP_GetTicketViews? ESP_LaunchTitle? ESP_DiGetTicketView? ESP_DiGetTmd? ESP_GetConsumption? ESP_ReadContentFile? ESP_OpenContentFile?
+ISFS_OpenLib ISFS_Open ISFS_OpenAsync ISFS_Close ISFS_CloseAsync ISFS_Read ISFS_ReadAsync ISFS_Write ISFS_WriteAsync ISFS_Seek ISFS_SeekAsync
+ISFS_CreateFile ISFS_CreateFileAsync ISFS_Delete ISFS_DeleteAsync ISFS_CreateDir ISFS_CreateDirAsync ISFS_ReadDir ISFS_ReadDirAsync
+ISFS_GetAttr ISFS_GetAttrAsync ISFS_Rename ISFS_RenameAsync ISFS_GetUsage ISFS_GetUsageAsync ISFS_GetStats? ISFS_GetFileStats ISFS_GetFileStatsAsync ISFS_ShutdownAsync?
+
+[NAND]
+NANDInit NANDOpen NANDOpenAsync NANDClose NANDCloseAsync NANDRead NANDReadAsync NANDWrite NANDWriteAsync NANDSeek NANDSeekAsync
+NANDCreate NANDCreateAsync NANDPrivateCreate NANDPrivateCreateAsync NANDDelete NANDDeleteAsync NANDPrivateDelete NANDPrivateDeleteAsync
+NANDCreateDir NANDCreateDirAsync NANDPrivateCreateDir NANDPrivateCreateDirAsync NANDReadDir? NANDPrivateReadDir? NANDMove NANDMoveAsync
+NANDGetLength NANDGetLengthAsync NANDGetStatus NANDGetStatusAsync NANDPrivateGetStatus? NANDSetStatus? NANDGetType NANDGetTypeAsync
+NANDGetHomeDir NANDChangeDir? NANDGetCurrentDir? NANDCheck NANDCheckAsync NANDOpenDir? NANDCloseDir? NANDPrivateOpen NANDPrivateOpenAsync
+NANDSafeOpen NANDSafeOpenAsync NANDSafeClose NANDSafeCloseAsync NANDSimpleSafeOpen? NANDSimpleSafeClose? NANDGetAvailableArea? NANDFreeBanner? NANDInitBanner?
+
+[SC]
+SCInit SCCheckStatus SCFlush SCFlushAsync SCReloadConfFileAsync SCGetAspectRatio SCGetLanguage SCGetProgressiveMode SCGetEuRgb60Mode
+SCGetSoundMode SCGetScreenSaverMode SCGetDisplayOffsetH SCGetBtDeviceInfoArray SCSetBtDeviceInfoArray SCGetBtDpdSensibility SCGetWpadMotorMode
+SCGetWpadSensorBarPosition SCGetWpadSpeakerVolume SCSetWpadSpeakerVolume SCGetIdleMode SCGetCounterBias SCGetSimpleAddressData? SCGetSimpleAddressRegionNameA?
+SCGetProductArea? SCGetProductGameRegion? SCGetParentalControl? SCGetItem? SCFindByteArrayItem? SCFindIntegerItem? __SCF1? SCGetProductSN? SCGetDvdOrder?
+
+[VI]
+VIInit VIConfigure VIConfigurePan? VIFlush VISetNextFrameBuffer VIGetNextFrameBuffer? VIGetCurrentFrameBuffer? VIWaitForRetrace VISetBlack
+VIGetRetraceCount VIGetNextField VIGetCurrentLine VIGetTvFormat VIGetScanMode? VIGetDTVStatus VISetPreRetraceCallback VISetPostRetraceCallback
+VISetTrapFilter? VISetGamma? VIEnableDimming? VIEnableDVDStopMotor? VIResetDimmingCount? __VIResetRFIdle? VIGetVSyncTimingTest?
+
+[GX]
+GXInit GXInitFifoBase GXInitFifoPtrs GXSetCPUFifo GXSetGPFifo GXGetCPUFifo GXGetGPFifo GXSaveCPUFifo GXGetFifoPtrs GXSetDrawSync GXSetDrawSyncCallback
+GXSetDrawDone GXDrawDone GXWaitDrawDone GXSetDrawDoneCallback GXFlush GXAbortFrame GXPixModeSync GXTexModeSync GXSetBreakPtCallback? GXEnableBreakPt? GXDisableBreakPt?
+GXCopyDisp GXCopyTex GXSetDispCopySrc GXSetTexCopySrc GXSetTexCopyDst GXSetDispCopyDst GXSetCopyFilter GXSetCopyClear GXSetDispCopyGamma GXClearBoundingBox? GXReadBoundingBox?
+GXPeekARGB GXPokeARGB GXPeekZ GXPokeZ GXReadPixMetric? GXReadMemMetric? GXSetGPMetric? GXClearGPMetric? GXReadGPMetric? GXReadXfRasMetric?
+GXSetZTexture GXInitTexObj GXInitTexObjCI GXLoadTexObj GXInitTlutObj GXLoadTlut GXInvalidateTexAll GXSetMisc GXGetProjectionv GXSetProjection GXSetViewport GXSetScissor
+GXCallDisplayList GXBeginDisplayList GXEndDisplayList GXGetYScaleFactor GXGetNumXfbLines GXAdjustForOverscan? GXSetVerifyLevel? GXSetVerifyCallback?
+
+[DVD]
+DVDInit DVDOpen DVDFastOpen DVDClose DVDReadPrio DVDReadAsyncPrio DVDCancel DVDCancelAsync DVDGetCommandBlockStatus DVDGetDriveStatus
+DVDConvertPathToEntrynum DVDEntrynumIsDir? DVDChangeDir DVDGetCurrentDir? DVDOpenDir DVDReadDir DVDCloseDir DVDGetCurrentDiskID DVDCheckDisk? DVDCheckDiskAsync?
+DVDInquiryAsync DVDResume? DVDReset? DVDSetAutoInvalidation? DVDPrepareStreamAsync? DVDGetTransferredSize? DVDSetAutoFatalMessaging? __DVDInitWA? DVDLowInit
+DVDLowRead DVDLowReadDiskID DVDLowOpenPartition DVDLowClosePartition DVDLowGetCoverStatus DVDLowReset DVDLowStopMotor? DVDLowInquiry DVDLowRequestError DVDLowSetSpinupFlag? DVDLowUnmaskStatusInterrupts? DVDLowGetImmBufferReg? DVDLowClearCoverInterrupt? __DVDLowTestAlarm?
+
+[ARC / TPL]
+ARCInitHandle ARCOpen ARCFastOpen ARCConvertPathToEntrynum ARCGetStartAddrInMem ARCGetStartOffset ARCGetLength ARCClose ARCChangeDir ARCOpenDir ARCReadDir ARCCloseDir ARCEntrynumIsDir?
+TPLBind? TPLGet? TPLGetGXTexObjFromPalette? TPLGetPalette?
+
+[MEM]
+MEMInitList MEMAppendListObject MEMRemoveListObject MEMGetNextListObject MEMCreateExpHeapEx MEMDestroyExpHeap MEMAllocFromExpHeapEx MEMFreeToExpHeap MEMResizeForMBlockExpHeap
+MEMGetAllocatableSizeForExpHeapEx MEMGetTotalFreeSizeForExpHeap? MEMCreateFrmHeapEx MEMDestroyFrmHeap MEMAllocFromFrmHeapEx MEMFreeToFrmHeap MEMInitAllocatorForExpHeap MEMAllocFromAllocator MEMFreeToAllocator
+MEMCreateUnitHeapEx? MEMAllocFromUnitHeap? MEMFreeToUnitHeap? MEMInitAllocatorForFrmHeap?
+
+[WPAD / KPAD / WUD]
+WPADInit WPADShutdown WPADGetStatus WPADProbe WPADRead WPADSetAutoSamplingBuf WPADGetLatestIndexInBuf? WPADSetDataFormat WPADGetDataFormat WPADControlMotor WPADEnableMotor? WPADIsMotorEnabled?
+WPADSetConnectCallback WPADSetExtensionCallback WPADSetSamplingCallback WPADDisconnect WPADGetInfo? WPADGetInfoAsync WPADControlSpeaker WPADSendStreamData WPADCanSendStreamData WPADIsSpeakerEnabled? WPADGetSpeakerVolume WPADSetSpeakerVolume
+WPADControlDpd WPADIsDpdEnabled WPADGetSensorBarPosition WPADGetDpdSensitivity? WPADSetAcceptConnection? WPADGetAcceptConnection? WPADRegisterAllocator WPADGetWorkMemorySize WPADGetRadioSensitivity WPADIsUsedCallbackByKPAD? WPADSetCallbackByKPAD?
+WPADGetAccGravityUnit WPADGetCLTriggerThreshold? WPADClampStick? WPADClampTrigger? WPADClampAcc? WPADStartMotor? WPADStopMotor? WPADRecalibrate? WPADGetBLCalibration? WPADSetPowerSaveMode? WPADGetSyncType? WPADStartSimpleSync? WPADStopSimpleSync? WPADSetSimpleSyncCallback? WPADPurgeBtDb? WPADEnableURCC? WPADEnableWBC? WPADSetDisableChannel? WPADIsEnabledURCC? WPADGetGameDataTimeStamp? WPADEnableMotor? WPADSaveConfig?
+KPADInit KPADInitEx? KPADRead KPADReadEx? KPADReset KPADSetPosParam KPADSetHoriParam KPADSetDistParam KPADSetAccParam KPADSetBtnRepeat KPADSetSensorHeight KPADSetObjInterval KPADDisableDPD KPADEnableDPD KPADCalibrateDPD
+KPADGetUnifiedWpadStatus? KPADSetConnectCallback? KPADSetControlDpdCallback? KPADSetReviseMode? KPADReviseAcc? KPADGetProjectionPos? KPADEnableAimingMode? KPADDisableAimingMode? KPADSetFSStickClamp? KPADSetPosPlayMode? KPADSetHoriPlayMode? KPADSetDistPlayMode? KPADSetAccPlayMode?
+WUDInit WUDShutdown WUDIsBusy WUDGetStatus WUDSetSniffMode WUDRegisterAllocator WUDSetSyncSimpleCallback? WUDStartSyncSimple? WUDGetBufferStatus? WUDSetDisableChannel WUDSetVisibility? WUDCancelSyncDevice? WUDStartSyncDevice? WUDStartFastSyncSimple?
+
+[AX / AXFX / AI / DSP]
+AXInit AXInitEx AXQuit AXRegisterCallback AXAcquireVoice AXFreeVoice AXSetVoicePriority AXSetVoiceState AXSetVoiceAddr AXSetVoiceType AXSetVoiceMix AXSetVoiceVe AXSetVoiceSrc AXSetVoiceSrcType AXSetVoiceSrcRatio
+AXSetVoiceAdpcm AXSetVoiceAdpcmLoop AXSetVoiceLpf? AXSetVoiceLpfCoefs? AXSetVoiceItdOn? AXSetVoiceRmtOn? AXSetVoiceRmtMix? AXSetVoiceRmtSrc? AXSetVoiceRmtIIR? AXSetVoiceLoop AXSetVoiceLoopAddr AXSetVoiceEndAddr AXSetVoiceCurrentAddr AXSetVoiceBiquad?
+AXSetMode AXGetMode AXSetMasterVolume? AXGetMasterVolume? AXGetAuxAReturnVolume? AXSetAuxAReturnVolume AXSetAuxBReturnVolume AXSetAuxCReturnVolume AXRegisterAuxACallback AXRegisterAuxBCallback AXRegisterAuxCCallback AXGetAuxACallback AXGetAuxBCallback AXGetAuxCCallback
+AXGetDspCycles? AXGetMaxDspCycles? AXSetCompressor? AXSetStepMode? AXGetVoiceOffsets? AXSetVoiceOffsets? AXSetMaxDspCycles AXRegisterDSPCallback? AXGetCurrentParams? AXUserBegin? AXUserEnd? __AXOutInit? AXFXReverbHiInit? AXFXSetHooks AXFXGetHooks
+AIInit AIInitDMA AIStartDMA AIStopDMA AIRegisterDMACallback AIGetDMAStartAddr AIGetDMABytesLeft AIGetDMALength? AISetDSPSampleRate AIGetDSPSampleRate AICheckInit? AIReset?
+DSPInit DSPCheckMailToDSP DSPCheckMailFromDSP DSPReadMailFromDSP DSPSendMailToDSP DSPAssertInt DSPCheckInit? DSPAddTask? DSPHalt? DSPReset? __DSP_exec_task __DSP_boot_task __DSPHandler __DSP_insert_task __DSP_remove_task
+
+[NWC24 / SO / NCD / network]
+NWC24OpenLib NWC24CloseLib NWC24IsMsgLibOpened? NWC24GetMyUserId NWC24InitMsgObj? NWC24CommitMsg? NWC24SuspendScheduler NWC24ResumeScheduler NWC24iRegister? NWC24iOpenResourceManager NWC24iCloseResourceManager NWC24iIoctlResourceManager NWC24CheckUserId?
+NWC24OpenMsgBox? NWC24GetNumMsgs? NWC24ReadMsgText? NWC24GetErrorCode? NWC24iSynchronizeRtcCounter? NWC24iCheckSchedulerStatus? NWC24iRequestGenerateUserId? NWC24GetSchedulerStat? NWC24iPrepareShutdown? NWC24iSetRtcCounter? NWC24Check? NWC24iConfigOpen? NWC24iConfigFlush?
+SOInit SOStartup SOCleanup? SOFinish SOSocket SOClose SOConnect SOBind SOListen SOAccept SORecv SORecvFrom SOSend SOSendTo SOSetSockOpt SOGetSockOpt SOFcntl SOShutdown SOPoll SOGetHostByName SOGetHostID SOInetAtoN SOInetNtoA? SOGetInterfaceOpt? SOGetAddrInfo?
+NCDGetLinkStatus NCDGetCurrentIfConfig? NCDGetIfConfig? NCDReadConfig? NCDIsInterfaceDecided? NCDGetWirelessMacAddress? NCDiGetConfig?
+SSLNew? SSLConnect? SSLRead? SSLWrite? SSLShutdown? SSLSetBuiltinRootCA? SSLSetBuiltinClientCert? SSLInit? NHTTPStartup? NHTTPCleanup?
+
+[DWC / HBM]
+DWC_InitFriendsMatch DWC_ShutdownFriendsMatch DWC_ProcessFriendsMatch? DWC_LoginAsync? DWC_GetLastError? DWC_ClearError? DWC_Init? DWC_InitForDevelopment? DWC_CreateUserData? DWC_CheckUserData? DWC_SetMemFunc? DWC_ProcessNasLogin? DWC_NASLoginAsync? DWC_CleanupInet? DWC_InitInet? DWC_ConnectInetAsync? DWC_ProcessInet? DWC_CheckInet? DWC_GetLinkLevel?
+HBMCreate HBMDelete HBMInit HBMCalc HBMDraw HBMGetSelectBtnNum HBMSetAdjustFlag HBMStartBlackOut? HBMIsReassignedControllers? HBMCreateSound HBMDeleteSound HBMUpdateSound HBMSetBlackOutColor? HBMGetBlackOutColor? HBMSetVIBlack? HBMSetSoundVolume? HBMUpdateSoundArchive?
