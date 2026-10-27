@@ -338,21 +338,25 @@ int main(int argc, char* argv[]) {
     // cfrecomp (developer build): the game was recompiled at build time and linked in.
     setGameModule(&kGameModule);
     const char* wantId = kGameModule.gameId;
-    const std::string disc = findDisc(wantId);
+    std::string disc = findDisc(wantId);
+    if (const std::string root = port::discfolder::resolve(disc); !root.empty()) disc = root;  // e.g. "US DATA"
     {
         auto& inst = port::install();
         inst.staticBuild = true;
-        inst.running = std::strcmp(wantId, "RUUP01") == 0 ? port::GameVersion::PAL : port::GameVersion::USA;
-        inst.usReady = inst.running == port::GameVersion::USA;
-        inst.palReady = inst.running == port::GameVersion::PAL;
+        port::versionFromId(wantId, inst.running);
+        inst.ready[int(inst.running)] = true;
     }
 #else
     // CityFolkRecomp: set up from the user's discs (first run, or after changes).
     setup::Options so;
     so.forceUi = hasArg(argc, argv, "--setup");
     so.autoStart = hasArg(argc, argv, "--setup-auto");
-    so.usDisc = argValue(argc, argv, "--us-disc");
-    so.palDisc = argValue(argc, argv, "--pal-disc");
+    // --usa-disc / --pal-disc / --jpn-disc: a region's slot; --disc: any region (docs/SETUP.md).
+    so.disc[int(port::GameVersion::USA)] = argValue(argc, argv, "--usa-disc");
+    if (so.disc[0].empty()) so.disc[0] = argValue(argc, argv, "--us-disc");
+    so.disc[int(port::GameVersion::PAL)] = argValue(argc, argv, "--pal-disc");
+    so.disc[int(port::GameVersion::JPN)] = argValue(argc, argv, "--jpn-disc");
+    so.anyDisc = argValue(argc, argv, "--disc");
     setup::LaunchInfo launch;
     if (!setup::run(so, launch)) {
         port::recovery::onExit();

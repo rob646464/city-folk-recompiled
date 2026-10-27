@@ -49,6 +49,36 @@ bool isDiscFolder(const std::string& utf8Path) {
     return fs::is_directory(p, ec) && fs::is_regular_file(p / "sys" / "fst.bin", ec) && fs::is_directory(p / "files", ec);
 }
 
+std::string resolve(const std::string& utf8Path) {
+    if (utf8Path.empty()) return {};
+    std::error_code ec;
+    fs::path p = u8path(utf8Path);
+    auto u8 = [](const fs::path& x) {
+        const auto s = x.u8string();
+        return std::string(s.begin(), s.end());
+    };
+    auto isPart = [&](const fs::path& d) { return isDiscFolder(u8(d)); };
+    if (fs::is_regular_file(p, ec)) {  // a file in <partition>/sys
+        const fs::path sys = p.parent_path();
+        if (ieq(u8(sys.filename()), "sys") && isPart(sys.parent_path())) return u8(sys.parent_path());
+        return {};
+    }
+    if (!fs::is_directory(p, ec)) return {};
+    if (isPart(p)) return u8(p);
+    if (ieq(u8(p.filename()), "sys") && isPart(p.parent_path())) return u8(p.parent_path());
+    // A whole-disc extraction: DATA/ (Dolphin), else the one partition folder that is not UPDATE.
+    if (isPart(p / "DATA")) return u8(p / "DATA");
+    std::string found;
+    int n = 0;
+    for (auto it = fs::directory_iterator(p, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        const std::string name = u8(it->path().filename());
+        if (ieq(name, "UPDATE") || ieq(name, "CHANNEL") || !isPart(it->path())) continue;
+        found = u8(it->path());
+        n++;
+    }
+    return n == 1 ? found : std::string();
+}
+
 bool open(const std::string& utf8Path, std::string& error) {
     const fs::path p = u8path(utf8Path);
     std::vector<uint8_t> fst;

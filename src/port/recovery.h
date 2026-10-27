@@ -4,8 +4,8 @@
 // Each run records how far it got in <configDir>/last_run_state.ini: starting (until the game has
 // shown a few hundred frames), running, exited (clean) or crashed (with the error). When the last
 // start crashed before the game ran, or two runs in a row failed, the next start offers recovery
-// before anything else loads: reset the settings, rebuild the game data (recompiled module, Hidden
-// Mansion overlay, shader caches) or put the memory card saves aside. Nothing is deleted that the
+// before anything else loads: reset the settings, rebuild the game data (recompiled module,
+// shader caches) or put the memory card saves aside. Nothing is deleted that the
 // player made: settings and saves are kept as backups.
 //
 // Windows: everything the game logs also goes to <configDir>/last_run.log (the previous run's to

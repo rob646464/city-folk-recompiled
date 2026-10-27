@@ -29,8 +29,7 @@ namespace recomp::ios {
 
 u64 titleId() {
     // 00010000 = disc title; low word = the game id's first four characters ("RUUE").
-    const bool pal = port::install().running == port::GameVersion::PAL;
-    return 0x0001000052555500ull | (pal ? 'P' : 'E');
+    return 0x0001000052555500ull | u8(port::gameId(port::install().running)[3]);
 }
 
 std::string titleDataDir() {

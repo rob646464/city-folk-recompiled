@@ -15,6 +15,12 @@ namespace port::discfolder {
 
 // True if `path` is a directory that looks like an extracted disc (sys/fst.bin, files/).
 bool isDiscFolder(const std::string& utf8Path);
+// The game partition folder a picked path stands for, or "" if none: the partition folder itself
+// (sys/ + files/), the folder Dolphin's "Extract Entire Disc" writes for a Wii disc (its DATA/
+// subfolder; "P-<id>"-style names of other tools too: the one subfolder with sys/ + files/ that is
+// not the update partition), or a file inside the partition's sys/ (main.dol, boot.bin, ...:
+// what a file dialog can pick).
+std::string resolve(const std::string& utf8Path);
 
 // Opens the folder as the current disc (reads sys/fst.bin). False with `error` if unusable.
 bool open(const std::string& utf8Path, std::string& error);

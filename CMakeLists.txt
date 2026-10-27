@@ -121,19 +121,26 @@ if (WIN32)
     target_link_options(CityFolkRecomp PRIVATE "LINKER:/ENTRY:mainCRTStartup")
 endif ()
 add_executable(cfembed tools/recomp/cfembed.cpp)
+# Setup's inputs: the function tables of every supported release (setup recompiles whichever disc
+# the player has; docs/SETUP.md), the hook list and the module's freestanding sources.
 set(CF_EMBEDDED_FILES
-    kSymbolsUs=config/RUUE01/symbols.txt kSplitsUs=config/RUUE01/splits.txt
     kHooks=tools/recomp/hooks.txt kCtxHeader=src/recomp/ctx.h kModuleAbiHeader=src/recomp/module_abi.h
     kModuleRt=src/recomp/module_rt.cpp kRecompilerSource=src/recompiler/recompiler.cpp)
 set(_embed_deps)
+foreach (_id RUUE01 RUUP01 RUUJ01)
+    list(APPEND CF_EMBEDDED_FILES kSymbols_${_id}=config/${_id}/symbols.txt kSplits_${_id}=config/${_id}/splits.txt
+        kModules_${_id}=config/${_id}/modules.txt)
+    # The REL maps: one embedded blob of the whole folder (cfembed's folder mode).
+    file(GLOB _embed_rel_maps CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/config/${_id}/rels/*.txt)
+    list(APPEND _embed_deps ${_embed_rel_maps})
+endforeach ()
 foreach (_e ${CF_EMBEDDED_FILES})
     string(REGEX REPLACE "^[^=]*=" "${CMAKE_SOURCE_DIR}/" _f ${_e})
     list(APPEND _embed_deps ${_f})
 endforeach ()
-# The REL maps: one embedded blob of the whole folder (cfembed's folder mode).
-list(APPEND CF_EMBEDDED_FILES kRelMapsUs=config/RUUE01/rels)
-file(GLOB _embed_rel_maps CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/config/RUUE01/rels/*.txt)
-list(APPEND _embed_deps ${_embed_rel_maps})
+foreach (_id RUUE01 RUUP01 RUUJ01)
+    list(APPEND CF_EMBEDDED_FILES kRelMaps_${_id}=config/${_id}/rels)
+endforeach ()
 add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/embedded_data.cpp
     COMMAND cfembed ${CMAKE_BINARY_DIR}/embedded_data.cpp setup::embedded::data ${CF_EMBEDDED_FILES}
     DEPENDS cfembed ${_embed_deps}

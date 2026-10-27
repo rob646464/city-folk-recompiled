@@ -1,13 +1,13 @@
 // Self-updater: see update.h and docs/SETUP.md ("Updates").
 //
 // Contract with the release pipeline (tools/release_windows.ps1, tools/release_linux.sh):
-//   - releases are GitHub releases of kRepo (rob646464/luigis-mansion-recompiled; the old name
-//     luigis-mansion-pc-port redirects) tagged v<version> (e.g. v1.1, v1.0.1); drafts and
-//     prereleases are ignored;
-//   - assets: CityFolkRecompiled-<version>-windows-x64.zip and
-//     CityFolkRecompiled-<version>-linux-x86_64.tar.gz (from v1.1; v1.0/v1.0.1 used the prefix
-//     LuigisMansionPC-, still accepted),
-//     each holding one folder (or the files at the top) with the install layout of docs/SETUP.md;
+//   - releases are GitHub releases of kRepo (rob646464/city-folk-recompiled) tagged v<version>
+//     (e.g. v0.1, v1.0.1); drafts and prereleases are ignored. While the repository is private
+//     the API answers 404 to the game (no token is ever sent): reported as "no published release",
+//     nothing else happens;
+//   - assets: CityFolkRecompiled-<version>-windows-x64.zip, -linux-x86_64.tar.gz and
+//     -macos-arm64.tar.gz, each holding one folder (or the files at the top) with the install
+//     layout of docs/SETUP.md;
 //   - integrity: the API's asset "digest" ("sha256:<hex>"), else the release body's download table
 //     row "| `<asset name>` | ... | `<sha256 hex>` |".
 // Transport: WinHTTP + BCrypt on Windows; libcurl loaded at run time (dlopen) on Linux, and the
@@ -63,13 +63,12 @@ namespace fs = std::filesystem;
 namespace port::update {
 namespace {
 
-constexpr const char* kRepo = "rob646464/luigis-mansion-recompiled";
-constexpr const char* kApiLatest = "https://api.github.com/repos/rob646464/luigis-mansion-recompiled/releases/latest";
-// Release downloads of the repository (new name, and the old one GitHub redirects).
-constexpr const char* kAssetPrefixes[] = {"https://github.com/rob646464/luigis-mansion-recompiled/releases/download/",
-                                          "https://github.com/rob646464/luigis-mansion-pc-port/releases/download/"};
+constexpr const char* kRepo = "rob646464/city-folk-recompiled";
+constexpr const char* kApiLatest = "https://api.github.com/repos/rob646464/city-folk-recompiled/releases/latest";
+// Release downloads of the repository.
+constexpr const char* kAssetPrefixes[] = {"https://github.com/rob646464/city-folk-recompiled/releases/download/"};
 // Package names: "<prefix><version><kAssetSuffix>".
-constexpr const char* kPackagePrefixes[] = {"CityFolkRecompiled-", "LuigisMansionPC-"};
+constexpr const char* kPackagePrefixes[] = {"CityFolkRecompiled-"};
 // Hosts a release download may redirect to (GitHub's asset storage).
 constexpr const char* kAssetHosts[] = {"github.com", "objects.githubusercontent.com",
                                        "release-assets.githubusercontent.com"};
@@ -90,14 +89,11 @@ constexpr const char* kLinkerFile = "llvm/bin/ld.lld";
 constexpr const char* kExeName = "CityFolkRecomp";
 const char* const kExpected[] = {"CityFolkRecomp", "pipelines.bin", "llvm/bin/clang", kLinkerFile};
 constexpr const char* kLauncher = "CityFolkRecompiled.sh";
-constexpr const char* kOldLauncher = "LuigisMansionPC.sh";  // 1.0 / 1.0.1 (same file in both)
-constexpr const char* kOldLauncherSha = "efbcb131f2018dcbeb49fc937a5fafa1ec425e55bc159cf4ced3445a7b12dc36";
 #endif
 // Inside the install folder. Short, and the package's top folder is flattened into it, so the
 // deepest staged file is only 4 characters longer than its installed path (docs/SETUP.md "Long
-// paths"; up to 1.1.1 "update.tmp\new\<package>\" added 74 and failed past MAX_PATH).
+// paths"; LM's 1.1 staged deeper and failed past MAX_PATH).
 constexpr const char* kStagingName = "upd";
-constexpr const char* kOldStagingName = "update.tmp";  // up to 1.1.1: removed when found
 #ifdef _WIN32
 // tar.exe is not long-path aware: its working directory (the staging folder) must stay below
 // MAX_PATH. 247 = CreateDirectory's MAX_PATH - 12, with room to spare.
@@ -1075,7 +1071,8 @@ std::string fetchFeed(std::string& body) {
                 when = " in " + ra + " s";
             return "GitHub's limit for update checks from this network was reached; try again" + when + ".";
         }
-        if (r.status == 404) return "No published release was found.";
+        // A private repository (or one without releases) answers 404 to an unauthenticated request.
+        if (r.status == 404) return "No published release was found (the project's releases are not public yet).";
         return "GitHub answered HTTP " + std::to_string(r.status) + ".";
     }
     return "too many redirects";
@@ -1308,7 +1305,6 @@ void downloadWorker() {
                     ", so it cannot be verified; not installed. Use the download page.");
     std::error_code ec;
     fs::remove_all(staging, ec);
-    fs::remove_all(installDir() / kOldStagingName, ec);
     fs::create_directories(staging, ec);
     if (!fs::is_directory(staging, ec)) return fail("Could not create " + utf8(staging) + ".");
     const fs::path part = staging / (c.info.assetName + ".part");
@@ -1399,54 +1395,6 @@ void downloadWorker() {
     sState.message.clear();
 }
 
-#ifndef _WIN32
-// The launcher was LuigisMansionPC.sh up to 1.0.1 (CityFolkRecompiled.sh since 1.1). Desktop
-// entries and shortcuts may still start the old one, so an unmodified old launcher becomes a
-// forwarder to the new one; one the player edited is left alone (it still starts the game).
-void forwardOldLauncher(const fs::path& dir) {
-    std::error_code ec;
-    const fs::path oldSh = dir / kOldLauncher, newSh = dir / kLauncher;
-    if (!fs::is_regular_file(oldSh, ec) || !fs::is_regular_file(newSh, ec)) return;
-    const std::string forwarder = std::string("#!/bin/sh\n"
-                                              "# The launcher's name up to 1.0.1; kept so existing shortcuts keep working.\n"
-                                              "exec \"$(dirname \"$(readlink -f \"$0\")\")/") +
-                                  kLauncher + "\" \"$@\"\n";
-    {
-        std::ifstream in(oldSh, std::ios::binary);
-        const std::string have((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        if (have == forwarder) return;  // done before
-    }
-    std::string sha;
-    const std::atomic<bool> noCancel{false};
-    if (!sha256File(oldSh, sha, noCancel)) return;
-    if (sha != kOldLauncherSha) {
-        ulog("%s was changed by hand: left as it is (%s starts the game too)", kOldLauncher, kLauncher);
-        return;
-    }
-    // Written next to it and renamed over it: a shell that is still running the old script
-    // keeps reading its own (now unlinked) file.
-    const fs::path tmp = dir / (std::string(kOldLauncher) + ".new");
-    {
-        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-        out << forwarder;
-        if (!out) {
-            out.close();
-            fs::remove(tmp, ec);
-            return;
-        }
-    }
-    fs::permissions(tmp, fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec |
-                             fs::perms::others_read | fs::perms::others_exec,
-                    ec);
-    fs::rename(tmp, oldSh, ec);
-    if (ec) {
-        ulog("could not replace %s with a forwarder: %s", kOldLauncher, ec.message().c_str());
-        fs::remove(tmp, ec);
-        return;
-    }
-    ulog("%s (1.0.x launcher) now starts %s", kOldLauncher, kLauncher);
-}
-#endif
 
 // Lexically: p (built as dir / a relative name) stays inside dir. Links are refused when the
 // package is unpacked, so no component can lead elsewhere. (weakly_canonical drops the \\?\
@@ -1736,15 +1684,9 @@ bool dismissed() {
 void cleanupAfterUpdate() {
     const fs::path dir = installDir();
     std::error_code ec;
-#ifndef _WIN32
-    // At every start, not only after an update: a 1.1+ package unpacked over a 1.0.x folder
-    // leaves the old launcher next to the new one too. The updater's restart (execv) runs this
-    // right after an update.
-    if (isPackaged()) forwardOldLauncher(dir);
-#endif
     const fs::path listFile = dir / kCleanupList;
     const bool haveList = fs::exists(listFile, ec);
-    const bool haveStaging = fs::exists(dir / kStagingName, ec) || fs::exists(dir / kOldStagingName, ec);
+    const bool haveStaging = fs::exists(dir / kStagingName, ec);
     if (!haveList && !haveStaging) return;
     std::thread([dir, listFile] {
         std::vector<fs::path> left;
@@ -1774,7 +1716,6 @@ void cleanupAfterUpdate() {
         }
         std::error_code ec;
         fs::remove_all(dir / kStagingName, ec);
-        fs::remove_all(dir / kOldStagingName, ec);
         if (left.empty()) {
             fs::remove(listFile, ec);
             ulog("removed the previous version's files");
