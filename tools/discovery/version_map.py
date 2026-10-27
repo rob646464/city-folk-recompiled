@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Carry the USA names to another version (PAL RUUP01, Japan RUUJ01) by function matching.
+"""Carry the USA names to another version (PAL RUUP01, Japan RUUJ01, Korea RUUK01) by function matching.
 
     python tools/discovery/version_map.py --base-disc "US DATA/DATA" --disc "PAL DATA/DATA" --id RUUP01
 

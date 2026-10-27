@@ -54,7 +54,7 @@ private:
 // Opens and identifies a disc without keeping it open; for validating a picked file.
 bool probeDisc(const std::string& utf8Path, port::GameVersion& version, std::string& error);
 
-// "Animal Crossing: City Folk (USA, RUUE01 rev 1)".
+// "Animal Crossing: City Folk (USA, RUUE01 rev 1)", "... (Korea, RUUK01 rev 1)".
 std::string describe(port::GameVersion v);
 
 std::string hex(const std::uint8_t* data, size_t n);

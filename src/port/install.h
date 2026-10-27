@@ -8,15 +8,22 @@
 
 namespace port {
 
-// The three rev 1 releases (docs/SETUP.md "Discs"). Every disc carries every region's content,
-// so one disc of any region is a complete install; several can be installed side by side.
-enum class GameVersion { USA, PAL, JPN };  // RUUE01 / RUUP01 / RUUJ01
-constexpr int kVersionCount = 3;
-constexpr GameVersion kVersions[kVersionCount] = {GameVersion::USA, GameVersion::PAL, GameVersion::JPN};
+// The four releases (docs/SETUP.md "Discs"), revision 1 each: USA, Europe, Japan, Korea (the only
+// Korean release). Every disc carries every region's content, so one disc of any region is a complete
+// install; several can be installed side by side.
+enum class GameVersion { USA, PAL, JPN, KOR };  // RUUE01 / RUUP01 / RUUJ01 / RUUK01
+constexpr int kVersionCount = 4;
+constexpr GameVersion kVersions[kVersionCount] = {GameVersion::USA, GameVersion::PAL, GameVersion::JPN,
+                                                  GameVersion::KOR};
 
-const char* gameId(GameVersion v);       // "RUUE01" / "RUUP01" / "RUUJ01"
-const char* versionName(GameVersion v);  // "USA" / "PAL" / "JPN" (install.ini, logs)
-const char* regionName(GameVersion v);   // "USA" / "Europe" / "Japan" (what players read)
+const char* gameId(GameVersion v);       // "RUUE01" / "RUUP01" / "RUUJ01" / "RUUK01"
+const char* versionName(GameVersion v);  // "USA" / "PAL" / "JPN" / "KOR" (install.ini, logs)
+const char* regionName(GameVersion v);   // "USA" / "Europe" / "Japan" / "Korea" (what players read)
+// The disc revision the port knows (by its hashes) for a version: 1 for all four. It is the outer
+// disc header's byte 7; the Korean disc's game partition header (sys/boot.bin, which the console
+// copies to 0x80000000) says 0 instead (partitionRevision).
+int supportedRevision(GameVersion v);
+int partitionRevision(GameVersion v);
 // "RUUE01"... (also a disc's first 6 header bytes) -> version; false for anything else.
 bool versionFromId(const char* id, GameVersion& v);
 
@@ -34,7 +41,11 @@ struct InstallState {
     std::string& discOf(GameVersion v) { return disc[int(v)]; }
     const std::string& discOf(GameVersion v) const { return disc[int(v)]; }
     bool isReady(GameVersion v) const { return ready[int(v)]; }
-    int readyCount() const { return int(ready[0]) + int(ready[1]) + int(ready[2]); }
+    int readyCount() const {
+        int n = 0;
+        for (bool r : ready) n += r;
+        return n;
+    }
 };
 
 // Feature availability for the F1 menu (docs/SETUP.md, "Feature gating"). A feature written for

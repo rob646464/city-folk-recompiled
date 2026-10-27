@@ -1719,10 +1719,11 @@ bool recompile(const Input& in, Output& out, std::string& error) {
                 throw std::runtime_error(fmt("%s: module id %u is used twice", ri.name.c_str(), rels.back().id));
         }
         Recompiler rc(dol, rels);
-        // hooks.txt: "<symbol> [us] [pal] [jp]". A line applies to the US build unless it lists
-        // only other versions, and to PAL / Japan only when tagged "pal" / "jp".
+        // hooks.txt: "<symbol> [us] [pal] [jp] [kr]". A line applies to the US build unless it
+        // lists only other versions, and to PAL / Japan / Korea only when tagged "pal" / "jp" / "kr".
         const bool pal = in.version.size() >= 4 && in.version[3] == 'P';
         const bool jp = in.version.size() >= 4 && in.version[3] == 'J';
+        const bool kr = in.version.size() >= 4 && in.version[3] == 'K';
         std::vector<std::pair<u32, std::pair<u32, u32>>> patchList;
         for (std::string_view line : splitLines(in.hooks)) {
             line = trim(line);
@@ -1735,14 +1736,15 @@ bool recompile(const Input& in, Output& out, std::string& error) {
                 if (q > p) words.push_back(line.substr(p, q - p));
                 p = q + 1;
             }
-            bool tagUs = false, tagPal = false, tagJp = false;
+            bool tagUs = false, tagPal = false, tagJp = false, tagKr = false;
             const bool isPatch = words[0] == "patch";
             for (size_t i = isPatch ? 4 : 1; i < words.size(); i++) {
                 if (words[i] == "us") tagUs = true;
                 else if (words[i] == "pal") tagPal = true;
                 else if (words[i] == "jp") tagJp = true;
+                else if (words[i] == "kr") tagKr = true;
             }
-            const bool applies = pal ? tagPal : jp ? tagJp : (tagUs || !(tagPal || tagJp));
+            const bool applies = pal ? tagPal : jp ? tagJp : kr ? tagKr : (tagUs || !(tagPal || tagJp || tagKr));
             if (!applies) continue;
             if (isPatch) {  // "patch <id> <address> <instruction word> [us] [pal]"
                 u32 addr = 0, word = 0;

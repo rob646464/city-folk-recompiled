@@ -2,7 +2,7 @@
 """Write docs/SDK_NAMES.md: the HLE-relevant SDK functions (tools/discovery/hle_wanted.txt)
 with their addresses in each version, and what is still missing.
 
-    python tools/discovery/sdk_report.py [--ids RUUE01,RUUP01,RUUJ01]
+    python tools/discovery/sdk_report.py [--ids RUUE01,RUUP01,RUUJ01,RUUK01]
 """
 import argparse
 from collections import Counter, OrderedDict
@@ -87,7 +87,7 @@ def make_diag(refdir, base):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ids", default="RUUE01,RUUP01,RUUJ01")
+    ap.add_argument("--ids", default="RUUE01,RUUP01,RUUJ01,RUUK01")
     ap.add_argument("--refs", help="reference maps dir (sdk_names.py): diagnoses missing names")
     a = ap.parse_args()
     ids = [i for i in a.ids.split(",") if (ROOT / "config" / i / "names.txt").exists()]
@@ -107,7 +107,7 @@ def main():
            "`gap` = same position between two named functions in a reference with the same number",
            "of functions in between; `str` = the function's own \"X() was called\" trace string;",
            "`manual` = config/<id>/names_manual.txt; `map` = carried over from the USA table by",
-           "function matching (PAL/Japan, tools/discovery/version_map.py).",
+           "function matching (PAL/Japan/Korea, tools/discovery/version_map.py).",
            ""]
     summ = []
     body = []

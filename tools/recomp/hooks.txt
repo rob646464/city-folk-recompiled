@@ -1,14 +1,14 @@
 # Game functions replaced by host code (docs/RECOMPILER.md "Hooks").
 #
-#   <symbol> [us] [pal] [jp]   the function's body moves to <fn>_orig; HLE(<symbol>) replaces it
+#   <symbol> [us] [pal] [jp] [kr]  the function's body moves to <fn>_orig; HLE(<symbol>) replaces it
 #                              and may call callOriginal(c, "<symbol>")
 #   <module>::<symbol>         a function of a REL module (name from config/<id>/rels/<module>.txt)
 #   patch <id> <addr> <word>   runtime-switchable instruction patch (setPatch(id, on))
 #
 # Every named DOL function is replaceable by name already (no line needed); lines here are for
-# REL functions and patches. A line applies to the USA build unless it is tagged only "pal" and/or
-# "jp"; to the European / Japanese build only when tagged "pal" / "jp" (REL offsets differ between
-# versions: config/<id>/rels_us_map.txt).
+# REL functions and patches. A line applies to the USA build unless it is tagged only "pal", "jp"
+# and/or "kr"; to the European / Japanese / Korean build only when tagged "pal" / "jp" / "kr" (REL
+# offsets differ between versions: config/<id>/rels_us_map.txt).
 
 # Audio (docs/AUDIO.md "Surround output"): with F1 > Sound > Output 5.1 / 7.1 the port keeps NW4R's
 # Dolby Pro Logic II mode: City Folk's `bl AxManager::SetOutputMode(STEREO)` right after

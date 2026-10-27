@@ -366,11 +366,12 @@ int main(int argc, char* argv[]) {
     setup::Options so;
     so.forceUi = hasArg(argc, argv, "--setup");
     so.autoStart = hasArg(argc, argv, "--setup-auto");
-    // --usa-disc / --pal-disc / --jpn-disc: a region's slot; --disc: any region (docs/SETUP.md).
+    // --usa-disc / --pal-disc / --jpn-disc / --kor-disc: a region's slot; --disc: any region (docs/SETUP.md).
     so.disc[int(port::GameVersion::USA)] = argValue(argc, argv, "--usa-disc");
     if (so.disc[0].empty()) so.disc[0] = argValue(argc, argv, "--us-disc");
     so.disc[int(port::GameVersion::PAL)] = argValue(argc, argv, "--pal-disc");
     so.disc[int(port::GameVersion::JPN)] = argValue(argc, argv, "--jpn-disc");
+    so.disc[int(port::GameVersion::KOR)] = argValue(argc, argv, "--kor-disc");
     so.anyDisc = argValue(argc, argv, "--disc");
     setup::LaunchInfo launch;
     if (!setup::run(so, launch)) {
