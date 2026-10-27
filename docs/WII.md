@@ -141,11 +141,31 @@ the CPU given up).
   driver is not enough on its own (no IR pointer), so claim the device before SDL opens it.
 - **Remote speaker** (`WPADSendStreamData`, 4-bit ADPCM): decode and mix into PC output (option:
   separate volume).
-- Boot stand-in now (`src/recomp/hle_wpad.cpp`): WPADInit/KPADInit do nothing (the Bluetooth
-  stack never starts: BTA_Init would wait forever for the USB Bluetooth device), WPADGetStatus =
-  set up, channel 0 a core remote, KPADRead = buttons of host port 1 (`readHostPads`,
-  hle_pad.cpp). The real HLE replaces `remoteButtons()` with a per-port source feeding one remote
-  state (buttons, DPD pointer, acc, extension, rumble, speaker) as planned above.
+- **Done (branch wpad-1, docs/CONTROLS.md)**: `hle_wpad.cpp` answers the WPAD/KPAD calls the game
+  makes (KPADRead with 200 Hz report timing, WPADProbe, connection/extension callbacks, battery
+  info, motor, LED, DPD, speaker calls accepted, disconnect/reconnect); `wiimote.cpp` builds each
+  port's Remote from a Source (emulated today: F1 > Controls bindings + mouse / right stick / gyro
+  pointer + shake inputs). `VIGetDimmingCount` reports Remote radio activity (0 = the game's
+  "Communications with the Wii Remote have been interrupted"). Not yet: speaker sound, real Wii
+  Remotes, tilt from a pad's accelerometer, Classic Controller (check whether the game reads it).
+- **Real Wii Remotes, plan**: an `HidSource` (wiimote.h `Source`) per paired Remote: SDL hidapi
+  (`SDL_hid_open` on 057E:0306/0330 before SDL's own Wii driver claims it), report mode 0x37
+  (buttons + acc + 10-byte IR + 6-byte extension), IR camera init sequence, IR dots -> pointer
+  (midpoint of the two brightest dots, sensor bar above/below from SYSCONF, roll from the dot
+  angle), extension identification (Nunchuk), rumble bit in every output report, speaker data
+  (report 0x18, 4-bit ADPCM) from WPADSendStreamData. F1 > Controls > Ports gets "Wii Remote
+  (Bluetooth)" as a device per port.
+
+### Scripted route to the town
+
+USA, `CF_INPUT_CLOCK=frames`, render-1 merged (3D/keyboard drawn), AURORA_FIFO_INLINE=1: A every 80
+frames from 1300 to 4600 (wrist strap, title, Rover); pointer `@0.41/0.42` then A every 60 to 7560
+("Start fresh!", "That's right!"); name keyboard from about frame 7600: `@-0.339/0.017` (r),
+`@0.364/0.017` (o), `@0.052/0.292` (b), `@0.656/0.778` (Confirm), each followed by A; more dialogue;
+town-name keyboard (same key positions) and Confirm; then A every 60 with the pointer cycling
+`@0.62/0.5` ("That's it!"), `@0.41/0.42`, `@0.656/0.778` (town map "OK!"): the bus arrives and the
+player stands at the town gate at about frame 16000 (the next pointer click opens the map from
+the HUD). Generator: a few lines of Python building the item list (one item per press).
 
 ## Audio
 
@@ -198,9 +218,12 @@ the CPU given up).
    456-line EFB copy (VIConfigure is a no-op: VI/XFB size not taken from the render mode), exit
    hangs in shutdown (killed after the test; the main thread waits in `vi::stopTimer`'s join,
    seen 2026-10-27 with CF_HANG_DUMP). With Aurora's FIFO thread the title intro often ends in
-   `FIFO processing range ... is outside buffered range` (AURORA_FIFO_INLINE=1 avoids it), and the
-   title does not react to scripted A/START (also on main).
-5. KPAD/WPAD HLE with mouse pointer → into the game; NAND save/load. **System side done** (branch
+   `FIFO processing range ... is outside buffered range` (AURORA_FIFO_INLINE=1 avoids it). (The
+   title "not reacting to scripted A" was a test wrapper with a `$Input` parameter: PowerShell's
+   automatic variable, so nothing reached `--input`; docs/CONTROLS.md.)
+5. KPAD/WPAD HLE with mouse pointer → into the game; NAND save/load. **Wii Remote done** (branch
+   wpad-1): scripted pointer play from the title through name/town entry into the town (route
+   above). **System side done** (branch
    nand-sys, docs/NAND.md): IOS file system on a host NAND folder, SYSCONF/setting.txt from F1
    settings (language, 16:9, ... verified in the game: French text, 16:9 title), ES, STM, clock
    offset, devices absent cleanly (SD empty, no USB keyboard, offline). The game's NAND library

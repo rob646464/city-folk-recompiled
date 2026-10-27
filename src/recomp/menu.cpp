@@ -12,6 +12,7 @@
 #include "port/update.h"
 #include "recomp/audio.h"
 #include "recomp/controls.h"
+#include "recomp/wiimote.h"
 #include "recomp/crt.h"
 #include "recomp/enhanced_lighting.h"
 #include "recomp/frame.h"
@@ -84,7 +85,7 @@ struct Page {
 constexpr Page kPages[] = {
     {"Visuals", "General"},       {"Visuals", "Rendering"},        {"Visuals", "Enhanced lighting"},
     {"Sound", nullptr},           {"Controls", "Ports"},           {"Controls", "Bindings"},
-    {"Controls", "Analog"},       {"Controls", "DSU"},             {"Enhancements", "General"},     {"Enhancements", "Gameplay"},
+    {"Controls", "Pointer"},      {"Controls", "Analog"},       {"Controls", "DSU"},             {"Enhancements", "General"},     {"Enhancements", "Gameplay"},
     {"Enhancements", "Silly"},          {"Enhancements", "Unused content"}, {"Enhancements", "Debug"}, {"Game", nullptr},
 };
 constexpr int kPageCount = int(sizeof(kPages) / sizeof(kPages[0]));
@@ -1850,6 +1851,7 @@ bool SliderInt(const char* label, int* v, int min, int max, const char* format, 
 
 void draw() {
     click::frame();
+    recomp::wiimote::hostFrame();  // mouse cursor over the game (pointer from the mouse)
     scriptedSettings();
     recomp::gx::applyAccuracySettings();
     recomp::enh::applySettings();

@@ -1,22 +1,24 @@
 // Controller configuration: F1 > Controls (docs/CONTROLS.md).
 //
-// Every GameCube input of every port can be bound to keyboard keys, mouse buttons and
-// gamepad buttons/axes. Bindings live in profiles: one for the keyboard (and mouse) and
-// one per gamepad model (SDL GUID), created from a per-type default layout. A port is
-// driven by one gamepad (chosen, or "Auto" = the next free one) and optionally the
-// keyboard.
+// Port N of this menu drives Wii Remote N (with its Nunchuk). Every Wii Remote / Nunchuk
+// input of every port can be bound to keyboard keys, mouse buttons and gamepad buttons/axes
+// (the pointer itself comes from the port's pointer source: mouse, right stick or gyro,
+// wiimote.cpp). Bindings live in profiles: one for the keyboard (and mouse) and one per
+// gamepad model (SDL GUID), created from a per-type default layout. A port is driven by one
+// gamepad (chosen, or "Auto" = the next free one) and optionally the keyboard.
 //
 // Aurora's PAD resolves a port's controller from the SDL player index, so device
 // assignment sets player indices. Its own per-controller mappings and keyboard bindings
-// are emptied and all our bindings go in through aurora::pad::set_action_bindings, which
-// accepts any physical input for any PAD control (aurora/pad.hpp, aurora/binding.hpp).
-// Stick dead zones and sensitivity are applied to the PADStatus afterwards (hle_pad.cpp).
+// are emptied and all our bindings go in through aurora::pad::set_action_bindings onto our
+// own controls (cf.wpad.*), read back with aurora::pad::control_value (remoteInputs()).
+// Stick dead zones and sensitivity are applied there.
 // Everything is saved in settings.ini ([controls], [controls.keyboard],
 // [controls.pad.<guid>]) through port::addSettingsExtension.
 #include "recomp/menu.h"
 #include "recomp/controls.h"
 #include "recomp/dsu.h"
 #include "recomp/ui_scale.h"
+#include "recomp/wiimote.h"
 
 #include "port/settings.h"
 
@@ -53,14 +55,20 @@ using aurora::binding::ControlId;
 using aurora::binding::PhysicalInput;
 using Clock = std::chrono::steady_clock;
 
-// ---- GameCube inputs -----------------------------------------------------------------
+// ---- Wii Remote inputs ---------------------------------------------------------------
+// City Folk is played with a Wii Remote (+ Nunchuk). Each controller port of this menu drives
+// the Wii Remote of the same number (wiimote.cpp builds the remote's state from these inputs
+// plus its pointer source). Every input is a game-defined Aurora control ("cf.wpad.*") bound
+// per port through set_action_bindings and read back with aurora::pad::control_value (Aurora
+// 0320): a GameCube PADStatus has too few buttons for a Remote + Nunchuk.
 
 enum Target : int {
-    tA, tB, tX, tY, tZ, tStart, tL, tR,
+    tA, tB, t1, t2, tPlus, tMinus, tHome,
     tDUp, tDDown, tDLeft, tDRight,
+    tC, tZ,
     tStickUp, tStickDown, tStickLeft, tStickRight,
-    tCUp, tCDown, tCLeft, tCRight,
-    tAnalogL, tAnalogR,
+    tPtrUp, tPtrDown, tPtrLeft, tPtrRight,
+    tShake, tShakeNunchuk, tRecenter,
     kTargets
 };
 
@@ -68,33 +76,61 @@ struct TargetInfo {
     const char* key;    // ini key
     const char* label;  // menu
     const char* group;  // menu section, printed when it changes
-    u16 padButton;      // PAD_BUTTON_* for digital inputs, else 0
+    u32 button;         // RemoteInputs::buttons bit (wiimote.h kBtn*) for digital inputs, else 0
 };
 
 constexpr TargetInfo kTargetInfo[kTargets] = {
-    {"a", "A", "Buttons", PAD_BUTTON_A},
-    {"b", "B", "Buttons", PAD_BUTTON_B},
-    {"x", "X", "Buttons", PAD_BUTTON_X},
-    {"y", "Y", "Buttons", PAD_BUTTON_Y},
-    {"z", "Z", "Buttons", PAD_TRIGGER_Z},
-    {"start", "START", "Buttons", PAD_BUTTON_START},
-    {"l", "L (click)", "Buttons", PAD_TRIGGER_L},
-    {"r", "R (click)", "Buttons", PAD_TRIGGER_R},
-    {"dpad_up", "Up", "D-pad", PAD_BUTTON_UP},
-    {"dpad_down", "Down", "D-pad", PAD_BUTTON_DOWN},
-    {"dpad_left", "Left", "D-pad", PAD_BUTTON_LEFT},
-    {"dpad_right", "Right", "D-pad", PAD_BUTTON_RIGHT},
-    {"stick_up", "Up", "Control stick", 0},
-    {"stick_down", "Down", "Control stick", 0},
-    {"stick_left", "Left", "Control stick", 0},
-    {"stick_right", "Right", "Control stick", 0},
-    {"c_up", "Up", "C-stick", 0},
-    {"c_down", "Down", "C-stick", 0},
-    {"c_left", "Left", "C-stick", 0},
-    {"c_right", "Right", "C-stick", 0},
-    {"analog_l", "L (analog)", "Analog triggers", 0},
-    {"analog_r", "R (analog)", "Analog triggers", 0},
+    {"a", "A", "Wii Remote", wiimote::kBtnA},
+    {"b", "B", "Wii Remote", wiimote::kBtnB},
+    {"one", "1", "Wii Remote", wiimote::kBtn1},
+    {"two", "2", "Wii Remote", wiimote::kBtn2},
+    {"plus", "+ (Plus)", "Wii Remote", wiimote::kBtnPlus},
+    {"minus", "- (Minus)", "Wii Remote", wiimote::kBtnMinus},
+    {"home", "HOME", "Wii Remote", wiimote::kBtnHome},
+    {"dpad_up", "Up", "D-pad", wiimote::kBtnUp},
+    {"dpad_down", "Down", "D-pad", wiimote::kBtnDown},
+    {"dpad_left", "Left", "D-pad", wiimote::kBtnLeft},
+    {"dpad_right", "Right", "D-pad", wiimote::kBtnRight},
+    {"c", "C", "Nunchuk", wiimote::kBtnC},
+    {"z", "Z", "Nunchuk", wiimote::kBtnZ},
+    {"stick_up", "Up", "Nunchuk stick", 0},
+    {"stick_down", "Down", "Nunchuk stick", 0},
+    {"stick_left", "Left", "Nunchuk stick", 0},
+    {"stick_right", "Right", "Nunchuk stick", 0},
+    {"pointer_up", "Up", "Pointer (stick or keys)", 0},
+    {"pointer_down", "Down", "Pointer (stick or keys)", 0},
+    {"pointer_left", "Left", "Pointer (stick or keys)", 0},
+    {"pointer_right", "Right", "Pointer (stick or keys)", 0},
+    {"shake", "Shake Wii Remote", "Motion and pointer", wiimote::kBtnShake},
+    {"shake_nunchuk", "Shake Nunchuk", "Motion and pointer", wiimote::kBtnShakeNunchuk},
+    {"recenter", "Recenter pointer", "Motion and pointer", wiimote::kBtnRecenter},
 };
+
+// The Aurora controls behind the targets: one button control per digital target, and the
+// Nunchuk stick / pointer stick axes ([-1, 1], +x right, +y up).
+struct RemoteControls {
+    std::array<ControlId, kTargets> button{};
+    ControlId stickX = 0, stickY = 0, ptrX = 0, ptrY = 0;
+};
+
+const RemoteControls& remoteControls() {
+    static const RemoteControls sC = [] {
+        RemoteControls c;
+        for (int t = 0; t < kTargets; t++)
+            if (kTargetInfo[t].button)
+                c.button[t] = aurora::binding::register_control(
+                    {.name = std::string("cf.wpad.") + kTargetInfo[t].key, .kind = aurora::binding::ControlKind::Button});
+        const auto axis = [](const char* name) {
+            return aurora::binding::register_control({.name = name, .kind = aurora::binding::ControlKind::Axis});
+        };
+        c.stickX = axis("cf.wpad.stick_x");
+        c.stickY = axis("cf.wpad.stick_y");
+        c.ptrX = axis("cf.wpad.pointer_x");
+        c.ptrY = axis("cf.wpad.pointer_y");
+        return c;
+    }();
+    return sC;
+}
 
 // ---- Physical inputs -----------------------------------------------------------------
 
@@ -280,55 +316,59 @@ struct Profile {
     SDL_GamepadType type = SDL_GAMEPAD_TYPE_STANDARD;
     std::string name;  // last seen device name
     std::array<std::array<Input, 2>, kTargets> bind{};
-    // Gamepads only. [0] control stick / L, [1] C-stick / R.
-    float deadzone[2] = {0.08f, 0.08f};    // radial, fraction of full tilt; rescaled outside it
+    // Gamepads only. [0] Nunchuk stick / left trigger, [1] pointer stick / right trigger.
+    float deadzone[2] = {0.08f, 0.12f};    // radial, fraction of full tilt; rescaled outside it
     float sensitivity[2] = {1.0f, 1.0f};   // tilt multiplier after the dead zone
     bool invertX[2] = {false, false};
     bool invertY[2] = {false, false};
-    float threshold[2] = {0.85f, 0.85f};   // analog trigger pull that counts as the L/R click
+    float threshold[2] = {0.5f, 0.5f};     // analog trigger pull that presses a button bound to it
     bool rumble = true;
     float rumbleStrength = 0.5f;           // 0..1 (controllers that support intensity)
     bool operator==(const Profile&) const = default;
 };
 
-// Keyboard: WASD = control stick, arrow keys = C-stick (aim), Space = R (vacuum),
-// Left Shift = L, E = A, Q = B, R = X, F = Y, Left Ctrl = Z, Enter = START, 1-4 = D-pad;
-// mouse left/right = R/L as alternates. (Tab, F1, F3, F4 and Esc are port hotkeys.)
+// Keyboard and mouse (pointer = the mouse, wiimote.cpp): left click / Space = A, right click /
+// Left Shift = B (run), WASD = Nunchuk stick, C/Q = C, Z/E = Z, arrow keys = D-pad, 1/2,
+// Enter = +, Backspace = -, H = HOME, F / middle click = shake, G = shake the Nunchuk,
+// R = recenter. (Tab, F1, F3, F4 and Esc are port hotkeys.)
 Profile keyboardDefaults() {
     Profile p;
     p.keyboard = true;
     p.name = "Keyboard and mouse";
     auto& b = p.bind;
-    b[tA][0] = key(SDL_SCANCODE_E);
-    b[tB][0] = key(SDL_SCANCODE_Q);
-    b[tX][0] = key(SDL_SCANCODE_R);
-    b[tY][0] = key(SDL_SCANCODE_F);
-    b[tZ][0] = key(SDL_SCANCODE_LCTRL);
-    b[tZ][1] = key(SDL_SCANCODE_C);
-    b[tStart][0] = key(SDL_SCANCODE_RETURN);
-    b[tL][0] = key(SDL_SCANCODE_LSHIFT);
-    b[tL][1] = mouse(SDL_BUTTON_RIGHT);
-    b[tR][0] = key(SDL_SCANCODE_SPACE);
-    b[tR][1] = mouse(SDL_BUTTON_LEFT);
-    b[tDUp][0] = key(SDL_SCANCODE_1);
-    b[tDDown][0] = key(SDL_SCANCODE_2);
-    b[tDLeft][0] = key(SDL_SCANCODE_3);
-    b[tDRight][0] = key(SDL_SCANCODE_4);
+    b[tA][0] = mouse(SDL_BUTTON_LEFT);
+    b[tA][1] = key(SDL_SCANCODE_SPACE);
+    b[tB][0] = mouse(SDL_BUTTON_RIGHT);
+    b[tB][1] = key(SDL_SCANCODE_LSHIFT);
+    b[t1][0] = key(SDL_SCANCODE_1);
+    b[t2][0] = key(SDL_SCANCODE_2);
+    b[tPlus][0] = key(SDL_SCANCODE_RETURN);
+    b[tMinus][0] = key(SDL_SCANCODE_BACKSPACE);
+    b[tHome][0] = key(SDL_SCANCODE_H);
+    b[tDUp][0] = key(SDL_SCANCODE_UP);
+    b[tDDown][0] = key(SDL_SCANCODE_DOWN);
+    b[tDLeft][0] = key(SDL_SCANCODE_LEFT);
+    b[tDRight][0] = key(SDL_SCANCODE_RIGHT);
+    b[tC][0] = key(SDL_SCANCODE_C);
+    b[tC][1] = key(SDL_SCANCODE_Q);
+    b[tZ][0] = key(SDL_SCANCODE_Z);
+    b[tZ][1] = key(SDL_SCANCODE_E);
     b[tStickUp][0] = key(SDL_SCANCODE_W);
     b[tStickDown][0] = key(SDL_SCANCODE_S);
     b[tStickLeft][0] = key(SDL_SCANCODE_A);
     b[tStickRight][0] = key(SDL_SCANCODE_D);
-    b[tCUp][0] = key(SDL_SCANCODE_UP);
-    b[tCDown][0] = key(SDL_SCANCODE_DOWN);
-    b[tCLeft][0] = key(SDL_SCANCODE_LEFT);
-    b[tCRight][0] = key(SDL_SCANCODE_RIGHT);
+    b[tShake][0] = key(SDL_SCANCODE_F);
+    b[tShake][1] = mouse(SDL_BUTTON_MIDDLE);
+    b[tShakeNunchuk][0] = key(SDL_SCANCODE_G);
+    b[tRecenter][0] = key(SDL_SCANCODE_R);
     return p;
 }
 
-// Gamepads: the GameCube layout by position (A = bottom face button, B = left, X = right,
-// Y = top), except Nintendo pads, which use their printed A/B/X/Y. Z = right shoulder,
-// L/R = triggers (analog, plus the click past the threshold), sticks and D-pad as is.
-// A GameCube controller (adapter or NSO) maps 1:1, L/R clicks being its real clicks.
+// Gamepads as a Wii Remote held with a Nunchuk: A = bottom face button, B = right face button
+// (and the right trigger: the Remote's B is a trigger), 1 = left, 2 = top (printed A/B/X/Y on
+// Nintendo pads: A, B, Y, X), + = Start, - = Back, HOME = Guide, D-pad as is; Nunchuk: left
+// stick, C = left shoulder, Z = left trigger; pointer = right stick (wiimote.cpp), right stick
+// press = recenter, right shoulder = shake, left stick press = shake the Nunchuk.
 Profile padDefaults(SDL_GamepadType type, const std::string& name) {
     Profile p;
     p.type = type;
@@ -336,50 +376,53 @@ Profile padDefaults(SDL_GamepadType type, const std::string& name) {
     auto& b = p.bind;
     const Family f = familyOf(type);
     // Face buttons by printed label on Nintendo/GameCube pads, by position elsewhere.
-    SDL_GamepadButton face[4] = {SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_WEST, SDL_GAMEPAD_BUTTON_EAST,
-                                 SDL_GAMEPAD_BUTTON_NORTH};  // A, B, X, Y
+    SDL_GamepadButton face[4] = {SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_EAST, SDL_GAMEPAD_BUTTON_WEST,
+                                 SDL_GAMEPAD_BUTTON_NORTH};  // A, B, 1, 2
     if (f == Family::Nintendo || f == Family::GameCube) {
         for (int i = 0; i <= SDL_GAMEPAD_BUTTON_NORTH; i++) {
             const auto btn = SDL_GamepadButton(i);
             switch (SDL_GetGamepadButtonLabelForType(type, btn)) {
             case SDL_GAMEPAD_BUTTON_LABEL_A: face[0] = btn; break;
             case SDL_GAMEPAD_BUTTON_LABEL_B: face[1] = btn; break;
-            case SDL_GAMEPAD_BUTTON_LABEL_X: face[2] = btn; break;
-            case SDL_GAMEPAD_BUTTON_LABEL_Y: face[3] = btn; break;
+            case SDL_GAMEPAD_BUTTON_LABEL_Y: face[2] = btn; break;
+            case SDL_GAMEPAD_BUTTON_LABEL_X: face[3] = btn; break;
             default: break;
             }
         }
     }
     b[tA][0] = button(face[0]);
     b[tB][0] = button(face[1]);
-    b[tX][0] = button(face[2]);
-    b[tY][0] = button(face[3]);
-    b[tZ][0] = button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
-    b[tStart][0] = button(SDL_GAMEPAD_BUTTON_START);
-    if (f == Family::GameCube) {
-        b[tL][0] = button(SDL_GAMEPAD_BUTTON_MISC3);
-        b[tR][0] = button(SDL_GAMEPAD_BUTTON_MISC4);
-        p.deadzone[0] = p.deadzone[1] = 0.0f;  // the game's PADClamp already has the GameCube dead zone
-    } else {
-        b[tZ][1] = button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
-        b[tL][0] = axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER, 1);
-        b[tR][0] = axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, 1);
-        b[tStart][1] = button(SDL_GAMEPAD_BUTTON_BACK);
-    }
+    b[t1][0] = button(face[2]);
+    b[t2][0] = button(face[3]);
+    b[tPlus][0] = button(SDL_GAMEPAD_BUTTON_START);
+    b[tMinus][0] = button(SDL_GAMEPAD_BUTTON_BACK);
+    b[tHome][0] = button(SDL_GAMEPAD_BUTTON_GUIDE);
     b[tDUp][0] = button(SDL_GAMEPAD_BUTTON_DPAD_UP);
     b[tDDown][0] = button(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
     b[tDLeft][0] = button(SDL_GAMEPAD_BUTTON_DPAD_LEFT);
     b[tDRight][0] = button(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+    b[tC][0] = button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
+    if (f == Family::GameCube) {  // GameCube controller: Z = Z button, L/R clicks = C / B
+        b[tZ][0] = button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+        b[tC][0] = button(SDL_GAMEPAD_BUTTON_MISC3);
+        b[tB][1] = button(SDL_GAMEPAD_BUTTON_MISC4);
+        b[tMinus][0] = {};
+        p.deadzone[0] = 0.15f;  // the GameCube stick rests less centred than modern ones
+    } else {
+        b[tZ][0] = axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER, 1);
+        b[tB][1] = axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, 1);
+        b[tShake][0] = button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+    }
     b[tStickUp][0] = axis(SDL_GAMEPAD_AXIS_LEFTY, -1);
     b[tStickDown][0] = axis(SDL_GAMEPAD_AXIS_LEFTY, 1);
     b[tStickLeft][0] = axis(SDL_GAMEPAD_AXIS_LEFTX, -1);
     b[tStickRight][0] = axis(SDL_GAMEPAD_AXIS_LEFTX, 1);
-    b[tCUp][0] = axis(SDL_GAMEPAD_AXIS_RIGHTY, -1);
-    b[tCDown][0] = axis(SDL_GAMEPAD_AXIS_RIGHTY, 1);
-    b[tCLeft][0] = axis(SDL_GAMEPAD_AXIS_RIGHTX, -1);
-    b[tCRight][0] = axis(SDL_GAMEPAD_AXIS_RIGHTX, 1);
-    b[tAnalogL][0] = axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER, 1);
-    b[tAnalogR][0] = axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, 1);
+    b[tPtrUp][0] = axis(SDL_GAMEPAD_AXIS_RIGHTY, -1);
+    b[tPtrDown][0] = axis(SDL_GAMEPAD_AXIS_RIGHTY, 1);
+    b[tPtrLeft][0] = axis(SDL_GAMEPAD_AXIS_RIGHTX, -1);
+    b[tPtrRight][0] = axis(SDL_GAMEPAD_AXIS_RIGHTX, 1);
+    b[tShakeNunchuk][0] = button(SDL_GAMEPAD_BUTTON_LEFT_STICK);
+    b[tRecenter][0] = button(SDL_GAMEPAD_BUTTON_RIGHT_STICK);
     return p;
 }
 
@@ -570,18 +613,16 @@ void assign() {
 }
 
 ControlId stickControl(Target t, float& scale) {
-    const auto& c = aurora::pad::controls();
+    const auto& c = remoteControls();
     switch (t) {
-    case tStickUp: scale = 1; return c.leftY;
-    case tStickDown: scale = -1; return c.leftY;
-    case tStickLeft: scale = -1; return c.leftX;
-    case tStickRight: scale = 1; return c.leftX;
-    case tCUp: scale = 1; return c.rightY;
-    case tCDown: scale = -1; return c.rightY;
-    case tCLeft: scale = -1; return c.rightX;
-    case tCRight: scale = 1; return c.rightX;
-    case tAnalogL: scale = 1; return c.triggerL;
-    case tAnalogR: scale = 1; return c.triggerR;
+    case tStickUp: scale = 1; return c.stickY;
+    case tStickDown: scale = -1; return c.stickY;
+    case tStickLeft: scale = -1; return c.stickX;
+    case tStickRight: scale = 1; return c.stickX;
+    case tPtrUp: scale = 1; return c.ptrY;
+    case tPtrDown: scale = -1; return c.ptrY;
+    case tPtrLeft: scale = -1; return c.ptrX;
+    case tPtrRight: scale = 1; return c.ptrX;
     default: scale = 0; return aurora::binding::kInvalidControlId;
     }
 }
@@ -602,8 +643,8 @@ void addBindings(std::vector<Binding>& out, const Profile& prof) {
                 break;
             default: continue;
             }
-            if (const u16 bit = kTargetInfo[t].padButton) {
-                b.target = aurora::pad::control_for_button(bit);
+            if (kTargetInfo[t].button) {
+                b.target = remoteControls().button[t];
                 if (in.kind == Input::Axis)
                     b.threshold = in.code == SDL_GAMEPAD_AXIS_LEFT_TRIGGER    ? prof.threshold[0]
                                   : in.code == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER ? prof.threshold[1]
@@ -611,9 +652,9 @@ void addBindings(std::vector<Binding>& out, const Profile& prof) {
             } else {
                 b.target = stickControl(Target(t), b.scale);
                 if (!prof.keyboard) {
-                    const int stick = t >= tCUp && t <= tCRight ? 1 : 0;
-                    const bool horizontal = t == tStickLeft || t == tStickRight || t == tCLeft || t == tCRight;
-                    const bool vertical = t == tStickUp || t == tStickDown || t == tCUp || t == tCDown;
+                    const int stick = t >= tPtrUp && t <= tPtrRight ? 1 : 0;
+                    const bool horizontal = t == tStickLeft || t == tStickRight || t == tPtrLeft || t == tPtrRight;
+                    const bool vertical = t == tStickUp || t == tStickDown || t == tPtrUp || t == tPtrDown;
                     if ((horizontal && prof.invertX[stick]) || (vertical && prof.invertY[stick])) b.scale = -b.scale;
                 }
             }
@@ -975,10 +1016,10 @@ std::string portDeviceLabel(const PortConfig& pc) {
 
 bool portsTab() {
     bool changed = false;
-    ImGui::TextWrapped("Choose what drives each GameCube controller port. Luigi's Mansion is played on port 1. "
+    ImGui::TextWrapped("Choose what drives each Wii Remote (with its Nunchuk). City Folk is played on Wii Remote 1. "
                        "\"Auto\" takes the next connected controller that no other port has chosen.");
     if (ImGui::BeginTable("ports", 4, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg)) {
-        ImGui::TableSetupColumn("Port", ImGuiTableColumnFlags_WidthFixed, 40 * recomp::ui::scale());
+        ImGui::TableSetupColumn("Remote", ImGuiTableColumnFlags_WidthFixed, 50 * recomp::ui::scale());
         ImGui::TableSetupColumn("Device", ImGuiTableColumnFlags_WidthStretch, 1.0f);
         ImGui::TableSetupColumn("+ Keyboard", ImGuiTableColumnFlags_WidthFixed, 80 * recomp::ui::scale());
         ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthStretch, 1.1f);
@@ -1010,13 +1051,13 @@ bool portsTab() {
                 }
                 ImGui::EndCombo();
             }
-            ImGui::SetItemTooltip("The controller (or the keyboard) that drives this GameCube port.");
+            ImGui::SetItemTooltip("The controller (or the keyboard) whose buttons and sticks drive this Wii Remote.");
             ImGui::TableNextColumn();
             ImGui::BeginDisabled(pc.device == "keyboard" || pc.device == "none");
             changed |= ImGui::Checkbox("##kb", &pc.keyboard);
             ImGui::EndDisabled();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("Keyboard and mouse also control this port");
+                ImGui::SetTooltip("Keyboard and mouse buttons also control this Wii Remote");
             ImGui::TableNextColumn();
             if (st.pad.id) {
                 ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1), "%s%s", st.pad.name.c_str(), st.keyboard ? " + keys" : "");
@@ -1036,64 +1077,17 @@ bool portsTab() {
         ImGui::EndTable();
     }
 
+    changed |= wiimote::drawRemotesSection();
     ImGui::SeparatorText("Input test");
     for (int port = 0; port < PAD_MAX_CONTROLLERS; port++) {
         if (port) ImGui::SameLine();
-        char label[16];
-        std::snprintf(label, sizeof(label), "Port %d", port + 1);
+        char label[24];
+        std::snprintf(label, sizeof(label), "Wii Remote %d", port + 1);
         ImGui::RadioButton(label, &sTestPort, port);
-        ImGui::SetItemTooltip("Shows what the game reads from this port below.");
+        ImGui::SetItemTooltip("Shows what the game reads from this Wii Remote below.");
     }
-    const auto& st = sPorts[sTestPort];
-    if (!st.haveLast || st.last.err != PAD_ERR_NONE) {
-        ImGui::TextDisabled("Nothing connected (or the game has not read the controllers yet).");
-    } else {
-        const PADStatus& s = st.last;
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        const float k = recomp::ui::scale();  // menu size (ui_scale.cpp): the drawing scales with the text
-        const float r = 34.0f * k;
-        const ImVec2 origin = ImGui::GetCursorScreenPos();
-        const ImU32 rim = ImGui::GetColorU32(ImGuiCol_Border), dot = IM_COL32(120, 220, 120, 255);
-        auto stick = [&](float cx, s8 x, s8 y, const char* label) {
-            const ImVec2 c(origin.x + cx, origin.y + r + 2 * k);
-            dl->AddCircle(c, r, rim, 32, 1.5f * k);
-            dl->AddCircleFilled(ImVec2(c.x + x / 127.0f * r, c.y - y / 127.0f * r), 5 * k, dot);
-            dl->AddText(ImVec2(c.x - ImGui::CalcTextSize(label).x / 2, c.y + r + 4 * k), ImGui::GetColorU32(ImGuiCol_Text), label);
-        };
-        stick(r + 4 * k, s.stickX, s.stickY, "Stick");
-        stick(3 * r + 24 * k, s.substickX, s.substickY, "C");
-        auto bar = [&](float x, float y, u8 v, const char* label) {
-            const ImVec2 a(origin.x + x, origin.y + y), b(a.x + 90 * k, a.y + 12 * k);
-            dl->AddRectFilled(a, ImVec2(a.x + 90 * k * v / 255.0f, b.y), dot);
-            dl->AddRect(a, b, rim);
-            dl->AddText(ImVec2(b.x + 6 * k, a.y - 2 * k), ImGui::GetColorU32(ImGuiCol_Text), label);
-        };
-        const float bx = 4 * r + 50 * k;
-        bar(bx, 6 * k, s.triggerLeft, "L");
-        bar(bx, 26 * k, s.triggerRight, "R");
-        static const std::pair<u16, const char*> kBtns[] = {
-            {PAD_BUTTON_A, "A"}, {PAD_BUTTON_B, "B"}, {PAD_BUTTON_X, "X"}, {PAD_BUTTON_Y, "Y"},
-            {PAD_TRIGGER_Z, "Z"}, {PAD_TRIGGER_L, "L"}, {PAD_TRIGGER_R, "R"}, {PAD_BUTTON_START, "START"},
-            {PAD_BUTTON_UP, "Up"}, {PAD_BUTTON_DOWN, "Down"}, {PAD_BUTTON_LEFT, "Left"}, {PAD_BUTTON_RIGHT, "Right"}};
-        float x = bx;
-        float y = 50 * k;
-        for (const auto& [bit, name] : kBtns) {
-            const ImVec2 sz = ImGui::CalcTextSize(name);
-            const ImVec2 a(origin.x + x, origin.y + y), b(a.x + sz.x + 10 * k, a.y + sz.y + 4 * k);
-            if (s.button & bit) dl->AddRectFilled(a, b, dot, 3 * k);
-            dl->AddRect(a, b, rim, 3 * k);
-            dl->AddText(ImVec2(a.x + 5 * k, a.y + 2 * k), ImGui::GetColorU32(ImGuiCol_Text), name);
-            x += sz.x + 16 * k;
-            if (bit == PAD_BUTTON_START) {
-                x = bx;
-                y += sz.y + 10 * k;
-            }
-        }
-        ImGui::Dummy(ImVec2(0, 2 * r + 26 * k));
-        ImGui::TextDisabled("buttons %04X  stick %d,%d  C %d,%d  L %u  R %u", s.button, s.stickX, s.stickY,
-                            s.substickX, s.substickY, s.triggerLeft, s.triggerRight);
-        ImGui::TextDisabled("Keyboard keys reach the game only while this menu does not have focus.");
-    }
+    wiimote::drawInputTest(sTestPort);
+    ImGui::TextDisabled("Keyboard keys and the mouse reach the game only while this menu is closed.");
     return changed;
 }
 
@@ -1147,9 +1141,6 @@ bool conflicts(const Profile& p, int t, int slot, std::string& with) {
     if (!in) return false;
     for (int u = 0; u < kTargets; u++) {
         if (u == t) continue;
-        if ((t == tL && u == tAnalogL) || (t == tAnalogL && u == tL) || (t == tR && u == tAnalogR) ||
-            (t == tAnalogR && u == tR))
-            continue;
         for (const Input& other : p.bind[u])
             if (other == in) {
                 with = std::string(kTargetInfo[u].group) + " " + kTargetInfo[u].label;
@@ -1170,7 +1161,7 @@ bool bindingsTab() {
         kCaptureSeconds - std::chrono::duration<float>(Clock::now() - sCap.start).count();
     if (ImGui::BeginChild("bindings", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 4))) {
         if (ImGui::BeginTable("bind", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH)) {
-            ImGui::TableSetupColumn("GameCube", ImGuiTableColumnFlags_WidthFixed, 150 * recomp::ui::scale());
+            ImGui::TableSetupColumn("Wii Remote", ImGuiTableColumnFlags_WidthFixed, 170 * recomp::ui::scale());
             ImGui::TableSetupColumn("Primary");
             ImGui::TableSetupColumn("Alternate");
             ImGui::TableHeadersRow();
@@ -1255,11 +1246,11 @@ bool analogTab() {
     };
     for (int s = 0; s < 2; s++) {
         ImGui::PushID(s);
-        ImGui::SeparatorText(s == 0 ? "Control stick" : "C-stick");
+        ImGui::SeparatorText(s == 0 ? "Nunchuk stick (left stick)" : "Pointer stick (right stick)");
         pct("Dead zone", prof->deadzone[s], 0.0f, 0.5f);
-        ImGui::SetItemTooltip("Radial. The game adds the GameCube's own small dead zone (PADClamp) on top.");
+        ImGui::SetItemTooltip("Radial: tilts inside it count as centred, the rest is rescaled to the full range.");
         changed |= recomp::menu::SliderFloat("Sensitivity", &prof->sensitivity[s], 0.5f, 2.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
-        ImGui::SetItemTooltip("Scales the stick's travel (1 = as the controller reports it). Above 1 the game's\n"
+        ImGui::SetItemTooltip("Scales the stick's travel (1 = as the controller reports it). Above 1 the\n"
                               "full deflection is reached before the stick's edge.");
         changed |= ImGui::Checkbox("Invert X", &prof->invertX[s]);
         ImGui::SetItemTooltip("Left and right are swapped.");
@@ -1269,15 +1260,13 @@ bool analogTab() {
         ImGui::PopID();
     }
     ImGui::SeparatorText("Triggers");
-    pct("L click at", prof->threshold[0], 0.05f, 1.0f);
-    ImGui::SetItemTooltip("How far the analog L trigger must be pulled to press L (click).");
-    pct("R click at", prof->threshold[1], 0.05f, 1.0f);
-    ImGui::SetItemTooltip("How far the analog R trigger must be pulled to press R (click).");
-    ImGui::TextDisabled("How far an analog trigger bound to L/R (click) must be pulled to press it.\n"
-                        "Luigi's Mansion also reads the analog L/R values (Analog triggers bindings).");
+    pct("Left trigger presses at", prof->threshold[0], 0.05f, 1.0f);
+    ImGui::SetItemTooltip("How far the left trigger must be pulled to press the button bound to it (Nunchuk Z).");
+    pct("Right trigger presses at", prof->threshold[1], 0.05f, 1.0f);
+    ImGui::SetItemTooltip("How far the right trigger must be pulled to press the button bound to it (B).");
     ImGui::SeparatorText("Rumble");
     changed |= recomp::menu::Checkbox("Rumble", &prof->rumble);
-    ImGui::SetItemTooltip("The controller vibrates when the game turns the GameCube rumble motor on.");
+    ImGui::SetItemTooltip("The controller vibrates when the game turns the Wii Remote's rumble motor on.");
     const bool intensity = port >= 0 ? PADSupportsRumbleIntensity(u32(port)) != FALSE : prof->type != SDL_GAMEPAD_TYPE_GAMECUBE;
     ImGui::BeginDisabled(!prof->rumble || !intensity);
     pct("Strength", prof->rumbleStrength, 0.05f, 1.0f);
@@ -1461,6 +1450,10 @@ bool drawTab() {
             local |= bindingsTab();
             ImGui::EndTabItem();
         }
+        if (ImGui::BeginTabItem("Pointer & motion", nullptr, subTabFlags("Pointer"))) {
+            local |= wiimote::drawPointerTab();
+            ImGui::EndTabItem();
+        }
         if (ImGui::BeginTabItem("Sticks, triggers & rumble", nullptr, subTabFlags("Analog"))) {
             local |= analogTab();
             ImGui::EndTabItem();
@@ -1477,6 +1470,7 @@ bool drawTab() {
 }
 
 bool handleEvent(const SDL_Event& ev) {
+    wiimote::handleEvent(ev);  // mouse pointer position, window focus
     if (ev.type != SDL_EVENT_KEY_DOWN && ev.type != SDL_EVENT_KEY_UP) return false;
     std::lock_guard lk(sMutex);
     if (sCap.active) return true;  // keys being captured never reach hotkeys
@@ -1512,6 +1506,62 @@ void afterRead(PADStatus* status) {
         st.last = s;
         st.haveLast = true;
     }
+}
+
+bool remoteInputs(u32 port, RemoteInputs& out) {
+    out = {};
+    if (port >= PAD_MAX_CONTROLLERS) return false;
+    std::lock_guard lk(sMutex);
+    const auto& st = sPorts[port];
+    if (!st.haveLast || st.last.err != PAD_ERR_NONE) return false;
+    out.keyboard = st.keyboard;
+    out.pad = st.pad.id != 0;
+    const auto& c = remoteControls();
+    for (int t = 0; t < kTargets; t++)
+        if (kTargetInfo[t].button && aurora::pad::control_value(port, c.button[t]) >= 0.5f) out.buttons |= kTargetInfo[t].button;
+    float v[4] = {aurora::pad::control_value(port, c.stickX), aurora::pad::control_value(port, c.stickY),
+                  aurora::pad::control_value(port, c.ptrX), aurora::pad::control_value(port, c.ptrY)};
+    for (int s = 0; s < 2; s++) {
+        float& x = v[2 * s];
+        float& y = v[2 * s + 1];
+        x = std::clamp(x, -1.0f, 1.0f);
+        y = std::clamp(y, -1.0f, 1.0f);
+        if (st.pad.id) {  // dead zone and sensitivity of the pad's profile (keys are digital)
+            const Profile& prof = padProfile(st.pad);
+            const float m = std::sqrt(x * x + y * y), dz = prof.deadzone[s];
+            if (m <= dz || m == 0.0f) {
+                x = y = 0;
+            } else {
+                const float k = (m - dz) / (1.0f - std::min(dz, 0.95f)) / m * prof.sensitivity[s];
+                x *= k;
+                y *= k;
+            }
+        }
+        // A stick (or two keys at once) never leaves the unit circle: W+D is a full diagonal.
+        if (const float m = std::sqrt(x * x + y * y); m > 1.0f) {
+            x /= m;
+            y /= m;
+        }
+    }
+    out.stickX = v[0];
+    out.stickY = v[1];
+    out.ptrX = v[2];
+    out.ptrY = v[3];
+    return true;
+}
+
+SDL_Gamepad* portGamepad(u32 port) {
+    if (port >= PAD_MAX_CONTROLLERS) return nullptr;
+    std::lock_guard lk(sMutex);
+    return sPorts[port].pad.id ? SDL_GetGamepadFromID(sPorts[port].pad.id) : nullptr;
+}
+
+std::string portDeviceName(u32 port) {
+    if (port >= PAD_MAX_CONTROLLERS) return "";
+    std::lock_guard lk(sMutex);
+    const auto& st = sPorts[port];
+    if (st.pad.id) return st.pad.name + (st.keyboard ? " + keyboard" : "");
+    return st.keyboard ? "Keyboard and mouse" : "";
 }
 
 void controlMotor(u32 chan, u32 cmd) {
