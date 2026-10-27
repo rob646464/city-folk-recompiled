@@ -18,6 +18,7 @@
 #include <thread>
 
 namespace recomp {
+bool wpadRadioActive();  // hle_wpad.cpp: a Wii Remote is connected (reports arrive)
 namespace {
 
 std::atomic<u32> sRetraceCount{0};
@@ -103,7 +104,10 @@ HLE(VIGetCurrentLine) { c.r[3] = 0; }
 HLE(VIGetTvFormat) { c.r[3] = palGame() ? 1 : 0; }  // VI_PAL / VI_NTSC
 HLE(VIGetDTVStatus) { c.r[3] = 0; }
 // RVL: screen burn-in dimming (the console darkens the picture after minutes without input).
-HLE(VIGetDimmingCount) { c.r[3] = 0; }
+// VIGetDimmingCount = retraces left before dimming. The SDK resets the count on every Wii Remote
+// report (__VIResetRFIdle), so it only runs out while no Remote talks to the console: City Folk
+// then says "Communications with the Wii Remote have been interrupted" (hle_wpad.cpp).
+HLE(VIGetDimmingCount) { c.r[3] = wpadRadioActive() ? 18000 : 0; }
 HLE(VIEnableDimming) { c.r[3] = 0; }
 HLE(VIResetDimmingCount) {}
 HLE(VISetPreRetraceCallback) {

@@ -1,0 +1,35 @@
+0320: aurora::pad::control_value(port, control)
+
+Game-defined controls (registered with binding::register_control and bound per port through
+set_action_bindings) could be bound but not read: only the PAD controls reach PADStatus. A port
+that emulates another kind of controller (City Folk: Wii Remote + Nunchuk buttons, Nunchuk stick,
+pointer stick, shake) needs more inputs than a GameCube PADStatus has. control_value() returns a
+port's current value of any control, read the same way PADRead reads the PAD controls.
+
+--- a/include/aurora/pad.hpp
++++ b/include/aurora/pad.hpp
+@@ -50,4 +50,8 @@
+ // Extra per-port bindings for game-defined controls, e.g. "metaforce.open_menu".
+ void set_action_bindings(uint32_t port, std::vector<binding::Binding> bindings);
+ 
++// Current value of any control on a port (buttons 0 or 1, axes [-1, 1]), including game-defined controls bound through
++// set_action_bindings. Same thread rules as PADRead; 0 for an unknown port or control.
++[[nodiscard]] float control_value(uint32_t port, binding::ControlId control);
++
+ } // namespace aurora::pad
+--- a/lib/dolphin/pad/adapter.cpp
++++ b/lib/dolphin/pad/adapter.cpp
+@@ -504,6 +504,13 @@
+   ++g_ports[port].actionGeneration;
+ }
+ 
++float control_value(uint32_t port, ControlId control) {
++  if (port >= PAD_MAX_CONTROLLERS || control == kInvalidControlId) {
++    return 0.f;
++  }
++  return synced_port(port).gameplay.value(control);
++}
++
+ namespace detail {
+ 
+ void initialize() {

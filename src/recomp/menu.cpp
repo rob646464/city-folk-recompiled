@@ -11,6 +11,7 @@
 #include "port/update.h"
 #include "recomp/audio.h"
 #include "recomp/controls.h"
+#include "recomp/wiimote.h"
 #include "recomp/crt.h"
 #include "recomp/enhanced_lighting.h"
 #include "recomp/frame.h"
@@ -1857,6 +1858,7 @@ bool SliderInt(const char* label, int* v, int min, int max, const char* format, 
 
 void draw() {
     click::frame();
+    recomp::wiimote::hostFrame();  // mouse cursor over the game (pointer from the mouse)
     scriptedSettings();
     recomp::gx::applyAccuracySettings();
     recomp::enh::applySettings();
