@@ -260,19 +260,32 @@ hands it every packet and speaker command.
 
 ## Surround output
 
-AX mixes in one of three modes (`AXSetMode`, from NW4R's output mode, from the console's sound
-setting in SYSCONF, which the port writes from F1 > Sound > Output: Mono 0, Stereo 1, any surround
-choice 2): stereo, surround (Dolby Pro Logic: one surround bus S) or DPL2 (Ls on the S bus, Rs on
-the aux C slot). Each frame the fold command adds last frame's surround into the fronts (stereo
-L+S R+S, surround L-S R+S, DPL2 L+Ls R-Rs). Matrix-encoded surround (F1 "Surround") is that
-stereo signal, unchanged. For discrete output (F1 "Surround 5.1" / "7.1", a device with 6/8
-channels; WAV captures without a device use the chosen layout) the DSP keeps, per AI block, what
-the fold added (at the output's master volume ramp) and the surround buses themselves;
-audio_out.cpp subtracts the fold from the fronts and plays Ls/Rs (surround mode: S on both) on
-the surround speakers (7.1: side and back at 0.707 each), the Remote speaker on the centre, LFE
-silent (the game has no LFE or centre bus: its centre stays a phantom centre). In stereo mode
-(the game mixing stereo) the extra channels stay silent. Stereo (the default) never uses side
-data: the fold-down is the console's.
+AX mixes in one of three modes (`AXSetMode`): stereo, surround (Dolby Pro Logic: one surround bus
+S) or DPL2 (Ls on the S bus, Rs on the aux C slot). Each frame the fold command adds last frame's
+surround into the fronts (stereo L+S R+S, surround L-S R+S, DPL2 L+Ls R-Rs).
+
+**What City Folk does**: NW4R's InitSoundSystem reads the console's sound setting
+(`SCGetSoundMode`, from SYSCONF `IPL.SND`, which the port writes from F1 > Sound > Output: Mono 0,
+Stereo 1, any surround choice 2) and picks NW4R's output mode mono / stereo / DPL2; the game
+(fn_801CE6B0, right after it) then sets DPL2 back to **stereo**. So on a console the game always
+mixes in stereo, and F1 "Surround (matrix-encoded)" sounds like Stereo (as on the console). Its
+sounds never use a surround pan either: in DPL2 mode no voice start in the title, bus or town
+(about 4900 starts, `CF_AUDIO_LOG=2`) had an S send (mixer control 1/2/3 = L/R only).
+
+**Discrete 5.1 / 7.1** (F1 "Surround 5.1" / "7.1"; a device with 6/8 channels, WAV captures without
+a device use the chosen layout): the port keeps DPL2 mixing (hooks.txt patch 30 turns the game's
+`bl SetOutputMode(STEREO)` into a nop, switched in the `SCGetSoundMode` hook only for these two
+choices; USA address), so whatever the game sends to the surround buses, in practice its reverb
+returns (the DPL2 aux round trip, command 8, returns into L, R, Ls and Rs) reach the surround
+speakers. The DSP keeps per AI block what the fold added (at the master volume ramp) and the
+surround buses themselves (`dspFrameExtras`); audio_out.cpp subtracts the fold from the fronts and
+plays Ls/Rs (surround mode: S on both) on the surround speakers (7.1: side and back at 0.707
+each), the Wii Remote speaker on the centre, LFE silent (the game has no centre or LFE bus: its
+centre stays a phantom centre). Checked in DPL2 (town route, 6-channel capture): fronts equal to
+the AI stream (rms 1206.4 / 1185.3 vs 1206.5 / 1185.4), voice counts as in stereo (bus 5.38 vs
+5.17, town 3.35 vs 3.34 per frame: no extra voices dropped by AX's DSP cycle estimate), surround
+channels silent (nothing panned there; no reverb send in those scenes). Stereo (the default) never
+uses side data: the fold-down is the console's, byte-identical.
 
 ## Verified
 
@@ -293,6 +306,17 @@ data: the fold-down is the console's.
 - These runs used the render-1 branch merged locally (without it, Aurora's FIFO error at the title
   often aborts the run before the bus scene); the AX code is the same on both.
 
+- Volume sliders (branch audio-2; USA, new-game route to the town, `CF_SETTINGS_AT` switching
+  sliders during one run, levels from `CF_AUDIO_LOG`'s per-second peaks and the raw capture):
+  every voice start in title, bus and town classified (title stream = player 21, bus/town music =
+  25, Rover's speech = 15, menus 3/5/7, footsteps 8, ...; no unknown voices once released voices
+  keep their kind). Title: music 0 -> peaks 17000-19000 down to 900-1200 (what is left are the
+  "Press A" effects). Bus: music 0 -> only Rover's mono speech (peaks L = R ~4200-4600); voices 0
+  -> music and the bus hum only; effects 0 -> music and speech. Town: music 0 -> rms 1269 -> 42-530
+  (footsteps / ambience left; seconds with only music voices at peak 7); effects 0 -> the hourly
+  music alone (rms 800-1100, steady peaks 6549). All sliders at 100 %: no gain is applied (the
+  mix is bit-exact).
+
 Tools (scratch, not in the repo): per-second level/clip/correlation stats, a frame-phase check and
 the brstm cross-check were small numpy scripts over `CF_AUDIO_WAV_RAW` captures.
 
@@ -303,6 +327,17 @@ the brstm cross-check were small numpy scripts over `CF_AUDIO_WAV_RAW` captures.
 - `CF_AUDIO_LOG=1`: the first command lists, every voice start (format, src/coef, ratio, loop,
   addresses, mixer control, volumes, filters, ITD, remote), and once a second: voices playing,
   starts, filter/remote/ITD/aux use, output peaks, clipped samples, compressor counter; AI pacing.
+  Also: each voice start's kind (music / effect / voice) and sound player id, per second the
+  voices of each kind, the AX mode, the command set when it changes (aux effects registered,
+  mode), the aux callbacks (`AXRegisterAux*Callback`), `SCGetSoundMode` / `AXSetMode`, and per
+  Remote speaker burst its packets and rate (`[rmt]`). `CF_AUDIO_LOG=2`: every voice start (not
+  just the first 400).
+- `CF_AUDIO_KIND_LOG=1`: a voice start that could not be classified, with the chain step that
+  failed (volume sliders).
+- `CF_RMT_DUMP=<file>`: the Wii Remote speaker stream, raw, to `<file>.<remote>`.
+- Slider checks in one run: `CF_SETTINGS_AT="5000:audio.music_volume=0;5600:audio.music_volume=1,
+  audio.voice_volume=0"` (ini keys `master_volume`, `music_volume`, `sfx_volume`, `voice_volume`,
+  `remote_speaker_volume`, `output`).
 - `CF_AX_TRACE=<PB address>`: that voice's state at each frame start and its first/last samples.
 - `CF_AX=0`: lists finish without mixing (silence; the old boot stand-in) for A/B tests.
 - `CF_AX_DSP_US=<us>`: DSP time before the resume callback.
@@ -318,6 +353,9 @@ the brstm cross-check were small numpy scripts over `CF_AUDIO_WAV_RAW` captures.
   last block for that time (a short stutter as the title music starts). Shown by `CF_IRQ_STALL=1
   CF_TRACE=ring` ("interrupt handler ran 2384 ms"). For the VI/rendering side: the handoff should
   not wait inside interrupt context.
-- Reverb (AXFX on aux buses), ITD, filters and the Wii Remote speaker were not exercised by the
-  scenes reached so far (no voice sent to aux, used a filter or the remote): implemented from the
-  microcode, unverified in play.
+- Reverb (AXFX on aux buses), ITD and filters were not exercised by the scenes reached so far
+  (title, bus, town around the gate, HOME Menu): NW4R registers its reverb on aux A at boot
+  (`fn_8025A11C`, the HOME Menu swaps in `AXFXReverbHiCallback` while open) and the aux A round
+  trip runs every frame, but no voice sent anything to aux, used a filter or ITD (`aux 0.0`,
+  `lpf 0.0`, `biquad 0.0`, `itd 0.0` per frame). Implemented from the microcode, unverified in
+  play; next: a building interior (not reachable by the scripted route yet).

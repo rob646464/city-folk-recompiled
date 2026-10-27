@@ -1,7 +1,7 @@
 // Host audio output. The AI DMA blocks the game hands to AIInitDMA (big-endian s16
 // stereo at the console's 32028 Hz) are turned into the output layout chosen in
 // F1 > Sound (stereo / mono / matrix surround, or discrete 5.1 / 7.1 built from the DSP's
-// own centre and surround buses), resampled to the device rate with a windowed-sinc
+// surround buses, the Wii Remote speakers on the centre), resampled to the device rate with a windowed-sinc
 // filter (or by SDL), and queued on an SDL3 audio stream. docs/AUDIO.md.
 //
 // CF_AUDIO_WAV=<path> records exactly what goes to the device (all channels, device

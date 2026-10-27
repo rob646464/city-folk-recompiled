@@ -1598,20 +1598,21 @@ void soundTab() {
     ImGui::SetItemTooltip("What the game plays on the Wii Remote's own speaker, played through the PC's speakers\n"
                           "(in the centre; on the centre speaker with 5.1 / 7.1). Band-limited to 3 kHz like the\n"
                           "Remote's 6 kHz speaker stream, with a little bass cut for the small speaker. 0%: off.\n"
-                          "The HOME Menu's Wii Remote speaker volume applies on top.");
+                          "(The HOME Menu's Wii Remote speaker volume is already part of what it sends.)");
     ImGui::SeparatorText("Output");
     static const char* kOutputs[] = {"Stereo", "Mono", "Surround (matrix-encoded stereo)", "Surround 5.1 (discrete)",
                                      "Surround 7.1 (discrete)"};
     sDirty |= combo("Output", a.output, kOutputs, 5);
     ImGui::SetItemTooltip(
-            "The game's own sound option (its options menu changes the same setting).\n"
+            "The console's sound setting (Wii Settings), read by the game at start: changes apply\n"
+            "on the next start.\n"
             "Stereo / Mono: the game's stereo or mono mix.\n"
-            "Surround: the game's surround mode as a console outputs it: stereo with the\n"
-            "surround channels matrix-encoded for a Dolby Pro Logic / Pro Logic II decoder.\n"
-            "5.1 / 7.1: the game's surround mode with its surround channels played on the\n"
-            "surround speakers instead of matrix-encoded (the Wii Remote speaker sound on the\n"
-            "centre speaker). Needs a device with 6 / 8 channels (else falls back to 5.1 or\n"
-            "matrix-encoded stereo). The console's sound setting follows this option (next start).");
+            "Surround: the console set to surround. City Folk itself then mixes in stereo, as on\n"
+            "a Wii, so this sounds like Stereo.\n"
+            "5.1 / 7.1: the game keeps mixing in Dolby Pro Logic II and its surround channels go\n"
+            "to the surround speakers (the game pans nothing to the rear itself: they carry its\n"
+            "reverb returns); the Wii Remote speaker sound goes to the centre speaker. Needs a\n"
+            "device with 6 / 8 channels (else falls back to 5.1 or stereo).");
     {
         const int dev = recomp::audio::outDeviceChannels();
         if (dev > 0) ImGui::TextDisabled("Device: %d channels. Playing: %s", dev, recomp::audio::outStatus());

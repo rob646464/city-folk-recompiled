@@ -13,6 +13,7 @@
 #include "recomp/cpu_qos.h"
 #include "recomp/guest_util.h"
 #include "recomp/hle.h"
+#include "recomp/runtime.h"
 #include "recomp/sched.h"
 
 #include <algorithm>
@@ -387,41 +388,45 @@ HLE(DSPSendMailToDSP) {
 HLE(DSPAssertInt) {}
 HLE(DSPGetDMAStatus) { c.r[3] = 0; }
 
+// ---- NW4R snd / AX hooks (docs/AUDIO.md) ----
+
 // nw4r::snd::SoundArchivePlayer::SetupSoundPlayer(archive, &buf, end): places one SoundPlayer
 // per player of the sound archive at SoundArchivePlayer +0x3C (count at +0x38), 0x64 bytes
 // each (the stride its loop uses). The volume sliders map a sound to its player by this array.
-// CF_AUDIO_LOG: the aux effects AX gets (AXFX reverb / chorus / delay callbacks on aux A/B/C).
+HLE(SetupSoundPlayer__Q34nw4r3snd18SoundArchivePlayerFPCQ34nw4r3snd12SoundArchivePPvPv) {
+    const u32 self = c.r[3];
+    callOriginal(c, "SetupSoundPlayer__Q34nw4r3snd18SoundArchivePlayerFPCQ34nw4r3snd12SoundArchivePPvPv");
+    if (c.r[3]) audio::noteSoundPlayers(rd32(self + 0x3C), rd32(self + 0x38), 0x64);
+}
+
+// The console's sound setting (SCGetSoundMode: 0 mono, 1 stereo, 2 surround), read by NW4R's
+// InitSoundSystem, which picks the NW4R output mode mono / stereo / DPL2 from it. City Folk
+// (fn_801CE6B0, right after InitSoundSystem) then sets DPL2 back to stereo: on a console the
+// game always mixes in stereo. With F1 > Sound > Output 5.1 / 7.1 (discrete) hooks.txt patch 30
+// skips that call, so the game keeps mixing in DPL2 and the surround buses exist for the extra
+// speakers (docs/AUDIO.md "Surround output"); every other choice leaves the game's behaviour.
+// The switch is set here, before the game's call. (USA address.)
+HLE(SCGetSoundMode) {
+    callOriginal(c, "SCGetSoundMode");
+    const auto out = port::settings().audio.output;
+    const bool discrete = out == port::AudioOutput::Surround51 || out == port::AudioOutput::Surround71;
+    setPatch(30, discrete && c.r[3] == 2);
+    if (audio::g_log || discrete)
+        log("[ax] SCGetSoundMode -> %u%s", c.r[3],
+            discrete && c.r[3] == 2 ? " (discrete surround: the game keeps Dolby Pro Logic II mixing)" : "");
+}
+
+// CF_AUDIO_LOG: the AX output mode and the aux effects (AXFX reverb / chorus / delay callbacks).
+HLE(AXSetMode) {
+    if (audio::g_log) log("[ax] AXSetMode(%u) (0 stereo, 1 surround, 2 DPL2), lr %08X", c.r[3], c.lr);
+    callOriginal(c, "AXSetMode");
+}
 std::string guestSymbolize(u32 addr);  // runtime.cpp
 namespace {
 void logAux(char bus, const Ctx& c) {
     if (audio::g_log) log("[ax] aux %c callback %s (context %08X)", bus, c.r[3] ? guestSymbolize(c.r[3]).c_str() : "none", c.r[4]);
 }
 }  // namespace
-// CF_AUDIO_LOG: the console sound setting NW4R's InitSoundSystem reads (SCGetSoundMode: 0 mono,
-// 1 stereo, 2 surround -> NW4R output mode mono / stereo / DPL2) and the AX mode it sets.
-HLE(SCGetSoundMode) {
-    callOriginal(c, "SCGetSoundMode");
-    if (audio::g_log) log("[ax] SCGetSoundMode -> %u", c.r[3]);
-}
-HLE(AXSetMode) {
-    if (audio::g_log) log("[ax] AXSetMode(%u) (0 stereo, 1 surround, 2 DPL2), lr %08X", c.r[3], c.lr);
-    callOriginal(c, "AXSetMode");
-}
-// nw4r::snd::detail::AxManager::SetOutputMode(this, mode) (USA fn_80259974; the current mode at
-// +0x00; NW4R modes 0 stereo, 1 surround, 2 DPL2, 3 mono). InitSoundSystem picks DPL2 when the
-// console is set to surround, and City Folk (fn_801CE6B0, right after it) turns DPL2 back into
-// stereo: on a console the game is always stereo. With F1 > Sound > Output 5.1 / 7.1 (discrete)
-// the port keeps DPL2 so the surround buses exist for the extra speakers (docs/AUDIO.md
-// "Surround output"); every other choice leaves the game's own behaviour.
-HLE(fn_80259974) {
-    const auto out = port::settings().audio.output;
-    const bool discrete = out == port::AudioOutput::Surround51 || out == port::AudioOutput::Surround71;
-    if (discrete && c.r[4] == 0 && rd32(c.r[3]) == 2) {
-        log("[ax] keeping Dolby Pro Logic II mixing for discrete surround output (the game asked for stereo)");
-        return;
-    }
-    callOriginal(c, "fn_80259974");
-}
 HLE(AXRegisterAuxACallback) {
     logAux('A', c);
     callOriginal(c, "AXRegisterAuxACallback");
@@ -433,12 +438,6 @@ HLE(AXRegisterAuxBCallback) {
 HLE(AXRegisterAuxCCallback) {
     logAux('C', c);
     callOriginal(c, "AXRegisterAuxCCallback");
-}
-
-HLE(SetupSoundPlayer__Q34nw4r3snd18SoundArchivePlayerFPCQ34nw4r3snd12SoundArchivePPvPv) {
-    const u32 self = c.r[3];
-    callOriginal(c, "SetupSoundPlayer__Q34nw4r3snd18SoundArchivePlayerFPCQ34nw4r3snd12SoundArchivePPvPv");
-    if (c.r[3]) audio::noteSoundPlayers(rd32(self + 0x3C), rd32(self + 0x38), 0x64);
 }
 
 }  // namespace recomp

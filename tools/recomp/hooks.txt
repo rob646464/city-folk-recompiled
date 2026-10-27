@@ -7,3 +7,8 @@
 #
 # Every named DOL function is replaceable by name already (no line needed); lines here are for
 # REL functions and patches. A line applies to the USA build unless tagged only "pal".
+
+# Audio (docs/AUDIO.md "Surround output"): with F1 > Sound > Output 5.1 / 7.1 the port keeps NW4R's
+# Dolby Pro Logic II mode: City Folk's `bl AxManager::SetOutputMode(STEREO)` right after
+# InitSoundSystem (in fn_801CE6B0) becomes a nop. Switched by hle_audio.cpp (SCGetSoundMode).
+patch 30 801CE714 60000000
