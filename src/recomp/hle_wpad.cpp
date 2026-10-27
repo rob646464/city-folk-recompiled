@@ -434,6 +434,7 @@ HLE(WPADControlSpeaker) {
     else if (cmd == 2) ch.speakerMuted = true;
     else if (cmd == 3) ch.speakerMuted = false;
     if (sLog) log("[wpad] remote %u speaker command %u", chan + 1, cmd);
+    wiimote::speakerControl(int(chan), int(cmd));  // a real Remote's speaker (wiimote_hid.cpp)
     callLater(kReplyDelay, c.r[5], chan, u32(kErrNone), "speaker");
     c.r[3] = u32(kErrNone);
 }
@@ -456,6 +457,7 @@ HLE(WPADSendStreamData) {
         return;
     }
     sChan[chan].streamBytes += c.r[5];
+    if (c.r[4] && c.r[5]) wiimote::speakerData(int(chan), hostp(c.r[4]), std::min<u32>(c.r[5], 0x400));
     c.r[3] = u32(kErrNone);
 }
 HLE(WPADGetSpeakerVolume) {

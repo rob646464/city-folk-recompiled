@@ -73,6 +73,9 @@ public:
     // Fills st (connected=false: no Remote). now = guest time in seconds.
     virtual void read(int chan, double now, State& st) = 0;
     virtual void rumble(int chan, bool on) = 0;
+    // Remote speaker (WPADControlSpeaker command, WPADSendStreamData bytes: 4-bit ADPCM).
+    virtual void speakerControl(int /*chan*/, int /*cmd*/) {}
+    virtual void speakerData(int /*chan*/, const u8* /*data*/, u32 /*len*/) {}
 };
 
 // Guest thread: the current state of a Remote (its port's source, the --input script, F1
@@ -80,6 +83,15 @@ public:
 void sample(int chan, State& out);
 // The game's motor command (WPADControlMotor) for a Remote.
 void rumble(int chan, bool on);
+// The game's speaker commands and stream data (hle_wpad.cpp), for sources with a real speaker.
+void speakerControl(int chan, int cmd);
+void speakerData(int chan, const u8* data, u32 len);
+
+// Real Wii Remotes over HID (wiimote_hid.cpp, docs/CONTROLS.md "Real Wii Remotes").
+Source* hidSource(int chan);     // the port's real-Remote source, nullptr while the port is emulated
+bool drawHidPortsSection();      // F1 > Controls > Ports: source per port, status, pairing help
+bool drawHidPointerSection();    // F1 > Controls > Pointer & motion: real Remote pointer options
+void hidShutdown();              // motors off, devices closed (before the process exits)
 
 // Host thread.
 void handleEvent(const SDL_Event& ev);  // mouse position over the window (mouse pointer)

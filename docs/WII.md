@@ -146,15 +146,16 @@ the CPU given up).
   info, motor, LED, DPD, speaker calls accepted, disconnect/reconnect); `wiimote.cpp` builds each
   port's Remote from a Source (emulated today: F1 > Controls bindings + mouse / right stick / gyro
   pointer + shake inputs). `VIGetDimmingCount` reports Remote radio activity (0 = the game's
-  "Communications with the Wii Remote have been interrupted"). Not yet: speaker sound, real Wii
-  Remotes, tilt from a pad's accelerometer, Classic Controller (check whether the game reads it).
-- **Real Wii Remotes, plan**: an `HidSource` (wiimote.h `Source`) per paired Remote: SDL hidapi
-  (`SDL_hid_open` on 057E:0306/0330 before SDL's own Wii driver claims it), report mode 0x37
-  (buttons + acc + 10-byte IR + 6-byte extension), IR camera init sequence, IR dots -> pointer
-  (midpoint of the two brightest dots, sensor bar above/below from SYSCONF, roll from the dot
-  angle), extension identification (Nunchuk), rumble bit in every output report, speaker data
-  (report 0x18, 4-bit ADPCM) from WPADSendStreamData. F1 > Controls > Ports gets "Wii Remote
-  (Bluetooth)" as a device per port.
+  "Communications with the Wii Remote have been interrupted"). Not yet: speaker sound on the PC
+  (real Remotes play it themselves, below), tilt from a pad's accelerometer, Classic Controller (check whether the game reads it).
+- **Real Wii Remotes (branch hid-remotes, docs/CONTROLS.md "Real Wii Remotes")**: `HidSource`
+  (wiimote_hid.cpp) per port set to "Real Wii Remote" in F1 > Controls > Ports: SDL hidapi on
+  057E:0306/0330 only (SDL's own Wii driver forced off meanwhile), report mode 0x37, the Wii's IR
+  camera sequence with the console's sensitivity, calibration from EEPROM, Nunchuk (unencrypted
+  init, calibration), IR dots -> KPAD pointer (roll-compensated midpoint, sensor bar above/below),
+  rumble, speaker (WPADSendStreamData ADPCM as reports 0x18 at 6 kHz), battery, hot-plug, player
+  LED = port. Protocol in wiimote_proto.cpp, tested against a fake device
+  (`cf_wiimote_hid_test`); not yet tried with a real Remote.
 
 ### Scripted route to the town
 
