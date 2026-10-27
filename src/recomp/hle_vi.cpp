@@ -10,6 +10,9 @@
 #include "recomp/sched.h"
 #include "recomp/game.h"
 
+#include <dolphin/gx.h>
+#include <dolphin/vi.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -71,10 +74,20 @@ void startTimer() {
             next += period;
             if (clock::now() > next + period * 4) next = clock::now() + period;  // don't spiral after a stall
             if (frame::gamePaused()) continue;
-            sched::postIrq(&retrace);
+            // An RVL game's post-retrace callback can end the frame itself (EGG::AsyncDisplay calls
+            // VISetNextFrameBuffer there), so with no guest thread holding the CPU this thread may
+            // run present() and wait for the host; at shutdown that wait ends in ThreadExit.
+            try {
+                sched::postIrq(&retrace);
+            } catch (const sched::ThreadExit&) {
+                break;
+            }
         }
     });
 }
+// Shutdown: stopTimer() only after frame::stop(), which releases a present() the timer thread may
+// be waiting in (it used to wait there for the host forever while the main thread joined it).
+void requestStop() { sTimerRun = false; }
 void stopTimer() {
     sTimerRun = false;
     if (sTimer.joinable()) sTimer.join();
@@ -93,7 +106,41 @@ u32 hw::viRead(u32 addr, int size) {
 }
 
 HLE(VIInit) {}
-HLE(VIConfigure) {}
+// The render mode sizes Aurora's frame buffer (fbWidth x efbHeight): RVL games often draw
+// 456 or 528 lines instead of 480 (City Folk: 640x456), which Aurora otherwise shows as the top
+// of a 640x480 EFB with the clear colour below. GXRenderModeObj (guest, big-endian): viTVmode
+// u32 +0, fbWidth +4, efbHeight +6, xfbHeight +8, viXOrigin +A, viYOrigin +C, viWidth +E,
+// viHeight +10 (u16), xFBmode u32 +14, field_rendering +18, aa +19, sample_pattern[12][2] +1A,
+// vfilter[7] +32.
+HLE(VIConfigure) {
+    const u32 rm = c.r[3];
+    if (!rm) return;
+    GXRenderModeObj m{};
+    m.viTVmode = VITVMode(rd32(rm));
+    m.fbWidth = u16(rd16(rm + 4));
+    m.efbHeight = u16(rd16(rm + 6));
+    m.xfbHeight = u16(rd16(rm + 8));
+    m.viXOrigin = u16(rd16(rm + 0xA));
+    m.viYOrigin = u16(rd16(rm + 0xC));
+    m.viWidth = u16(rd16(rm + 0xE));
+    m.viHeight = u16(rd16(rm + 0x10));
+    m.xFBmode = VIXFBMode(rd32(rm + 0x14));
+    m.field_rendering = u8(rd8(rm + 0x18));
+    m.aa = u8(rd8(rm + 0x19));
+    for (int i = 0; i < 12; i++)
+        for (int j = 0; j < 2; j++) m.sample_pattern[i][j] = u8(rd8(rm + 0x1A + i * 2 + j));
+    for (int i = 0; i < 7; i++) m.vfilter[i] = u8(rd8(rm + 0x32 + i));
+    static u32 sLast = 0;
+    const u32 key = u32(m.fbWidth) << 16 | m.efbHeight;
+    if (key != sLast) {
+        log("[vi] VIConfigure: tv mode %u, fb %ux%u, xfb %u lines, vi %ux%u at (%u,%u), xfb mode %u, aa %u",
+            u32(m.viTVmode), m.fbWidth, m.efbHeight, m.xfbHeight, m.viWidth, m.viHeight, m.viXOrigin, m.viYOrigin,
+            u32(m.xFBmode), m.aa);
+        sLast = key;
+    }
+    if (m.fbWidth < 16 || m.fbWidth > 720 || m.efbHeight < 16 || m.efbHeight > 528) return;
+    ::VIConfigure(&m);
+}
 HLE(VIConfigurePan) {}
 HLE(VIFlush) {}
 HLE(VISetBlack) { sBlack = c.r[3] != 0; }
@@ -120,11 +167,23 @@ HLE(VIWaitForRetrace) {
     const u32 start = sRetraceCount.load();
     while (sRetraceCount.load() == start) sched::sleepOn(sRetraceQueue);
 }
+// RVL games built on EGG (City Folk: EGG::AsyncDisplay) set the next frame buffer from their
+// retrace callback, at an interrupt that can arrive in the middle of a draw (the poll at a loop
+// back-edge between GXBegin and the last vertex). Presenting there ended the Aurora frame inside
+// the draw (malformed FIFO data: vertices cut off from their draw command). The first such call
+// switches to presenting at GXCopyDisp, where the frame's drawing is finished.
+std::atomic<bool> sCopyPresents{false};
 HLE(VISetNextFrameBuffer) {
-    if (!frame::presentOnCopy()) frame::present(c, c.r[3], sBlack);
+    if (frame::presentOnCopy()) return;
+    if (sched::inIrq()) {
+        sCopyPresents = true;
+        log("[vi] VISetNextFrameBuffer from an interrupt (lr %08X): frames end at GXCopyDisp", c.lr);
+        return;
+    }
+    frame::present(c, c.r[3], sBlack);
 }
 
-bool frame::presentOnCopy() { return palGame(); }
+bool frame::presentOnCopy() { return palGame() || sCopyPresents.load(std::memory_order_relaxed); }
 
 // European double-buffered frame end (fn_80007844, called by LMChangeFrameBuffer): it copies
 // the frame only when the VI has picked up the previous one (lbl_804C5700, set by the

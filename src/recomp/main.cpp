@@ -56,6 +56,7 @@ extern const GameModule kGameModule;  // generated func_table.cpp, linked in (cf
 #endif
 namespace vi {
 void startTimer();
+void requestStop();
 void stopTimer();
 }  // namespace vi
 
@@ -297,6 +298,9 @@ int main(int argc, char* argv[]) {
     if (!config.windowWidth && opts.aspectRatio > 0.0f) {  // fixed aspect: open a window of that shape
         config.windowHeight = 960;
         config.windowWidth = u32(960.0f * opts.aspectRatio + 0.5f);
+    } else if (!config.windowWidth && ws::gameWidescreen()) {  // the game's 16:9 frame
+        config.windowWidth = 1280;
+        config.windowHeight = 720;
     }
     precache::configure();
     port::setPhase("graphics initialization (device, render targets, anti-aliasing)");
@@ -558,8 +562,9 @@ int main(int argc, char* argv[]) {
 
     port::setPhase("shutdown (releasing graphics objects, writing caches)");
     menu::shutdown();
-    vi::stopTimer();
+    vi::requestStop();
     frame::stop();
+    vi::stopTimer();
     audio::outShutdown();
     aurora_shutdown();
     port::recovery::onExit();

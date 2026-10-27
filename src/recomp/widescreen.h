@@ -26,6 +26,10 @@ void beginFrame();    // host thread, before the guest runs a frame: picks up wi
 // (4:3) / display aspect: 1 when the display is 4:3 or narrower or the mode is
 // off, < 1 when wider. Constant while the guest runs a frame.
 float factor();
+// The aspect the game draws its frame for: 16:9 (Wii widescreen, the default) or 4:3 (F1 Original
+// 4:3 / --aspect 4:3), fixed at start-up; SCGetAspectRatio reports it (hle_display.cpp).
+bool gameWidescreen();
+float baseAspect();
 inline bool active() { return factor() < 0.9999f; }
 
 // Field of view (settings().video.fovScale): the factor by which a perspective

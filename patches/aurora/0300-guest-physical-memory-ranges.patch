@@ -1,0 +1,223 @@
+0300: guest physical memory ranges (City Folk; generic, superset of SMS 0101)
+
+GXSetAuroraPhysicalMemoryRange(physStart, size, host) registers up to 4 windows for console
+physical addresses (Wii: MEM1 at 0, MEM2 at 0x10000000); GXSetAuroraPhysicalMemory(base, mask)
+is SMS's call (one window at 0). With a window registered, raw writes from game code are
+resolved: CP vertex array bases (0xA0-0xAF), BP TX_SETIMAGE3 (24-bit address field for MEM2),
+TLUT loads (BP 0x64/0x65) and TMEM TLUT references, and GX_CMD_CALL_DL (opcode 0x40), whose
+list is processed in place (a call inside a called list is ignored, as on the hardware).
+NW4R g3d's shape display lists set their vertex arrays this way and EGG calls lists from the
+FIFO: without it every g3d model is invisible.
+
+diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
+index 8ec5b00..20335be 100644
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -236,6 +236,20 @@ u32 GXGetAuroraAccuracy();
+ #define GX_AURORA_TEXGEN_BEYOND_TEXCOORD0 2
+ void GXSetAuroraTexGenBeyondCount(u32 mode);
+ 
++/*
++ * Guest physical memory (recompiled/emulated games; 0300, a superset of SMS's 0101). Display lists
++ * and raw FIFO writes from game code carry console physical addresses: CP vertex array bases
++ * (0xA0-0xAF), BP texture image addresses (TX_SETIMAGE3), TLUT load addresses (BP 0x64), TMEM
++ * TLUT references, and display list calls (GX_CMD_CALL_DL, opcode 0x40). Each registered range
++ * maps physical [start, start + size) to host memory at `host` (up to 4 ranges, e.g. the Wii's
++ * MEM1 at 0 and MEM2 at 0x10000000; GameCube: one range at 0). With a range registered, Aurora
++ * resolves such writes (GXLoadTexObj/GXLoadTlut metadata still takes precedence when present);
++ * without one (default) they are ignored as before. Addresses outside every range are ignored.
++ * GXSetAuroraPhysicalMemory(base, mask) = one range at 0 of size mask + 1 (SMS's call).
++ */
++void GXSetAuroraPhysicalMemoryRange(u32 physStart, u32 size, void* host);
++void GXSetAuroraPhysicalMemory(void* base, u32 mask);
++
+ /*
+  * Debug marker stuff
+  */
+diff --git a/lib/dolphin/gx/GXAurora.cpp b/lib/dolphin/gx/GXAurora.cpp
+index d4a8960..7dce6bd 100644
+--- a/lib/dolphin/gx/GXAurora.cpp
++++ b/lib/dolphin/gx/GXAurora.cpp
+@@ -79,6 +79,16 @@ void GXSetAuroraAccuracy(u32 flags) { aurora::gx::g_accuracyFlags.store(flags, s
+ u32 GXGetAuroraAccuracy() { return aurora::gx::g_accuracyFlags.load(std::memory_order_relaxed); }
+ 
+ void GXSetAuroraTexGenBeyondCount(u32 mode) { aurora::gx::g_texGenBeyondCount.store(mode, std::memory_order_relaxed); }
++void GXSetAuroraPhysicalMemoryRange(u32 physStart, u32 size, void* host) {
++  auto& ranges = aurora::gx::g_physRanges;
++  for (auto& r : ranges) {
++    if (r.size == 0 || r.start == physStart) {
++      r = {physStart, size, static_cast<u8*>(host)};
++      return;
++    }
++  }
++}
++void GXSetAuroraPhysicalMemory(void* base, u32 mask) { GXSetAuroraPhysicalMemoryRange(0, mask + 1, base); }
+ 
+ void GXSetViewportRender(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz) {
+   GX_WRITE_AURORA(GX_AURORA_LOAD_VIEWPORT_RENDER);
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+index daee721..77f5698 100644
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -629,8 +629,25 @@ ProcessResult process(const u8* data, u32 size, u64 streamBase) noexcept {
+         break;
+       }
+       // Call display list: 8 bytes (address + size)
+-      Log.warn("Ignoring nested GX_CMD_CALL_DL");
++      const u32 dlAddr = be32(data + cmdPos + 1);
++      const u32 dlSize = be32(data + cmdPos + 5);
+       reader.skip(8);
++      // 0300: a call written by game code (raw FIFO or a game-built list) carries a physical
++      // address. Calls inside a called list are ignored, as the command processor does.
++      static thread_local u32 sDlDepth = 0;
++      const u8* dl = static_cast<const u8*>(phys_to_host(dlAddr & 0x3FFFFFE0, dlSize));
++      if (dl != nullptr && sDlDepth == 0 && dlSize != 0) {
++        const u64 savedBase = sBlockBase;
++        ++sDlDepth;
++        process(dl, dlSize & ~31u, 0);
++        --sDlDepth;
++        sBlockBase = savedBase;
++        break;
++      }
++      static u32 sWarned = 0;
++      if (sWarned++ < 16) {
++        Log.warn("Ignoring {} GX_CMD_CALL_DL {:08X} size {}", sDlDepth != 0 ? "nested" : "unmapped", dlAddr, dlSize);
++      }
+       break;
+     }
+ 
+diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
+index 62113ea..80b9b87 100644
+--- a/lib/gx/gx.cpp
++++ b/lib/gx/gx.cpp
+@@ -35,6 +35,7 @@ GXState g_gxState{};
+ std::atomic<u32> g_accuracyFlags{GX_AURORA_ACCURACY_INT_TEV | GX_AURORA_ACCURACY_EFB_DEPTH};
+ u8 g_drawEfbBlend6 = 0;
+ std::atomic<u32> g_texGenBeyondCount{GX_AURORA_TEXGEN_BEYOND_GENERATE};
++PhysRange g_physRanges[4]{};
+ wgpu::BindGroup g_emptyTextureBindGroup;
+ 
+ namespace {
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+index 28775c7..d2dfcf8 100644
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -457,6 +457,25 @@ struct GXState {
+ extern GXState g_gxState;
+ extern std::atomic<u32> g_accuracyFlags; // GX_AURORA_ACCURACY_*
+ extern std::atomic<u32> g_texGenBeyondCount; // GX_AURORA_TEXGEN_BEYOND_*
++// 0300 GXSetAuroraPhysicalMemoryRange: host windows for guest physical addresses (size 0 = unused).
++struct PhysRange {
++  u32 start = 0;
++  u32 size = 0;
++  u8* host = nullptr;
++};
++extern PhysRange g_physRanges[4];
++inline bool phys_mapped() noexcept { return g_physRanges[0].size != 0; }
++inline void* phys_to_host(u32 addr, u32 len = 1) noexcept {
++  for (const auto& r : g_physRanges) {
++    if (r.size == 0) {
++      break;
++    }
++    if (addr - r.start < r.size && len <= r.size - (addr - r.start)) {
++      return r.host + (addr - r.start);
++    }
++  }
++  return nullptr;
++}
+ // 0176: set by populate_pipeline_config: 1 = blended RGBA6 draw quantized after its pass (efb_blend6), 3 = and it dithers
+ extern u8 g_drawEfbBlend6;
+ struct ShaderInfo;
+diff --git a/lib/gx/regs.cpp b/lib/gx/regs.cpp
+index 2c203af..718f07a 100644
+--- a/lib/gx/regs.cpp
++++ b/lib/gx/regs.cpp
+@@ -286,6 +286,21 @@ void bp_efb_copy(u8, u32 value) noexcept {
+ // TLUT load trigger (0x65)
+ void bp_tlut_load(u8, u32 value) noexcept {
+   const auto idx = reg_get(value, 10, 0);
++  if (phys_mapped() && idx >= 0x600) {
++    // 0300: raw TLUT load from game code: TMEM offset (address >> 9), source in BP 0x64
++    // (address >> 5). Aurora's own loads use slot ids.
++    const u32 tlutIdx = idx >= 0x700 ? GX_BIGTLUT0 + (idx - 0x700) / 0x40 : (idx - 0x600) / 0x10;
++    if (tlutIdx < MaxTluts) {
++      auto& slot = g_gxState.loadedTluts[tlutIdx];
++      slot.loadTlut0 = g_gxState.bpRegCache[0x64];
++      slot.numEntries = static_cast<u16>(reg_get(value, 10, 10) * 16);
++      slot.data = phys_to_host((g_gxState.bpRegCache[0x64] & 0xFFFFFF) << 5);
++      slot.tlutObjId = 0;
++      slot.tlutDataVersion = 0;
++      slot.flags &= ~0x80u;
++    }
++    return;
++  }
+   if (idx < MaxTluts) {
+     auto& slot = g_gxState.loadedTluts[idx];
+     slot.loadTlut0 = g_gxState.bpRegCache[0x64];
+@@ -507,7 +522,30 @@ void bp_tex(u8 reg, u32 value) noexcept {
+     break;
+   case 5: // Image3
+     slot.image3 = value;
++    // 0300: raw texture load from game code (a display list or the FIFO): the address is
++    // physical (bits 0-20 = address >> 5; Wii: bits 0-23). Aurora's own GXLoadTexObj follows
++    // this write with its metadata, which overrides the slot.
++    if (void* data = phys_to_host((value & 0xFFFFFF) << 5)) {
++      slot.data = data;
++      slot.mWidth = 0;
++      slot.mHeight = 0;
++      slot.mFormat = gfx::InvalidTextureFormat;
++      slot.texObjId = 0; // no object identity: the texture cache keys it by content
++      slot.texDataVersion = 0;
++      slot.flags = static_cast<u8>((slot.flags & ~0x81u) | (((slot.mode1 >> 8) & 0xFF) != 0 ? 1u : 0u));
++    }
++    break;
++  case 6: { // TLUT reference: TMEM offset (address >> 9) and palette format
++    const u32 tmem = value & 0x3FF;
++    if (phys_mapped() && tmem >= 0x200) { // a real TMEM offset (Aurora's own loads use slot ids)
++      const u32 tlutIdx = tmem >= 0x700 ? GX_BIGTLUT0 + (tmem - 0x700) / 0x40 : (tmem - 0x600) / 0x10;
++      if (tmem >= 0x600 && tlutIdx < MaxTluts) {
++        slot.tlut = static_cast<GXTlut>(tlutIdx);
++        g_gxState.loadedTluts[tlutIdx].format = static_cast<GXTlutFmt>((value >> 10) & 3);
++      }
++    }
+     break;
++  }
+   default:
+     break;
+   }
+@@ -581,7 +619,7 @@ constexpr auto kBpRegs = [] {
+       regs[base + 0x0C + i] = {};                      // Image1 (GXTexRegion)
+       regs[base + 0x10 + i] = {};                      // Image2 (GXTexRegion)
+       regs[base + 0x14 + i] = {bp_tex, DirtyTextures}; // Image3
+-      regs[base + 0x18 + i] = {};                      // TLUT region TMEM offset
++      regs[base + 0x18 + i] = {bp_tex, DirtyTextures}; // TLUT reference (0300: raw loads)
+     }
+   }
+   for (u8 r = 0xC0; r <= 0xDE; r += 2) {
+@@ -708,7 +746,25 @@ void cp_vat_c(u8 addr, u32 value) noexcept {
+   g_gxState.clearVtxSizeCache();
+ }
+ 
+-void cp_arraybase_unsupported(u8, u32) noexcept {
++void cp_arraybase_unsupported(u8 addr, u32 value) noexcept {
++  // 0300: array base from game code (display list / FIFO): a physical address. Sized from the
++  // indices each draw uses (size 0), big-endian.
++  if (phys_mapped()) {
++    void* data = phys_to_host(value & 0x3FFFFFFF);
++    const u32 attrIdx = addr - 0xA0 + GX_VA_POS;
++    auto& array = g_gxState.arrays[attrIdx];
++    if (array.data != data || array.size != 0 || array.le) {
++      if (array.le) {
++        g_gxState.dirty |= DirtyPipeline;
++      }
++      array.data = data;
++      array.size = 0;
++      array.le = false;
++      array.cachedRange = {};
++      g_gxState.dirty |= DirtyImmediates;
++    }
++    return;
++  }
+   Log.error("CP_REG_ARRAYBASE_ID is not supported. Use GX_AURORA_LOAD_ARRAYBASE instead.");
+ }
+ 
