@@ -31,8 +31,9 @@ constexpr std::string_view kHleTuPrefixes[] = {"os/", "gx/", "vi/", "pad/", "dvd
                                                "si/", "exi/", "base/", "ipc/", "TRK_MINNOW_DOLPHIN/", "OdemuExi2/",
                                                "amcstubs/", "odenotstub/"};
 // SDK units that are plain computation on guest memory: recompiled like game code.
-constexpr std::string_view kHleTuExclude[] = {"os/OSAlloc.c", "os/OSArena.c", "pad/Padclamp.c", "os/__ppc_eabi_init.cpp",
-                                              "os/OSFont.c", "os/OSStopwatch.c"};
+constexpr std::string_view kHleTuExclude[] = {"os/OSAlloc.c", "os/OSArena.c", "pad/Padclamp.c", "pad/rvlPadClamp.c",
+                                              "os/__ppc_eabi_init.cpp", "os/OSFont.c", "os/OSStopwatch.c", "os/OSUtf.c",
+                                              "ipc/memory.c"};
 
 bool isHleTu(std::string_view tu) {
     if (tu.substr(0, 8) == "dolphin/") tu.remove_prefix(8);
@@ -1545,6 +1546,27 @@ void FuncEmitter::ps(u32 w, u32 d, u32 a, u32 b) {
 
 std::string chunkName(int i) { return fmt("funcs_%03d.cpp", i); }
 
+// Symbol names inside generated C++: string literals (escaped) and comments (no backslash, which
+// would continue the comment onto the next line). Map names may hold any character
+// ("__sinit_\ut_FileStream_cpp").
+std::string lit(const std::string& n) {
+    std::string o;
+    for (char ch : n) {
+        if (ch == '\\' || ch == '"') o += '\\';
+        if (ch == '?') {  // no trigraphs
+            o += "\\?";
+            continue;
+        }
+        o += ch;
+    }
+    return o;
+}
+std::string commentText(std::string n) {
+    for (char& ch : n)
+        if (ch == '\\' || ch == '\n' || ch == '\r') ch = '/';
+    return n;
+}
+
 void Recompiler::run(Output& out, const std::string& version) {
     struct Item {
         Space* sp;
@@ -1587,17 +1609,17 @@ void Recompiler::run(Output& out, const std::string& version) {
             const std::string fn = sp.fname(a);
             const std::string addr = sp.isRel() ? fmt("relBase(%uu, %uu) + 0x%Xu", sp.mod->id, keySec(a), keyOff(a))
                                                 : fmt("0x%08Xu", a);
-            text += "// " + (sp.isRel() ? sp.mod->name + ": " : std::string()) + f.name + "\n";
+            text += "// " + commentText((sp.isRel() ? sp.mod->name + ": " : std::string()) + f.name) + "\n";
             text += "void " + fn + "(Ctx& c) {\n";
             text += "    c.enter(" + addr + ");\n";
             if (sp.hle.count(a)) {
-                text += "    static const HleFn s = hleLookup(\"" + f.name + "\");\n";
-                text += "    if (s) { s(c); } else { hleMissing(\"" + f.name + "\", " + addr + ", c); }\n";
+                text += "    static const HleFn s = hleLookup(\"" + lit(f.name) + "\");\n";
+                text += "    if (s) { s(c); } else { hleMissing(\"" + lit(f.name) + "\", " + addr + ", c); }\n";
             } else {
                 if (sp.hooked.count(a)) {
                     // The translated body lives in <fn>_orig so a hook can call it.
                     const std::string hname = sp.isRel() ? sp.mod->name + "::" + f.name : f.name;
-                    text += "    static const HleFn hook = hleLookup(\"" + hname + "\");\n";
+                    text += "    static const HleFn hook = hleLookup(\"" + lit(hname) + "\");\n";
                     text += "    if (hook) { hook(c); return; }\n";
                     text += "    " + fn + "_orig(c);\n}\n";
                     text += "void " + fn + "_orig(Ctx& c) {\n";
@@ -1617,7 +1639,7 @@ void Recompiler::run(Output& out, const std::string& version) {
     for (auto& [a, f] : dolSpace.funcs) t += fmt("    {0x%08Xu, &", a) + dolSpace.fname(a) + "},\n";
     t += "};\n";
     t += "extern const SymEntry kSymTable[] = {\n";
-    for (auto& [a, f] : dolSpace.funcs) t += "    {\"" + f.name + fmt("\", 0x%08Xu},\n", a);
+    for (auto& [a, f] : dolSpace.funcs) t += "    {\"" + lit(f.name) + fmt("\", 0x%08Xu},\n", a);
     t += "};\n";
     t += "extern const FuncEntry kOrigTable[] = {\n";
     size_t origCount = 0;
@@ -1636,7 +1658,7 @@ void Recompiler::run(Output& out, const std::string& version) {
         if (rs.funcs.empty()) t += "    {0, nullptr},\n";
         t += "};\n";
         t += fmt("static const char* const kRel%03uNames[] = {\n", id);
-        for (auto& [k, f] : rs.funcs) t += "    \"" + f.name + "\",\n";
+        for (auto& [k, f] : rs.funcs) t += "    \"" + lit(f.name) + "\",\n";
         if (rs.funcs.empty()) t += "    \"\",\n";
         t += "};\n";
     }

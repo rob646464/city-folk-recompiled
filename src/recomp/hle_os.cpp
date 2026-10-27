@@ -187,8 +187,11 @@ void armAlarm(u32 alarm, u64 ticks, u32 handler, u64 period) {
 }
 }  // namespace
 
+// RVL OSAlarm is 0x30 bytes: the GameCube layout plus user data at +0x28.
+HLE(OSSetAlarmUserData) { wr32(c.r[3] + 0x28, c.r[4]); }
+HLE(OSGetAlarmUserData) { c.r[3] = rd32(c.r[3] + 0x28); }
 HLE(OSCreateAlarm) {
-    std::memset(hostp(c.r[3]), 0, 0x28);
+    std::memset(hostp(c.r[3]), 0, 0x30);
     std::lock_guard lk(sAlarmM);
     ++sAlarmGen[c.r[3]];
     sAlarmFired.erase(c.r[3]);
@@ -239,6 +242,33 @@ HLE(OSCancelThread) { sched::cancel(c.r[3]); }
 HLE(OSExitThread) { sched::exitThread(c.r[3]); }
 HLE(OSGetCurrentThread) { c.r[3] = sched::currentGuest(); }
 HLE(OSGetThreadPriority) { c.r[3] = u32(sched::priority(c.r[3])); }
+HLE(OSSetThreadPriority) { setBool(c, sched::setPriority(c.r[3], s32(c.r[4]))); }
+HLE(OSSetSwitchThreadCallback) { c.r[3] = 0; }  // (debugging aid; no callback runs)
+HLE(OSIsThreadSuspended) { setBool(c, sched::suspendCount(c.r[3]) > 0); }
+// The scheduler lock (OSDisableScheduler/OSEnableScheduler): a nesting count; the host scheduler
+// switches threads only at blocking calls and interrupts, which the callers avoid meanwhile.
+namespace {
+s32 sSchedulerLock = 0;
+u32 sResetCallback = 0, sPowerCallback = 0;
+}  // namespace
+HLE(OSDisableScheduler) { c.r[3] = u32(sSchedulerLock++); }
+HLE(OSEnableScheduler) { c.r[3] = u32(sSchedulerLock > 0 ? sSchedulerLock-- : 0); }
+// Reset / Power button callbacks (STM): stored; the buttons do not exist here.
+HLE(OSSetResetCallback) {
+    const u32 old = sResetCallback;
+    sResetCallback = c.r[3];
+    c.r[3] = old;
+}
+HLE(OSSetPowerCallback) {
+    const u32 old = sPowerCallback;
+    sPowerCallback = c.r[3];
+    c.r[3] = old;
+}
+// RVL SDK: each library registers its version string (shown by the system's debug tools).
+HLE(OSRegisterVersion) {
+    static const bool sLog = std::getenv("CF_OS_LOG") != nullptr;
+    if (sLog) log("[os] %s", gstr(c.r[3]));
+}
 HLE(OSIsThreadTerminated) { setBool(c, sched::isTerminated(c.r[3])); }
 HLE(OSDetachThread) { sched::detach(c.r[3]); }
 HLE(OSInitThreadQueue) {

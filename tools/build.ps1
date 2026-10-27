@@ -4,7 +4,7 @@ param(
     [string]$Preset = "windows-clang",
     [switch]$Configure,
     [string]$Target = "",
-    [string]$Dol = ""  # sets CF_DOL (the main.dol to recompile) when configuring
+    [string]$Disc = ""  # sets CF_DISC (extracted disc folder or image) when configuring
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -25,8 +25,8 @@ foreach ($p in @("$env:ProgramFiles\CMake\bin", "$env:LOCALAPPDATA\Microsoft\Win
 
 Push-Location $root
 try {
-    if ($Configure -or $Dol -or -not (Test-Path "build/$Preset/build.ninja")) {
-        if ($Dol) { cmake --preset $Preset "-DLM_DOL=$($Dol -replace '\\', '/')" } else { cmake --preset $Preset }
+    if ($Configure -or $Disc -or -not (Test-Path "build/$Preset/build.ninja")) {
+        if ($Disc) { cmake --preset $Preset "-DCF_DISC=$($Disc -replace '\\', '/')" } else { cmake --preset $Preset }
         if ($LASTEXITCODE) { throw "configure failed" }
     }
     if ($Target) { cmake --build --preset $Preset --target $Target } else { cmake --build --preset $Preset }

@@ -295,12 +295,49 @@ HLE(AISetStreamTrigger) {}
 HLE(AIGetStreamSampleCount) { c.r[3] = 0; }
 HLE(AIGetStreamTrigger) { c.r[3] = 0; }
 
-HLE(DSPInit) {}
-HLE(DSPCheckMailToDSP) { c.r[3] = 0; }
+// DSP task interface (dsp/dsp.c, dsp_task.c), as the RVL SDK's AX uses it. Boot stand-in until
+// the AX microcode stand-in exists (docs/WII.md "Audio"): a task added with DSPAddTask gets its
+// init callback at once (the "DSP" is ready), and every command list the CPU hands over (the
+// mail pair 0xBABExxxx + address that AX sends per audio frame) is "finished" a moment later
+// through the task's request callback, so AX's frame loop and the callbacks NW4R's sound system
+// runs on keep going. No samples are mixed (silence).
+// DSPTaskInfo: +0x00 state, +0x28 init_cb, +0x2C res_cb, +0x30 done_cb, +0x34 req_cb.
+namespace {
+std::atomic<u32> sDspTask{0};
+u32 sMailHi = 0;
+bool sDspInit = false;
+void callTaskCb(u32 task, u32 offset) {
+    if (!task) return;
+    const u32 cb = rd32(task + offset);
+    if (cb) sched::postIrqAfter(0.0005, [cb, task](Ctx& ic) { guestCall(ic, cb, task); });
+}
+}  // namespace
+HLE(DSPInit) { sDspInit = true; }
+HLE(DSPCheckInit) { c.r[3] = sDspInit ? 1 : 0; }
+HLE(DSPAddTask) {
+    const u32 task = c.r[3];
+    sDspTask = task;
+    wr32(task, 1);  // DSP_TASK_STATE_INIT: running
+    callTaskCb(task, 0x28);
+    c.r[3] = task;
+}
+HLE(DSPAssertTask) { c.r[3] = c.r[3]; }
+HLE(DSPCheckMailToDSP) { c.r[3] = 0; }      // the "DSP" took every mail
 HLE(DSPCheckMailFromDSP) { c.r[3] = 0; }
 HLE(DSPReadMailFromDSP) { c.r[3] = 0; }
-HLE(DSPSendMailToDSP) {}
+HLE(DSPSendMailToDSP) {
+    const u32 mail = c.r[3];
+    if ((mail >> 16) == 0xBABE) {
+        sMailHi = mail;
+        return;
+    }
+    if (sMailHi) {  // second word of a command list: finished at once
+        sMailHi = 0;
+        callTaskCb(sDspTask, 0x34);
+    }
+}
 HLE(DSPAssertInt) {}
+HLE(DSPGetDMAStatus) { c.r[3] = 0; }
 
 // JAudio voice classification and the game's sound mode come from LM's game hooks (Luigi's
 // Mansion: the second half of hle_audio.cpp there). City Folk mixes with AX (docs/WII.md

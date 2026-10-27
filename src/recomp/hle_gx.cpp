@@ -1205,6 +1205,38 @@ GXHLE(GXSetProjection) {
     traceNote("projection %s from %08X", c.r[4] ? "ortho" : "persp", c.lr);
     if (!ws::adjusting()) emitProjection(ProjMode::Plain);
 }
+// GXSetProjectionv(f32 v[7]): type, then the six significant matrix terms (GXGetProjectionv's
+// form), rebuilt into the matrix GXSetProjection would take.
+GXHLE(GXSetProjectionv) {
+    const u32 v = c.r[3];
+    const bool ortho = rdf32(v) != 0.0f;
+    float m[4][4] = {};
+    m[0][0] = rdf32(v + 4);
+    m[1][1] = rdf32(v + 12);
+    m[2][2] = rdf32(v + 20);
+    m[2][3] = rdf32(v + 24);
+    if (ortho) {
+        m[0][3] = rdf32(v + 8);
+        m[1][3] = rdf32(v + 16);
+        m[3][3] = 1.0f;
+    } else {
+        m[0][2] = rdf32(v + 8);
+        m[1][2] = rdf32(v + 16);
+        m[3][2] = -1.0f;
+    }
+    std::memcpy(sProj.m, m, sizeof(sProj.m));
+    sProj.type = ortho ? GX_ORTHOGRAPHIC : GX_PERSPECTIVE;
+    sProjDirty = sProjSet = sRawCheck = true;
+    if (!ws::adjusting()) emitProjection(ProjMode::Plain);
+}
+// The scissor offset (RVL games set 0,0 around their passes): not modelled by Aurora yet.
+GXHLE(GXSetScissorBoxOffset) {
+    if (c.r[3] || c.r[4]) {
+        static bool sLogged = false;
+        if (!sLogged) log("[gx] GXSetScissorBoxOffset(%d, %d) ignored", s32(c.r[3]), s32(c.r[4]));
+        sLogged = true;
+    }
+}
 GXHLE(GXLoadPosMtxImm) {
     const Mtx<3, 4> m(c.r[3]);
     if (const u32 id = c.r[4]; id % 3 == 0 && id / 3 < 10) {
@@ -1755,6 +1787,45 @@ GXHLE(GXCopyTex) {
     interp::efbCopied(c.r[3], GXGetTexBufferSize(u16(sCopyDiag.dw), u16(sCopyDiag.dh), sCopyDiag.fmt, GX_FALSE, 0));
     efbcopy::guestCopy(c.r[3], sCopyDiag.dw, sCopyDiag.dh, sCopyDiag.fmt);
     GXCopyTex(hostp(c.r[3]), GXBool(c.r[4]));
+}
+
+// --- RVL SDK additions and helpers the GameCube games did not use ------------------
+// The display copy's vertical scale (GXFrameBuf.c semantics: the scale register holds
+// 256 / yScale as a 9-bit integer; the XFB gets (efbHeight - 1) * 256 / reg + 1 lines).
+namespace {
+u32 xfbLines(u32 efbHeight, f32 yScale) {
+    const u32 reg = u32(256.0f / yScale) & 0x1FF;
+    if (!reg) return efbHeight;
+    return (efbHeight - 1) * 256 / reg + 1;
+}
+}  // namespace
+HLE(GXGetNumXfbLines) { c.r[3] = xfbLines(u16(c.r[3]), farg(c, 1)); }
+HLE(GXGetYScaleFactor) {
+    const u32 efb = u16(c.r[3]), xfb = u16(c.r[4]);
+    f32 s = efb ? f32(xfb) / f32(efb) : 1.0f;
+    // The largest scale (smallest register) whose line count reaches xfb lines, as the SDK finds.
+    for (u32 reg = u32(256.0f / s) & 0x1FF; reg > 1; reg--) {
+        const f32 t = 256.0f / f32(reg);
+        if (xfbLines(efb, t) >= xfb) {
+            s = t;
+            break;
+        }
+    }
+    c.setSingle(1, s);
+}
+GXHLE(GXSetTexCoordScaleManually) {
+    GXSetTexCoordScaleManually(GXTexCoordID(c.r[3]), GXBool(c.r[4]), u16(c.r[5]), u16(c.r[6]));
+}
+GXHLE(GXSetTexCoordCylWrap) { GXSetTexCoordCylWrap(GXTexCoordID(c.r[3]), GXBool(c.r[4]), GXBool(c.r[5])); }
+// Texture/TLUT memory region callbacks: Aurora has no TMEM regions to allocate; the previous
+// callback (none) is returned.
+GXHLE(GXSetTexRegionCallback) { c.r[3] = 0; }
+GXHLE(GXSetTlutRegionCallback) { c.r[3] = 0; }
+// GXDraw.c debug primitives (spheres, cubes, ...): not drawn yet.
+GXHLE(GXDrawSphere) {
+    static bool sLogged = false;
+    if (!sLogged) log("[gx] GXDrawSphere not drawn (lr %08X)", c.lr);
+    sLogged = true;
 }
 
 // For the [mem] report (mem_report.cpp): host texture / TLUT object table sizes.

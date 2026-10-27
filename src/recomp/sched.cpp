@@ -312,6 +312,25 @@ s32 priority(u32 guest) {
     return t ? t->priority : 0;
 }
 
+s32 suspendCount(u32 guest) {
+    std::lock_guard lk(sM);
+    GuestThread* t = find(guest);
+    return t ? t->suspendCount : 0;
+}
+
+bool setPriority(u32 guest, s32 prio) {
+    if (prio < 0 || prio > 31) return false;
+    std::unique_lock lk(sM);
+    GuestThread* t = find(guest);
+    if (!t) return false;
+    t->priority = prio;
+    wr32(guest + kPriority, u32(prio));
+    wr32(guest + kBase, u32(prio));
+    // A lowered running thread or a raised ready one: the highest-priority ready thread runs.
+    if (tSelf && !tInIrq) reschedule(lk, tSelf);
+    return true;
+}
+
 void detach(u32 guest) {
     std::lock_guard lk(sM);
     if (GuestThread* t = find(guest)) t->detached = true;

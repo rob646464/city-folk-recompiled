@@ -38,3 +38,20 @@ void onBoot(Ctx&) {}
 void onFrame() {}
 
 }  // namespace recomp::game
+
+// Game-side hooks the generic runtime declares in its own headers (LM: skip.cpp, shadows.cpp,
+// tags.cpp).
+namespace recomp {
+namespace gx {
+bool g_discardDraws = false;  // gx_bridge.h: the frame being drawn is not shown (fast-forward)
+}
+namespace interp {
+u32 viewMatrixSource() { return 0; }  // interp.h: no camera matrix in guest memory known yet
+namespace detail {
+bool trackPoints(float out[9]) {
+    (void)out;
+    return false;
+}  // interp.h: path check (CF_TRACK_LOG)
+}
+}  // namespace interp
+}  // namespace recomp

@@ -69,6 +69,7 @@ bool inHudScope();   // inside any scope (widescreen active), and not in a Rende
 // the same rectangle set again later for that view's passes (ghost layer, effects) follows too
 // (hle_gx.cpp), so the whole view stays in one place.
 bool inMainViewSetup();
+void setMainViewSetup(bool on);  // the game's hooks (src/game) around its main view setup
 
 // A render-to-texture pass run from inside a HUD element's scope (the event-scene renderer
 // fn_80114E18 draws the door knob's reflection into a 128x128 viewport at the EFB origin and

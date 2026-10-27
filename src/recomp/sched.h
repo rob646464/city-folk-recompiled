@@ -34,6 +34,8 @@ void cancel(u32 guest);
 [[noreturn]] void exitThread(u32 val);
 bool isTerminated(u32 guest);
 s32 priority(u32 guest);
+bool setPriority(u32 guest, s32 prio);  // OSSetThreadPriority (may switch threads)
+s32 suspendCount(u32 guest);            // > 0: suspended (OSIsThreadSuspended)
 void detach(u32 guest);
 
 // Blocks the current thread on a thread queue (any guest address works as a key).

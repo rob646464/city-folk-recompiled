@@ -411,6 +411,22 @@ HleFn hleLookup(const char* name) {
 }
 
 void hleMissing(const char* name, u32 addr, Ctx& c) {
+    // CF_HLE_MISSING=log (boot work): log each missing function once and return 0 instead of
+    // stopping, to see more of what a boot needs in one run.
+    static const bool sSoft = [] {
+        const char* v = std::getenv("CF_HLE_MISSING");
+        return v && std::string(v) == "log";
+    }();
+    if (sSoft) {
+        static std::mutex m;
+        static std::unordered_set<std::string> seen;
+        {
+            std::lock_guard lk(m);
+            if (seen.insert(name).second) log("[hle] MISSING %s (%08X) lr=%08X: returns 0", name, addr, c.lr);
+        }
+        c.r[3] = 0;
+        return;
+    }
     fatal("SDK function %s (%08X) has no HLE implementation (lr=%08X)", name, addr, c.lr);
 }
 
