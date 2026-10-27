@@ -14,6 +14,10 @@ Engine work for the Wii: docs/WII.md. This file tracks the phases and the user's
 ## Feature list (from the user, 2026-10-27)
 - **Wii pointer controls** from the mouse, from the right stick, and from gyro on controllers
   with motion sensors (when connected). F1 > Controls picks the source per port.
+- **Real Wii Remotes**: Wii Remotes paired with the PC over Bluetooth (or through a Mayflash
+  DolphinBar) work as on a Wii: buttons, pointer from the IR camera (needs a sensor bar),
+  accelerometer, Nunchuk, rumble and the remote speaker. Read over HID (SDL's hidapi) under our
+  WPAD/KPAD HLE, so they mix freely with mice and normal controllers per player port.
 - **Normal controller menu navigation**: select and interact in menus with stick/D-pad and
   buttons, without being forced to use the pointer. (First check what the game's own Classic
   Controller support covers, if it has one.)
