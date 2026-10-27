@@ -182,14 +182,6 @@ int sInChannels = 2, sInRate = 32028;
 Resampler sResampler;
 char sStatus[128] = "No audio device";
 
-// Side data per AI block (outTagBlock), keyed by the block's guest address.
-struct BlockSide {
-    u32 dac = 0;
-    std::vector<SideSample> v;
-};
-std::array<BlockSide, 6> sBlockSide;
-u32 sBlockNext = 0;
-
 void queryDevice() {
     if (!sStream) return;
     SDL_AudioSpec dev{};
@@ -218,12 +210,6 @@ void openDevice() {
     SDL_ResumeAudioStreamDevice(sStream);
     queryDevice();
     log("[audio] output started; device: %d channels at %d Hz; console rate %.2f Hz", sDevChannels.load(), sDevRate.load(), sRate);
-}
-
-const SideSample* sideFor(u32 dac) {
-    for (const auto& b : sBlockSide)
-        if (b.dac == dac && !b.v.empty()) return b.v.data();
-    return nullptr;
 }
 
 }  // namespace
@@ -256,21 +242,6 @@ void outSetPaused(bool paused) {
 }
 
 bool outPaused() { return sPaused.load(); }
-
-void outTagBlock(u32 dac, u32 bufL, u32 frames) {
-    std::vector<SideSample> v(frames);
-    if (!dspSideData(bufL, v.data(), frames)) return;
-    std::lock_guard lk(sM);
-    BlockSide* b = nullptr;
-    for (auto& x : sBlockSide)
-        if (x.dac == dac) b = &x;
-    if (!b) {
-        b = &sBlockSide[sBlockNext];
-        sBlockNext = (sBlockNext + 1) % sBlockSide.size();
-        b->dac = dac;
-    }
-    b->v = std::move(v);
-}
 
 std::atomic<unsigned long long> sRawFrames{0};
 unsigned long long outRawFrames() { return sRawFrames.load(); }
@@ -306,32 +277,44 @@ void outPushGuestBlock(u32 addr, u32 bytes) {
     // Swap left/right (F1), and the PAL Hidden Mansion mirrors the picture, so the speakers too.
     const bool swap = as.swapChannels != game::audioMirrored();
     const float gain = std::clamp(as.masterVolume, 0.0f, 1.0f) * game::audioGain() / 32768.0f;
-    const SideSample* side = ch > 2 ? sideFor(addr) : nullptr;
+    // What the DSP mixed besides the stereo samples: surround side data, the Wii Remote
+    // speakers (audio_dsp.cpp). One AI block is one AX frame (96 samples).
+    static thread_local FrameExtras ex;
+    const bool haveEx = frames == FrameExtras::kSamples && dspFrameExtras(addr, ex);
+    const SideSample* side = haveEx && ex.hasSide && ch > 2 ? ex.side : nullptr;
+    // The Wii Remote speakers (audio_remote.cpp) in the centre: on the centre speaker of 5.1 /
+    // 7.1, else at 0.707 in each side (the power of one speaker). 3 dB below the TV mix at
+    // 100%: a small speaker in the hand. (The HOME Menu's speaker volume is already in the
+    // stream: it scales its samples before encoding them.)
+    static thread_local std::vector<float> rmtBuf;
+    rmtBuf.resize(frames);
+    const float rk = std::clamp(as.remoteVolume, 0.0f, 1.0f) * 0.70710678f;
+    const float* remote = remoteFetch(rmtBuf.data(), int(frames), sRate) && rk > 0 ? rmtBuf.data() : nullptr;
 
     static thread_local std::vector<float> buf;
     buf.assign(size_t(frames) * ch, 0.0f);
     for (u32 i = 0; i < frames; i++) {
         float l = raw[i * 2], r = raw[i * 2 + 1];
+        const float rm = remote ? remote[i] * rk : 0.0f;
         float* o = &buf[size_t(i) * ch];
         if (ch == 2) {
             if (mono) l = r = (l + r) * 0.5f;
             if (swap) std::swap(l, r);
-            o[0] = l * gain;
-            o[1] = r * gain;
+            o[0] = (l + rm * 0.70710678f) * gain;
+            o[1] = (r + rm * 0.70710678f) * gain;
             continue;
         }
-        // Discrete: the fronts without the centre / surround / rear-right parts, those
-        // buses on their own speakers. The centre went into each side at 0.707 (a phantom
-        // centre), so the centre speaker plays it at full level; the mono surround bus went
-        // in at +1 / -1, so each surround speaker plays it at 1 (5.1) or 0.707 (7.1), which
-        // keeps its power. LFE stays silent (the game has no LFE bus).
-        const SideSample s = side ? side[i] : SideSample{};
-        float fl = l - s.lExtra, fr = r - s.rExtra;
-        float sl = s.s, sr = float(s.s) + s.rr, bl = 0, br = 0;
+        // Discrete: the fronts without what the surround fold added, the surround buses on
+        // their own speakers (AX surround mode: its mono S on both; DPL2: Ls and Rs). 7.1 plays
+        // each surround side on its side and back speaker at 0.707 (same power). The game has
+        // no centre or LFE bus: its centre stays a phantom centre in the fronts.
+        const SideSample sd = side ? side[i] : SideSample{};
+        float fl = l - sd.lExtra, fr = r - sd.rExtra;
+        float sl = sd.sl, sr = sd.sr, bl = 0, br = 0;
         if (ch == 8) {
             constexpr float k = 0.70710678f;
-            sl = s.s * k;
-            sr = s.s * k + s.rr * k;
+            sl *= k;
+            sr *= k;
             bl = sl;
             br = sr;
         }
@@ -342,7 +325,7 @@ void outPushGuestBlock(u32 addr, u32 bytes) {
         }
         o[0] = fl * gain;
         o[1] = fr * gain;
-        o[2] = s.c * gain;
+        o[2] = rm * gain;
         o[3] = 0;
         if (ch == 6) {  // SDL 5.1: FL FR FC LFE BL BR (BL/BR may be the side pair)
             o[4] = sl * gain;

@@ -166,11 +166,113 @@ NW4R's `AxVoiceParamBlock::SetVoiceSrcType` maps its types to srcSelect/coefSele
 
 - F1 > Sound > Reverb / echo off: the aux returns are not mixed (AXFX still runs).
 - F1 > Sound > Voice filters off: no per-voice low-pass/biquad (main and remote).
-- The music / sound-effect volume sliders do nothing yet: unlike LM's JAudio voices, an AX voice
-  does not say which NW4R player owns it (next step: follow `AxVoice` -> `Voice` -> its sound's
-  player).
-- Discrete 5.1/7.1 output falls back to matrix-encoded stereo (`dspSideData` has no data yet; the
-  S / DPL2 buses could feed it).
+- F1 > Sound > Master / Music / Sound effects / Voices / Wii Remote speaker volume: below.
+- F1 > Sound > Output: Stereo / Mono / Surround (matrix-encoded) / 5.1 / 7.1 (discrete): below.
+  Stereo is the default and leaves the output as before (byte-identical AI stream).
+
+## Volume sliders
+
+The console has no such sliders, so they are applied in the DSP stand-in per voice, as a gain on
+the voice's 96 samples after the envelope and filters and before the mixer (so its reverb sends,
+Wii Remote sends and depop values follow), ramped from last frame's gain over the frame (no click
+when a slider moves). With every slider at 100 % nothing is multiplied: the mix stays bit-exact.
+Master is applied at the output (audio_out.cpp) to everything, the Remote speaker included.
+
+Which slider a voice follows is decided by the **NW4R sound that owns it**, found by following
+pointers the game's own NW4R snd code keeps (read from the recompiled code, USA addresses; PAL and
+Japan by symbol name):
+
+1. The DSP PB's index in AX's PB array (`__AXGetPBs` is `lwz r3, d(r13)`: the SDA global; the
+   ITD buffers and the CPU-side AXVPBs (0x168 bytes each) are the next two globals, in the order
+   `__AXVPBInitCommon` clears them) gives the **AXVPB**; its user context (+0x14, AXAcquireVoice's
+   third argument) is NW4R's **AxVoice** when `AxVoice +0x38` (its callback) is
+   `Voice::AxVoiceCallbackFunc` (else the voice is not NW4R's, e.g. the HOME Menu's).
+2. `AxVoice +0x3C` = the **Voice** (`AxVoiceManager::AcquireAxVoice` stores callback and data at
+   +0x38/+0x3C); `Voice +0x94/+0x98` = its callback and data (`Voice::InitParam`):
+   - `Channel::VoiceCallbackFunc` -> a **Channel**, whose callback and data (+0xE0/+0xE4,
+     `Channel::InitParam`) are `SeqTrack::ChannelCallbackFunc` + the SeqTrack (its SeqPlayer at
+     +0xC0, the pointer `ChannelCallbackFunc` calls through) or `WsdPlayer::ChannelCallbackFunc` +
+     the WsdPlayer;
+   - `StrmPlayer::VoiceCallbackFunc` -> one of the StrmPlayer's tracks (`StrmPlayer::AllocVoices`:
+     0x38-byte tracks from +0xB78, the count at +0x82C), so the player is found by trying the
+     track numbers.
+3. Seq/Strm/Wave sounds hold their player at +0x10C (`GetBasicPlayer`), the BasicSound has its
+   **SoundPlayer** at +0x10 (`AttachSoundPlayer`). Its index in the SoundArchivePlayer's array
+   (+0x3C, count +0x38, 0x64 bytes each: `SetupSoundPlayer`, hooked in hle_audio.cpp to learn the
+   array) is the **player id** of `rv_forest.brsar` (the USA, PAL and Japanese archives have the
+   same 30 players and 9244 sounds).
+
+Player ids (from the archive's symbol and player tables):
+
+| kind | players |
+|---|---|
+| music | 21 PLAYER_STRM (title.brstm), 22 PLAYER_MUSIC (K.K. songs, records: BGM_MU*), 23 PLAYER_CONDUCTOR, 24 PLAYER_FANFARE (jingles: BGM_FANFARE_*), 25 PLAYER_BGM (hourly music, KK, bus, ...) |
+| voices | 15 PLAYER_DOUBUTSUGO (animal speech syllables), 16 PLAYER_KEYBOARD (the per-letter speech sounds of each language, SE_Keyboard_<lang>_*) |
+| sound effects | everything else: 0-2 the town tune melodies (chime, editor, instruments), 3-7 system/menus/cursor, 8 walking, 9 furniture, 10 actions, 11 environment, 12/13 reactions, 14 environment loops, 17 money, 18 furniture loops, 19 dances, 20 fireworks, 26 gyroids, 27/28 TV |
+
+A voice that cannot be classified counts as a sound effect. NW4R lets go of a Voice before its
+release has died away (the AX voice plays out without an owner): such a voice keeps the kind it
+had; a voice that starts takes its kind and gain at once.
+
+Checked: with `CF_AUDIO_LOG=1` every voice start names its kind and player; across the title,
+the bus scene and the town every voice start was classified (`CF_AUDIO_KIND_LOG=1` logs any that
+is not, with the step that failed). Level checks with `CF_SETTINGS_AT` switching sliders during
+one run: see "Verified".
+
+## Wii Remote speaker on the PC
+
+What a Remote's speaker plays is what the game streams to it: `WPADSendStreamData` packets (20
+bytes = 40 samples, one output report 0x18 each) of 4-bit Yamaha ADPCM at 6 kHz, after
+`WPADControlSpeaker` turned the speaker on (1) and started playback (4). Two writers exist in City
+Folk: NW4R's RemoteSpeaker (encodes the DSP's Remote output, `AXRmtGetSamples`, with WENC) and the
+HOME Menu (homebutton::RemoteSpk: its own sounds, PCM scaled by its speaker volume level / 10, then
+`WENCGetEncodeData` and `WPADSendStreamData`). `src/recomp/audio_remote.cpp` decodes the stream,
+which covers both and plays what the real speaker gets (its ADPCM noise included); hle_wpad.cpp
+hands it every packet and speaker command.
+
+- Decoder (from the public description of Yamaha 4-bit ADPCM): per nibble `diff = (2|n|+1) *
+  step / 8` added or subtracted (bit 3 = sign), `step = step * {230,230,230,230,307,409,512,614}[|n|]
+  / 256` kept in 127..24576, prediction saturated to 16 bits; start state 0 / 127, reset at speaker
+  off/on/play. **High nibble first**: checked on the HOME Menu's streams (the low-nibble-first
+  decode drifts into saturation; high-nibble-first gives four clean decaying clicks, peaks in
+  proportion to the HOME Menu volume steps 6/7/6/5).
+- Rate: the HOME Menu sends 150.0 packets/s while a sound plays (6003 samples/s measured,
+  `CF_AUDIO_LOG`), i.e. the speaker's 6 kHz.
+- Each Remote has a queue (playback starts at 40 ms queued, at most 120 ms kept); once per AI block
+  audio_out.cpp pulls the summed queues resampled to the AI rate (8-tap Kaiser-windowed sinc,
+  cutoff 0.9 of the 3 kHz Nyquist frequency) through a one-pole 250 Hz high-pass (the small
+  speaker has no bass).
+- Choices (not the console's): it plays **in the centre** (the centre speaker with 5.1/7.1, else
+  0.707 on each side), 3 dB under the TV mix at 100 %, scaled by F1 > Sound > Wii Remote speaker
+  volume (default 100 %, 0 = off) and Master. The game's speaker volume (`WPADSetSpeakerVolume`)
+  is not applied again: the HOME Menu already scales its samples by it. Remotes that are not
+  connected, speaker off or muted play nothing.
+- Where City Folk uses it: the HOME Menu (opening it turns the speaker on; Wii Remote Settings >
+  Volume +/- plays a test click on the Remote). The game's own sounds never had a Remote send in
+  the title, bus or town scenes (`remote 0.0` per frame in `CF_AUDIO_LOG`; NW4R's RemoteSpeaker
+  is linked but no sound used a Remote output line there).
+- Verified: HOME Menu at the title, Volume + twice and - twice: 4 bursts of 119 packets, decoded,
+  in `CF_AUDIO_WAV` (device output) at ~700 rms in 100 ms windows where the AI stream (`CF_AUDIO_
+  WAV_RAW`, the TV) has 10-120. `CF_RMT_DUMP=<file>` writes the raw stream per Remote.
+- The DSP's own Remote buffers (command 13) are still written for the game (`axRemoteFrame` gives
+  the last frame's samples); they are not mixed on the PC, as their sound arrives through the
+  stream.
+
+## Surround output
+
+AX mixes in one of three modes (`AXSetMode`, from NW4R's output mode, from the console's sound
+setting in SYSCONF, which the port writes from F1 > Sound > Output: Mono 0, Stereo 1, any surround
+choice 2): stereo, surround (Dolby Pro Logic: one surround bus S) or DPL2 (Ls on the S bus, Rs on
+the aux C slot). Each frame the fold command adds last frame's surround into the fronts (stereo
+L+S R+S, surround L-S R+S, DPL2 L+Ls R-Rs). Matrix-encoded surround (F1 "Surround") is that
+stereo signal, unchanged. For discrete output (F1 "Surround 5.1" / "7.1", a device with 6/8
+channels; WAV captures without a device use the chosen layout) the DSP keeps, per AI block, what
+the fold added (at the output's master volume ramp) and the surround buses themselves;
+audio_out.cpp subtracts the fold from the fronts and plays Ls/Rs (surround mode: S on both) on
+the surround speakers (7.1: side and back at 0.707 each), the Remote speaker on the centre, LFE
+silent (the game has no LFE or centre bus: its centre stays a phantom centre). In stereo mode
+(the game mixing stereo) the extra channels stay silent. Stereo (the default) never uses side
+data: the fold-down is the console's.
 
 ## Verified
 

@@ -80,8 +80,10 @@ struct CrtSettings {
 
 struct AudioSettings {
     float masterVolume = 1.0f;  // 0..1
-    float musicVolume = 1.0f;   // streamed/sequenced music
+    float musicVolume = 1.0f;   // music players of the sound archive (BGM, K.K., fanfares, title stream)
     float sfxVolume = 1.0f;     // everything else
+    float voiceVolume = 1.0f;   // animal speech (Animalese) players
+    float remoteVolume = 1.0f;  // Wii Remote speaker sound played on the PC (0 = off)
     AudioOutput output = AudioOutput::Stereo;
     bool swapChannels = false;
     bool reverb = true;        // aux bus returns (the game's AXFX reverb/chorus/delay) mixed back in
