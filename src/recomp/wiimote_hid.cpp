@@ -539,9 +539,13 @@ void hidShutdown() {
 
 // ---- Menu ----------------------------------------------------------------------------------
 
+// Test aid CF_WIIMOTE_HID_MENU=1 (screenshots): the Ports tab scrolled to this section, pairing help open.
+const bool sMenuShot = std::getenv("CF_WIIMOTE_HID_MENU") != nullptr;
+
 bool drawHidPortsSection() {
     bool changed = false;
     ImGui::SeparatorText("Real Wii Remotes");
+    if (sMenuShot) ImGui::SetScrollHereY(0.0f);
     if (sDisabled) {
         ImGui::TextDisabled("Turned off for this run (CF_WIIMOTE_HID=0).");
         return false;
@@ -583,13 +587,13 @@ bool drawHidPortsSection() {
                                   "motion, Nunchuk, rumble and speaker. The controller assigned above is then unused.");
             ImGui::TableNextColumn();
             ImGui::BeginDisabled(!pc.real);
-            std::string cur = "Auto (next free Remote)";
+            std::string cur = "Auto";
             for (const auto& d : devs)
                 if (!pc.device.empty() && d->serial == pc.device) cur = d->label();
             if (!pc.device.empty() && cur.rfind("Auto", 0) == 0) cur = pc.device + " (not found)";
             ImGui::SetNextItemWidth(-1);
             if (ImGui::BeginCombo("##which", cur.c_str())) {
-                if (ImGui::Selectable("Auto (next free Remote)", pc.device.empty())) {
+                if (ImGui::Selectable("Auto", pc.device.empty())) {
                     pc.device.clear();
                     changed = true;
                 }
@@ -626,7 +630,9 @@ bool drawHidPortsSection() {
                                        s.ptr.valid ? "" : ", no sensor bar seen");
                     ImGui::SetItemTooltip("%s", mine->label().c_str());
                 } else {
-                    ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.3f, 1), "Searching: press a button on a paired Remote");
+                    ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.3f, 1), "Searching...");
+                    ImGui::SetItemTooltip("No answering Wii Remote for this port yet. Press a button on a paired Remote\n"
+                                          "(one paired with 1 + 2 must be paired again; see \"How to pair\" below).");
                 }
             }
             ImGui::PopID();
@@ -648,6 +654,7 @@ bool drawHidPortsSection() {
         }
     }
     menu::openTreesForCheck();
+    if (sMenuShot) ImGui::SetNextItemOpen(true, ImGuiCond_Always);
     if (ImGui::TreeNode("How to pair a Wii Remote")) {
         ImGui::TextWrapped(
             "Windows: Settings > Bluetooth & devices > Add device > Bluetooth. Press the red SYNC button "

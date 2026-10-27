@@ -109,7 +109,9 @@ switched off and on, Linux and macOS.
 
 Test aids: `CF_WIIMOTE_HID=0` (never touch HID; ports stay emulated), `CF_WIIMOTE_HID=nodevices`
 (real-Remote ports and menu without any HID access: "No Wii Remote found"), `CF_WIIMOTE_HID_LOG=1`
-(devices opened, calibration, battery). Settings `[wiimote_hid]`: `remote<N>_source=emulated|real`,
+(devices opened, calibration, battery), `CF_WIIMOTE_HID_MENU=1` (Ports tab scrolled to the section with
+the pairing help open, for screenshots; with `CF_MENU=Controls CF_CONTROLS_TAB=Ports`). The F1 menu ID
+sweep (`CF_MENU_ID_CHECK=exit`) with two real-Remote ports: 0 conflicts. Settings `[wiimote_hid]`: `remote<N>_source=emulated|real`,
 `remote<N>_device=auto|<serial>`, `pointer_range`, `pointer_offset`, `invert_x`, `invert_y`, `speaker`.
 
 ## SDK side (hle_wpad.cpp)
