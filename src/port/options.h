@@ -34,6 +34,9 @@ struct Options {
 
 Options& options();
 void parseOptions(int argc, char* argv[]);
+// Route/script text -> the plain comma list (comments, include, +N relative times); dir = folder
+// for relative includes.
+std::string expandInputScript(const std::string& text, const std::string& dir);
 
 // Parses "16:9", "1.777" or "auto" (-> 0). Returns a negative value if malformed.
 float parseAspect(const char* s);

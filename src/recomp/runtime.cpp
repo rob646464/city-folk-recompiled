@@ -487,7 +487,28 @@ void initTimeBase() {
     g.tm_isdst = -1;
     const s64 tz = s64(now) - s64(std::mktime(&g));
     // The console clock: the host's local time plus the clock offset setting (time travel).
-    const s64 secs = s64(now) + tz - 946684800 + s64(sys::clockOffsetSeconds());
+    s64 secs = s64(now) + tz - 946684800 + s64(sys::clockOffsetSeconds());
+    // CF_CLOCK_START="YYYY-MM-DD HH:MM[:SS]": the console clock starts at that time (test aid:
+    // routes that depend on the time of day, the date or a clock-seeded random number).
+    if (const char* cs = std::getenv("CF_CLOCK_START")) {
+        int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0;
+        if (std::sscanf(cs, "%d-%d-%d %d:%d:%d", &y, &mo, &d, &h, &mi, &s) >= 5 && y >= 2000) {
+            std::tm t{};
+            t.tm_year = y - 1900;
+            t.tm_mon = mo - 1;
+            t.tm_mday = d;
+            t.tm_hour = h;
+            t.tm_min = mi;
+            t.tm_sec = s;
+#ifdef _WIN32
+            const s64 asUtc = s64(_mkgmtime(&t));
+#else
+            const s64 asUtc = s64(timegm(&t));
+#endif
+            secs = asUtc - 946684800;
+            log("[time] console clock starts at %04d-%02d-%02d %02d:%02d:%02d (CF_CLOCK_START)", y, mo, d, h, mi, s);
+        }
+    }
     sTbBias = u64(double(std::max<s64>(secs, 0)) * kTimerClock);
     if (sys::clockOffsetSeconds()) log("[time] console clock offset %lld s", (long long)sys::clockOffsetSeconds());
 }

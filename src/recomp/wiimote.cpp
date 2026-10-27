@@ -220,6 +220,10 @@ std::vector<ScriptItem> parseScript(const std::string& script) {
                 {"C", kBtnC}, {"Z", kBtnZ}, {"SHAKE", kBtnShake}, {"NSHAKE", kBtnShakeNunchuk}};
             for (const auto& [name, bit] : kNames)
                 if (b == name) p.buttons |= bit;
+            if (b.rfind("STICK=", 0) == 0) {  // STICK=x/y: Nunchuk stick at any position (-1..1, up +)
+                std::sscanf(b.c_str() + 6, "%f/%f", &p.sx, &p.sy);
+                continue;
+            }
             if (b == "STICKUP") p.sy = 1;
             else if (b == "STICKDOWN") p.sy = -1;
             else if (b == "STICKLEFT") p.sx = -1;

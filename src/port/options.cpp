@@ -1,5 +1,6 @@
 #include "port/options.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -23,6 +24,94 @@ float parseAspect(const char* s) {
         return float(a / b);
     }
     return *end ? -1.0f : float(a);
+}
+
+namespace {
+
+bool readFile(const std::string& path, std::string& out) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return false;
+    char buf[4096];
+    for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) out.append(buf, n);
+    std::fclose(f);
+    return true;
+}
+
+std::string trim(const std::string& s) {
+    size_t a = 0, b = s.size();
+    while (a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r' || s[a] == '\n')) a++;
+    while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r' || s[b - 1] == '\n')) b--;
+    return s.substr(a, b - a);
+}
+
+// Route files (tools/routes/*.txt): one or more items per line separated by commas, `#` starts a
+// comment, `include <file>` (relative to the including file) inserts another route. An item's
+// time may be `+N`: N after the previous item's start (in the same clock), so routes can be
+// edited and chained without renumbering. Output: the plain comma list the parsers read.
+void expandScript(const std::string& text, const std::string& dir, std::string& out, unsigned long& last, int depth) {
+    size_t pos = 0;
+    while (pos <= text.size()) {
+        size_t nl = text.find('\n', pos);
+        if (nl == std::string::npos) nl = text.size();
+        std::string line = text.substr(pos, nl - pos);
+        pos = nl + 1;
+        if (const auto hash = line.find('#'); hash != std::string::npos) line.resize(hash);
+        line = trim(line);
+        if (line.empty()) continue;
+        if (line.rfind("include ", 0) == 0) {
+            std::string path = trim(line.substr(8));
+            const bool absolute = path.size() > 1 && (path[0] == '/' || path[0] == '\\' || path[1] == ':');
+            if (!absolute) path = dir + path;
+            std::string sub;
+            if (depth < 8 && readFile(path, sub)) {
+                const auto slash = path.find_last_of("/\\");
+                expandScript(sub, slash == std::string::npos ? std::string() : path.substr(0, slash + 1), out, last,
+                             depth + 1);
+            } else {
+                std::fprintf(stderr, "--input: cannot include %s\n", path.c_str());
+            }
+            continue;
+        }
+        size_t ip = 0;
+        while (ip <= line.size()) {
+            size_t comma = line.find(',', ip);
+            if (comma == std::string::npos) comma = line.size();
+            std::string item = trim(line.substr(ip, comma - ip));
+            ip = comma + 1;
+            if (item.empty()) continue;
+            std::string prefix;
+            if (item.size() > 3 && (item[0] == 'P' || item[0] == 'p') && item[1] >= '1' && item[1] <= '4' && item[2] == ':') {
+                prefix = item.substr(0, 3);
+                item.erase(0, 3);
+            }
+            // `~N` at the end repeats the item N times; a +D time spaces the copies D apart.
+            unsigned long repeat = 1;
+            if (const auto tilde = item.rfind('~'); tilde != std::string::npos) {
+                repeat = std::max(1ul, std::strtoul(item.c_str() + tilde + 1, nullptr, 10));
+                item = trim(item.substr(0, tilde));
+            }
+            const auto colon = item.find(':');
+            if (colon == std::string::npos) continue;
+            const std::string t = trim(item.substr(0, colon));
+            const bool relative = !t.empty() && t[0] == '+';
+            const unsigned long v = std::strtoul(t.c_str() + (relative ? 1 : 0), nullptr, 10);
+            for (unsigned long r = 0; r < repeat; r++) {
+                const unsigned long at = relative ? last + v : (r == 0 ? v : last);
+                last = at;
+                if (!out.empty()) out += ',';
+                out += prefix + std::to_string(at) + item.substr(colon);
+            }
+        }
+    }
+}
+
+}  // namespace
+
+std::string expandInputScript(const std::string& text, const std::string& dir) {
+    std::string out;
+    unsigned long last = 0;
+    expandScript(text, dir, out, last, 0);
+    return out;
 }
 
 void parseOptions(int argc, char* argv[]) {
@@ -51,19 +140,21 @@ void parseOptions(int argc, char* argv[]) {
             o.hiddenMansion = argv[++i];
         } else if (std::strcmp(argv[i], "--input") == 0) {
             o.inputScript = argv[++i];
-            // --input @<file>: the script read from a file (long test scripts exceed the command line).
+            // --input @<file>: the script read from a route file (lines, comments, includes, +N
+            // relative times; tools/routes/). Plain scripts may use +N too.
             if (!o.inputScript.empty() && o.inputScript[0] == '@') {
-                if (FILE* f = std::fopen(o.inputScript.c_str() + 1, "rb")) {
-                    std::string s;
-                    char buf[4096];
-                    for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) s.append(buf, n);
-                    std::fclose(f);
-                    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
-                    o.inputScript = s;
+                const std::string path = o.inputScript.substr(1);
+                std::string s;
+                if (readFile(path, s)) {
+                    const auto slash = path.find_last_of("/\\");
+                    o.inputScript = expandInputScript(s, slash == std::string::npos ? std::string() : path.substr(0, slash + 1));
                 } else {
-                    std::fprintf(stderr, "--input: cannot read %s\n", o.inputScript.c_str() + 1);
+                    std::fprintf(stderr, "--input: cannot read %s\n", path.c_str());
                 }
+            } else {
+                o.inputScript = expandInputScript(o.inputScript, std::string());
             }
+            if (std::getenv("CF_INPUT_LOG")) std::fprintf(stderr, "[input] script: %s\n", o.inputScript.c_str());
         } else if (std::strcmp(argv[i], "--room-viewer") == 0) {
             o.roomViewer = argv[++i];
             o.modelViewer = "(room)";  // the viewer scene handles both

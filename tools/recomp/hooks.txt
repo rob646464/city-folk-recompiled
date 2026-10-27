@@ -7,3 +7,6 @@
 #
 # Every named DOL function is replaceable by name already (no line needed); lines here are for
 # REL functions and patches. A line applies to the USA build unless tagged only "pal".
+
+# Random::setSeed(this, seed) (stw r4,0(r3)): CF_RNG_SEED test aid in src/game/cf_game.cpp.
+fn_802AA1A0

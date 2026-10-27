@@ -19,6 +19,7 @@
 #include <cstring>
 #include <ctime>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 
@@ -405,12 +406,27 @@ HLE(OSUnlockMutex) {
 
 // --- time -----------------------------------------------------------------------
 
+// CF_TIME_LOG=1: the first call of OSGetTime/OSGetTick from each return address (who reads the
+// clock: RNG seeds, timers), with the guest frame.
+static void logTimeCaller(const char* fn, u32 lr) {
+    static const bool on = std::getenv("CF_TIME_LOG") != nullptr;
+    if (!on) return;
+    static std::mutex m;
+    static std::set<u32> seen;
+    std::lock_guard lk(m);
+    if (seen.insert(lr).second) log("[time] %s from lr %08X (guest frame %u)", fn, lr, game::guestFrames());
+}
+
 HLE(OSGetTime) {
+    logTimeCaller("OSGetTime", c.lr);
     const u64 t = timeBase();
     c.r[3] = u32(t >> 32);
     c.r[4] = u32(t);
 }
-HLE(OSGetTick) { c.r[3] = u32(timeBase()); }
+HLE(OSGetTick) {
+    logTimeCaller("OSGetTick", c.lr);
+    c.r[3] = u32(timeBase());
+}
 // OSCalendarTime {sec, min, hour, mday, mon (0-11), year, wday, yday, msec, usec} -> ticks since
 // 2000-01-01 (the inverse of OSTicksToCalendarTime; out-of-range fields carry over).
 HLE(OSCalendarTimeToTicks) {
