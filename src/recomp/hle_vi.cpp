@@ -167,11 +167,23 @@ HLE(VIWaitForRetrace) {
     const u32 start = sRetraceCount.load();
     while (sRetraceCount.load() == start) sched::sleepOn(sRetraceQueue);
 }
+// RVL games built on EGG (City Folk: EGG::AsyncDisplay) set the next frame buffer from their
+// retrace callback, at an interrupt that can arrive in the middle of a draw (the poll at a loop
+// back-edge between GXBegin and the last vertex). Presenting there ended the Aurora frame inside
+// the draw (malformed FIFO data: vertices cut off from their draw command). The first such call
+// switches to presenting at GXCopyDisp, where the frame's drawing is finished.
+std::atomic<bool> sCopyPresents{false};
 HLE(VISetNextFrameBuffer) {
-    if (!frame::presentOnCopy()) frame::present(c, c.r[3], sBlack);
+    if (frame::presentOnCopy()) return;
+    if (sched::inIrq()) {
+        sCopyPresents = true;
+        log("[vi] VISetNextFrameBuffer from an interrupt (lr %08X): frames end at GXCopyDisp", c.lr);
+        return;
+    }
+    frame::present(c, c.r[3], sBlack);
 }
 
-bool frame::presentOnCopy() { return palGame(); }
+bool frame::presentOnCopy() { return palGame() || sCopyPresents.load(std::memory_order_relaxed); }
 
 // European double-buffered frame end (fn_80007844, called by LMChangeFrameBuffer): it copies
 // the frame only when the VI has picked up the previous one (lbl_804C5700, set by the
