@@ -84,8 +84,8 @@ struct AudioSettings {
     float sfxVolume = 1.0f;     // everything else
     AudioOutput output = AudioOutput::Stereo;
     bool swapChannels = false;
-    bool reverb = true;        // DSP effect lines (echo/reverb) and the chorus bus
-    bool voiceFilters = true;  // per-voice FIR / IIR / distortion stages of the DSP microcode
+    bool reverb = true;        // aux bus returns (the game's AXFX reverb/chorus/delay) mixed back in
+    bool voiceFilters = true;  // per-voice low-pass / biquad (and remote speaker filter) of the AX microcode
     bool sincResampler = true; // windowed-sinc 32 kHz -> device rate (off: SDL's resampler)
 };
 

@@ -154,7 +154,25 @@ void runIrqs() {
         Ctx& c = sIrqCtx;
         c.r[1] = sIrqStackTop;
         c.msr = 0;
+        static const bool sTimeIrqs = std::getenv("CF_IRQ_STALL") != nullptr;
+        if (!sTimeIrqs) {
+            fn(c);
+            continue;
+        }
+        // CF_IRQ_STALL: an interrupt handler that runs long holds every other interrupt (with
+        // CF_TRACE=ring: the functions it ran last).
+        const auto t0 = std::chrono::steady_clock::now();
         fn(c);
+        const double ms = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e3;
+        if (ms > 20) {
+            std::string s;
+            for (u32 i = c.ringPos > 24 ? c.ringPos - 24 : 0; i < c.ringPos; i++) {
+                char b[12];
+                std::snprintf(b, sizeof b, " %08X", c.ring[i & 31]);
+                s += b;
+            }
+            log("[stall] interrupt handler ran %.1f ms; recent%s", ms, s.c_str());
+        }
     }
     tInIrq = false;
 }

@@ -17,6 +17,8 @@ can take. Status: pending = not in LM/SMS yet.
 | 10 | GX HLE additions: GXGetYScaleFactor / GXGetNumXfbLines (not implemented in Aurora), GXSetProjectionv, GXInitTexObjWrapMode, texture object getters, GXGetTexObjLODAll (remembered LOD params), light getters + GXInitLightAttnA/K, indexed matrix loads (GXLoadNrmMtxIndx3x3 written as CP LOAD_INDX_B: Aurora lacks it) | src/recomp/hle_gx.cpp | not linked in LM | pending, optional |
 | 11 | OSCalendarTimeToTicks HLE; RVL OSAlarm size 0x30 (user data) | src/recomp/hle_os.cpp | GC alarm is 0x28 (LM's memset is right there) | n/a for LM |
 | 12 | `cfembed` folder mode (a directory becomes one blob of its .txt files) | tools/recomp/cfembed.cpp | — | optional |
+| 13 | `CF_IRQ_STALL=1` also times every interrupt handler and logs those over 20 ms with their recent functions (`CF_TRACE=ring`): found a frame handoff blocking inside the VI retrace interrupt | src/recomp/sched.cpp runIrqs | test aid (LM_IRQ_STALL) | pending |
+| 14 | AI pacing log: "AI interrupt without the game's mix" says whether the interrupt's callback ran and whether the DSP frame was still in flight; slow AI callbacks (> 20 ms) logged | src/recomp/hle_audio.cpp | test aid | pending |
 
 ## Aurora patch series
 Same files as LM (patches/aurora, LM's 0001-0250 at Aurora 50e5be3); no City Folk patches (0300+)
