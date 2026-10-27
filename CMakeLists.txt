@@ -72,6 +72,15 @@ target_include_directories(cf_wiimote_hid_test PRIVATE src)
 enable_testing()
 add_test(NAME wiimote_hid COMMAND cf_wiimote_hid_test)
 
+# Online room transport (src/recomp/online_net.*, docs/ONLINE.md): host + members over loopback UDP.
+add_executable(cf_online_test tools/tests/online_net_test.cpp src/recomp/online_net.cpp
+    src/recomp/online_nat.cpp src/recomp/online_crypto.cpp)
+target_include_directories(cf_online_test PRIVATE src)
+if (WIN32)
+    target_link_libraries(cf_online_test PRIVATE ws2_32 iphlpapi bcrypt)
+endif ()
+add_test(NAME online_net COMMAND cf_online_test)
+
 # Runtime shared by both executables: memory/CPU helpers, scheduler, HLE SDK, frame driver,
 # audio, menu, and the game-specific parts in src/game. module_rt.cpp belongs to the game
 # module, not the runtime.
@@ -93,7 +102,7 @@ function(cf_runtime_target tgt)
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/data/pipelines.bin $<TARGET_FILE_DIR:${tgt}>)
     endif ()
     if (WIN32)
-        target_link_libraries(${tgt} PRIVATE dbghelp winhttp bcrypt)  # winhttp/bcrypt: updater
+        target_link_libraries(${tgt} PRIVATE dbghelp winhttp bcrypt ws2_32 iphlpapi)  # winhttp/bcrypt: updater; ws2_32/iphlpapi: online
         target_sources(${tgt} PRIVATE ${CMAKE_SOURCE_DIR}/packaging/windows/longpath.manifest)
         add_custom_command(TARGET ${tgt} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:${tgt}> $<TARGET_FILE_DIR:${tgt}>
