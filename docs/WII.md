@@ -61,6 +61,49 @@ items done as they land.
   let F1 pick 4:3), then Hor+ ultrawide on top, as in LM.
 - 480p / PAL60 / EuRGB60 from SC/VI settings.
 
+### Rendering status (branch render-1)
+
+- **Physical addresses in game-written GX data** (Aurora 0300, `GXSetAuroraPhysicalMemoryRange`,
+  set in the GXInit HLE: MEM1 at 0, MEM2 at 0x10000000). NW4R g3d's shape display lists set the
+  vertex array bases (CP 0xA0+) and EGG/g3d write `GX_CMD_CALL_DL` (0x40) straight into the FIFO,
+  both with physical (often MEM2) addresses. Aurora ignored them ("Ignoring nested
+  GX_CMD_CALL_DL", ~14 per frame), so every g3d model was invisible: the black bus scene, and the
+  title town too. Now the arrays are mapped, called lists are processed in place (a call inside a
+  called list is ignored, as on the hardware), and raw texture/TLUT loads (TX_SETIMAGE3 with its
+  24-bit Wii address field, BP 0x64/0x65) are resolved as in SMS's 0101. Note: a called list is
+  read when Aurora's FIFO thread reaches it (as on the console's GPU); a game that rewrites a list
+  right after calling it would race (LM's vertex-snapshot issue), not seen yet.
+- **VIConfigure** passes the render mode to Aurora (fbWidth x efbHeight): City Folk draws
+  640x456 (viWidth 686 at 16:9, 670 at 4:3); the blue band under the picture was the rest of a
+  640x480 EFB.
+- **Aspect**: `SCGetAspectRatio` (src/recomp/hle_display.cpp) reports 16:9 unless F1 > Visuals >
+  Aspect is Original 4:3 or `--aspect 4:3` (read at boot; main's generated SYSCONF says the same).
+  The game then lays out its 2D for 16:9 and draws anamorphic into 640x456. widescreen.cpp's base
+  aspect is the game's (16:9): a window at or below it gets the frame fitted at that aspect
+  (Aurora 0301 `VISetDisplayAspect`, the fit used to go by 640/456), wider windows stretch + Hor+
+  (factor 16:9 / window aspect; HUD anchoring hooks not written for City Folk yet). Default
+  window 1280x720.
+- **Frame hand-off**: EGG::AsyncDisplay calls VISetNextFrameBuffer from its retrace callback.
+  Presenting there blocked the interrupt (audio stutter up to 2.4 s, the exit hang: the VI timer
+  thread waited in present() while the main thread joined it) and ended the Aurora frame inside a
+  draw when the interrupt came at a loop back-edge between GXBegin and the last vertex (malformed
+  FIFO data on the town map). The first call from an interrupt switches to presenting at
+  GXCopyDisp (`frame::presentOnCopy`, as LM's PAL release). Shutdown stops the frame hand-off
+  before joining the timer thread.
+- **Display lists**: recorded into a host buffer; a list that does not fit the game's buffer in
+  Aurora's (longer) encoding stays in host memory and the game's buffer gets a 32-byte
+  `GX_AURORA_CALL_HOST_DL` (Aurora 0302). City Folk's lists all fit since GXDrawSphere is
+  implemented (EGG::DrawGX's two sphere lists were empty/overflowing). Test aids `CF_DL_LOG=1`,
+  `CF_DL_FORCE_HOST=1`.
+- RVL GX HLE added: GXGetProjectionv, GXGetTexObjAll/Fmt/MipMap/UserData, GXLoadTexObjPreLoaded,
+  GXGetViewportv, GXGetScissor, GXGetVtxDescv/AttrFmt(v), draw-done callback, GXDrawSphere,
+  FIFO/metric/poke/field stubs. GXSetZScaleOffset is logged, not applied (Aurora has no depth
+  scale/offset yet).
+- Verified (screenshots, US disc, 1280x720): wrist strap, title town, Rover's spotlight stage,
+  the bus interior (seats, windows, cab), name/town keyboards, town arrival at the gate (bus,
+  bus stop, player, blob shadow), town map. Open: no console reference capture compared yet
+  (only from memory of the game); GXSetZScaleOffset; Hor+ HUD anchoring; interpolation not tried.
+
 ## IOS (Starlet)
 
 The game reaches every device through IPC to IOS (`IOS_Open/Ioctl(v)/Read/Write`). Decision
@@ -150,7 +193,8 @@ the CPU given up).
    devices, step 5), DSP task stand-in (replaced by the AX stand-in, branch ax-audio),
    Wii Remote stand-in (`hle_wpad.cpp`: channel 0 buttons from the host pad, no pointer/
    Nunchuk, so the game shows "Communications with the Wii Remote have been interrupted").
-   Open: the bus interior's 3D does not show (black behind the dialogue), a blue band under the
+   Fixed on branch render-1 (see "Rendering status"): the bus interior's 3D, the blue band, the
+   exit hang. Was open: the bus interior's 3D does not show (black behind the dialogue), a blue band under the
    456-line EFB copy (VIConfigure is a no-op: VI/XFB size not taken from the render mode), exit
    hangs in shutdown (killed after the test; the main thread waits in `vi::stopTimer`'s join,
    seen 2026-10-27 with CF_HANG_DUMP). With Aurora's FIFO thread the title intro often ends in

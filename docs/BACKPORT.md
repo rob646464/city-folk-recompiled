@@ -20,6 +20,18 @@ can take. Status: pending = not in LM/SMS yet.
 | 13 | `CF_IRQ_STALL=1` also times every interrupt handler and logs those over 20 ms with their recent functions (`CF_TRACE=ring`): found a frame handoff blocking inside the VI retrace interrupt | src/recomp/sched.cpp runIrqs | test aid (LM_IRQ_STALL) | pending |
 | 14 | AI pacing log: "AI interrupt without the game's mix" says whether the interrupt's callback ran and whether the DSP frame was still in flight; slow AI callbacks (> 20 ms) logged | src/recomp/hle_audio.cpp | test aid | pending |
 
+| 15 | VIConfigure HLE passes the guest render mode to Aurora (frame buffer sized fbWidth x efbHeight) | src/recomp/hle_vi.cpp | LM/SMS draw 640x480 (no change) | pending, optional |
+| 16 | VISetNextFrameBuffer from an interrupt switches to presenting at GXCopyDisp; shutdown stops the frame hand-off before joining the VI timer thread | src/recomp/hle_vi.cpp, main.cpp | latent (GC games call it from the game thread) | pending |
+| 17 | Widescreen base aspect = the game's (16:9 or 4:3); narrower windows fit the frame at that aspect | src/recomp/widescreen.cpp/.h | LM/SMS: base stays 4:3 | n/a |
+| 18 | Game display lists recorded into a host buffer; oversized ones kept in host memory behind a GX_AURORA_CALL_HOST_DL (Aurora 0302) | src/recomp/hle_gx.cpp | LM/SMS: lists near their buffer size would stop being cut to 0 | pending |
+| 19 | GX HLE: GXGetProjectionv, GXGetTexObjAll/Fmt/MipMap/UserData, GXLoadTexObjPreLoaded, GXGetViewportv, GXGetScissor, GXGetVtxDescv/AttrFmt(v), draw-done callback, GXDrawSphere (Aurora's), stubs | src/recomp/hle_gx.cpp | not linked in LM | pending, optional |
+
 ## Aurora patch series
-Same files as LM (patches/aurora, LM's 0001-0250 at Aurora 50e5be3); no City Folk patches (0300+)
-yet. Note: upstream Aurora has moved on (WPAD/KPAD implementations); we stay on LM's commit.
+Same files as LM (patches/aurora, LM's 0001-0250 at Aurora 50e5be3), plus City Folk's 0300+
+(generic). Note: upstream Aurora has moved on (WPAD/KPAD implementations); we stay on LM's commit.
+
+| Patch | What | LM/SMS |
+|---|---|---|
+| 0300-guest-physical-memory-ranges | Physical address windows (`GXSetAuroraPhysicalMemoryRange`, up to 4; `GXSetAuroraPhysicalMemory(base, mask)` = SMS's call): raw CP array bases, TX_SETIMAGE3 (24-bit), TLUT loads/refs, and `GX_CMD_CALL_DL` processed in place (nested calls ignored) | superset of SMS 0101 (SMS can replace 0101 with it; LM: not needed) |
+| 0301-display-aspect | `VISetDisplayAspect`: the fit viewport policy fits to a display aspect instead of the frame buffer's ratio | optional |
+| 0302-call-host-display-list | `GX_AURORA_CALL_HOST_DL` (u64 pointer, u32 size) command | optional (with BACKPORT 18) |
