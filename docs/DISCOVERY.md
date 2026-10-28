@@ -86,7 +86,9 @@ Methods, in order (confidence in `names.txt`):
 - the references vote; disagreements are logged (`--report`), a name is not given twice unless
   some reference uses it for several functions (static functions such as `Callback`).
 - `manual`: `config/<id>/names_manual.txt` (`dol <addr> <name> <note>`), applied last
-  (none yet).
+  (51 DWC functions, docs/ONLINE.md section 2). `tools/discovery/apply_manual.py` applies them to
+  all four versions' symbols.txt/names.txt without decomp-toolkit (other versions through
+  `us_map.txt`), the same result the full pipeline gives.
 - `map` (PAL/Japan/Korea): from the USA name of the matched function.
 
 Spot checks (disassembly): `OSGetTime` (mftbu/mftb loop), `SCGetAspectRatio`,
