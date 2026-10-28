@@ -7,6 +7,7 @@
 #include "recomp/system.h"
 #include "recomp/game.h"
 #include "recomp/gx_bridge.h"
+#include "game/cf_region.h"
 
 #include "port/install.h"
 #include "port/options.h"
@@ -1661,6 +1662,8 @@ void gameplayTab() {
     ImGui::SeparatorText("Seasons and weather");
     sDirty |= recomp::calendar::drawHemisphereMenu();  // src/game/cf_calendar.cpp
     sDirty |= recomp::calendar::drawWeatherMenu();     // src/game/cf_weather.cpp
+    // Content from other regions (src/game/cf_region.cpp).
+    sDirty |= recomp::region::menuSection();
 }
 
 // Debug: the game's debug entries (src/game).
