@@ -14,6 +14,7 @@
 // Generic: nothing here is specific to one game. The format is in src/recompiler/rel_format.h.
 #include "recomp/hle.h"
 #include "recomp/runtime.h"
+#include "recomp/wiimote.h"
 #include "recompiler/rel_format.h"
 
 #include <algorithm>
@@ -201,6 +202,7 @@ void registerModule(u32 m) {
                       sLinked.end());
         sLinked.push_back(std::move(l));
     }
+    wiimote::noteScriptEvent(moduleName(id));  // route anchors (`after link <module>`)
     if (logOn()) {
         std::string secs;
         for (u32 s = 0; s < nsec; s++) {

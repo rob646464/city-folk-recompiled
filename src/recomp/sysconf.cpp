@@ -298,8 +298,119 @@ const char* languageName(int lang) {
     return lang >= 0 && lang < 10 ? kNames[lang] : "default";
 }
 
+namespace {
+// --- WiiConnect24 files ------------------------------------------------------------------
+// Every Wii has the WiiConnect24 configuration, friend lists, download task list and mailboxes
+// in /shared2/wc24 (written by the System Menu at first setup, whether WiiConnect24 is ever turned
+// on or not). The game's NWC24 library opens them; City Folk's save path runs WiiConnect24 tasks
+// (fn_80177F44 tasks: download tasks, friend info, letters) before it writes rvforest.dat. Written
+// once when missing, as a console that never connected: no user id yet (creation stage 0), the
+// standard server URLs, empty lists, empty mailboxes. Layouts from the NWC24 library's checks and
+// public WiiConnect24 documentation.
+void putBe32(std::vector<u8>& b, size_t o, u32 v) {
+    b[o] = u8(v >> 24);
+    b[o + 1] = u8(v >> 16);
+    b[o + 2] = u8(v >> 8);
+    b[o + 3] = u8(v);
+}
+void putBe16(std::vector<u8>& b, size_t o, u16 v) {
+    b[o] = u8(v >> 8);
+    b[o + 1] = u8(v);
+}
+void putStr(std::vector<u8>& b, size_t o, const char* s) { std::memcpy(b.data() + o, s, std::strlen(s)); }
+
+std::vector<u8> wc24Config() {
+    std::vector<u8> b(0x400, 0);
+    putStr(b, 0x00, "WcCf");
+    putBe32(b, 0x04, 8);           // version
+    // 0x08 friend code (u64) 0, 0x10 id generation count 0, 0x14 creation stage 0 (no id yet)
+    putStr(b, 0x18, "@wii.com");   // mail domain
+    const char* urls[5] = {"https://amw.wc24.wii.com/cgi-bin/account.cgi", "http://rcw.wc24.wii.com/cgi-bin/check.cgi",
+                           "http://mtw.wc24.wii.com/cgi-bin/receive.cgi", "http://mtw.wc24.wii.com/cgi-bin/delete.cgi",
+                           "http://mtw.wc24.wii.com/cgi-bin/send.cgi"};
+    for (int i = 0; i < 5; i++) putStr(b, 0x9C + 0x80 * size_t(i), urls[i]);
+    u32 sum = 0;
+    for (size_t o = 0; o < 0x3FC; o += 4) sum += u32(b[o]) << 24 | u32(b[o + 1]) << 16 | u32(b[o + 2]) << 8 | b[o + 3];
+    putBe32(b, 0x3FC, sum);  // checksum: sum of the 255 words before it
+    return b;
+}
+std::vector<u8> wc24Header(const char* magic, u32 version, u32 word8, size_t size) {
+    std::vector<u8> b(size, 0);
+    putStr(b, 0, magic);
+    putBe32(b, 4, version);
+    putBe32(b, 8, word8);
+    return b;
+}
+std::vector<u8> wc24DownloadList() {
+    std::vector<u8> b = wc24Header("WcDl", 1, 0, 63488);  // 0x800 header + 120 task records of 0x200
+    putBe16(b, 0x10, 0x20);  // subtasks per task
+    putBe16(b, 0x12, 8);     // reserved mail entries
+    putBe16(b, 0x14, 120);   // tasks
+    return b;
+}
+// Mailbox control file: 0x80-byte header + one 0x80-byte record per message slot, the free
+// slots chained through +0x0C (offset of the next free record, 0 at the end).
+std::vector<u8> wc24MailboxControl(u32 size, u32 mailboxSize) {
+    std::vector<u8> b = wc24Header("WcTf", 4, 0, size);
+    const u32 slots = size / 0x80 - 1;
+    putBe32(b, 0x0C, slots);
+    putBe32(b, 0x14, size);
+    putBe32(b, 0x18, 1);
+    putBe32(b, 0x1C, 0x80);  // first free record
+    putBe32(b, 0x24, mailboxSize);
+    std::memset(b.data() + 0x58, '0', 31);
+    for (u32 i = 1; i <= slots; i++) putBe32(b, size_t(0x80) * i + 0x0C, i < slots ? 0x80 * (i + 1) : 0);
+    return b;
+}
+// Mailbox volume (VFF, the VF library's FAT volume): header + the start of an empty FAT, as
+// a freshly formatted volume begins (the rest of a real 7 / 2 MB volume is empty).
+std::vector<u8> wc24Mailbox(u32 volumeSize, bool fat16) {
+    std::vector<u8> b(0x30, 0);
+    putStr(b, 0, "VFF ");
+    putBe16(b, 4, 0xFEFF);
+    putBe16(b, 6, 0x0100);
+    putBe32(b, 8, volumeSize);
+    putBe16(b, 0x0C, 0x20);  // cluster size in 16-byte units (512 bytes)
+    const u8 fat[] = {0xF0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    std::memcpy(b.data() + 0x20, fat, fat16 ? 6 : 4);
+    if (!fat16) b[0x24] = 0x0F;
+    return b;
+}
+
+void prepareWc24() {
+    if (const char* v = std::getenv("CF_WC24_FILES"); v && *v == '0') return;  // A/B test aid: leave them out
+    struct F {
+        const char* path;
+        std::vector<u8> (*make)();
+    };
+    static const F files[] = {
+        {"/shared2/wc24/nwc24msg.cfg", &wc24Config},
+        {"/shared2/wc24/nwc24msg.cbk", &wc24Config},
+        {"/shared2/wc24/nwc24fl.bin", [] { return wc24Header("WcFl", 2, 100, 32864); }},
+        {"/shared2/wc24/nwc24fls.bin", [] { return wc24Header("WcFs", 2, 0x150, 12800); }},
+        {"/shared2/wc24/nwc24dl.bin", &wc24DownloadList},
+        {"/shared2/wc24/mbox/wc24send.ctl", [] { return wc24MailboxControl(0x4000, 0x200000); }},
+        {"/shared2/wc24/mbox/wc24recv.ctl", [] { return wc24MailboxControl(0x8000, 0x700000); }},
+        {"/shared2/wc24/mbox/wc24send.mbx", [] { return wc24Mailbox(0x200000, false); }},
+        {"/shared2/wc24/mbox/wc24recv.mbx", [] { return wc24Mailbox(0x700000, true); }},
+    };
+    int made = 0;
+    for (const F& f : files) {
+        const fs::path p = ios::hostPath(f.path);
+        std::error_code ec;
+        if (fs::exists(p, ec)) continue;
+        fs::create_directories(p.parent_path(), ec);
+        writeFile(p, f.make());
+        made++;
+    }
+    if (made) recomp::log("[sys] WiiConnect24 files created in /shared2/wc24 (%d; WiiConnect24 never set up)", made);
+}
+
+}  // namespace
+
 void prepareNand() {
     writeSysconf();
+    prepareWc24();
     const char* settingPath = "/title/00000001/00000002/data/setting.txt";
     writeFile(ios::hostPath(settingPath), settingTxtEncrypted());
     ios::Attr a;

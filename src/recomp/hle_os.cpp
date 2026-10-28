@@ -19,6 +19,7 @@
 #include <cstring>
 #include <ctime>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 
@@ -192,6 +193,8 @@ void armAlarm(u32 alarm, u64 ticks, u32 handler, u64 period) {
 }
 }  // namespace
 
+static u64 gameClock();  // the clock the game reads (below)
+
 // RVL OSAlarm is 0x30 bytes: the GameCube layout plus user data at +0x28.
 HLE(OSSetAlarmUserData) { wr32(c.r[3] + 0x28, c.r[4]); }
 HLE(OSGetAlarmUserData) { c.r[3] = rd32(c.r[3] + 0x28); }
@@ -204,7 +207,7 @@ HLE(OSCreateAlarm) {
 HLE(OSSetAlarm) { armAlarm(c.r[3], u64(c.r[5]) << 32 | c.r[6], c.r[7], 0); }
 HLE(OSSetPeriodicAlarm) {
     // (alarm, u64 start r5:r6, u64 period r7:r8, handler r9); start is absolute time.
-    const u64 now = timeBase(), start = u64(c.r[5]) << 32 | c.r[6], period = u64(c.r[7]) << 32 | c.r[8];
+    const u64 now = gameClock(), start = u64(c.r[5]) << 32 | c.r[6], period = u64(c.r[7]) << 32 | c.r[8];
     armAlarm(c.r[3], start > now ? start - now : 0, c.r[9], period ? period : 1);
 }
 HLE(OSCancelAlarm) {
@@ -277,7 +280,21 @@ HLE(OSRegisterVersion) {
     static const bool sLog = std::getenv("CF_OS_LOG") != nullptr;
     if (sLog) log("[os] %s", gstr(c.r[3]));
 }
-HLE(OSIsThreadTerminated) { setBool(c, sched::isTerminated(c.r[3])); }
+HLE(OSIsThreadTerminated) {
+    const bool t = sched::isTerminated(c.r[3]);
+    // CF_THREAD_LOG=1: a thread's terminated state each time a caller sees it change (who waits on whom).
+    static const bool on = std::getenv("CF_THREAD_LOG") != nullptr;
+    if (on) {
+        static std::mutex m;
+        static std::unordered_map<u32, int> last;
+        std::lock_guard lk(m);
+        auto [it, fresh] = last.try_emplace(c.r[3], -1);
+        if (it->second != int(t))
+            log("[thread] OSIsThreadTerminated(%08X) = %d (lr %08X, frame %u)", c.r[3], int(t), c.lr, game::guestFrames());
+        it->second = int(t);
+    }
+    setBool(c, t);
+}
 HLE(OSDetachThread) { sched::detach(c.r[3]); }
 HLE(OSInitThreadQueue) {
     wr32(c.r[3], 0);
@@ -404,12 +421,63 @@ HLE(OSUnlockMutex) {
 
 // --- time -----------------------------------------------------------------------
 
+// CF_TIME_LOG=1: the first call of OSGetTime/OSGetTick from each return address (who reads the
+// clock: RNG seeds, timers), with the guest frame.
+static void logTimeCaller(const char* fn, u32 lr) {
+    static const bool on = std::getenv("CF_TIME_LOG") != nullptr;
+    if (!on) return;
+    static std::mutex m;
+    static std::set<u32> seen;
+    std::lock_guard lk(m);
+    if (seen.insert(lr).second) log("[time] %s from lr %08X (guest frame %u)", fn, lr, game::guestFrames());
+}
+
+// Test aid CF_CLOCK_FRAMES=1 (scripted routes, with CF_CLOCK_START): the clock the game reads
+// (OSGetTime/OSGetTick) follows guest frames instead of host time: frame n starts at n/59.94 s
+// after the clock start, and each read inside a frame adds 1 us. Dates, times of day and values
+// the game derives from the clock (City Folk's new player/town ids, its town generator's inputs)
+// are then the same at the same frame in every run. A frame that reads the clock more than 8000
+// times (a loop waiting for time) continues in real time from there, so waits still end. Reads
+// are counted per guest thread (threads whose reads depend on host timing don't shift others).
+// Host-side timing (alarms, IOS/DVD latency) stays real.
+static u64 gameClock() {
+    static const bool frameClock = std::getenv("CF_CLOCK_FRAMES") != nullptr;
+    if (!frameClock) return timeBase();
+    static std::mutex m;
+    struct PerThread {
+        u64 last = 0, frameStart = 0;
+        u32 frame = ~0u, reads = 0;
+    };
+    static std::unordered_map<u32, PerThread> threads;  // guest thread -> its reads
+    constexpr double kFrameTicks = kTimerClock / 59.94;
+    constexpr u64 kReadTicks = u64(kTimerClock / 1e6);
+    constexpr u32 kCountedReads = 8000;
+    std::lock_guard lk(m);
+    const u32 f = game::guestFrames();
+    const u64 real = timeBase();
+    PerThread& t = threads[sched::currentGuest()];  // per thread: other threads' reads don't shift it
+    if (f != t.frame) {
+        t.frame = f;
+        t.frameStart = real;
+        t.reads = 0;
+    }
+    u64 offset = u64(++t.reads) * kReadTicks;
+    if (t.reads > kCountedReads) offset = std::max(offset, real - t.frameStart);
+    const u64 v = timeBaseStart() + u64(double(f) * kFrameTicks) + offset;
+    t.last = std::max(t.last + 1, v);  // never backwards
+    return t.last;
+}
+
 HLE(OSGetTime) {
-    const u64 t = timeBase();
+    logTimeCaller("OSGetTime", c.lr);
+    const u64 t = gameClock();
     c.r[3] = u32(t >> 32);
     c.r[4] = u32(t);
 }
-HLE(OSGetTick) { c.r[3] = u32(timeBase()); }
+HLE(OSGetTick) {
+    logTimeCaller("OSGetTick", c.lr);
+    c.r[3] = u32(gameClock());
+}
 // OSCalendarTime {sec, min, hour, mday, mon (0-11), year, wday, yday, msec, usec} -> ticks since
 // 2000-01-01 (the inverse of OSTicksToCalendarTime; out-of-range fields carry over).
 HLE(OSCalendarTimeToTicks) {
@@ -489,6 +557,20 @@ HLE(OSClearContext) {}
 HLE(OSSetCurrentContext) {}
 HLE(OSFillFPUContext) {}
 HLE(OSSetErrorHandler) { c.r[3] = 0; }
+// os/OSPlayRecord-era app info (os/ TU, so HLE'd): the running title's game code and type. The
+// SDK copies the 4-character code from low memory (0x80003194 when it holds a valid code, else
+// 0x80003180, where OSInit puts the disc's id) into its static buffer at r13-0x2180 and returns
+// it. NWC24 asks for it when City Folk's WiiConnect24 task lists its download tasks.
+HLE(OSGetAppGamename) {
+    const u8 c0 = rd8(0x80003194);
+    const bool alnum = (c0 >= '0' && c0 <= '9') || (c0 >= 'A' && c0 <= 'Z');
+    const u32 src = alnum ? 0x80003194 : 0x80003180;
+    const u32 buf = c.r[13] - 0x2180;
+    for (u32 i = 0; i < 4; i++) wr8(buf + i, rd8(src + i));
+    wr8(buf + 4, 0);
+    c.r[3] = buf;
+}
+HLE(OSGetAppType) { c.r[3] = rd8(0x80003184); }
 HLE(OSPanic) { fatal("OSPanic %s:%u: %s", gstr(c.r[3]), c.r[4], gstr(c.r[5])); }
 HLE(OSReport) { std::fputs(gstr(c.r[3]), stdout); }
 

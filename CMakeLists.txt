@@ -87,7 +87,8 @@ add_test(NAME online_net COMMAND cf_online_test)
 file(GLOB RECOMP_RUNTIME_SOURCES CONFIGURE_DEPENDS src/recomp/*.cpp src/game/*.cpp)
 list(REMOVE_ITEM RECOMP_RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/src/recomp/module_rt.cpp)
 list(APPEND RECOMP_RUNTIME_SOURCES src/port/crash_handler.cpp src/port/options.cpp src/port/dol.cpp
-    src/port/settings.cpp src/port/install.cpp src/port/update.cpp src/port/recovery.cpp src/port/disc_folder.cpp)
+    src/port/settings.cpp src/port/install.cpp src/port/update.cpp src/port/recovery.cpp src/port/disc_folder.cpp
+    src/port/http.cpp)
 set_source_files_properties(src/port/update.cpp PROPERTIES COMPILE_DEFINITIONS "CF_VERSION=\"${PROJECT_VERSION}\"")
 
 function(cf_runtime_target tgt)

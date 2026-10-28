@@ -216,17 +216,22 @@ the CPU given up).
 
 ### Scripted route to the town
 
-USA, `CF_INPUT_CLOCK=frames`, render-1 merged (3D/keyboard drawn), AURORA_FIFO_INLINE=1: A every 80
-frames from 1300 to 4600 (wrist strap, title, Rover); pointer `@0.41/0.42` then A every 60 to 7560
-("Start fresh!", "That's right!"); name keyboard from about frame 7600: `@-0.339/0.017` (r),
-`@0.364/0.017` (o), `@0.052/0.292` (b), `@0.656/0.778` (Confirm), each followed by A; more dialogue;
-town-name keyboard (same key positions) and Confirm; then A every 60 with the pointer cycling
-`@0.62/0.5` ("That's it!"), `@0.41/0.42`, `@0.656/0.778` (town map "OK!"): the bus arrives and the
-player stands at the town gate at about frame 16000 (the next pointer click opens the map from
-the HUD). Committed as `tools/routes/town.txt` (and `town_walk.txt`, walking from frame 16700),
-built by `tools/routes/gen_town.py`: `--input @tools/routes/town.txt`. It reaches the gate at about
-frame 13300 (the town-name step goes by without a keyboard; the player's name comes out as "'rob").
-Every new game makes a new random town, so screenshots of the town differ between runs.
+`tools/routes/new_game.txt` (USA, `CF_INPUT_CLOCK=frames`, run with `tools/routes/run.ps1`):
+wrist strap, title and Rover's lines (A every 80 from 1300), "Start fresh!" (pointer
+`@0.41/0.42`), Rover's questions, the name keyboard ("rob": `@-0.339/0.017` r, `@0.367/0.017` o,
+`@0.052/0.292` b, `@0.656/0.778` Confirm), the town-name keyboard ("Aa": `@-0.75/0.286` Shift,
+`@-0.547/0.15` a twice, Confirm), "That's it!" (`@0.625/0.508`), "SO excited!", the town map
+("OK!" at `@0.656/0.778`), bus, arrival, Rover's "Head on over to the town hall", the map hint;
+the player stands at the gate, controllable, from about frame 14900 (~250 s). One key press per
+key. Deterministic: with run.ps1's CF_RNG_SEED / CF_CLOCK_START / CF_CLOCK_FRAMES the town
+(layout, villagers Butch, Jambette, Alfonso, Whitney, Patty, ...) and every frame up to the gate
+are the same in every run (checked: identical frames 14000-19000 in two runs). `town_basics.txt`
+adds walking (STICK*), running (B) and the pockets/map buttons; `continue.txt` continues a saved
+town. Fast-forward (CF_FF) changes the game's timing and breaks the route.
+
+Seen in play: the Nunchuk stick walks in all directions (camera-relative), B held runs, the HUD
+Map button (`@0.578/0.82`) opens the town map with the player marker, B closes it; the town hall
+door opens on stick-up (when exactly varies: route with `after link d_bgi_drawNP`).
 
 ## Audio
 

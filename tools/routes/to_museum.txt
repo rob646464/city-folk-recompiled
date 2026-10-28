@@ -1,0 +1,23 @@
+# New town (run.ps1's deterministic seed/clock) -> walk/run south over the river -> the museum,
+# checking the position on the HUD map on the way (Map button `@0.578/0.82`, B closes). Indoors
+# (museum hall, Blathers) from about frame 16660. Verified 2026-10-28; with another seed or clock
+# the town differs and this walk does not fit.
+include new_game.txt
+15100:STICKLEFT*50
++60:STICKDOWN+B*150
++160:STICKRIGHT+B*50
++60:STICKDOWN+B*120
++130:STICKLEFT+B*12
++22:STICKDOWN+B*200
++210:@0.578/0.82
++20:A
++90:B
++60:STICKRIGHT+B*70
++80:STICKDOWN+B*110
++120:STICKLEFT+B*70
++80:@0.578/0.82
++20:A
++90:B
++60:STICKLEFT*30
++40:STICKUP*200
++260:@off

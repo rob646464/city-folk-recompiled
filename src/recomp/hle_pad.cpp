@@ -38,7 +38,7 @@ std::vector<ScriptedPress> parseScript(const std::string& script) {
             item.erase(0, 3);
         }
         const auto colon = item.find(':');
-        if (colon == std::string::npos) continue;
+        if (colon == std::string::npos || !(item[0] >= '0' && item[0] <= '9')) continue;  // (event-anchored items: Wii Remote only)
         ScriptedPress p{port, u32(std::strtoul(item.c_str(), nullptr, 10)), 6, 0, 0, 0};
         std::string rest = item.substr(colon + 1);
         if (const auto star = rest.find('*'); star != std::string::npos) {

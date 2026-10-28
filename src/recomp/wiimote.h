@@ -81,6 +81,9 @@ public:
 // Guest thread: the current state of a Remote (its port's source, the --input script, F1
 // menu suppression applied). Polls the host devices at most once per guest millisecond.
 void sample(int chan, State& out);
+// Test-script anchors: rel.cpp reports each REL link ("<module>"); route items written after
+// `after link <module> [n]` start relative to it (docs/CONTROLS.md "Test aids").
+void noteScriptEvent(const std::string& name);
 // The game's motor command (WPADControlMotor) for a Remote.
 void rumble(int chan, bool on);
 // The game's speaker commands and stream data (hle_wpad.cpp), for sources with a real speaker.
