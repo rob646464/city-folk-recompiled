@@ -1,6 +1,7 @@
 // Online room transport test (src/recomp/online_net.*): one host and several members in this
 // process over loopback UDP. No game, no internet. Run: build/windows-clang/cf_online_test.exe
 #include "recomp/online_crypto.h"
+#include "recomp/online_ed25519.h"
 #include "recomp/online_net.h"
 
 #include <cctype>
@@ -48,6 +49,7 @@ int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::string why;
     CHECK(onlinecrypto::selfTest(&why), "%s", why.c_str());
+    CHECK(onlinecrypto::edSelfTest(&why), "%s", why.c_str());
     setTestMode(true);
 
     // Room codes round trip.

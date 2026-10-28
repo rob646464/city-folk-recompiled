@@ -510,6 +510,12 @@ void handle(Ctx& c, const net::AppMsg& m) {
             len = rb.size;
         }
         std::memcpy(hostp(rb.buf), p, len);
+        if (log()) {
+            static int n = 0;
+            if (n++ < 40 || n % 100 == 0)
+                std::printf("[dwc] receive #%d from aid %u: %zu bytes (%s), first %08X\n", n, src, len,
+                            m.type == M_DATA ? "reliable" : "unreliable", len >= 4 ? rd32(rb.buf) : 0);
+        }
         call(c, d.recvCb, {src, rb.buf, u32(len), d.recvParam});
         break;
     }
@@ -601,7 +607,7 @@ void process(Ctx& c) {
     }
     net::AppMsg m;
     int budget = 256;
-    while (budget-- > 0 && s.pollApp(m)) handle(c, m);
+    while (budget-- > 0 && s.pollApp(m, 0x01, 0x3F)) handle(c, m);
     if (d.updPending && now() >= d.updAt) {
         d.updPending = false;
         d.updDone = true;
@@ -992,6 +998,12 @@ HLE(DWC_SendReliable) {
     const u8 aid = u8(c.r[3]);
     const u32 buf = c.r[4], size = c.r[5];
     const bool ok = sendData(aid, buf, size, true);
+    if (log()) {
+        static int n = 0;
+        if (n++ < 40 || n % 100 == 0)
+            std::printf("[dwc] SendReliable #%d to aid %u: %u bytes, first %08X%s\n", n, aid, size, size >= 4 ? rd32(buf) : 0,
+                        ok ? "" : " (refused)");
+    }
     if (ok && d.sendCb) {
         const u32 cb = d.sendCb, param = d.sendParam;
         d.later.push_back([cb, param, size, aid](Ctx& cc) { call(cc, cb, {size, aid, param}); });

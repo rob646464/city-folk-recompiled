@@ -74,7 +74,7 @@ add_test(NAME wiimote_hid COMMAND cf_wiimote_hid_test)
 
 # Online room transport (src/recomp/online_net.*, docs/ONLINE.md): host + members over loopback UDP.
 add_executable(cf_online_test tools/tests/online_net_test.cpp src/recomp/online_net.cpp
-    src/recomp/online_nat.cpp src/recomp/online_crypto.cpp)
+    src/recomp/online_nat.cpp src/recomp/online_crypto.cpp src/recomp/online_ed25519.cpp)
 target_include_directories(cf_online_test PRIVATE src)
 if (WIN32)
     target_link_libraries(cf_online_test PRIVATE ws2_32 iphlpapi bcrypt)

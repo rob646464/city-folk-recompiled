@@ -10,6 +10,8 @@
 #include "recomp/hle.h"
 #include "recomp/menu.h"
 #include "recomp/online_crypto.h"
+#include "recomp/online_ed25519.h"
+#include "recomp/online_friends.h"
 #include "recomp/online_net.h"
 
 #include <imgui.h>
@@ -35,6 +37,7 @@ namespace oc = ::onlinecrypto;
 std::atomic<u32> sPid{0};
 std::atomic<u64> sFriendKey{0};
 std::once_flag sIdentOnce;
+u8 sSeed[32];
 
 const char* envOr(const char* name, const char* def = nullptr) {
     const char* v = std::getenv(name);
@@ -60,11 +63,12 @@ void loadIdentity() {
         std::ofstream out(file, std::ios::binary);
         out.write(reinterpret_cast<const char*>(id), 32);
     }
-    u8 h[32];
-    oc::hmacSha256(id, 32, "cf-dwc-profile-id", 17, h);
-    u32 pid = (u32(h[0]) << 24 | u32(h[1]) << 16 | u32(h[2]) << 8 | h[3]) & 0x7FFFFFFFu;
-    if (pid < 0x10000) pid |= 0x10000;  // never 0 / tiny (DWC: > 0)
-    sPid = pid;
+    // Ed25519 seed for the friend key; the DWC profile id is derived from the public key, so a
+    // peer that proves its key (online_friends.cpp) also proves its in-game friend code.
+    oc::hmacSha256(id, 32, "cf-ed25519-seed", 15, sSeed);
+    u8 pub[32];
+    oc::ed25519PublicKey(sSeed, pub);
+    sPid = friends::pidOf(pub);
 }
 
 void ensureIdentity() { std::call_once(sIdentOnce, loadIdentity); }
@@ -155,6 +159,7 @@ struct TestStep {
     std::string action;
 };
 std::vector<TestStep> sSteps;
+std::vector<TestStep> sRepeat;  // steps an action asked to run again
 bool sEnvDone = false;
 std::string sCodeFile;
 bool sJoinPending = false;
@@ -206,7 +211,22 @@ void tryJoinFromEnv() {
 
 // The game's network system (USA addresses; test aid only): the calls Copper's gate makes.
 void runAction(Ctx& c, const std::string& a) {
-    std::printf("[online-test] frame %u: %s\n", recomp::game::guestFrames(), a.c_str());
+    if (a.rfind("visit:", 0) != 0) std::printf("[online-test] frame %u: %s\n", recomp::game::guestFrames(), a.c_str());
+    // F1 friends (any version): addfriend:<member id> as the member list's button, acceptfriends
+    // accepts every pending request, friends lists them.
+    if (a.rfind("addfriend:", 0) == 0) {
+        const u8 id = u8(std::atoi(a.c_str() + 10));
+        std::printf("[online-test] member %u relation %d, code %s\n", id, int(friends::relation(id)), friends::memberCode(id).c_str());
+        friends::requestFriend(id);
+        return;
+    }
+    if (a == "acceptfriends" || a == "friends") {
+        for (auto& f : friends::list()) {
+            std::printf("[online-test] friend %s %s state %d pid %u\n", f.name.c_str(), f.code.c_str(), int(f.state), f.pid);
+            if (a == "acceptfriends" && f.state == friends::State::RequestReceived) friends::accept(f.code);
+        }
+        return;
+    }
     if (port::dol::version() != port::dol::Version::RUUE01) {
         std::printf("[online-test] actions use USA addresses: skipped\n");
         return;
@@ -237,7 +257,12 @@ void runAction(Ctx& c, const std::string& a) {
     } else if (a == "host") {
         std::printf("[online-test] open gate -> %u\n", gu::call(c, 0x800DCC54));
     } else if (a.rfind("visit:", 0) == 0) {
-        std::printf("[online-test] visit -> %u\n", gu::call(c, 0x800DCCEC, {u32(std::atoi(a.c_str() + 6))}));
+        // Copper calls this every frame until it returns 1 (connected), then the trip starts.
+        static int tries = 0;
+        const u32 r = gu::call(c, 0x800DCCEC, {u32(std::atoi(a.c_str() + 6))});
+        if (r || tries % 60 == 0) std::printf("[online-test] visit -> %u (try %d)\n", r, tries);
+        if (!r && ++tries < 3600) sRepeat.push_back({recomp::game::guestFrames() + 1, a});
+        return;
     } else if (a == "disconnect") {
         std::printf("[online-test] disconnect -> %u\n", gu::call(c, 0x800DCE44));
     } else if (a.rfind("friend:", 0) == 0) {
@@ -284,6 +309,13 @@ u32 profileId() {
 
 u64 friendKey() { return sFriendKey; }
 
+const u8* identitySeed() {
+    ensureIdentity();
+    return sSeed;
+}
+
+void postNotice(const std::string& text) { notice(text); }
+
 void setFriendKey(u64 key) {
     sFriendKey = key;
     pushIdentity();
@@ -319,17 +351,31 @@ void onGuestFrame(Ctx& c) {
             lastThr = s2;
         }
     }
-    for (auto& s : sSteps)
-        if (s.frame && f >= s.frame) {
-            s.frame = 0;
-            runAction(c, s.action);
+    for (size_t i = 0; i < sSteps.size(); i++)
+        if (sSteps[i].frame && f >= sSteps[i].frame) {
+            sSteps[i].frame = 0;
+            const std::string a = sSteps[i].action;
+            runAction(c, a);
         }
+    for (auto& r : sRepeat) sSteps.push_back(r);
+    sRepeat.clear();
+    // The game's own session state while connected (online system +0x3664: 3 = in a session).
+    if (logOn() && port::dol::version() == port::dol::Version::RUUE01) {
+        static u32 last = ~0u;
+        const u32 sys = rd32(0x8074E7B8);
+        if (sys >= 0x80000000u && sys < 0x93F00000u && rd32(sys + 0x3664) != last) {
+            last = rd32(sys + 0x3664);
+            std::printf("[online] frame %u: online system session state (+0x3664) %u\n", f, last);
+        }
+    }
 }
 
 void drawOverlay() {
     watchRoom();
+    friends::tick();
     const auto snap = net::session().snapshot();
-    const bool showReq = !snap.pending.empty();
+    const auto freq = friends::incoming();
+    const bool showReq = !snap.pending.empty() || !freq.empty();
     std::vector<Notice> live;
     {
         std::lock_guard<std::mutex> g(sNoticeMutex);
@@ -354,15 +400,26 @@ void drawOverlay() {
             if (ImGui::SmallButton("Decline")) net::session().answerJoinRequest(r.ticket, false);
             ImGui::PopID();
         }
+        for (auto& f : freq) {
+            ImGui::PushID(f.code.c_str());
+            ImGui::Text("%s (%s) wants to be your friend", f.name.c_str(), f.code.c_str());
+            if (ImGui::SmallButton("Accept")) friends::accept(f.code);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Decline")) friends::decline(f.code);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Block")) friends::block(f.code);
+            ImGui::PopID();
+        }
     }
     ImGui::End();
 }
 
 static void memberTable(const net::Snapshot& snap, bool canKick) {
-    if (!ImGui::BeginTable("members", canKick ? 4 : 3, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) return;
+    if (!ImGui::BeginTable("members", canKick ? 5 : 4, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) return;
     ImGui::TableSetupColumn("Player");
     ImGui::TableSetupColumn("Friend code (in game)");
     ImGui::TableSetupColumn("Ping");
+    ImGui::TableSetupColumn("Friend");
     if (canKick) ImGui::TableSetupColumn("");
     ImGui::TableHeadersRow();
     for (auto& m : snap.members) {
@@ -375,6 +432,23 @@ static void memberTable(const net::Snapshot& snap, bool canKick) {
         ImGui::TableNextColumn();
         if (m.self || m.rttMs < 0) ImGui::TextDisabled("-");
         else ImGui::Text("%d ms", m.rttMs);
+        ImGui::TableNextColumn();
+        if (!m.self) {
+            switch (friends::relation(m.id)) {
+            case friends::Rel::Unknown: ImGui::TextDisabled("checking key..."); break;
+            case friends::Rel::Verified:
+                if (menu::SmallButton("Add friend")) friends::requestFriend(m.id);
+                ImGui::SetItemTooltip("Sends %s a friend request (their key %s came over the room).", m.name.c_str(),
+                                      friends::memberCode(m.id).c_str());
+                break;
+            case friends::Rel::Friend: ImGui::TextUnformatted("Friend"); break;
+            case friends::Rel::RequestSent: ImGui::TextDisabled("Request sent"); break;
+            case friends::Rel::RequestReceived:
+                if (menu::SmallButton("Accept request")) friends::requestFriend(m.id);
+                break;
+            case friends::Rel::Blocked: ImGui::TextDisabled("Blocked"); break;
+            }
+        }
         if (canKick) {
             ImGui::TableNextColumn();
             if (!m.self && menu::SmallButton("Kick")) net::session().kick(m.id);
@@ -382,6 +456,35 @@ static void memberTable(const net::Snapshot& snap, bool canKick) {
         ImGui::PopID();
     }
     ImGui::EndTable();
+}
+
+static void friendsSection() {
+    if (!ImGui::CollapsingHeader("Friends")) return;
+    ImGui::Text("Your friend code: %s", friends::myCode().c_str());
+    ImGui::SameLine();
+    if (menu::SmallButton("Copy##fc")) ImGui::SetClipboardText(friends::myCode().c_str());
+    ImGui::SetItemTooltip("From this install's key (never sent itself). In a room, \"Add friend\" next to a player\n"
+                          "sends a request; nobody needs to copy codes. Friends are kept in this PC's data folder.");
+    const auto fl = friends::list();
+    if (fl.empty()) ImGui::TextDisabled("No friends yet: join a room and use \"Add friend\" in its member list.");
+    for (auto& f : fl) {
+        ImGui::PushID(f.code.c_str());
+        const char* st = f.state == friends::State::Friend ? "friend" : f.state == friends::State::RequestSent ? "request sent"
+                       : f.state == friends::State::RequestReceived ? "wants to be your friend" : "blocked";
+        ImGui::Text("%s  %s  (%s)", f.name.c_str(), f.code.c_str(), st);
+        ImGui::SameLine();
+        if (f.state == friends::State::RequestReceived) {
+            if (menu::SmallButton("Accept")) friends::accept(f.code);
+            ImGui::SameLine();
+            if (menu::SmallButton("Decline")) friends::decline(f.code);
+            ImGui::SameLine();
+        }
+        if (f.state != friends::State::Blocked && menu::SmallButton("Block")) friends::block(f.code);
+        ImGui::SameLine();
+        if (menu::SmallButton(f.state == friends::State::Blocked ? "Unblock###rm" : "Remove###rm")) friends::remove(f.code);
+        ImGui::PopID();
+    }
+    ImGui::TextDisabled("Letters between friends and visits without a room: not yet (docs/ONLINE.md section 10).");
 }
 
 bool drawTab() {
@@ -533,6 +636,7 @@ bool drawTab() {
         ImGui::TextWrapped("For hosts whose router has no UPnP: forward the UDP port (default 29910) on the host's router, or "
                            "use a VPN (Tailscale, ZeroTier, Hamachi) and enter the host's VPN address.");
     }
+    friendsSection();
     dirty |= menu::Checkbox("Room notices over the game", &o.notices);
     return dirty;
 }

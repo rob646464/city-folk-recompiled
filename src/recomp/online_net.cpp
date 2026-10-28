@@ -469,6 +469,13 @@ struct Session::Impl {
         return nullptr;
     }
 
+    // Messages nobody polls (DWC traffic while the game is not online) must not crowd out the
+    // rest: the oldest goes when the inbox is full.
+    void pushInbox(AppMsg&& m) {
+        if (inbox.size() >= 4096) inbox.pop_front();
+        inbox.push_back(std::move(m));
+    }
+
     // App frame: from, to, type, frag, [total], data.
     void sendAppFrames(Link& l, u8 from, u8 to, u8 type, const u8* data, size_t len, bool reliable) {
         if (!reliable) {
@@ -547,14 +554,14 @@ struct Session::Impl {
             m.type = type;
             m.data = std::move(it->second);
             owner->reasm.erase(it);
-            if (inbox.size() < 4096) inbox.push_back(std::move(m));
+            pushInbox(std::move(m));
             return;
         }
         AppMsg m;
         m.from = from;
         m.type = type;
         m.data.assign(d, d + restLen);
-        if (inbox.size() < 4096) inbox.push_back(std::move(m));
+        pushInbox(std::move(m));
     }
 
     std::vector<u8> membersBody() {
@@ -1633,12 +1640,15 @@ bool Session::sendApp(u8 to, u8 type, const void* data, size_t len, bool reliabl
     return false;
 }
 
-bool Session::pollApp(AppMsg& out) {
+bool Session::pollApp(AppMsg& out, u8 lo, u8 hi) {
     std::lock_guard<std::recursive_mutex> g(d_->m);
-    if (d_->inbox.empty()) return false;
-    out = std::move(d_->inbox.front());
-    d_->inbox.pop_front();
-    return true;
+    for (auto it = d_->inbox.begin(); it != d_->inbox.end(); ++it)
+        if (it->type >= lo && it->type <= hi) {
+            out = std::move(*it);
+            d_->inbox.erase(it);
+            return true;
+        }
+    return false;
 }
 
 size_t Session::queuedBytes(u8 to) {

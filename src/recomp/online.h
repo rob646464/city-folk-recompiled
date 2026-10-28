@@ -18,6 +18,10 @@ bool active();
 u32 profileId();
 u64 friendKey();
 void setFriendKey(u64 key);
+// This install's 32-byte Ed25519 seed (from <data>/online/identity.bin; never leaves the PC).
+const u8* identitySeed();
+// A notice over the game for a few seconds (room / friend events).
+void postNotice(const std::string& text);
 // Player name shown in rooms (F1 setting, else "Player").
 std::string playerName();
 // Guest frame hook (cf_game.cpp onGuestFrame): CF_ONLINE_TEST actions on the game thread.

@@ -124,7 +124,8 @@ public:
     void lanScan(bool on);
     std::vector<LanRoom> lanRooms();
     bool sendApp(u8 to, u8 type, const void* data, size_t len, bool reliable);
-    bool pollApp(AppMsg& out);
+    // The oldest message with lo <= type <= hi (DWC uses 0x01-0x3F, friends 0x40-0x5F).
+    bool pollApp(AppMsg& out, u8 lo = 0, u8 hi = 0xFF);
     size_t queuedBytes(u8 to);  // reliable bytes not yet acknowledged toward `to` (flow control)
     bool pollMemberEvent(MemberEvent& out);
 
