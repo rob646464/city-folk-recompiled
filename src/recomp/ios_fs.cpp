@@ -554,9 +554,16 @@ const fs::path& nandRoot() {
         const fs::path& p = root;
         fs::create_directories(p, ec);
         // What the System Menu and IOS leave on every console: the disc title's data folder,
-        // the shared folders, an empty /tmp (IOS clears it at boot).
+        // the shared folders, the title-type folders (channels, disc titles, DLC...), an empty /tmp
+        // (IOS clears it at boot). The save's free-space check (NANDCheck-style, City Folk's "Save
+        // and quit") sums GetUsage over /title/00010001-00010007 and /shared2/title and fails with
+        // "Could not access the Wii System Memory" when one of them is missing.
         for (const std::string& d : {titleDataDir(), std::string("/shared2/sys"), std::string("/shared2/menu/FaceLib"),
-                                     std::string("/shared2/wc24/mbox"), std::string("/title/00000001/00000002/data"),
+                                     std::string("/shared2/wc24/mbox"), std::string("/shared2/title"),
+                                     std::string("/title/00000001/00000002/data"), std::string("/title/00010001"),
+                                     std::string("/title/00010002"), std::string("/title/00010003"),
+                                     std::string("/title/00010004"), std::string("/title/00010005"),
+                                     std::string("/title/00010006"), std::string("/title/00010007"),
                                      std::string("/meta"), std::string("/ticket"), std::string("/tmp")})
             fs::create_directories(hostPath(d), ec);
         for (const auto& e : fs::directory_iterator(hostPath("/tmp"), ec)) fs::remove_all(e.path(), ec);
