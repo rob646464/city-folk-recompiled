@@ -69,3 +69,9 @@ fn_802AA1A8
 # WiiConnect24 task start the save path waits on (auto names are only hookable when listed).
 fn_800D284C
 fn_80177F44
+
+# Menu navigation (src/game/cf_menu_nav.cpp, docs/CONTROLS.md "Snap pointer to menu items"): the
+# game's gui::Manager::update (a copy of the HOME Menu's homebutton::gui library).
+fn_80314AF4
+# The pane-tree walk the game's menus hit-test the pointer with (Bounding panes named "B*").
+fn_802B5598
