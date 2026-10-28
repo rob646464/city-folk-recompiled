@@ -15,7 +15,10 @@ param(
     [string]$Disc = "C:\Users\rmelv\Desktop\Animal Crossing City Folk Recompiled\US DATA\DATA",
     # Build folder under build/ (another version's dev build: windows-clang-RUUP01 etc., made by
     # tools\build.ps1 -Game <id>; pass that version's -Disc too).
-    [string]$Build = "windows-clang"
+    [string]$Build = "windows-clang",
+    # settings.ini lines written into the scratch APPDATA before the start, "[audio]|output=3|..."
+    # ('|' separates lines; for settings the game reads at boot, which CF_SETTINGS_AT is too late for).
+    [string]$Settings = ""
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -24,6 +27,11 @@ foreach ($d in @("appdata", "card", "shots")) {
     $p = Join-Path $run $d
     if (Test-Path $p) { Remove-Item -Recurse -Force $p }
     New-Item -ItemType Directory -Force $p | Out-Null
+}
+if ($Settings) {
+    $sd = Join-Path $run "appdata\Animal Crossing City Folk Recompiled"
+    New-Item -ItemType Directory -Force $sd | Out-Null
+    ($Settings -split '\|') -join "`n" | Out-File -Encoding ascii (Join-Path $sd "settings.ini")
 }
 if (-not $Nand) { $Nand = Join-Path $run "nand" }
 if (-not $KeepNand -and (Test-Path $Nand) -and -not $PSBoundParameters.ContainsKey("Nand")) { Remove-Item -Recurse -Force $Nand }
