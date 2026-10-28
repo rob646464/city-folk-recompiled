@@ -6202,3 +6202,5 @@ dol 8033CE00 DWC_IsEqualFriendData manual use:compares_two_entries_by_type -
 dol 8033D10C DWC_ReportUserData manual use:"[pseudo_login_id]"_/_"[authentic_login_id]"_report -
 dol 80222650 IOS_Open2 manual use:IOS_Open(path,_mode)_through_the_second_IPC_send_(USB_getDeviceList) -
 dol 802228D4 IOS_Close2 manual use:IOS_Close(fd)_through_the_second_IPC_send_(USB_getDeviceList) -
+dol 80101894 cf_SaveData manual use:the_town_save_(DWC_user_data_+4,_friend_list_+0x44,_friend_info_+0x1C8,_0x78_each) -
+dol 8017C294 cf_RosterRegisterOffline manual use:(slot,_friendData*,_info*_or_NULL)_while_offline_->_memcpy_into_save+0x44_and_info_at_+0x1C8 -

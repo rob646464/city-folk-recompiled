@@ -327,8 +327,57 @@ std::string playerName() {
     return s.empty() ? "Player" : s;
 }
 
+// F1 friends into the game's own friend roster (docs/ONLINE.md section 10): a friend whose
+// profile id is not in the save's DWC friend list yet is registered the way the roster menu does
+// it after a friend code is typed (cf_RosterRegisterOffline: slot, friend data, no info: the
+// game fills name and town at the first visit), only while the game is offline and a town save
+// with valid DWC user data is loaded. The save keeps it when the game next saves.
+static void rosterSync(Ctx& c) {
+    static u32 next = 0;
+    const u32 f = recomp::game::guestFrames();
+    if (f < next) return;
+    next = f + 120;
+    auto fl = friends::list();
+    bool any = false;
+    for (auto& fr : fl) any |= fr.state == friends::State::Friend;
+    if (!any) return;
+    static const u32 fnSave = guestSymbol("cf_SaveData"), fnReg = guestSymbol("cf_RosterRegisterOffline"),
+                     fnCheck = guestSymbol("DWC_CheckUserData");
+    if (!fnSave || !fnReg || !fnCheck) return;
+    // cf_RosterRegisterOffline itself refuses while the game is connected (online system state > 1).
+    const u32 save = gu::call(c, fnSave);
+    if (!save || !gu::call(c, fnCheck, {save + 4})) return;
+    static u32 buf = 0;
+    if (!buf) buf = hleAlloc(16);
+    for (auto& fr : fl) {
+        if (fr.state != friends::State::Friend || !fr.pid) continue;
+        int empty = -1;
+        bool have = false;
+        for (int i = 0; i < 32; i++) {
+            const u32 e = save + 0x44 + 12u * u32(i);
+            const u32 type = (rd32(e) >> 11) & 3;
+            if (type == 0 && empty < 0) empty = i;
+            if ((type == 2 || type == 3) && rd32(e + 4) == fr.pid) have = true;
+        }
+        if (have) continue;
+        if (empty < 0) {
+            notice("The game's friend roster is full: " + fr.name + " was not added");
+            continue;
+        }
+        wr32(buf, 3u << 11);
+        wr32(buf + 4, fr.pid);
+        wr32(buf + 8, 0);
+        const u32 ok = gu::call(c, fnReg, {u32(empty), buf, 0});
+        std::printf("[online] friend %s (profile id %u) -> game roster slot %d: %s\n", fr.name.c_str(), fr.pid, empty,
+                    ok ? "registered" : "refused");
+        if (ok) notice(fr.name + " is now in the game's friend roster");
+        return;  // one per pass
+    }
+}
+
 void onGuestFrame(Ctx& c) {
     if (!sEnvDone) envStart();
+    rosterSync(c);
     if (sJoinPending) tryJoinFromEnv();
     if (!sCodeFile.empty() && envOr("CF_ONLINE_HOST")) {
         static std::string written;
