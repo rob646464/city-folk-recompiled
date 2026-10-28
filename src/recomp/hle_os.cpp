@@ -420,26 +420,39 @@ static void logTimeCaller(const char* fn, u32 lr) {
 }
 
 // Test aid CF_CLOCK_FRAMES=1 (scripted routes, with CF_CLOCK_START): the clock the game reads
-// (OSGetTime/OSGetTick) follows guest frames, 1/59.94 s per frame plus 1 us per read (reads within
-// a frame stay increasing; a loop waiting for time still ends), instead of host time. Dates, times
-// of day and clock-derived values are then the same at the same frame in every run (City Folk
-// builds the new town from them); host-side timing (alarms, IOS/DVD latency) stays real.
+// (OSGetTime/OSGetTick) follows guest frames instead of host time: frame n starts at n/59.94 s
+// after the clock start, and each read inside a frame adds 1 us. Dates, times of day and values
+// the game derives from the clock (City Folk's new player/town ids, its town generator's inputs)
+// are then the same at the same frame in every run. A frame that reads the clock more than 8000
+// times (a loop waiting for time) continues in real time from there, so waits still end. Reads
+// are counted per guest thread (threads whose reads depend on host timing don't shift others).
+// Host-side timing (alarms, IOS/DVD latency) stays real.
 static u64 gameClock() {
     static const bool frameClock = std::getenv("CF_CLOCK_FRAMES") != nullptr;
     if (!frameClock) return timeBase();
     static std::mutex m;
-    static u64 base = 0, last = 0;
-    static bool init = false;
+    struct PerThread {
+        u64 last = 0, frameStart = 0;
+        u32 frame = ~0u, reads = 0;
+    };
+    static std::unordered_map<u32, PerThread> threads;  // guest thread -> its reads
     constexpr double kFrameTicks = kTimerClock / 59.94;
+    constexpr u64 kReadTicks = u64(kTimerClock / 1e6);
+    constexpr u32 kCountedReads = 8000;
     std::lock_guard lk(m);
     const u32 f = game::guestFrames();
-    if (!init) {
-        init = true;
-        base = timeBase() - u64(double(f) * kFrameTicks);
+    const u64 real = timeBase();
+    PerThread& t = threads[sched::currentGuest()];  // per thread: other threads' reads don't shift it
+    if (f != t.frame) {
+        t.frame = f;
+        t.frameStart = real;
+        t.reads = 0;
     }
-    const u64 frameNow = base + u64(double(f) * kFrameTicks);
-    last = std::max(last + u64(kTimerClock / 1e6), frameNow);
-    return last;
+    u64 offset = u64(++t.reads) * kReadTicks;
+    if (t.reads > kCountedReads) offset = std::max(offset, real - t.frameStart);
+    const u64 v = timeBaseStart() + u64(double(f) * kFrameTicks) + offset;
+    t.last = std::max(t.last + 1, v);  // never backwards
+    return t.last;
 }
 
 HLE(OSGetTime) {

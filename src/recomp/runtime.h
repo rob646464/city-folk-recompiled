@@ -32,6 +32,7 @@ void initWatch();
 void watchRange(u32 addr, u32 len, const char* what);  // HLE bulk writes
 void verifyLowMemory();  // hle_os.cpp: boot values in low memory intact (restored and logged if not)
 u64 timeBase();
+u64 timeBaseStart();  // the console clock at program start (timeBase() counts from it)
 // The guest memory window (kHostMemSize bytes, zeroed). On Windows the pages are write-watched so
 // guestWrittenRanges can skip pages nothing ever wrote (a scan then does not touch them).
 u8* allocGuestMemory();

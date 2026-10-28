@@ -93,9 +93,24 @@ Settings: `[controls]`, `[controls.keyboard]`, `[controls.pad.<guid>]` (bindings
 
 - `--input` drives the Remotes: items `<time>:<tokens>[*<frames>]`, `P2:`..`P4:` for other Remotes.
   Tokens: `A B 1 2 PLUS MINUS HOME UP DOWN LEFT RIGHT C Z SHAKE NSHAKE STICKUP STICKDOWN STICKLEFT
-  STICKRIGHT` (`START`/`X`/`Y` = `PLUS`/`1`/`2`), `@x/y` = pointer at KPAD position (stays until the
-  next one), `@off` = pointing away. `--input @file` reads the script from a file. Time in retraces,
-  or in guest frames with `CF_INPUT_CLOCK=frames` (matches `CF_SHOT` frame numbers).
+  STICKRIGHT` (`START`/`X`/`Y` = `PLUS`/`1`/`2`), `STICK=x/y` = Nunchuk stick at any position
+  (-1..1, up = +y), `@x/y` = pointer at KPAD position (stays until the next one), `@off` = pointing
+  away. Time in retraces, or in guest frames with `CF_INPUT_CLOCK=frames` (matches `CF_SHOT` frame
+  numbers). A time `+N` = N after the previous item's start; `~N` after an item repeats it N times
+  (`+60:A ~10` = ten presses 60 apart).
+- **Route files** (`--input @file`, `tools/routes/*.txt`): items one per line or comma-separated,
+  `#` comments, `include <file>` (relative to the including file) chains routes. `CF_INPUT_LOG=1`
+  prints the expanded script. Routes: `new_game.txt` (boot -> new game "rob" / town "Aa" -> the
+  town gate), `town_basics.txt` (walk, run, pockets, map), see docs/WII.md "Scripted route to the
+  town". `tools/routes/run.ps1 -Name <run> -Route <file> -Seconds <s> [-Shots first,last,step]`
+  does a test run with scratch folders (build/runs/<run>/), muted, off screen, controllers hidden;
+  `py tools/routes/sheet.py <shots dir> <out.png>` makes a contact sheet of the `CF_SHOT` frames.
+- **Same town every run**: a new town's layout and villagers come from random numbers and the
+  clock. `CF_RNG_SEED=<hex>` (seeds from (seed, caller, call count), one main-generator stream per
+  guest thread; src/game/cf_game.cpp), `CF_CLOCK_START="YYYY-MM-DD HH:MM"` and `CF_CLOCK_FRAMES=1`
+  (the game's clock follows guest frames) make it repeatable; run.ps1 sets all three
+  (12345678, 2026-10-27 10:00). Diagnostics: `CF_RNG_LOG=1` (every setSeed), `CF_RNG_DRAWS=a,b`
+  (every main-generator draw in frames a..b), `CF_TIME_LOG=1` (who reads the clock).
 - `CF_WPAD_LOG=1`: Remote state changes, callbacks, motor/DPD/speaker commands.
 - Route from boot to the town (USA, guest frames, see docs/WII.md "Scripted route to the town").
 

@@ -520,6 +520,7 @@ u64 timeBase() {
 }
 
 void setTimeBaseBias(u64 bias) { sTbBias = bias; }
+u64 timeBaseStart() { return sTbBias; }
 
 u32 Ctx::mfspr(u32 spr) { return sSpr[spr & 1023]; }
 void Ctx::mtspr(u32 spr, u32 v) { sSpr[spr & 1023] = v; }

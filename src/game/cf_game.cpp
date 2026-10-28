@@ -31,7 +31,7 @@ u32 guestFrames() { return sFrames.load(std::memory_order_relaxed); }
 // real time, and by a second guest thread (the new town is built on one while the main thread
 // draws for the bus scene) in whatever order the threads run. Scenes seed their own generators
 // from main-generator draws (fn_8014C198: five draws summed, via fn_80107E90). With the aid:
-// - every setSeed gets a value from (seed, caller, n-th call from that caller), and the calling
+// - every setSeed gets a value from (seed, thread, caller, n-th such call), and the calling
 //   thread's main-generator stream is reset the same way at each of them;
 // - each guest thread other than the boot thread draws "main" numbers from its own stream.
 // So the game's random choices (town layout, villagers) stop depending on load times and thread
@@ -41,7 +41,7 @@ constexpr u32 kMainRng = 0x8074F290;
 const char* const kEnv = std::getenv("CF_RNG_SEED");
 const u32 kSeed = kEnv ? u32(std::strtoul(kEnv, nullptr, 16)) : 0;
 std::mutex sMutex;
-std::unordered_map<u32, u32> sCalls;    // setSeed caller -> calls so far
+std::unordered_map<u64, u32> sCalls;    // (guest thread, setSeed caller) -> calls so far
 std::unordered_map<u32, u32> sStreams;  // guest thread -> its main-generator state
 u32 sBootThread = 0;
 
@@ -66,13 +66,13 @@ HLE(fn_802AA1A0) {  // Random::setSeed(this, seed)
     u32 v = c.r[4];
     if (rng::kEnv) {
         std::lock_guard lk(rng::sMutex);
-        const u32 n = ++rng::sCalls[c.lr];
         const u32 thread = sched::currentGuest();
+        const u32 n = ++rng::sCalls[u64(thread) << 32 | c.lr];
         if (c.lr == 0x8016C0A0) {
             v = rng::kSeed;  // the boot seed of the main generator
             rng::sBootThread = thread;
         } else if (c.r[3] != rng::kMainRng) {
-            v = rng::mix(rng::kSeed ^ rng::mix(c.lr) ^ (n * 0x9E3779B9u));
+            v = rng::mix(rng::kSeed ^ rng::mix(c.lr ^ rng::mix(thread)) ^ (n * 0x9E3779B9u));
             const u32 reset = rng::mix(v ^ 0x5BD1E995u);
             if (u32* s = rng::stream(thread)) *s = reset;
             else wr32(rng::kMainRng, reset);
@@ -114,6 +114,15 @@ HLE(fn_802AA1A8) {
             *s = rngStep(*s);
             c.r[3] = *s;
             return;
+        }
+        // The boot thread's stream restarts every guest frame from (seed, frame): how many
+        // frames a load took no longer shifts the numbers drawn after it (a new player's and
+        // town's ids are drawn at the name entry, many frames after the last setSeed).
+        static u32 lastFrame = ~0u;
+        const u32 f = guestFrames();
+        if (f != lastFrame) {
+            lastFrame = f;
+            wr32(obj, rng::mix(rng::kSeed ^ (f * 0x9E3779B9u) ^ 0xA5A5A5A5u));
         }
     }
     const u32 x = rngStep(rd32(obj));

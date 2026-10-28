@@ -532,6 +532,36 @@ const fs::path& nandRoot() {
         std::error_code ec;
         const fs::path& p = root;
         fs::create_directories(p, ec);
+        // Test aid CF_FIXTURE=<name or folder>: the run's NAND starts as a copy of a fixture's
+        // (a saved town; tools/routes/make_fixtures.ps1, CLAUDE.md "Test runs"). A bare name means
+        // <CF_FIXTURE_DIR or the nearest out\fixtures above the program>\<name>\nand. The NAND folder is
+        // emptied first, so a fixture run never mixes with an earlier run's files.
+        if (const char* fx = std::getenv("CF_FIXTURE"); fx && *fx) {
+            fs::path src = fs::path(fx);
+            if (!fs::is_directory(src)) {
+                fs::path base;
+                if (const char* b = std::getenv("CF_FIXTURE_DIR"); b && *b) {
+                    base = port::envPath("CF_FIXTURE_DIR");
+                } else {  // the nearest out/fixtures above the program (worktrees: the main checkout's)
+                    for (fs::path d = port::exeDir(); !d.empty(); d = d.parent_path()) {
+                        if (fs::is_directory(d / "out" / "fixtures" / fx, ec)) {
+                            base = d / "out" / "fixtures";
+                            break;
+                        }
+                        if (d == d.parent_path()) break;
+                    }
+                }
+                src = base / fx / "nand";
+            }
+            if (fs::is_directory(src)) {
+                for (const auto& e : fs::directory_iterator(p, ec)) fs::remove_all(e.path(), ec);
+                fs::copy(src, p, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+                recomp::log("[nand] fixture %s copied from %s%s", fx, src.string().c_str(),
+                            ec ? (" FAILED: " + ec.message()).c_str() : "");
+            } else {
+                recomp::log("[nand] ERROR: fixture %s not found (%s)", fx, src.string().c_str());
+            }
+        }
         // What the System Menu and IOS leave on every console: the disc title's data folder,
         // the shared folders, an empty /tmp (IOS clears it at boot).
         for (const std::string& d : {titleDataDir(), std::string("/shared2/sys"), std::string("/shared2/menu/FaceLib"),
