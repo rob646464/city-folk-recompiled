@@ -49,6 +49,7 @@ HLE(DrawXlu__Q34nw4r3g3d7ScnRootFv) {
 namespace {
 void objectScope(Ctx& c, const char* name) {
     const u32 obj = c.r[3];
+    cflight::onModel(c, obj);
     interp::TagScope t(interp::TagCat::Object, obj, rd32(obj), c.r[4]);
     interp::tagGroupIfNone(obj);
     callOriginal(c, name);

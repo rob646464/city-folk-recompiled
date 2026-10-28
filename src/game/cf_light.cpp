@@ -25,6 +25,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <unordered_map>
 
 namespace recomp {
 u32 copyDispCount();  // hle_gx.cpp
@@ -250,6 +252,55 @@ bool onRootDraw(Ctx& c, bool xlu, bool begin) {
         enh::setCasterPass(true);
     }
     return true;
+}
+
+// ---- g3d models (night-light sources) ----
+// A scene model's ResMdl: the first word in the object pointing at an 'MDL0' block; its name
+// (MDL0 rev 9/10/11: name offset after the section offsets). Cached per object.
+namespace {
+struct ModelInfo {
+    u32 mdl = 0;
+    std::string name;
+};
+std::unordered_map<u32, ModelInfo> sModels;
+bool guestPtr(u32 p) { return (p >= 0x80000000u && p < 0x81800000u) || (p >= 0x90000000u && p < 0x94000000u); }
+const ModelInfo& modelInfo(u32 obj) {
+    auto [it, fresh] = sModels.try_emplace(obj);
+    if (!fresh) return it->second;
+    if (sModels.size() > 8192) sModels.clear(), it = sModels.try_emplace(obj).first;
+    ModelInfo& mi = it->second;
+    for (u32 off = 0xC; off < 0x180 && !mi.mdl; off += 4) {
+        const u32 p = rd32(obj + off);
+        if (guestPtr(p) && (p & 3) == 0 && rd32(p) == 0x4D444C30u) mi.mdl = p;  // 'MDL0'
+    }
+    if (mi.mdl) {
+        const u32 rev = rd32(mi.mdl + 8);
+        const u32 sections = rev >= 10 ? 14 : 11;
+        const s32 nameOff = s32(rd32(mi.mdl + 0x10 + 4 * sections));
+        if (nameOff > 0 && nameOff < 0x1000000) {
+            const u32 s = mi.mdl + u32(nameOff);
+            for (u32 k = 0; k < 48; k++) {
+                const char ch = char(rd8(s + k));
+                if (!ch) break;
+                mi.name += (ch >= 32 && ch < 127) ? ch : '?';
+            }
+        }
+    }
+    return mi;
+}
+const bool sModelLog = std::getenv("CF_MODEL_LOG") != nullptr;
+}  // namespace
+
+void onModel(Ctx& c, u32 obj) {
+    if (!sModelLog && !enh::masterOn()) return;
+    const ModelInfo& mi = modelInfo(obj);
+    if (sModelLog) {
+        static std::unordered_map<std::string, u32> sSeen;
+        if (sSeen[mi.name]++ < 2)
+            log("[model] f%u obj %08X task %u mdl %08X '%s' m3c t %.1f %.1f %.1f  m0c t %.1f %.1f %.1f", copyDispCount(), obj, c.r[4],
+                mi.mdl, mi.name.c_str(), rdf32(obj + 0x48), rdf32(obj + 0x58), rdf32(obj + 0x68), rdf32(obj + 0x18), rdf32(obj + 0x28),
+                rdf32(obj + 0x38));
+    }
 }
 
 void onLayoutDraw(Ctx& c) {
