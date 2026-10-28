@@ -23,6 +23,7 @@
 
 ## Test runs (same rules as LM)
 - **Start from a save, not a new game**: fixture `user-town` (the user's own town "Frun", tutorial done, house, USA; `out/fixtures/user-town/nand`, gitignored, never commit or modify it) with `CF_FIXTURE=user-town` + `--input @tools/routes/continue.txt` (`CF_INPUT_CLOCK=frames`): title -> Rover -> "Preparing saved data" -> in town at the house by ~frame 5000 (Resetti greets first: the game introduces him at the first reload after the first save). The copy goes into the run's scratch NAND; the fixture itself is never written.
+- Second town fixture `user-town2` (the user's town "test", tutorial done, Resetti done; `out/fixtures/user-town2/nand`): same use (`CF_FIXTURE=user-town2` + continue.txt), e.g. the visitor in two-instance online tests.
 - Muted (audio to WAV only), window off screen (`CF_OFFSCREEN=1`) and background (`CF_BACKGROUND=1`), one instance per agent at a time, kill only processes whose executable path is inside your own worktree.
 - PowerShell wrappers: never name a parameter `$Input` (automatic pipeline variable: `--input` silently gets nothing). Wii Remote script tokens and `@x/y` pointer items: docs/CONTROLS.md "Test aids".
 - The scratchpad folder is shared by every agent: keep all your scripts and run outputs in your own subfolder named after your branch (e.g. `scratchpad/render-2/`), never write or delete shared names like `run.sh` or `runs/r1` at its top level.
