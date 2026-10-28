@@ -1126,7 +1126,26 @@ bool rawXfAfter(u32 v, int size) {
 }
 }  // namespace
 
+namespace {
+std::vector<u32> sLineWords;  // CF_LINE_LOG (GXBegin): words of the draw being logged
+u32 sLineWant = 0;
+std::string sLineHead;
+void lineWord(u32 v, int size) {
+    if (!sLineWant || size != 4) return;
+    sLineWords.push_back(v);
+    if (--sLineWant) return;
+    std::string s = sLineHead;
+    char b[24];
+    for (u32 w : sLineWords) {
+        std::snprintf(b, sizeof b, " %.3f", std::bit_cast<f32>(w));
+        s += b;
+    }
+    log("[line] %s", s.c_str());
+}
+}  // namespace
+
 void hw::fifoWrite(u32 v, int size) {
+    if (sLineWant) [[unlikely]] lineWord(v, size);
     frame::gxWaitForGuestTurn();
     interp::joinCapture();
     if (dropDraw()) [[unlikely]] return;
@@ -1392,6 +1411,20 @@ GXHLE(GXBegin) {
     }
     prepareDraw(drawMode(ProjMode::Scaled), "begin");
     interp::snapBegin(c.r[4], c.r[5]);
+    // Test aid CF_LINE_LOG=1: the first words of the first few line/point draws per 60 frames.
+    static const bool sLineLog = std::getenv("CF_LINE_LOG") != nullptr;
+    if (sLineLog && (c.r[3] == GX_LINES || c.r[3] == GX_LINESTRIP || c.r[3] == GX_POINTS)) {
+        static u32 sFrame = ~0u, sCount = 0;
+        if (sDiagFrame / 60 != sFrame) sFrame = sDiagFrame / 60, sCount = 0;
+        if (sCount++ < 3) {
+            sLineWords.clear();
+            sLineWant = 12;
+            char b[128];
+            std::snprintf(b, sizeof b, "f%u prim %02X fmt %u n %u lr %08X proj %s", sDiagFrame, c.r[3], c.r[4], c.r[5], c.lr,
+                          sProj.type == GX_PERSPECTIVE ? "persp" : "ortho");
+            sLineHead = b;
+        }
+    }
     GXBegin(GXPrimitive(c.r[3]), GXVtxFmt(c.r[4]), u16(c.r[5]));
 }
 
