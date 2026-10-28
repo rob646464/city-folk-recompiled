@@ -1,0 +1,66 @@
+# Manual names (docs/DISCOVERY.md `manual`): dol <USA address> <name> <evidence>
+# Applied by tools/discovery/sdk_names.py in the full pipeline, or directly (no decomp-toolkit
+# needed) by tools/discovery/apply_manual.py, which also carries them to PAL/Japan/Korea through
+# config/<id>/us_map.txt. Evidence: docs/ONLINE.md "The game's online flow".
+#
+# DWC friends / matching (dwc_friend, dwc_main, dwc_match): names from the "!!X() was called!!"
+# traces in the function itself (trace), or from what the function does and how City Folk's
+# network manager (fn_800E7C20 thread) calls it (use).
+dol 8031A62C DWC_GetFriendStatusSC use:status+maxEntry+numEntry+locstring of a buddy, called by DWC_GetFriendStatusDataSC
+dol 8031A790 DWC_GetFriendStatusDataSC use:GetFriendStatusSC+Base64Decode of the status string
+dol 8031A848 DWC_SetOwnStatusData use:Base64Encode+gpSetStatus
+dol 8031A8E0 DWC_CanChangeFriendList use:FALSE while the friend control is updating (state 1/2)
+dol 8031A910 DWC_DeleteBuddyFriendData trace:DWC_DeleteBuddyFriendData
+dol 8031A9E8 DWC_SetBuddyFriendCallback use:stores callback+param in the friend control
+dol 8031D700 DWC_ProcessFriendsMatch use:per-frame call, gpProcess/gt2Think/qr2 state machine
+dol 8031DA0C DWC_LoginAsync trace:DWC_LoginAsync
+dol 8031DDCC DWC_UpdateServersAsync trace:DWC_UpdateServersAsync
+dol 8031DF1C DWC_ConnectToAnybodyAsync trace:DWC_ConnectToAnybodyAsync
+dol 8031E0CC DWC_SetupGameServer trace:DWC_SetupGameServer
+dol 8031E268 DWC_ConnectToGameServerAsync trace:DWC_ConnectToGameServerAsync
+dol 8031E618 DWC_SetConnectionClosedCallback use:stores callback+param (+0x88) in the main control
+dol 8031E640 DWC_CloseAllConnectionsHard trace:DWC_CloseAllConnectionsHard
+dol 8031E978 DWC_CloseConnectionHard trace:DWC_CloseConnectionHard
+dol 8031EAD0 DWC_GetNumConnectionHost use:node count of the match
+dol 8031EAE8 DWC_GetMyAID use:own node aid
+dol 8031ED64 DWC_IsValidAID use:a connected node other than own
+dol 8031EE08 DWC_GetServerAID trace:DWC_GetServerAID
+dol 8031EEA4 DWC_IsServerMyself use:server aid == own and server-client match
+dol 80319A00 DWC_GetLastErrorEx use:error + code + error type table
+dol 80320A5C DWC_CancelMatch use:"Now unable to cancel."
+dol 80320AEC DWC_AddMatchKeyString trace:DWC_AddMatchKeyString
+dol 80320F3C DWC_GetLastMatchingType use:match type byte (2 server, 3 client)
+dol 80320FC8 DWC_GetSuspendMatch use:suspend state of the match (name unverified)
+# DWC transport (dwc_transport)
+dol 80339558 DWC_IsSendableReliable use:DWCi_IsSendable(aid, reliable=1)
+dol 80339770 DWC_SendReliable use:DWCi_Send(reliable=1, aid, buf, size)
+dol 80339B14 DWC_SendUnreliable use:"SendUnreliable size is too large"
+dol 80339C14 DWC_SetRecvBuffer use:"Cannot set recv buffer"
+dol 80339C84 DWC_Ping trace:DWC_Ping
+dol 80339D2C DWC_SetUserSendCallback use:transport +0x800 (game: size, aid)
+dol 80339D54 DWC_SetUserRecvCallback use:transport +0x804 (game: aid, buffer, size)
+dol 80339D7C DWC_SetUserRecvTimeoutCallback use:transport +0x808 (name unverified)
+dol 80339DA4 DWC_SetUserPingCallback use:transport +0x80C (game: latency, aid)
+dol 80339DCC DWC_SetSendSplitMax use:u16 transport +0x820 (game: 1329)
+dol 80339DEC DWC_SetTransportTimeout use:u32 transport +0x824 (game: 180000 ms; name unverified)
+# DWC account (dwc_account): friend codes and user data
+dol 8033BD40 DWC_IsBuddyFriendData use:type 3 and buddy flag
+dol 8033BD64 DWC_GetFriendDataType use:type bits of word 0
+dol 8033BDA8 DWC_ClearBuddyFlagFriendData use:clears the buddy flag of a type-3 entry
+dol 8033BDDC DWC_CheckFriendKey use:MD5 checksum of pid + gamecode against the key
+dol 8033C3B0 DWC_IsValidFriendData use:type != 0
+dol 8033C3E0 DWC_CreateUserData use:pseudo login id from the clock, CRC, dirty flag
+dol 8033C418 DWC_CheckUserData use:CRC of the 0x40-byte user data
+dol 8033C760 DWC_ClearDirtyFlag use:clears +0x20 bit 0, new CRC
+dol 8033C8D8 DWC_GetFriendKey use:64-bit key of a type-2 entry
+dol 8033C900 DWC_GetGsProfileId use:profile id of a type-2 (checked) or type-3 entry
+dol 8033CA68 DWC_CreateFriendKey use:checksum<<32 | gs profile id of the user data
+dol 8033CAFC DWC_CreateFriendKeyToken use:type-2 entry from a friend key
+dol 8033CB74 DWC_CreateExchangeToken use:type-3 entry from the user data
+dol 8033CE00 DWC_IsEqualFriendData use:compares two entries by type
+dol 8033D10C DWC_ReportUserData use:"[pseudo login id]" / "[authentic login id]" report
+# IPC client (ipcclt): two more synchronous calls used only by the USB library (Wii Speak device
+# list, online only). Same bodies as IOS_Open / IOS_Close but sending through fn_802221A0 instead
+# of __ios_Ipc2 (real names unknown).
+dol 80222650 IOS_Open2 use:IOS_Open(path, mode) through the second IPC send (USB getDeviceList)
+dol 802228D4 IOS_Close2 use:IOS_Close(fd) through the second IPC send (USB getDeviceList)
