@@ -6200,3 +6200,5 @@ dol 8033CAFC DWC_CreateFriendKeyToken manual use:type-2_entry_from_a_friend_key 
 dol 8033CB74 DWC_CreateExchangeToken manual use:type-3_entry_from_the_user_data -
 dol 8033CE00 DWC_IsEqualFriendData manual use:compares_two_entries_by_type -
 dol 8033D10C DWC_ReportUserData manual use:"[pseudo_login_id]"_/_"[authentic_login_id]"_report -
+dol 80222650 IOS_Open2 manual use:IOS_Open(path,_mode)_through_the_second_IPC_send_(USB_getDeviceList) -
+dol 802228D4 IOS_Close2 manual use:IOS_Close(fd)_through_the_second_IPC_send_(USB_getDeviceList) -

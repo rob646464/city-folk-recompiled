@@ -6202,3 +6202,5 @@ dol 8033C94C DWC_CreateFriendKeyToken map RUUE01:manual:hash -
 dol 8033C9C4 DWC_CreateExchangeToken map RUUE01:manual:hash -
 dol 8033CC50 DWC_IsEqualFriendData map RUUE01:manual:hash -
 dol 8033CF5C DWC_ReportUserData map RUUE01:manual:hash -
+dol 802224A0 IOS_Open2 map RUUE01:manual:hash -
+dol 80222724 IOS_Close2 map RUUE01:manual:hash -

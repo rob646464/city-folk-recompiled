@@ -43,7 +43,7 @@ Layers (USA addresses):
 | Layer | Where | What |
 |---|---|---|
 | Copper (gatekeeper REL `d_a_npc_sp_gatekeeper_aNP`) and the friend roster menus (`d_menu_friend*NP`) | RELs | call the online system: `fn_800DCBC8` connect, `fn_800DCC54` open the gate (host), `fn_800DCCEC(i)` visit friend *i*, `fn_800DCE44` disconnect; roster: `fn_800E5A04` = DWC_CreateFriendKeyToken (register a code), `fn_800E5B24` = DWC_CheckFriendKey |
-| Online system (`r13-0x3188`, 0x3868 bytes) | `fn_800E4A08` setup (user data = save+0x44, friend list = save+4, 32 friends, 4 players), `fn_800E4ECC` start | copies the save's DWC user data (0x40) and friend list (32 x 12) to working copies, starts the network thread; request queue +0x3678 (1 anybody, 2 host, 3 join friend, 4 cancel, 5 close all, 6 reset); per-friend mirror +0x1C40 (0xD0 each); state +0x385C (1 idle, 3 connecting, 5 hosting, 6 visiting) |
+| Online system (`r13-0x3188`, 0x3868 bytes) | `fn_800E4A08` setup (user data = save+4, friend list = save+0x44, 32 friends, 4 players), `fn_800E4ECC` start | copies the save's DWC user data (0x40) and friend list (32 x 12) to working copies, starts the network thread; request queue +0x3678 (1 anybody, 2 host, 3 join friend, 4 cancel, 5 close all, 6 reset); per-friend mirror +0x1C40 (0xD0 each); state +0x385C (1 idle, 3 connecting, 5 hosting, 6 visiting) |
 | Network thread (`fn_800E7C20`, object `r13-0x3174` = 0x805B67E0) | `fn_800E7xxx`-`fn_800E91D4` | the only DWC caller (below) |
 | DWC | 0x80319698-0x8033F46C | friends match, matching, transport, account |
 | GameSpy / SO / NHTTP / SSL | 0x8033F46C-0x8036xxxx, 0x8043xxxx | under DWC only |

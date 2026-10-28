@@ -59,3 +59,8 @@ dol 8033CAFC DWC_CreateFriendKeyToken use:type-2 entry from a friend key
 dol 8033CB74 DWC_CreateExchangeToken use:type-3 entry from the user data
 dol 8033CE00 DWC_IsEqualFriendData use:compares two entries by type
 dol 8033D10C DWC_ReportUserData use:"[pseudo login id]" / "[authentic login id]" report
+# IPC client (ipcclt): two more synchronous calls used only by the USB library (Wii Speak device
+# list, online only). Same bodies as IOS_Open / IOS_Close but sending through fn_802221A0 instead
+# of __ios_Ipc2 (real names unknown).
+dol 80222650 IOS_Open2 use:IOS_Open(path, mode) through the second IPC send (USB getDeviceList)
+dol 802228D4 IOS_Close2 use:IOS_Close(fd) through the second IPC send (USB getDeviceList)
