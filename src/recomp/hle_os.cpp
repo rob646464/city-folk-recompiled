@@ -89,10 +89,9 @@ HLE(OSInit) {
     if (sDone) return;
     sDone = true;
     // Disc header (boot.bin) at 0x80000000: game id, maker, disc number, version.
-    const std::string& id = port::install().running == port::GameVersion::PAL ? std::string("RUUP01") : std::string("RUUE01");
-    std::memcpy(hostp(0x80000000), id.data(), 6);
+    std::memcpy(hostp(0x80000000), port::gameId(port::install().running), 6);
     wr8(0x80000006, 0);
-    wr8(0x80000007, 1);            // revision 1
+    wr8(0x80000007, u8(port::partitionRevision(port::install().running)));  // partition header: 1 (Korea 0)
     wr32(0x80000018, 0x5D1C9EA3);  // Wii disc magic
     wr32(0x8000001C, 0);
     wr32(0x80000020, 0x0D15EA5E);  // normal boot
@@ -111,7 +110,7 @@ HLE(OSInit) {
     wr32(0x80003110, arenaHi);                           // MEM1 arena end
     wr32(0x80003124, kMem2ArenaLo);                      // MEM2 usable start / end
     wr32(0x80003128, kMem2ArenaHi);
-    std::memcpy(hostp(0x80003180), id.data(), 4);        // the running title's game id
+    std::memcpy(hostp(0x80003180), port::gameId(port::install().running), 4);       // the running title's game id
     wr8(0x80003184, 0x80);                               // application type: disc
     guestCall(c, guestSymbol("OSSetMEM1ArenaLo"), (initialStack() + 8 + 31) & ~31u);
     guestCall(c, guestSymbol("OSSetMEM1ArenaHi"), arenaHi);

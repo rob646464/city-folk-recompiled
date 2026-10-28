@@ -3,6 +3,7 @@
 // %APPDATA%\Animal Crossing City Folk Recompiled\settings.ini. Read them wherever they apply;
 // changes take effect immediately unless noted.
 #include <iosfwd>
+#include <map>
 #include <string>
 
 namespace port {
@@ -80,8 +81,10 @@ struct CrtSettings {
 
 struct AudioSettings {
     float masterVolume = 1.0f;  // 0..1
-    float musicVolume = 1.0f;   // streamed/sequenced music
+    float musicVolume = 1.0f;   // music players of the sound archive (BGM, K.K., fanfares, title stream)
     float sfxVolume = 1.0f;     // everything else
+    float voiceVolume = 1.0f;   // animal speech (Animalese) players
+    float remoteVolume = 1.0f;  // Wii Remote speaker sound played on the PC (0 = off)
     AudioOutput output = AudioOutput::Stereo;
     bool swapChannels = false;
     bool reverb = true;        // aux bus returns (the game's AXFX reverb/chorus/delay) mixed back in
@@ -139,6 +142,11 @@ struct GameplaySettings {
     float vacuumStrength = 1.0f;         // Poltergust drain rate on ghost HP, 0.25..4
     bool alwaysRide = false;             // Luigi always uses the Poltergust-riding movement (PAL Boolossus mode)
     bool mirrorWorld = false;            // the European Hidden Mansion's left/right mirror in every mode (hm::mirrorWorld)
+    // City Folk (docs/FEATURES.md): grass wear 0 Original, 1 New Leaf style, 2 Off (src/game/cf_grass.cpp).
+    int grassWear = 0;
+    // Skin tone per resident (src/game/cf_skin.cpp): "<town id>-<player id>" (hex) -> fixed tone 1..8
+    // (absent = the game's tanning). Saved as the [skin_tone] section by cf_skin.cpp.
+    std::map<std::string, int> skinTone;
 };
 
 // Hardware-accuracy rendering features (F1 > Visuals > Rendering). Every costly accuracy

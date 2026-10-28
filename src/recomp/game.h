@@ -31,6 +31,10 @@ double retraceSpeed();
 float audioGain();
 // Audio channels swapped by the game state (LM: the mirrored Hidden Mansion).
 bool audioMirrored();
+// The game's own frame rate (LM/SMS 30, City Folk 60): the F1 frame-rate floor ("Original":
+// drawn directly); only targets above it are interpolated. Scenes that run slower (a 30 fps
+// scene in a 60 fps game) are interpolated by the tapes' time stamps either way.
+int nativeFps();
 
 // --- rendering (guest thread, GX HLE) ---
 // True while the game renders a pass that must not get the widescreen / FOV projection

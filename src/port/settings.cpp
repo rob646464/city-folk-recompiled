@@ -206,6 +206,8 @@ std::vector<Field> fields() {
         num("audio", "master_volume", a.masterVolume),
         num("audio", "music_volume", a.musicVolume),
         num("audio", "sfx_volume", a.sfxVolume),
+        num("audio", "voice_volume", a.voiceVolume),
+        num("audio", "remote_speaker_volume", a.remoteVolume),
         enm("audio", "output", a.output),
         flag("audio", "swap_channels", a.swapChannels),
         flag("audio", "reverb", a.reverb),
@@ -243,6 +245,7 @@ std::vector<Field> fields() {
         num("gameplay", "vacuum_strength", g.vacuumStrength),
         flag("gameplay", "always_ride", g.alwaysRide),
         flag("gameplay", "mirror_world", g.mirrorWorld),
+        num("gameplay", "grass_wear", g.grassWear),
         flag("debug", "particle_report", e.dbgParticleReport),
         flag("debug", "depth_blur", e.dbgDepthBlur),
         flag("debug", "luigi_debug_flags", e.dbgLuigiFlags),
@@ -392,6 +395,7 @@ void sanitize() {
     clampTo(g.healthScale, 0.25f, 5.0f);
     clampTo(g.ghostHealthScale, 0.25f, 5.0f);
     clampTo(g.vacuumStrength, 0.25f, 4.0f);
+    clampTo(g.grassWear, 0, 2);
     auto& u = sSettings.unused2;
     clampTo(u.poisonDamage, 1.0f, 100.0f);
     clampTo(u.poisonSeconds, 1.0f, 20.0f);

@@ -1,12 +1,64 @@
 # Game functions replaced by host code (docs/RECOMPILER.md "Hooks").
 #
-#   <symbol> [us] [pal]        the function's body moves to <fn>_orig; HLE(<symbol>) replaces it
+#   <symbol> [us] [pal] [jp] [kr]  the function's body moves to <fn>_orig; HLE(<symbol>) replaces it
 #                              and may call callOriginal(c, "<symbol>")
 #   <module>::<symbol>         a function of a REL module (name from config/<id>/rels/<module>.txt)
 #   patch <id> <addr> <word>   runtime-switchable instruction patch (setPatch(id, on))
 #
 # Every named DOL function is replaceable by name already (no line needed); lines here are for
-# REL functions and patches. A line applies to the USA build unless tagged only "pal".
+# REL functions and patches. A line applies to the USA build unless it is tagged only "pal", "jp"
+# and/or "kr"; to the European / Japanese / Korean build only when tagged "pal" / "jp" / "kr" (REL
+# offsets differ between versions: config/<id>/rels_us_map.txt).
+
+# Audio (docs/AUDIO.md "Surround output"): with F1 > Sound > Output 5.1 / 7.1 the port keeps NW4R's
+# Dolby Pro Logic II mode: City Folk's `bl AxManager::SetOutputMode(STEREO)` right after
+# InitSoundSystem (in fn_801CE6B0) becomes a nop. Switched by hle_audio.cpp (SCGetSoundMode).
+patch 30 801CE714 60000000
+
+# Calendar / hemisphere / real-time weather (src/game/cf_calendar.cpp, cf_weather.cpp; docs/CALENDAR.md).
+fn_8016D40C          # game clock getter
+fn_8016D0E0 pal
+fn_8016CFFC jp
+fn_8016DD58          # date -> term index
+fn_8016DA2C pal
+fn_8016D948 jp
+fn_8016DDA8          # date -> spring/summer/fall/winter
+fn_8016DA7C pal
+fn_8016D998 jp
+fn_80090E2C          # date -> fish period
+fn_80090E4C pal
+fn_80090DB4 jp
+fn_800BD450          # month -> insect table
+fn_800BD470 pal
+fn_800BD3D8 jp
+fn_800C6024          # month/day -> item season
+fn_800C6044 pal
+fn_800C5FAC jp
+fn_801C973C          # month/day -> weather period
+fn_801C9430 pal
+fn_801C94DC jp
+fn_801C9E48          # town weather of an hour
+fn_801C9B3C pal
+fn_801C9BE8 jp
+fn_801C9EC0          # city weather of an hour
+fn_801C9BB4 pal
+fn_801C9C60 jp
+
+# Grass wear (src/game/cf_grass.cpp, docs/FEATURES.md "Grass wear"): the step wear (player steps and
+# town generation) and the daily regrowth.
+fn_8008D6B4
+fn_800A7F9C
+fn_8008D6D4 pal
+fn_800A7FBC pal
+fn_8008D63C jp
+fn_800A7F24 jp
+
+# Skin tone (src/game/cf_skin.cpp, docs/FEATURES.md "Skin tone"): the player's skin palette index
+# (d_a_playerNP, same offset in all versions) and the daily tan update.
+d_a_playerNP::fn_80_2080 us pal jp
+fn_80137D34
+fn_801379E4 pal
+fn_80137924 jp
 
 # Random::setSeed(this, seed) (stw r4,0(r3)): CF_RNG_SEED test aid in src/game/cf_game.cpp.
 fn_802AA1A0

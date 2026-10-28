@@ -97,12 +97,68 @@ items done as they land.
   `CF_DL_FORCE_HOST=1`.
 - RVL GX HLE added: GXGetProjectionv, GXGetTexObjAll/Fmt/MipMap/UserData, GXLoadTexObjPreLoaded,
   GXGetViewportv, GXGetScissor, GXGetVtxDescv/AttrFmt(v), draw-done callback, GXDrawSphere,
-  FIFO/metric/poke/field stubs. GXSetZScaleOffset is logged, not applied (Aurora has no depth
-  scale/offset yet).
+  FIFO/metric/poke/field stubs. GXSetZScaleOffset: applied since render-2 (below).
 - Verified (screenshots, US disc, 1280x720): wrist strap, title town, Rover's spotlight stage,
   the bus interior (seats, windows, cab), name/town keyboards, town arrival at the gate (bus,
   bus stop, player, blob shadow), town map. Open: no console reference capture compared yet
   (only from memory of the game); GXSetZScaleOffset; Hor+ HUD anchoring; interpolation not tried.
+
+### Rendering status (branch render-2)
+
+- **Materials vs Dolphin**: Rover's intro spotlight scene matches Dolphin
+  (`C:\Users\rmelv\Desktop\games\Dolphin-x64`, scratch user folder, EFB/XFB copies to RAM) pixel for
+  pixel where nothing animates: face (181,188,161) vs (181,187,160), dialogue bubble identical. His
+  white face with red slit eyes is his design: the eye/mouth/body textures are C4 with two palettes
+  (`Npc/Special/Model/0.brres`, model `xct`: `skin` for eyes/mouth, `skin0` for the body), decoded
+  independently from the disc they look like what is drawn; the greenish-white face is white x
+  (ambient 49,66,99 + the spotlight's 255,239,99 x ~0.52). The town's ground materials (3-6 TEV
+  stages, alpha splats with signed unclamped intermediates, COMP ops, indirect) were read stage by
+  stage and need nothing Aurora lacks. The bus interior and town were not compared in Dolphin
+  (its scripted input got the pointer only as far as Rover's first choice): unverified, nothing
+  obviously off. Reference frames: Dolphin's "Dump Frames as Images" with a scripted DSU pad
+  (`dsu_server.py` in the agent scratch area; Wii Remote buttons on DSU stick axes, IR on the right
+  stick).
+- **Ignored GX state**: Aurora 0303 reports every BP/XF register written without a decoder once
+  (release builds too) and unimplemented indexed XF loads. City Folk writes only harmless ones:
+  BP 0x44/0x45/0x58/0x68 (field mask, PE done, GXInit's 0x58, field mode), XF 0x1000/0x1005 (error,
+  GXInit state) and XF 0x1012 = 1 (dual texture transform on, what Aurora always does).
+  `GXSetZScaleOffset` is applied (hle_gx.cpp `zRange`: the SDK's __GXSetViewport writes
+  sz = (far - near) S, oz = far S + O, i.e. depth x scale + offset, sent as the viewport's depth
+  range clamped to 0..1); the game only ever calls it with (1, 0) (RFLiSetup2DCameraAndParam).
+  `GXSetScissorBoxOffset` stays logged-if-non-zero (never seen).
+- **Frame rate**: the game presents one frame per retrace in every scene measured (title, Rover's
+  intro, bus, keyboards, town, town map: 59.8-60.0 game fps), so its native rate is 60 (50 for a
+  50 Hz European game: `game::nativeFps`, from the VI rate). F1's frame-rate slider starts there
+  ("Original (60)", drawn directly); above it frames are interpolated (tape stamps in VI fields of
+  the current rate, so a slower scene is interpolated by its own time stamps).
+- **Frame interpolation** (120 fps verified, 60 -> 120): it presented the right rate before, but
+  every in-between was a copy of the newest frame. Two causes: (1) nothing was tagged (no City Folk
+  tag sources: every value unpaired); (2) NW4R g3d loads its view-space model matrices with
+  **indexed** XF loads from buffers it rewrites every frame, so a tape replayed a game frame later
+  read the newest matrices (models drew with frame N+1's matrices). Now (hle_gx.cpp): while a tape
+  is captured, indexed loads (GXLoadPosMtxIndx, GXLoadNrmMtxIndx3x3, raw 0x20/0x28/0x30 in the
+  write-gather stream) are sent as immediate loads of the values in memory at that moment (what the
+  GPU reads on the console) and noted; raw XF matrix loads are parsed and noted; tag sources in
+  `src/game/cf_tags.cpp` (View: ScnRoot DrawOpa/DrawXlu; Object: ScnMdlSimple/ScnMdl/ScnProc
+  G3dProc; Hud: lyt Pane::Draw; camera: G3DState::SetCameraProjMtx's CameraData). Town walk at
+  120: 2558 paired values per tape, 519 blended per present, in-betweens halfway between the game
+  frames (CF_INTERP_TEST=2), 120.0 fps presented, game 59.9-60.0, step error p95 0.3-5 ms (LM's
+  `tools/interp/judder.py` on CF_INTERP_JUDDER logs). With VSync on a 60 Hz display the cap is the
+  refresh rate (57 fps with the VRR cap when the offscreen test window looks like VRR). Open: lights,
+  colours and effects (nw4r::ef particles) are not tagged yet (shown at the newest frame), text
+  boxes not grouped, no cut detection hooks; matrices inside display lists that use indexed loads
+  would still be read at replay (none counted so far).
+- **Hor+ / ultrawide** (21:9 checked at 1680x720): the 3D widens (Hor+), the 2D stays a centred
+  16:9 frame. With F1 > Visuals "Keep HUD at 16:9" off, `src/game/cf_hud.cpp` (hook on
+  nw4r::lyt::Pane::Draw) anchors the clock to the left edge and the memo / camera-adjust buttons to
+  the right edge; the toolbar, dialogue, keyboards and menus stay centred. Limitation: only the
+  picture moves, the game hit-tests the pointer at the 16:9 position (so the option stays off by
+  default). Test aid `CF_LYT_LOG=<first>,<last>` (pane tree per frame).
+- Test aids: `AURORA_DRAW_SKIP_SWEEP=1` (with AURORA_DRAW_LOG_FRAMES and CF_SHOT per frame: draw k
+  dropped in frame first+k, which pixels each draw makes), `CF_LYT_LOG`, `[interp] raw XF matrix
+  loads ...` line once a minute while interpolating. Scripted route: `tools/routes/gen_town.py`
+  writes `town.txt` (boot -> town gate, ~frame 13300) and `town_walk.txt` (+ walking from 16700):
+  `cfrecomp --input @tools/routes/town.txt` with `CF_INPUT_CLOCK=frames`.
 
 ## IOS (Starlet)
 
@@ -139,22 +195,24 @@ the CPU given up).
   dots → pointer, accelerometer, extensions (Nunchuk), rumble, speaker. The KPAD/WPAD HLE takes
   each port's input from a source: real remote, mouse, right stick, gyro pad. SDL's built-in Wii
   driver is not enough on its own (no IR pointer), so claim the device before SDL opens it.
-- **Remote speaker** (`WPADSendStreamData`, 4-bit ADPCM): decode and mix into PC output (option:
-  separate volume).
+- **Remote speaker** (`WPADSendStreamData`, 4-bit ADPCM): decoded and mixed into the PC output
+  with its own volume (branch audio-2, `src/recomp/audio_remote.cpp`, docs/AUDIO.md).
 - **Done (branch wpad-1, docs/CONTROLS.md)**: `hle_wpad.cpp` answers the WPAD/KPAD calls the game
   makes (KPADRead with 200 Hz report timing, WPADProbe, connection/extension callbacks, battery
   info, motor, LED, DPD, speaker calls accepted, disconnect/reconnect); `wiimote.cpp` builds each
   port's Remote from a Source (emulated today: F1 > Controls bindings + mouse / right stick / gyro
   pointer + shake inputs). `VIGetDimmingCount` reports Remote radio activity (0 = the game's
-  "Communications with the Wii Remote have been interrupted"). Not yet: speaker sound, real Wii
-  Remotes, tilt from a pad's accelerometer, Classic Controller (check whether the game reads it).
-- **Real Wii Remotes, plan**: an `HidSource` (wiimote.h `Source`) per paired Remote: SDL hidapi
-  (`SDL_hid_open` on 057E:0306/0330 before SDL's own Wii driver claims it), report mode 0x37
-  (buttons + acc + 10-byte IR + 6-byte extension), IR camera init sequence, IR dots -> pointer
-  (midpoint of the two brightest dots, sensor bar above/below from SYSCONF, roll from the dot
-  angle), extension identification (Nunchuk), rumble bit in every output report, speaker data
-  (report 0x18, 4-bit ADPCM) from WPADSendStreamData. F1 > Controls > Ports gets "Wii Remote
-  (Bluetooth)" as a device per port.
+  "Communications with the Wii Remote have been interrupted"). Speaker sound on the PC: branch
+  audio-2 (audio_remote.cpp; real Remotes play it themselves, below). Not yet: tilt from a pad's
+  accelerometer, Classic Controller (check whether the game reads it).
+- **Real Wii Remotes (branch hid-remotes, docs/CONTROLS.md "Real Wii Remotes")**: `HidSource`
+  (wiimote_hid.cpp) per port set to "Real Wii Remote" in F1 > Controls > Ports: SDL hidapi on
+  057E:0306/0330 only (SDL's own Wii driver forced off meanwhile), report mode 0x37, the Wii's IR
+  camera sequence with the console's sensitivity, calibration from EEPROM, Nunchuk (unencrypted
+  init, calibration), IR dots -> KPAD pointer (roll-compensated midpoint, sensor bar above/below),
+  rumble, speaker (WPADSendStreamData ADPCM as reports 0x18 at 6 kHz), battery, hot-plug, player
+  LED = port. Protocol in wiimote_proto.cpp, tested against a fake device
+  (`cf_wiimote_hid_test`); not yet tried with a real Remote.
 
 ### Scripted route to the town
 
@@ -165,7 +223,10 @@ frames from 1300 to 4600 (wrist strap, title, Rover); pointer `@0.41/0.42` then 
 town-name keyboard (same key positions) and Confirm; then A every 60 with the pointer cycling
 `@0.62/0.5` ("That's it!"), `@0.41/0.42`, `@0.656/0.778` (town map "OK!"): the bus arrives and the
 player stands at the town gate at about frame 16000 (the next pointer click opens the map from
-the HUD). Generator: a few lines of Python building the item list (one item per press).
+the HUD). Committed as `tools/routes/town.txt` (and `town_walk.txt`, walking from frame 16700),
+built by `tools/routes/gen_town.py`: `--input @tools/routes/town.txt`. It reaches the gate at about
+frame 13300 (the town-name step goes by without a keyboard; the player's name comes out as "'rob").
+Every new game makes a new random town, so screenshots of the town differ between runs.
 
 ## Audio
 
@@ -178,9 +239,10 @@ the HUD). Generator: a few lines of Python building the item list (one item per 
   the DSP task HLE mixes at the list's mail and resumes AX through the task's resume callback.
   NW4R snd, AX and AXFX (reverb/chorus/delay on the aux buses) run unchanged as game code. Only the
   polyphase coefficient ROM is ours. Title stream and bus-scene music/speech play (pitch, levels,
-  stereo checked; the stream bit-exact against an independent decode). Not done: music/SFX split
-  for the volume sliders, discrete surround side data, playing the Wii Remote speaker sound on the
-  PC (the 6 kHz remote buffers are filled; `audio::axRemoteFrame` is the hook).
+  stereo checked; the stream bit-exact against an independent decode). Branch audio-2: volume
+  sliders per NW4R sound player (music / effects / voices), the Wii Remote speaker stream
+  (WPADSendStreamData ADPCM) decoded and played on the PC, discrete 5.1/7.1 from the DPL2 buses
+  (docs/AUDIO.md).
 - AI pacing by the SDL3 audio device as in LM (docs/AUDIO.md there); 0x180-byte (3 ms) AI blocks.
 
 ## Other SDK parts
@@ -231,4 +293,9 @@ the HUD). Generator: a few lines of Python building the item list (one item per 
    own first save is still to be seen (no input past the title yet).
 6. AX microcode stand-in → sound.
 7. Enhancements (interpolation, widescreen, F1 menu) and game features (docs/ROADMAP.md).
-8. PAL and Japan bases (function matching), then setup flow + packaging.
+8. PAL and Japan bases (function matching), then setup flow + packaging. **Setup done** (branch
+   setup-1, docs/SETUP.md): CityFolkRecomp identifies USA/Europe/Japan rev 1 discs (ID, revision,
+   main.dol and REL hashes), reads images (ISO encrypted/decrypted, WBFS, RVZ, WIA, CISO, GCZ) and
+   extracted folders through one file system layer (port/disc_folder), builds each module with
+   the bundled clang/lld in about a minute; the European and Japanese games boot through the
+   title into Rover's bus dialogue with their own tables.

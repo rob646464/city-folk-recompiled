@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 
 namespace recomp {
 u32 copyDispCount();  // hle_gx.cpp: guest frame number (CF_AUDIO_LOG time stamps)
@@ -388,21 +389,172 @@ void mixGroup(Pb& p, int g, u32 bits, const s16* srcL, const s16* srcR, const s1
 
 struct VoiceStats {
     u32 voices = 0, active = 0, starts = 0, lpf = 0, biquad = 0, remote = 0, itd = 0, aux = 0;
+    u32 kind[4] = {};  // active voice-frames by VoiceKind
 } sVoiceStats;
+
+// ---- Volume sliders: the NW4R sound that owns an AX voice (docs/AUDIO.md "Volume sliders") ----
+// AX keeps its voice tables in SDA globals: the DSP PBs (__AXGetPBs: `lwz r3, d(r13)`), then
+// the ITD buffers and the CPU-side AXVPBs (0x168 bytes each) 4 and 8 bytes after it (the order
+// __AXVPBInitCommon clears them in). An AXVPB's user context (+0x14, AXAcquireVoice's third
+// argument) is NW4R's AxVoice when its callback (AxVoice +0x38) is Voice::AxVoiceCallbackFunc;
+// AxVoice +0x3C is the Voice, whose callback / data (+0x94 / +0x98, Voice::InitParam) name the
+// owner: a Channel (Channel::VoiceCallbackFunc) or a StrmPlayer. A Channel's callback / data
+// (+0xE0 / +0xE4, Channel::InitParam) are a SeqTrack (its SeqPlayer at +0xC0) or a WsdPlayer.
+// Seq/Strm/Wave sounds hold their player at +0x10C (GetBasicPlayer) and their SoundPlayer at
+// +0x10 (BasicSound::AttachSoundPlayer), whose index in the SoundArchivePlayer's array is the
+// player id of rv_forest.brsar (same 29 players in the USA, PAL and Japanese archives).
+u32 sSda = 0;
+struct SoundPlayers {
+    u32 base = 0, count = 0, stride = 0;
+} sPlayers;
+
+struct Nw4rAddrs {
+    u32 axVoiceCb = 0, chanVoiceCb = 0, strmVoiceCb = 0, seqTrackCb = 0, wsdCb = 0;
+    s32 pbOff = 0;
+    bool ok = false;
+};
+const Nw4rAddrs& nw4r() {
+    static const Nw4rAddrs a = [] {
+        Nw4rAddrs r;
+        r.axVoiceCb = guestSymbol("AxVoiceCallbackFunc__Q44nw4r3snd6detail5VoiceFPQ44nw4r3snd6detail7AxVoiceQ54nw4r3snd6detail7AxVoice21AxVoiceCallbackStatusPv");
+        r.chanVoiceCb = guestSymbol("VoiceCallbackFunc__Q44nw4r3snd6detail7ChannelFPQ44nw4r3snd6detail5VoiceQ54nw4r3snd6detail5Voice19VoiceCallbackStatusPv");
+        r.strmVoiceCb = guestSymbol("VoiceCallbackFunc__Q44nw4r3snd6detail10StrmPlayerFPQ44nw4r3snd6detail5VoiceQ54nw4r3snd6detail5Voice19VoiceCallbackStatusPv");
+        r.seqTrackCb = guestSymbol("ChannelCallbackFunc__Q44nw4r3snd6detail8SeqTrackFPQ44nw4r3snd6detail7ChannelQ54nw4r3snd6detail7Channel21ChannelCallbackStatusUl");
+        r.wsdCb = guestSymbol("ChannelCallbackFunc__Q44nw4r3snd6detail9WsdPlayerFPQ44nw4r3snd6detail7ChannelQ54nw4r3snd6detail7Channel21ChannelCallbackStatusUl");
+        const u32 insn = rd32(guestSymbol("__AXGetPBs"));
+        if ((insn & 0xFFFF0000u) == 0x806D0000u) {  // lwz r3, d(r13)
+            r.pbOff = s16(insn & 0xFFFF);
+            r.ok = true;
+        } else {
+            log("[ax] __AXGetPBs is not lwz r3,d(r13) (%08X): volume sliders apply to every voice", insn);
+        }
+        return r;
+    }();
+    return a;
+}
+
+inline bool guestPtr(u32 a) {
+    return ((a >= 0x80000000u && a < 0x81800000u) || (a >= 0x90000000u && a < 0x94000000u)) && (a & 3) == 0;
+}
+
+// Sound archive player ids (rv_forest.brsar) by kind. Music: PLAYER_STRM (21, the title
+// stream), PLAYER_MUSIC (22, K.K. songs / records), PLAYER_CONDUCTOR (23), PLAYER_FANFARE (24,
+// jingles), PLAYER_BGM (25, the background music). Voices: PLAYER_DOUBUTSUGO (15, animal
+// speech) and PLAYER_KEYBOARD (16, the per-letter speech sounds of every language). Everything
+// else (system, walk, furniture, action, environment, town tune melodies, gyroids, TV) is a
+// sound effect.
+VoiceKind kindOfPlayer(u32 id) {
+    switch (id) {
+    case 21: case 22: case 23: case 24: case 25: return VoiceKind::Music;
+    case 15: case 16: return VoiceKind::Voice;
+    default: return VoiceKind::Effect;
+    }
+}
+
+// The kind of the voice whose DSP PB is at (physical) pbAddr, and its player id (-1 unknown).
+// CF_AUDIO_KIND_LOG=1: why a voice could not be classified (the chain step that failed).
+const bool sKindLog = [] {
+    const char* e = std::getenv("CF_AUDIO_KIND_LOG");
+    return e && *e && *e != '0';
+}();
+
+VoiceKind classify(u32 pbAddr, int& player, bool logFail) {
+    player = -1;
+    const auto& a = nw4r();
+    auto fail = [&](const char* why, u32 v0, u32 v1) {
+        if (logFail && sKindLog) log("[ax] voice %08X: kind unknown, %s (%08X %08X)", pbAddr, why, v0, v1);
+        return VoiceKind::Unknown;
+    };
+    if (!a.ok || !sSda) return fail("no AX tables", sSda, u32(a.pbOff));
+    const u32 pbBase = rd32(sSda + a.pbOff), vpbBase = rd32(sSda + a.pbOff + 8);
+    const u32 off = (pbAddr & 0x1FFFFFFFu) - (pbBase & 0x1FFFFFFFu);
+    if (!guestPtr(vpbBase) || off % kPbSize || off / kPbSize >= 256) return fail("PB not in AX's table", pbBase, vpbBase);
+    const u32 vpb = vpbBase + off / kPbSize * 0x168;
+    const u32 axv = rd32(vpb + 0x14);
+    if (!guestPtr(axv) || rd32(axv + 0x38) != a.axVoiceCb)  // not an NW4R voice (HOME Menu, ...)
+        return fail("AXVPB context is no NW4R AxVoice", axv, guestPtr(axv) ? rd32(axv + 0x38) : 0);
+    const u32 voice = rd32(axv + 0x3C);
+    if (!guestPtr(voice)) return fail("AxVoice has no Voice", axv, voice);
+    const u32 vcb = rd32(voice + 0x94), vdata = rd32(voice + 0x98);
+    if (!guestPtr(vdata)) return fail("Voice has no owner", vcb, vdata);
+    u32 bp = 0;  // the sound's BasicPlayer
+    auto inPlayers = [](u32 sp) {
+        return sp >= sPlayers.base && (sp - sPlayers.base) % sPlayers.stride == 0 &&
+               (sp - sPlayers.base) / sPlayers.stride < sPlayers.count;
+    };
+    if (vcb == a.strmVoiceCb) {
+        // A stream voice's data is its track (StrmPlayer::AllocVoices: 0x38-byte tracks from
+        // StrmPlayer +0xB78, the track count at +0x82C): the track whose player belongs to a
+        // sound of the archive.
+        for (u32 k = 0; k < 8 && !bp && sPlayers.stride; k++) {
+            const u32 cand = vdata - 0xB78 - k * 0x38;
+            if (guestPtr(cand) && rd32(cand + 0x82C) > k && inPlayers(rd32(cand - 0x10C + 0x10))) bp = cand;
+        }
+    } else if (vcb == a.chanVoiceCb) {
+        const u32 ccb = rd32(vdata + 0xE0), cdata = rd32(vdata + 0xE4);
+        if (!guestPtr(cdata)) return fail("Channel has no owner", ccb, cdata);
+        if (ccb == a.seqTrackCb) bp = rd32(cdata + 0xC0);
+        else if (ccb == a.wsdCb) bp = cdata;
+        else return fail("Channel owner unknown", ccb, cdata);
+    } else {
+        return fail("Voice owner unknown", vcb, vdata);
+    }
+    if (!guestPtr(bp) || !sPlayers.stride) return fail("no player", bp, sPlayers.base);
+    const u32 sp = rd32(bp - 0x10C + 0x10);
+    if (!inPlayers(sp))
+        return fail("sound's SoundPlayer not in the archive player's array", bp, sp);
+    player = int((sp - sPlayers.base) / sPlayers.stride);
+    return kindOfPlayer(u32(player));
+}
+
+// Slider gain of a kind (unknown voices count as sound effects).
+float kindGain(VoiceKind k) {
+    const auto& as = port::settings().audio;
+    const float g = k == VoiceKind::Music ? as.musicVolume : k == VoiceKind::Voice ? as.voiceVolume : as.sfxVolume;
+    return std::clamp(g, 0.0f, 1.0f);
+}
+const char* kindName(VoiceKind k) {
+    return k == VoiceKind::Music ? "music" : k == VoiceKind::Voice ? "voice" : k == VoiceKind::Effect ? "effect" : "unknown";
+}
+
+// Per voice slot: the slider gain applied last frame (Q15), ramped to the new one over a frame
+// so a slider move does not click; a voice that starts takes its gain at once.
+u16 sVoiceGain[256];
+bool sVoiceOn[256];
+VoiceKind sVoiceKind[256];
+int sVoicePlayer[256];
+
+// ---- Extras per AI block (surround side data, Remote speakers) ----
+FrameExtras sPending;  // built during the list, filed under the OUTPUT command's AI buffer
+s32 sFoldA[kFrame], sFoldB[kFrame];
+int sFoldCmd = 0;
+std::atomic<int> sAxMode{0};
+struct ExtrasSlot {
+    u32 ai = 0;
+    FrameExtras x;
+};
+std::mutex sExtrasM;
+ExtrasSlot sExtras[4];
+u32 sExtrasNext = 0;
+
 
 // CF_AUDIO_LOG: one line per voice start (the first 400), so the source types, rates and
 // mixer settings the game uses can be checked against the PB layout.
 void logVoiceStart(u32 addr, const Pb& p) {
     static int sCount = 0;
-    if (++sCount > 400) return;
+    static const int sLimit = [] {  // CF_AUDIO_LOG=2: every voice start
+        const char* e = std::getenv("CF_AUDIO_LOG");
+        return e && *e == '2' ? 1 << 30 : 400;
+    }();
+    if (++sCount > sLimit) return;
     const u32 ratio = p.u32at(pb::kRatio);
     log("[ax] voice %08X start: fmt %02X src %u/%u ratio %.4f loop %u type %u addr %08X..%08X loop %08X "
-        "mix %08X L %04X R %04X S %04X A %04X/%04X B %04X/%04X ve %04X%+d lpf %u biq %u itd %u rmt %u/%04X",
+        "mix %08X L %04X R %04X S %04X A %04X/%04X B %04X/%04X ve %04X%+d lpf %u biq %u itd %u rmt %u/%04X; %s, player %d",
         addr, p.u(pb::kFormat), p.u(pb::kSrcSelect), p.u(pb::kCoefSelect), ratio / 65536.0, p.u(pb::kLoopFlag),
         p.u(pb::kType), p.u32at(pb::kCurAddr), p.u32at(pb::kEndAddr), p.u32at(pb::kLoopAddr), p.u32at(pb::kMixerCtrl),
         p.u(0x14), p.u(0x18), p.u(0x34), p.u(0x1C), p.u(0x20), p.u(0x24), p.u(0x28), p.u(pb::kVeVol),
         int(p.s(pb::kVeDelta)), p.u(pb::kLpfOn), p.u(pb::kBiqOn), p.u(pb::kItdOn), p.u(pb::kRmtOn),
-        p.u(pb::kRmtMixerCtrl));
+        p.u(pb::kRmtMixerCtrl), kindName(sVoiceKind[(addr / kPbSize) & 255]), sVoicePlayer[(addr / kPbSize) & 255]);
 }
 
 // CF_AX_TRACE=<PB address>: that voice's state at the start of each frame and its first and
@@ -424,15 +576,34 @@ void processVoice(Pb& p, u32 addr) {
             addr, p.u32at(pb::kCurAddr), p.u(pb::kPredScale), p.s(pb::kYn1), p.s(pb::kYn2), p.u(pb::kFrac),
             p.s(pb::kLast), p.s(pb::kLast + 2), p.s(pb::kLast + 4), p.s(pb::kLast + 6), p.u(pb::kVeVol),
             int(p.s(pb::kVeDelta)), p.u(0x14), int(p.s(0x16)), p.u(0x18), int(p.s(0x1A)));
+    // Volume sliders: the voice's kind, looked up each frame (a slot changes owner when NW4R
+    // reuses it), and its gain, ramped from last frame's.
+    const u32 slot = (addr / kPbSize) & 255;
+    const bool on = p.u(pb::kState) == 1;
+    const bool started = on && !sVoiceOn[slot];
+    sVoiceOn[slot] = on;
+    u16 gainFrom = 0x8000, gainTo = 0x8000;
+    if (on) {
+        int player;
+        VoiceKind kind = classify(addr, player, started);
+        // NW4R lets go of a voice before its release has died away (the Voice is freed, the AX
+        // voice still plays out): it keeps the kind it had.
+        if (kind == VoiceKind::Unknown && !started) {
+            kind = sVoiceKind[slot];
+            player = sVoicePlayer[slot];
+        }
+        sVoiceKind[slot] = kind;
+        sVoicePlayer[slot] = player;
+        gainTo = u16(std::lround(kindGain(kind) * 32768.0f));
+        gainFrom = started ? gainTo : sVoiceGain[slot];
+        sVoiceGain[slot] = gainTo;
+        sVoiceStats.kind[int(kind)]++;
+    }
     if (g_log) {
-        static u8 sWasOn[256];  // by voice index (PBs are 0x140 apart)
-        const u32 idx = (addr / kPbSize) & 255;
-        const bool on = p.u(pb::kState) == 1;
-        if (on && !sWasOn[idx]) {
+        if (started) {
             sVoiceStats.starts++;
             logVoiceStart(addr, p);
         }
-        sWasOn[idx] = on;
         if (on) {
             sVoiceStats.lpf += p.u(pb::kLpfOn) != 0;
             sVoiceStats.biquad += p.u(pb::kBiqOn) != 0;
@@ -473,6 +644,12 @@ void processVoice(Pb& p, u32 addr) {
         if (as.voiceFilters) {
             if (p.u(pb::kLpfOn)) lowPass(p, pb::kLpfYn1, v, v, kFrame);
             if (p.u(pb::kBiqOn)) biquad(p, pb::kBiqXn1, v, v, kFrame);
+        }
+        // F1 > Sound music / effects / voices volume (not the console's: default 1.0 leaves the
+        // mix bit-exact). Before the mixer, so the aux (reverb), remote and depop values follow.
+        if (gainFrom != 0x8000 || gainTo != 0x8000) {
+            const s32 d = s32(gainTo) - s32(gainFrom);
+            for (int i = 0; i < kFrame; i++) v[i] = s16((s32(v[i]) * (s32(gainFrom) + d * (i + 1) / kFrame)) >> 15);
         }
         // Mixer.
         for (u32 o = pb::kDpop; o < pb::kDpop + 24; o += 2) p.set(o, 0);
@@ -649,6 +826,32 @@ void output(u16 vol, u32 sAddr, u32 aiAddr, bool dpl2) {
     sPrevMaster = vol;
     const s32* L = bus(kMainL);
     const s32* R = bus(kMainR);
+    // Discrete surround side data (audio_out.cpp): the surround this frame's fold added, at the
+    // output level.
+    sPending.hasSide = sFoldCmd == 2 || sFoldCmd == 3;
+    if (sPending.hasSide) {
+        for (int i = 0; i < kFrame; i++) {
+            const float k = ramp[i] / 32768.0f;
+            SideSample& sd = sPending.side[i];
+            sd.sl = sFoldA[i] * k;
+            sd.sr = (sFoldCmd == 2 ? sFoldA[i] : sFoldB[i]) * k;
+            sd.lExtra = sFoldCmd == 2 ? -sd.sl : sd.sl;
+            sd.rExtra = sFoldCmd == 2 ? sd.sr : -sd.sr;
+        }
+    }
+    {
+        std::lock_guard lk(sExtrasM);
+        ExtrasSlot* slotp = nullptr;
+        for (auto& x : sExtras)
+            if (x.ai == aiAddr) slotp = &x;
+        if (!slotp) {
+            slotp = &sExtras[sExtrasNext];
+            sExtrasNext = (sExtrasNext + 1) % 4;
+        }
+        slotp->ai = aiAddr;
+        slotp->x = sPending;
+    }
+    sFoldCmd = 0;
     for (int i = 0; i < kFrame; i++) {
         const s16 r = sat16(floorDiv32768(s64(R[i]) * ramp[i]));
         const s16 l = sat16(floorDiv32768(s64(L[i]) * ramp[i]));
@@ -705,11 +908,14 @@ void setup(u32 studio) {
 void foldSurround(int cmd, u32 addr) {
     s32* L = bus(kMainL);
     s32* R = bus(kMainR);
+    sFoldCmd = cmd;
+    sAxMode.store(cmd - 1, std::memory_order_relaxed);
     for (int i = 0; i < kFrame; i++) {
         const s32 s = g32(addr + 4 * i);
+        sFoldA[i] = s;
         if (cmd == 1) L[i] += s, R[i] += s;
         else if (cmd == 2) L[i] -= s, R[i] += s;
-        else L[i] += s, R[i] -= g32(addr + 0x180 + 4 * i);
+        else R[i] -= (sFoldB[i] = g32(addr + 0x180 + 4 * i)), L[i] += s;
     }
 }
 
@@ -736,10 +942,13 @@ void logFrame() {
     const double rms = std::sqrt(sLevels.sumSq / (2.0 * kFrame * sLevels.frames));
     const double f = sLevels.frames;
     log("[ax] frame %llu (guest frame %u): %.1f playing (%u starts; per frame lpf %.1f biquad %.1f remote %.1f "
-        "itd %.1f aux %.1f), peak L %d R %d, rms %.0f, %u clipped samples, compressor %u",
+        "itd %.1f aux %.1f; music %.1f effect %.1f voice %.1f unknown %.1f), peak L %d R %d, rms %.0f, %u clipped "
+        "samples, compressor %u, mode %d",
         (unsigned long long)sFrames, copyDispCount(), sVoiceStats.active / f, sVoiceStats.starts, sVoiceStats.lpf / f,
-        sVoiceStats.biquad / f, sVoiceStats.remote / f, sVoiceStats.itd / f, sVoiceStats.aux / f, sLevels.peakL,
-        sLevels.peakR, rms, sLevels.clipped, sCompCount);
+        sVoiceStats.biquad / f, sVoiceStats.remote / f, sVoiceStats.itd / f, sVoiceStats.aux / f,
+        sVoiceStats.kind[int(VoiceKind::Music)] / f, sVoiceStats.kind[int(VoiceKind::Effect)] / f,
+        sVoiceStats.kind[int(VoiceKind::Voice)] / f, sVoiceStats.kind[int(VoiceKind::Unknown)] / f, sLevels.peakL,
+        sLevels.peakR, rms, sLevels.clipped, sCompCount, axMode());
     sLevels = {};
     sVoiceStats = {};
 }
@@ -761,11 +970,14 @@ void axCommandList(u32 addr, u32 bytes) {
         const u32 hi = w();
         return hi << 16 | w();
     };
+    sFoldCmd = 0;
     static int sListsLogged = 0;
     const bool logList = g_log && sListsLogged < 2;
+    u32 cmdMask = 0;  // CF_AUDIO_LOG: the command set (aux effects registered, mode) when it changes
     for (;;) {
         const u16 cmd = w();
         if (logList) log("[ax] list %08X: command %u", addr, cmd);
+        cmdMask |= 1u << (cmd & 31);
         switch (cmd) {
         case 0: setup(a32()); break;
         case 1: case 2: case 3: foldSurround(cmd, a32()); break;
@@ -810,6 +1022,13 @@ void axCommandList(u32 addr, u32 bytes) {
     }
 done:
     if (logList) sListsLogged++;
+    static u32 sLastMask = 0;
+    if (g_log && cmdMask != sLastMask) {
+        log("[ax] command set now %08X (guest frame %u): aux A %s, B %s, C %s, mode %d", cmdMask, copyDispCount(),
+            cmdMask & (1u << 5 | 1u << 8) ? "on" : "off", cmdMask & (1u << 6 | 1u << 9) ? "on" : "off",
+            cmdMask & (1u << 7) ? "on" : "off", axMode());
+        sLastMask = cmdMask;
+    }
     sFrames++;
     logFrame();
 }
@@ -825,10 +1044,23 @@ std::chrono::steady_clock::time_point dspFrameEnd() {
     return std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(sFrameEnd.load(std::memory_order_acquire)));
 }
 
-// Discrete surround side data: not produced by the AX stand-in yet (docs/AUDIO.md).
-bool dspSideData(u32, SideSample* out, u32 n) {
-    std::fill(out, out + n, SideSample{});
+bool dspFrameExtras(u32 aiAddr, FrameExtras& out) {
+    std::lock_guard lk(sExtrasM);
+    for (const auto& x : sExtras)
+        if (x.ai == aiAddr && aiAddr) {
+            out = x.x;
+            return true;
+        }
     return false;
+}
+
+int axMode() { return sAxMode.load(std::memory_order_relaxed); }
+
+void axSetSdaBase(u32 r13) { sSda = r13; }
+
+void noteSoundPlayers(u32 base, u32 count, u32 stride) {
+    sPlayers = {base, count, stride};
+    log("[ax] NW4R sound players: %u at %08X (volume sliders by player id)", count, base);
 }
 
 const s16* axRemoteFrame(int remote) { return sRmtOut[remote & 3]; }

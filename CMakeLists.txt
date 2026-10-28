@@ -65,13 +65,21 @@ target_include_directories(cf_recompiler PUBLIC src)
 add_executable(cfrecompile tools/recomp/cfrecompile.cpp)
 target_link_libraries(cfrecompile PRIVATE cf_recompiler)
 
+# Real Wii Remote protocol (src/recomp/wiimote_proto.cpp) against a fake HID device: no hardware,
+# no SDL (docs/CONTROLS.md "Real Wii Remotes"). ctest or build/<preset>/cf_wiimote_hid_test.
+add_executable(cf_wiimote_hid_test tools/tests/wiimote_hid_test.cpp src/recomp/wiimote_proto.cpp)
+target_include_directories(cf_wiimote_hid_test PRIVATE src)
+enable_testing()
+add_test(NAME wiimote_hid COMMAND cf_wiimote_hid_test)
+
 # Runtime shared by both executables: memory/CPU helpers, scheduler, HLE SDK, frame driver,
 # audio, menu, and the game-specific parts in src/game. module_rt.cpp belongs to the game
 # module, not the runtime.
 file(GLOB RECOMP_RUNTIME_SOURCES CONFIGURE_DEPENDS src/recomp/*.cpp src/game/*.cpp)
 list(REMOVE_ITEM RECOMP_RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/src/recomp/module_rt.cpp)
 list(APPEND RECOMP_RUNTIME_SOURCES src/port/crash_handler.cpp src/port/options.cpp src/port/dol.cpp
-    src/port/settings.cpp src/port/install.cpp src/port/update.cpp src/port/recovery.cpp src/port/disc_folder.cpp)
+    src/port/settings.cpp src/port/install.cpp src/port/update.cpp src/port/recovery.cpp src/port/disc_folder.cpp
+    src/port/http.cpp)
 set_source_files_properties(src/port/update.cpp PROPERTIES COMPILE_DEFINITIONS "CF_VERSION=\"${PROJECT_VERSION}\"")
 
 function(cf_runtime_target tgt)
@@ -106,7 +114,7 @@ endfunction()
 
 # Function maps: the DOL's (config/<id>/symbols.txt) and one per REL module
 # (config/<id>/rels/<module>.txt). Missing ones are filled by the recompiler's own scan.
-set(CF_GAME_ID "RUUE01" CACHE STRING "Game id of CF_DISC (RUUE01 USA rev 1)")
+set(CF_GAME_ID "RUUE01" CACHE STRING "Game id of CF_DISC (RUUE01 USA rev 1; RUUP01, RUUJ01, RUUK01)")
 set(CF_CONFIG_DIR ${CMAKE_SOURCE_DIR}/config/${CF_GAME_ID})
 
 # CityFolkRecomp: what end users run. It contains the runtime, the recompiler and the setup UI;
@@ -121,19 +129,26 @@ if (WIN32)
     target_link_options(CityFolkRecomp PRIVATE "LINKER:/ENTRY:mainCRTStartup")
 endif ()
 add_executable(cfembed tools/recomp/cfembed.cpp)
+# Setup's inputs: the function tables of every supported release (setup recompiles whichever disc
+# the player has; docs/SETUP.md), the hook list and the module's freestanding sources.
 set(CF_EMBEDDED_FILES
-    kSymbolsUs=config/RUUE01/symbols.txt kSplitsUs=config/RUUE01/splits.txt
     kHooks=tools/recomp/hooks.txt kCtxHeader=src/recomp/ctx.h kModuleAbiHeader=src/recomp/module_abi.h
     kModuleRt=src/recomp/module_rt.cpp kRecompilerSource=src/recompiler/recompiler.cpp)
 set(_embed_deps)
+foreach (_id RUUE01 RUUP01 RUUJ01 RUUK01)
+    list(APPEND CF_EMBEDDED_FILES kSymbols_${_id}=config/${_id}/symbols.txt kSplits_${_id}=config/${_id}/splits.txt
+        kModules_${_id}=config/${_id}/modules.txt)
+    # The REL maps: one embedded blob of the whole folder (cfembed's folder mode).
+    file(GLOB _embed_rel_maps CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/config/${_id}/rels/*.txt)
+    list(APPEND _embed_deps ${_embed_rel_maps})
+endforeach ()
 foreach (_e ${CF_EMBEDDED_FILES})
     string(REGEX REPLACE "^[^=]*=" "${CMAKE_SOURCE_DIR}/" _f ${_e})
     list(APPEND _embed_deps ${_f})
 endforeach ()
-# The REL maps: one embedded blob of the whole folder (cfembed's folder mode).
-list(APPEND CF_EMBEDDED_FILES kRelMapsUs=config/RUUE01/rels)
-file(GLOB _embed_rel_maps CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/config/RUUE01/rels/*.txt)
-list(APPEND _embed_deps ${_embed_rel_maps})
+foreach (_id RUUE01 RUUP01 RUUJ01 RUUK01)
+    list(APPEND CF_EMBEDDED_FILES kRelMaps_${_id}=config/${_id}/rels)
+endforeach ()
 add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/embedded_data.cpp
     COMMAND cfembed ${CMAKE_BINARY_DIR}/embedded_data.cpp setup::embedded::data ${CF_EMBEDDED_FILES}
     DEPENDS cfembed ${_embed_deps}

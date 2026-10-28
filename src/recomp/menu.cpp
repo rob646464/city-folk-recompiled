@@ -2,6 +2,8 @@
 // Drawn with Aurora's Dear ImGui on the host thread between the guest's present
 // and aurora_end_frame. While it is open the game receives neutral pad input.
 #include "recomp/menu.h"
+#include "game/cf_calendar.h"
+#include "game/cf_features.h"
 #include "recomp/system.h"
 #include "recomp/game.h"
 #include "recomp/gx_bridge.h"
@@ -735,25 +737,25 @@ void gameTab() {
         ImGui::Text("Developer build: %s, recompiled at build time.", port::versionName(inst.running));
         ImGui::TextDisabled("CityFolkRecomp manages discs and versions (docs/SETUP.md).");
     } else {
-        auto row = [](const char* label, const std::string& path, bool ready) {
-            ImGui::Text("%s:", label);
+        for (port::GameVersion v : port::kVersions) {
+            ImGui::Text("%s disc:", port::regionName(v));
             ImGui::SameLine();
-            if (ready) ImGui::TextWrapped("%s", path.c_str());
+            if (inst.isReady(v)) ImGui::TextWrapped("%s", inst.discOf(v).c_str());
             else ImGui::TextDisabled("not installed");
-        };
-        row("USA disc", inst.usDisc, inst.usReady);
-        row("Europe disc", inst.palDisc, inst.palReady);
-        ImGui::Text("Playing: %s version", inst.running == port::GameVersion::PAL ? "European" : "USA");
-        if (inst.both()) {
+        }
+        ImGui::Text("Playing: %s version (%s)", port::regionName(inst.running), port::gameId(inst.running));
+        if (inst.readyCount() > 1) {
             int base = int(inst.base);
             ImGui::Text("Version to play:");
-            ImGui::SameLine();
-            bool changed = ImGui::RadioButton("USA", &base, int(port::GameVersion::USA));
-            ImGui::SameLine();
-            changed |= ImGui::RadioButton("Europe", &base, int(port::GameVersion::PAL));
+            bool changed = false;
+            for (port::GameVersion v : port::kVersions) {
+                if (!inst.isReady(v)) continue;
+                ImGui::SameLine();
+                changed |= ImGui::RadioButton(port::regionName(v), &base, int(v));
+            }
             ImGui::SameLine();
             ImGui::TextDisabled("(?)");
-            ImGui::SetItemTooltip("Which installed disc's game runs (both are installed). Takes a restart.");
+            ImGui::SetItemTooltip("Which installed disc's game runs. Takes a restart.");
             if (changed) {
                 inst.base = port::GameVersion(base);
                 port::saveInstall();
@@ -771,7 +773,7 @@ void gameTab() {
             port::saveSettings();
             port::relaunch(true);
         }
-        ImGui::SetItemTooltip("Restarts into the setup screen to add a USA or European disc image or replace one\n"
+        ImGui::SetItemTooltip("Restarts into the setup screen to add a USA, European, Japanese or Korean disc or replace one\n"
                               "(unsaved game progress is lost).");
     }
     // The Wii's own settings as the game reads them (SYSCONF; src/recomp/sysconf.cpp, docs/NAND.md).
@@ -886,7 +888,7 @@ void renderingTab() {
         "GameCube's GPU reads it, instead of when the renderer thread gets to it. Without it,\n"
         "a draw can pick up data the game already rewrote for a later draw: Luigi's mouth or\n"
         "the Poltergust hose flicker now and then. Off: saves the copies (about 0.2-0.3 ms CPU per frame).\n"
-        "Above 30 fps (interpolation) vertex data is always snapshotted.");
+        "Above the game's own frame rate (interpolation) vertex data is always snapshotted.");
     {
         const bool avail = recomp::pacing::keepWarmAvailable();
         bool shown = avail && r.gpuKeepWarm;
@@ -1246,12 +1248,15 @@ void frameRateControls(port::VideoSettings& v) {
     const float hz = recomp::frame::displayRefreshHz();
     const int target = recomp::frame::targetFps();
     char label[64];
+    // The floor is the game's own rate (City Folk 60): "Original", drawn directly.
+    const int nativeFps = std::max(port::kMinFps, recomp::game::nativeFps());
+    if (v.targetFps < nativeFps) v.targetFps = nativeFps;
     if (v.matchDisplay) std::snprintf(label, sizeof(label), "%d fps (display)", target);
-    else if (v.targetFps <= port::kMinFps) std::snprintf(label, sizeof(label), "Original");
+    else if (v.targetFps <= nativeFps) std::snprintf(label, sizeof(label), "Original (%d)", nativeFps);
     else std::snprintf(label, sizeof(label), "%d fps", v.targetFps);
     if (v.unlimitedFps) std::snprintf(label, sizeof(label), "Unlimited");
     ImGui::BeginDisabled(v.matchDisplay || v.unlimitedFps);
-    sDirty |= recomp::menu::SliderInt("Frame rate", &v.targetFps, port::kMinFps, port::kMaxFps, label, ImGuiSliderFlags_AlwaysClamp);
+    sDirty |= recomp::menu::SliderInt("Frame rate", &v.targetFps, nativeFps, port::kMaxFps, label, ImGuiSliderFlags_AlwaysClamp);
     ImGui::EndDisabled();
     const bool sliderHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
     ImGui::BeginDisabled(v.unlimitedFps);
@@ -1260,7 +1265,7 @@ void frameRateControls(port::VideoSettings& v) {
     const bool checkHovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
     sDirty |= recomp::menu::Checkbox("Unlimited frame rate", &v.unlimitedFps);
     ImGui::SetItemTooltip("Interpolated frames as fast as the PC can draw them: no frame-rate target, no frame\n"
-                          "pacing and no cap below the display's refresh rate (the game itself still runs at 30).\n"
+                          "pacing and no cap below the display's refresh rate (the game itself still runs at its own rate).\n"
                           "With VSync on, the display's refresh rate still limits it (with G-SYNC the frame\n"
                           "rate can then sit right at the refresh rate); turn VSync off for a truly unlimited\n"
                           "rate. Uneven frame times can look less smooth than a paced target.");
@@ -1300,13 +1305,14 @@ void frameRateControls(port::VideoSettings& v) {
                           "divides the refresh rate, set the display to a matching refresh rate, or turn\n"
                           "VSync off (next launch).",
                           hz, target, fit);
-        ImGui::SetTooltip("30 fps is the game's own rate, drawn exactly as the console does.\n"
-                          "Above 30, frames in between are interpolated (the game still runs at 30):\n"
+        const int native = std::max(port::kMinFps, recomp::game::nativeFps());
+        ImGui::SetTooltip("Original (%d fps) is the game's own rate, drawn exactly as the console does.\n"
+                          "Above it, frames in between are interpolated (the game still runs at %d):\n"
                           "movement, the camera, lights and effects are blended between game frames,\n"
-                          "shown one game frame (33 ms) behind. Cuts and teleports are not blended.\n"
+                          "shown one game frame (%.0f ms) behind. Cuts and teleports are not blended.\n"
                           "Match display refresh rate: the refresh rate of the monitor the window is on\n"
                           "(currently %.0f Hz).%s",
-                          hz, vs);
+                          native, native, 1000.0 / native, hz, vs);
     }
     static const char* kVrr[] = {"Auto (detect)", "On", "Off"};
     sDirty |= combo("Variable refresh rate", v.vrr, kVrr, 3);
@@ -1483,10 +1489,10 @@ void visualsTab() {
     sDirty |= combo("Aspect ratio", v.aspect, kAspects, 6);
     ImGui::SetItemTooltip("Shape of the 3D view. Original 4:3: as on the console, with black bars in a wider\n"
                           "window. Match window: fills the window. The fixed ratios add black bars as needed.");
-    sDirty |= recomp::menu::Checkbox("Keep HUD at 4:3", &v.hudKeep4x3);
-    ImGui::SetItemTooltip("On: the HUD stays where it is on a 4:3 screen, centred. Off: in widescreen the health\n"
-                          "counter moves to the left edge and the Game Boy Horror to the right edge.");
-    if (!v.hudKeep4x3) pending("in-game HUD moves to the screen edges");
+    sDirty |= recomp::menu::Checkbox("Keep HUD at 16:9###hudKeep", &v.hudKeep4x3);
+    ImGui::SetItemTooltip("On: in a window wider than 16:9 the HUD stays where it is on a 16:9 TV, centred.\n"
+                          "Off: the clock moves to the left edge and the memo / camera buttons to the right\n"
+                          "edge (src/game/cf_hud.cpp); the toolbar, dialogue and menus stay centred.");
     sDirty |= recomp::menu::SliderFloat("Field of view", &v.fovScale, 0.75f, 1.5f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
     ImGui::SetItemTooltip("Scales the camera's field of view (1 = original). Higher shows more of the room.");
 
@@ -1587,24 +1593,32 @@ void soundTab() {
     sDirty |= volumeSlider("Master volume", a.masterVolume);
     ImGui::SetItemTooltip("Everything the game plays.");
     sDirty |= volumeSlider("Music volume", a.musicVolume);
-    ImGui::SetItemTooltip("Background music: the game's music sequences and streamed music.\n"
-                          "Not applied yet: music and effects are not told apart so far.");
+    ImGui::SetItemTooltip("Music: the background music, K.K. Slider's songs and records, jingles and the title\n"
+                          "theme (the game's music players).");
     sDirty |= volumeSlider("Sound effects volume", a.sfxVolume);
-    ImGui::SetItemTooltip("Everything else: sound effects, voices, ambience.\n"
-                          "Not applied yet: music and effects are not told apart so far.");
+    ImGui::SetItemTooltip("Everything else: footsteps, tools, menus, furniture, ambience, insects, the town tune\n"
+                          "chimes, gyroids and the TV.");
+    sDirty |= volumeSlider("Voices volume", a.voiceVolume);
+    ImGui::SetItemTooltip("The villagers' and Rover's speech (Animalese), also while typing.");
+    sDirty |= volumeSlider("Wii Remote speaker volume", a.remoteVolume);
+    ImGui::SetItemTooltip("What the game plays on the Wii Remote's own speaker, played through the PC's speakers\n"
+                          "(in the centre; on the centre speaker with 5.1 / 7.1). Band-limited to 3 kHz like the\n"
+                          "Remote's 6 kHz speaker stream, with a little bass cut for the small speaker. 0%: off.\n"
+                          "(The HOME Menu's Wii Remote speaker volume is already part of what it sends.)");
     ImGui::SeparatorText("Output");
     static const char* kOutputs[] = {"Stereo", "Mono", "Surround (matrix-encoded stereo)", "Surround 5.1 (discrete)",
                                      "Surround 7.1 (discrete)"};
     sDirty |= combo("Output", a.output, kOutputs, 5);
     ImGui::SetItemTooltip(
-            "The game's own sound option (its options menu changes the same setting).\n"
+            "The console's sound setting (Wii Settings), read by the game at start: changes apply\n"
+            "on the next start.\n"
             "Stereo / Mono: the game's stereo or mono mix.\n"
-            "Surround: the game's surround mode as a console outputs it: stereo with the\n"
-            "surround channel matrix-encoded (in phase left, inverted right) for a Dolby\n"
-            "Pro Logic / Pro Logic II decoder.\n"
-            "5.1 / 7.1: the game's surround mode with its centre and surround channels\n"
-            "played on their own speakers instead of matrix-encoded. Needs a device with\n"
-            "6 / 8 channels (else falls back to 5.1 or matrix-encoded stereo).");
+            "Surround: the console set to surround. City Folk itself then mixes in stereo, as on\n"
+            "a Wii, so this sounds like Stereo.\n"
+            "5.1 / 7.1: the game keeps mixing in Dolby Pro Logic II and its surround channels go\n"
+            "to the surround speakers (the game pans nothing to the rear itself: they carry its\n"
+            "reverb returns); the Wii Remote speaker sound goes to the centre speaker. Needs a\n"
+            "device with 6 / 8 channels (else falls back to 5.1 or stereo).");
     {
         const int dev = recomp::audio::outDeviceChannels();
         if (dev > 0) ImGui::TextDisabled("Device: %d channels. Playing: %s", dev, recomp::audio::outStatus());
@@ -1637,9 +1651,15 @@ void generalEnhancementsTab() {
     ImGui::SetItemTooltip("The game pauses (and goes quiet) while another window is in front.");
 }
 
-// Game features (docs/ROADMAP.md "Feature list"): none yet; every one will be off / original by
-// default.
-void gameplayTab() { ImGui::TextDisabled("Nothing here yet: the game's own options come later (docs/ROADMAP.md)."); }
+// Game features (docs/ROADMAP.md "Feature list", docs/FEATURES.md, docs/CALENDAR.md): every one
+// off / original by default; the controls live with the features in src/game/.
+void gameplayTab() {
+    recomp::cf::grassMenu(sDirty);
+    recomp::cf::skinMenu(sDirty);
+    ImGui::SeparatorText("Seasons and weather");
+    sDirty |= recomp::calendar::drawHemisphereMenu();  // src/game/cf_calendar.cpp
+    sDirty |= recomp::calendar::drawWeatherMenu();     // src/game/cf_weather.cpp
+}
 
 // Debug: the game's debug entries (src/game).
 void debugTab() { recomp::game::debugMenu(); }

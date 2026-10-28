@@ -72,6 +72,10 @@ Port design consequences [spec]:
 
 ## 2. Grass wear
 
+Implemented and traced in the game: docs/FEATURES.md "Grass wear" (the game's real rules differ
+from the web sources below: wear 4-7, or 8-11 under a flag, once per tile per load; regrowth
+1 + neighbour mean / 85 per day).
+
 City Folk [web-medium-high: Nookipedia "Animal tracks", from fan research; storage from ACSE
 (MIT, Cuyler36) `SaveDataManager.cs`]:
 - **Per tile**, one byte, 0 = bare dirt ... 255 = healthy grass. Town = 5 x 5 acres x 16 x 16
@@ -110,6 +114,9 @@ Spec for the F1 option (Enhancements > Gameplay "Grass wear") [spec]:
   writes to the town's wear block; LM-style `LM_WATCH` on the block).
 
 ## 3. Skin tone
+
+Implemented and traced in the game: docs/FEATURES.md "Skin tone" (tan at player data + 0x83F8 =
+save + 0x8418 for slot 0, 0..15, tone = tan >> 1: confirmed).
 
 [disc] The game has **8 skin palettes**: `Plyr/Pltt/Palette.arc` 0.brplt-7.brplt, each named
 `skin`, 16 RGB5A3 colours, darkening step by step (base tone 0 lightest, 7 darkest). Palettes

@@ -6,6 +6,7 @@
 #include "recomp/game.h"
 #include "recomp/system.h"
 #include "port/recovery.h"
+#include "recompiler/rel_format.h"
 
 #include <dolphin/gx.h>
 
@@ -378,7 +379,23 @@ void callOriginal(Ctx& c, const char* name) {
     // frame): the original is looked up once per name (callers pass string literals) per thread.
     thread_local std::unordered_map<const char*, HleFn> sCache;
     if (const auto it = sCache.find(name); it != sCache.end()) return it->second(c);
-    const u32 addr = guestSymbol(name);
+    // "<module>::<name>": a hooked REL function, keyed by relfmt::relOrigKey in the same table.
+    u32 addr = 0;
+    if (const char* sep = std::strstr(name, "::")) {
+        const std::string mod(name, size_t(sep - name));
+        for (u32 m = 0; m < g_module->relCount && !addr; m++) {
+            const RelModuleDesc& d = g_module->rels[m];
+            if (mod != d.name) continue;
+            for (u32 i = 0; i < d.funcCount; i++)
+                if (std::strcmp(d.names[i], sep + 2) == 0) {
+                    addr = relfmt::relOrigKey(d.id, d.funcs[i].key >> 24, d.funcs[i].key & 0xFFFFFF);
+                    break;
+                }
+        }
+        if (!addr) fatal("callOriginal: no REL function %s", name);
+    } else {
+        addr = guestSymbol(name);
+    }
     for (u32 i = 0; i < g_module->origCount; i++) {
         if (g_module->orig[i].addr == addr) {
             sCache.emplace(name, g_module->orig[i].fn);

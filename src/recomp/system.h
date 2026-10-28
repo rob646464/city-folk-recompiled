@@ -12,7 +12,7 @@ namespace recomp::sys {
 enum Language : int { Japanese = 0, English, German, French, Spanish, Italian, Dutch, ChineseS, ChineseT, Korean };
 
 struct SystemSettings {
-    int language = -1;          // -1 = the disc's region default (USA/PAL English, Japan Japanese); else Language
+    int language = -1;          // -1 = the disc's region default (USA/PAL English, Japan Japanese, Korea Korean); else Language
     int sensorBar = 0;          // 0 below the TV, 1 above
     int irSensitivity = 3;      // Wii Remote pointer sensitivity 1..5 (BT.SENS)
     int speakerVolume = 0x58;   // Wii Remote speaker volume 0..127 (BT.SPKV)
@@ -24,7 +24,7 @@ struct SystemSettings {
 SystemSettings& settings();
 
 // Languages the running disc offers (US: English, French, Spanish; PAL: English, German,
-// French, Spanish, Italian, Dutch; Japan: Japanese), and the one the console reports.
+// French, Spanish, Italian, Dutch; Japan: Japanese; Korea: Korean), and the one the console reports.
 bool languageAvailable(int lang);
 int effectiveLanguage();
 const char* languageName(int lang);

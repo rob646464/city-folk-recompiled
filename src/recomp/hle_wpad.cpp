@@ -17,6 +17,7 @@
 // info, speaker/DPD/LED control) arrive later from the interrupt side, never inside the call.
 // Remotes connect about a second after WPADInit, as paired Remotes do after the system starts.
 // CF_WPAD_LOG=1 logs state changes and every callback.
+#include "recomp/audio.h"
 #include "recomp/hle.h"
 #include "recomp/runtime.h"
 #include "recomp/sched.h"
@@ -418,7 +419,7 @@ HLE(WPADSaveConfig) {
     c.r[3] = 1;
 }
 
-// ---- WPAD: speaker (accepted; the Remote speaker's sound is not played yet) ------------------
+// ---- WPAD: speaker (its stream is decoded and played on the PC: audio_remote.cpp) ----------
 
 // WPADControlSpeaker(chan, command, cb): 0 off, 1 on, 2 mute, 3 unmute, 4 play, 5 (stream setup).
 HLE(WPADControlSpeaker) {
@@ -434,6 +435,8 @@ HLE(WPADControlSpeaker) {
     else if (cmd == 2) ch.speakerMuted = true;
     else if (cmd == 3) ch.speakerMuted = false;
     if (sLog) log("[wpad] remote %u speaker command %u", chan + 1, cmd);
+    audio::remoteSpeakerCommand(int(chan), int(cmd));  // the Remote speaker on the PC
+    wiimote::speakerControl(int(chan), int(cmd));  // a real Remote's speaker (wiimote_hid.cpp)
     callLater(kReplyDelay, c.r[5], chan, u32(kErrNone), "speaker");
     c.r[3] = u32(kErrNone);
 }
@@ -456,6 +459,8 @@ HLE(WPADSendStreamData) {
         return;
     }
     sChan[chan].streamBytes += c.r[5];
+    audio::remoteStreamData(int(chan), c.r[4], c.r[5], sChan[chan].speaker && !sChan[chan].speakerMuted);
+    if (c.r[4] && c.r[5]) wiimote::speakerData(int(chan), hostp(c.r[4]), std::min<u32>(c.r[5], 0x400));
     c.r[3] = u32(kErrNone);
 }
 HLE(WPADGetSpeakerVolume) {

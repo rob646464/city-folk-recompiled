@@ -40,9 +40,15 @@ std::array<uint8_t, 20> sha1(const uint8_t* data, size_t len) {
     };
     for (size_t chunk = 0; chunk < padded; chunk += 64) {
         uint32_t w[80];
-        for (int i = 0; i < 16; ++i) {
-            w[i] = (uint32_t(byteAt(chunk + i * 4)) << 24) | (uint32_t(byteAt(chunk + i * 4 + 1)) << 16) |
-                   (uint32_t(byteAt(chunk + i * 4 + 2)) << 8) | byteAt(chunk + i * 4 + 3);
+        if (chunk + 64 <= len) {  // whole block of the input (setup hashes every REL: keep it quick)
+            const uint8_t* q = data + chunk;
+            for (int i = 0; i < 16; ++i)
+                w[i] = (uint32_t(q[i * 4]) << 24) | (uint32_t(q[i * 4 + 1]) << 16) | (uint32_t(q[i * 4 + 2]) << 8) | q[i * 4 + 3];
+        } else {
+            for (int i = 0; i < 16; ++i) {
+                w[i] = (uint32_t(byteAt(chunk + i * 4)) << 24) | (uint32_t(byteAt(chunk + i * 4 + 1)) << 16) |
+                       (uint32_t(byteAt(chunk + i * 4 + 2)) << 8) | byteAt(chunk + i * 4 + 3);
+            }
         }
         for (int i = 16; i < 80; ++i) {
             w[i] = std::rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
@@ -75,6 +81,7 @@ namespace {
 constexpr uint8_t kShaRUUE01[20] = {0xa1, 0xce, 0x84, 0xf7, 0x89, 0x86, 0xb1, 0x8c, 0x7b, 0x63, 0xc4, 0xc5, 0x8b, 0x61, 0x84, 0x11, 0x17, 0xf8, 0xc0, 0x87};
 constexpr uint8_t kShaRUUP01[20] = {0xea, 0x33, 0x2f, 0x76, 0xb8, 0x4b, 0xf4, 0x6e, 0x4e, 0x0d, 0x78, 0x78, 0x6d, 0x7c, 0xd0, 0x2b, 0xcf, 0xb9, 0x5d, 0x11};
 constexpr uint8_t kShaRUUJ01[20] = {0xd8, 0xc6, 0x89, 0x54, 0xe6, 0xe4, 0xf1, 0xaf, 0x8d, 0x94, 0xb6, 0x0e, 0x05, 0xab, 0xaf, 0x64, 0x7d, 0x6e, 0x49, 0x23};
+constexpr uint8_t kShaRUUK01[20] = {0x5f, 0x1f, 0xca, 0xbf, 0xeb, 0x22, 0x12, 0x70, 0x41, 0x73, 0xef, 0x54, 0x78, 0x83, 0xbd, 0x54, 0xa2, 0x51, 0x90, 0x5d};
 
 }  // namespace
 
@@ -84,6 +91,7 @@ Version identify(const uint8_t* dol, size_t size) {
     if (std::memcmp(digest.data(), kShaRUUE01, 20) == 0) return Version::RUUE01;
     if (std::memcmp(digest.data(), kShaRUUP01, 20) == 0) return Version::RUUP01;
     if (std::memcmp(digest.data(), kShaRUUJ01, 20) == 0) return Version::RUUJ01;
+    if (std::memcmp(digest.data(), kShaRUUK01, 20) == 0) return Version::RUUK01;
     return Version::Unknown;
 }
 
@@ -92,6 +100,7 @@ const char* versionId(Version v) {
     case Version::RUUE01: return "RUUE01";
     case Version::RUUP01: return "RUUP01";
     case Version::RUUJ01: return "RUUJ01";
+    case Version::RUUK01: return "RUUK01";
     default: return "unknown";
     }
 }
@@ -119,7 +128,7 @@ Version load() {
     }
     sVersion = identify(sDol, sDolSize);
     if (sVersion == Version::Unknown)
-        OSReport("[dol] main.dol does not match a supported retail build (RUUE01/RUUP01/RUUJ01 rev 1)\n");
+        OSReport("[dol] main.dol does not match a supported retail build (RUUE01/RUUP01/RUUJ01/RUUK01 rev 1)\n");
     return sVersion;
 }
 

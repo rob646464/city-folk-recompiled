@@ -348,7 +348,27 @@ AttrBlock readAttrBlock(u32 a) {
 
 class FsDevice final : public Handle {
 public:
-    s32 ioctl(u32 cmd, u32 in, u32 inLen, u32 out, u32 outLen, const Reply&) override {
+    // Every refused /dev/fs request is logged once with its path (save errors in player logs).
+    s32 ioctl(u32 cmd, u32 in, u32 inLen, u32 out, u32 outLen, const Reply& r) override {
+        const s32 res = ioctlImpl(cmd, in, inLen, out, outLen, r);
+        if (res < 0) {
+            std::string path = in && cmd != 0x02 ? readPath(cmd == 0x03 || cmd == 0x05 || cmd == 0x09 ? in + 6 : in) : "";
+            if (cmd == 0x08 && in) path += " -> " + readPath(in + 0x40);
+            logOnce("/dev/fs ioctl " + std::to_string(cmd) + " " + path + " -> error " + std::to_string(res));
+        }
+        return res;
+    }
+    s32 ioctlv(u32 cmd, u32 nin, u32 nout, const Vec* v, const Reply& r) override {
+        const s32 res = ioctlvImpl(cmd, nin, nout, v, r);
+        if (res < 0) {
+            const std::string path = nin >= 1 && v[0].addr ? readPath(v[0].addr) : "";
+            logOnce("/dev/fs ioctlv " + std::to_string(cmd) + " " + path + " -> error " + std::to_string(res));
+        }
+        return res;
+    }
+
+private:
+    s32 ioctlImpl(u32 cmd, u32 in, u32 inLen, u32 out, u32 outLen, const Reply&) {
         std::lock_guard lk(sFsM);
         std::error_code ec;
         cost_ = 0.0003;
@@ -367,6 +387,8 @@ public:
             wr32(out + 16, 0x1000);
             wr32(out + 20, 0x17FF - (inodes + 0x200));
             wr32(out + 24, inodes + 0x200);
+            logOnce("/dev/fs GetStats: free " + std::to_string(used < total ? total - used : 0) + " clusters, " +
+                    std::to_string(0x17FF - (inodes + 0x200)) + " inodes");
             return IPC_OK;
         }
         case 0x03:    // CreateDir
@@ -460,7 +482,7 @@ public:
         logOnce("/dev/fs ioctl " + std::to_string(cmd) + " not handled");
         return FS_EINVAL;
     }
-    s32 ioctlv(u32 cmd, u32 nin, u32 nout, const Vec* v, const Reply&) override {
+    s32 ioctlvImpl(u32 cmd, u32 nin, u32 nout, const Vec* v, const Reply&) {
         std::lock_guard lk(sFsM);
         std::error_code ec;
         cost_ = 0.0005;
@@ -508,11 +530,13 @@ public:
             cost_ += 0.00002 * double(inodes);
             wr32(v[nin].addr, clusters);
             wr32(v[nin + 1].addr, inodes);
+            logOnce("/dev/fs GetUsage " + path + ": " + std::to_string(clusters) + " clusters, " + std::to_string(inodes) + " inodes");
             return IPC_OK;
         }
         logOnce("/dev/fs ioctlv " + std::to_string(cmd) + " not handled");
         return FS_EINVAL;
     }
+public:
     double cost() const override { return cost_; }
     Queue queue() const override { return Queue::Fs; }
 
@@ -563,9 +587,16 @@ const fs::path& nandRoot() {
             }
         }
         // What the System Menu and IOS leave on every console: the disc title's data folder,
-        // the shared folders, an empty /tmp (IOS clears it at boot).
+        // the shared folders, the title-type folders (channels, disc titles, DLC...), an empty /tmp
+        // (IOS clears it at boot). The save's free-space check (NANDCheck-style, City Folk's "Save
+        // and quit") sums GetUsage over /title/00010001-00010007 and /shared2/title and fails with
+        // "Could not access the Wii System Memory" when one of them is missing.
         for (const std::string& d : {titleDataDir(), std::string("/shared2/sys"), std::string("/shared2/menu/FaceLib"),
-                                     std::string("/shared2/wc24/mbox"), std::string("/title/00000001/00000002/data"),
+                                     std::string("/shared2/wc24/mbox"), std::string("/shared2/title"),
+                                     std::string("/title/00000001/00000002/data"), std::string("/title/00010001"),
+                                     std::string("/title/00010002"), std::string("/title/00010003"),
+                                     std::string("/title/00010004"), std::string("/title/00010005"),
+                                     std::string("/title/00010006"), std::string("/title/00010007"),
                                      std::string("/meta"), std::string("/ticket"), std::string("/tmp")})
             fs::create_directories(hostPath(d), ec);
         for (const auto& e : fs::directory_iterator(hostPath("/tmp"), ec)) fs::remove_all(e.path(), ec);

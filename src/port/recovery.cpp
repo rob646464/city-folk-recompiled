@@ -144,7 +144,7 @@ void resetSettings() {
 
 void rebuildGameData() {
     std::error_code ec;
-    for (const fs::path& p : {dataDir() / "game", hiddenMansionOverlayDir()}) {
+    for (const fs::path& p : {dataDir() / "game"}) {
         if (fs::exists(p, ec)) {
             fs::remove_all(p, ec);
             say("[recovery] removed " + u8(p) + (ec ? " (failed: " + ec.message() + ")" : ""));
@@ -355,9 +355,18 @@ void openRunLog() {
     if (sLog) return;
     std::error_code ec;
     const fs::path dir = configDir();
-    const fs::path path = dir / "last_run.log";
-    if (fs::exists(path, ec)) fs::rename(path, dir / "previous_run.log", ec);
+    fs::path path = dir / "last_run.log";
+    if (fs::exists(path, ec)) {
+        fs::remove(dir / "previous_run.log", ec);
+        fs::rename(path, dir / "previous_run.log", ec);
+    }
     sLog = _wfopen(path.wstring().c_str(), L"wb");
+    if (!sLog) {
+        // last_run.log still held by another copy of the program: this run's log gets its own
+        // name instead of being lost.
+        path = dir / ("last_run-" + stamp() + ".log");
+        sLog = _wfopen(path.wstring().c_str(), L"wb");
+    }
     if (!sLog) return;
     const std::string head = "Animal Crossing City Folk Recompiled " + std::string(update::buildVersion()) + ", started " + stamp();
     logLine(head.c_str(), head.size());

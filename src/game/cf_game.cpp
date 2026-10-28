@@ -8,9 +8,16 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "game/cf_features.h"
+
 #include <atomic>
+#include <cmath>
 #include <mutex>
 #include <unordered_map>
+
+namespace recomp::vi {
+double fieldSeconds();  // hle_vi.cpp
+}
 
 namespace recomp {
 namespace game {
@@ -18,9 +25,11 @@ namespace {
 std::atomic<u32> sFrames{0};
 }  // namespace
 
-bool onGuestFrame(Ctx&) {
+bool onGuestFrame(Ctx& c) {
     sFrames.fetch_add(1, std::memory_order_relaxed);
-    return false;
+    cf::grassOnFrame(c);  // cf_grass.cpp, cf_skin.cpp (docs/FEATURES.md)
+    cf::skinOnFrame(c);
+    return cf::devOnGuestFrame(c);  // CF_FF fast-forward and other test aids (cf_devaids.cpp)
 }
 u32 guestFrames() { return sFrames.load(std::memory_order_relaxed); }
 
@@ -131,9 +140,12 @@ HLE(fn_802AA1A8) {
 }
 void filterPad(PADStatus*, int) {}
 bool padHeld() { return false; }
-double retraceSpeed() { return 1.0; }
-float audioGain() { return 1.0f; }
+double retraceSpeed() { return cf::devRetraceSpeed(); }
+float audioGain() { return cf::devRetraceSpeed() > 1.0 ? 0.0f : 1.0f; }
 bool audioMirrored() { return false; }
+// One GXCopyDisp per retrace in every scene measured (title, Rover's intro, bus, keyboards,
+// town, town map; docs/WII.md "Frame rate"): 60 fps, 50 for a European game at 50 Hz.
+int nativeFps() { return int(std::lround(1.0 / vi::fieldSeconds())); }
 bool unadjustedPass() { return false; }
 bool splitScreen() { return false; }
 bool textBoxShown() { return false; }
@@ -162,7 +174,7 @@ namespace gx {
 bool g_discardDraws = false;  // gx_bridge.h: the frame being drawn is not shown (fast-forward)
 }
 namespace interp {
-u32 viewMatrixSource() { return 0; }  // interp.h: no camera matrix in guest memory known yet
+// viewMatrixSource: cf_tags.cpp (the current g3d camera).
 namespace detail {
 bool trackPoints(float out[9]) {
     (void)out;

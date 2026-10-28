@@ -431,9 +431,9 @@ public:
 
 EmulatedSource sEmulated;
 
-Source& sourceFor(int /*chan*/) {
-    // Every port uses the emulated source today; a real Wii Remote (HID) source is chosen here
-    // per port once it exists (docs/WII.md "Real Wii Remotes").
+Source& sourceFor(int chan) {
+    // A port set to "Real Wii Remote" (wiimote_hid.cpp), else the emulated source.
+    if (Source* real = hidSource(chan)) return *real;
     return sEmulated;
 }
 
@@ -465,6 +465,14 @@ void sample(int chan, State& out) {
 
 void rumble(int chan, bool on) {
     if (chan >= 0 && chan < kRemotes) sourceFor(chan).rumble(chan, on);
+}
+
+void speakerControl(int chan, int cmd) {
+    if (chan >= 0 && chan < kRemotes) sourceFor(chan).speakerControl(chan, cmd);
+}
+
+void speakerData(int chan, const u8* data, u32 len) {
+    if (chan >= 0 && chan < kRemotes && data && len) sourceFor(chan).speakerData(chan, data, len);
 }
 
 void handleEvent(const SDL_Event& ev) {
@@ -593,6 +601,7 @@ bool drawRemotesSection() {
         }
         ImGui::EndTable();
     }
+    changed |= drawHidPortsSection();
     return changed;
 }
 
@@ -623,8 +632,7 @@ bool drawPointerTab() {
     ImGui::SeparatorText("Sensor bar");
     changed |= recomp::menu::SliderFloat("Distance (m)", &sCfg.distance, 0.5f, 5.0f, "%.1f", ImGuiSliderFlags_AlwaysClamp);
     ImGui::SetItemTooltip("How far the emulated Remote is from the sensor bar, as the game reads it.");
-    ImGui::SeparatorText("Real Wii Remotes");
-    ImGui::TextDisabled("Wii Remotes paired over Bluetooth (or a DolphinBar) are planned: docs/WII.md.");
+    changed |= drawHidPointerSection();
     return changed;
 }
 

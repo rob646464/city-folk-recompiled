@@ -15,8 +15,8 @@
 
 #include <algorithm>
 #include <atomic>
-#include <fstream>
-#include <iterator>
+#include <chrono>
+#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -27,12 +27,14 @@ namespace setup {
 namespace {
 
 using port::GameVersion;
+using port::kVersionCount;
+using port::kVersions;
 
 struct Slot {
-    std::string path;     // UTF-8
+    std::string path;              // UTF-8, as picked (install.ini)
     bool valid = false;
-    GameVersion version = GameVersion::USA;
-    std::string message;  // validation result
+    std::string message;           // validation result
+    std::shared_ptr<Disc> disc;    // opened and verified (valid only)
 };
 
 // State shared with the worker thread.
@@ -52,57 +54,56 @@ struct Job {
 
 // Results of the file dialogs (SDL may call back on another thread).
 std::mutex sPickM;
-std::optional<std::string> sPicked[2];
+std::optional<std::string> sPicked[kVersionCount];
 std::string sDialogError;  // the file dialog could not open (Linux: no xdg-desktop-portal/zenity)
 
-std::string readText(const std::filesystem::path& p) {
-    std::ifstream in(port::longPath(p), std::ios::binary);
-    return std::string(std::istreambuf_iterator<char>(in), {});
-}
-
-void validate(Slot& s, GameVersion expected) {
-    s.valid = false;
-    s.message.clear();
-    if (s.path.empty()) return;
-    GameVersion v{};
-    std::string err;
-    if (!probeDisc(s.path, v, err)) {
-        s.message = err;
+// Opens and checks `path`. A disc of another region than `slot` moves to its own slot.
+void place(Slot slots[], int slot, const std::string& path) {
+    Slot s;
+    s.path = path;
+    if (path.empty()) {
+        slots[slot] = s;
         return;
     }
-    if (v != expected) {
-        s.message = std::string("This is the ") + (v == GameVersion::PAL ? "European" : "USA") +
-                    " disc; put it in the other slot.";
+    auto d = std::make_shared<Disc>();
+    std::string err;
+    if (!d->open(path, err)) {
+        s.message = err;
+        slots[slot] = s;
         return;
     }
     s.valid = true;
-    s.message = v == GameVersion::PAL ? "Animal Crossing: City Folk (Europe, RUUP01)" : "Animal Crossing: City Folk (USA, RUUE01)";
+    s.message = describe(d->version()) + ", " + d->kind();
+    const int target = int(d->version());
+    s.disc = std::move(d);
+    if (target != slot) {
+        s.message += " (moved here from the " + std::string(port::regionName(kVersions[slot])) + " row)";
+        if (!slots[slot].valid) slots[slot] = Slot{};
+    }
+    slots[target] = std::move(s);
 }
 
 struct Plan {
-    std::vector<GameVersion> modules;  // modules to (re)build
+    std::vector<GameVersion> modules;  // modules to (re)build, the base first
     bool empty() const { return modules.empty(); }
 };
 
-Plan makePlan(const Slot slots[2]) {
+Plan makePlan(const Slot slots[], GameVersion base) {
     Plan p;
-    std::unique_ptr<Disc> discs[2];
-    for (int i = 0; i < 2; i++) {
-        if (!slots[i].valid) continue;
-        discs[i] = std::make_unique<Disc>();
-        std::string err;
-        if (!discs[i]->open(slots[i].path, err)) {
-            discs[i].reset();
-            continue;
-        }
-        if (!moduleUpToDate(*discs[i])) p.modules.push_back(discs[i]->version());
+    std::vector<GameVersion> order{base};
+    for (GameVersion v : kVersions)
+        if (v != base) order.push_back(v);
+    for (GameVersion v : order) {
+        const Slot& s = slots[int(v)];
+        if (s.valid && !moduleUpToDate(*s.disc)) p.modules.push_back(v);
     }
     return p;
 }
 
-void startJob(Job& job, const Slot slots[2], const Plan& plan) {
-    const std::string paths[2] = {slots[0].valid ? slots[0].path : "", slots[1].valid ? slots[1].path : ""};
-    job.thread = std::thread([&job, paths, plan] {
+void startJob(Job& job, const Slot slots[], const Plan& plan) {
+    std::shared_ptr<Disc> discs[kVersionCount];
+    for (int i = 0; i < kVersionCount; i++) discs[i] = slots[i].disc;
+    job.thread = std::thread([&job, discs, plan] {
         auto set = [&](const std::string& stage, float f) {
             std::lock_guard lk(job.m);
             job.stage = stage;
@@ -116,16 +117,12 @@ void startJob(Job& job, const Slot slots[2], const Plan& plan) {
         const float steps = float(plan.modules.size());
         float step = 0.0f;
         for (GameVersion v : plan.modules) {
-            const int i = v == GameVersion::PAL ? 1 : 0;
-            const char* name = v == GameVersion::PAL ? "Europe" : "USA";
-            set(std::string("Reading the ") + name + " disc", step / steps);
-            Disc disc;
-            std::string err;
-            if (!disc.open(paths[i], err)) return fail(err);
+            const std::string name = port::regionName(v);
             Progress pr;
             pr.cancel = &job.cancel;
-            pr.report = [&](const std::string& s, float f) { set(std::string(name) + ": " + s, (step + f) / steps); };
-            if (!buildModule(disc, pr, err)) return fail(err);
+            pr.report = [&](const std::string& s, float f) { set(name + " disc: " + s, (step + f) / steps); };
+            std::string err;
+            if (!buildModule(*discs[int(v)], pr, err)) return fail(err);
             step += 1.0f;
         }
         std::lock_guard lk(job.m);
@@ -149,15 +146,25 @@ void SDLCALL onPicked(void* userdata, const char* const* files, int) {
     sPicked[slot] = files[0];
 }
 
-void browse(int slot, const std::string& current) {
+std::string dirOf(const std::string& current) {
+    const size_t slash = current.find_last_of("/\\");
+    return slash == std::string::npos ? std::string() : current.substr(0, slash + 1);
+}
+
+void browseImage(int slot, const std::string& current) {
     static const SDL_DialogFileFilter filters[] = {
-        {"Wii disc images", "iso;rvz;wbfs;ciso;gcz;wia;nfs"},
+        {"Wii disc images", "iso;rvz;wbfs;wia;ciso;gcz;nfs"},
         {"All files", "*"},
     };
-    const size_t slash = current.find_last_of("/\\");
-    const std::string dir = slash == std::string::npos ? std::string() : current.substr(0, slash + 1);
+    const std::string dir = dirOf(current);
     SDL_ShowOpenFileDialog(&onPicked, reinterpret_cast<void*>(intptr_t(slot)), aurora_get_window(), filters, 2,
                            dir.empty() ? nullptr : dir.c_str(), false);
+}
+
+void browseFolder(int slot, const std::string& current) {
+    const std::string dir = dirOf(current);
+    SDL_ShowOpenFolderDialog(&onPicked, reinterpret_cast<void*>(intptr_t(slot)), aurora_get_window(),
+                             dir.empty() ? nullptr : dir.c_str(), false);
 }
 
 enum class Screen { Pick, Working, Shaders, Failed };
@@ -168,44 +175,62 @@ bool run(const Options& opts, LaunchInfo& launch) {
     recomp::ui::install(recomp::ui::Context::Setup);
     port::loadInstall();
     auto& inst = port::install();
-    Slot slots[2];
-    slots[0].path = !opts.usDisc.empty() ? opts.usDisc : inst.usDisc;
-    slots[1].path = !opts.palDisc.empty() ? opts.palDisc : inst.palDisc;
-    validate(slots[0], GameVersion::USA);
-    validate(slots[1], GameVersion::PAL);
+    Slot slots[kVersionCount];
+    for (GameVersion v : kVersions) {
+        const int i = int(v);
+        const std::string& p = !opts.disc[i].empty() ? opts.disc[i] : inst.discOf(v);
+        if (!p.empty() && !slots[i].valid) place(slots, i, p);
+    }
+    if (!opts.anyDisc.empty()) place(slots, int(inst.base), opts.anyDisc);
     GameVersion base = inst.base;
 
+    auto anyValid = [&] {
+        for (const Slot& s : slots)
+            if (s.valid) return true;
+        return false;
+    };
     auto chooseBase = [&] {
-        if (!slots[1].valid) base = GameVersion::USA;
-        else if (!slots[0].valid) base = GameVersion::PAL;
+        if (slots[int(base)].valid) return;
+        for (GameVersion v : kVersions)
+            if (slots[int(v)].valid) {
+                base = v;
+                return;
+            }
     };
     chooseBase();
+    if (!opts.anyDisc.empty()) {  // --disc: play that one
+        for (GameVersion v : kVersions)
+            if (slots[int(v)].valid && slots[int(v)].path == opts.anyDisc) base = v;
+    }
 
     // Nothing to ask: the configured discs are all readable and the base is available.
-    bool showUi = opts.forceUi || opts.autoStart || !(slots[0].valid || slots[1].valid) ||
-                  (!slots[0].path.empty() && !slots[0].valid) || (!slots[1].path.empty() && !slots[1].valid);
+    bool showUi = opts.forceUi || opts.autoStart || !anyValid();
+    for (const Slot& s : slots)
+        if (!s.path.empty() && !s.valid) showUi = true;
     Screen screen = Screen::Pick;
     std::unique_ptr<Job> job;
     Plan plan;
     bool started = false;
+    std::chrono::steady_clock::time_point jobStart;
 
     auto begin = [&] {
-        inst.usDisc = slots[0].valid ? slots[0].path : "";
-        inst.palDisc = slots[1].valid ? slots[1].path : "";
+        for (GameVersion v : kVersions) inst.discOf(v) = slots[int(v)].valid ? slots[int(v)].path : "";
         inst.base = base;
         port::saveInstall();
-        plan = makePlan(slots);
+        plan = makePlan(slots, base);
         job = std::make_unique<Job>();
+        jobStart = std::chrono::steady_clock::now();
         if (!plan.empty()) startJob(*job, slots, plan);
         else job->done = job->ok = true;
         screen = Screen::Working;
         started = true;
     };
     if (!showUi) begin();
-    else if (opts.autoStart && (slots[0].valid || slots[1].valid)) begin();
+    else if (opts.autoStart && anyValid()) begin();
 
     port::setPhase("setup");
     bool finished = false;
+    bool reported = false;
     int framesDrawn = 0;  // the background precache is queued by the first frame (Aurora patch 0013)
     while (!finished) {
         port::heartbeat();
@@ -215,20 +240,30 @@ bool run(const Options& opts, LaunchInfo& launch) {
             if (ev->type == AURORA_UNPAUSED) port::setPhase("setup");
         }
         {
-            std::lock_guard lk(sPickM);
-            for (int i = 0; i < 2; i++) {
-                if (sPicked[i]) {
-                    slots[i].path = *sPicked[i];
-                    sPicked[i].reset();
-                    validate(slots[i], i ? GameVersion::PAL : GameVersion::USA);
-                    if (slots[i].valid && !slots[1 - i].valid) base = slots[i].version;
+            std::optional<std::string> picked[kVersionCount];
+            {
+                std::lock_guard lk(sPickM);
+                for (int i = 0; i < kVersionCount; i++) picked[i].swap(sPicked[i]);
+            }
+            for (int i = 0; i < kVersionCount; i++)
+                if (picked[i]) {
+                    place(slots, i, *picked[i]);
+                    // The disc just added is the one to play when it is the only one.
+                    for (GameVersion v : kVersions)
+                        if (slots[int(v)].valid && slots[int(v)].path == *picked[i] && !slots[int(base)].valid) base = v;
                     chooseBase();
                 }
-            }
         }
         if (job && screen == Screen::Working && framesDrawn > 0) {
             std::lock_guard lk(job->m);
             if (job->done) {
+                if (!reported && !plan.empty()) {
+                    reported = true;
+                    std::printf("[setup] %s after %.1f s\n", job->ok ? "game modules ready" : "failed",
+                                std::chrono::duration<double>(std::chrono::steady_clock::now() - jobStart).count());
+                    if (!job->ok) std::printf("[setup] %s\n", job->error.c_str());
+                    std::fflush(stdout);
+                }
                 if (!job->ok) screen = Screen::Failed;
                 // Setup was visible (first run, disc change, rebuild after an update): also finish
                 // compiling the shaders here, so the first game session runs as smoothly as later
@@ -250,11 +285,14 @@ bool run(const Options& opts, LaunchInfo& launch) {
         // Menu size (ui_scale.cpp; setup's Auto: 600 lines = 100%), font rasterized at that size.
         const float scale = recomp::ui::scale();
         ImGui::Dummy(ImVec2(0, 12 * scale));
-        ImGui::Text("Animal Crossing City Folk Recompiled");
+        ImGui::Text("Animal Crossing: City Folk Recompiled");
         ImGui::Separator();
         if (screen == Screen::Pick) {
-            ImGui::TextWrapped("This port runs your own copy of Animal Crossing: City Folk. Choose your disc image (ISO, WBFS or RVZ) or extracted disc folder. "
-                               "The game is translated and compiled for this PC once; that takes a minute or two.");
+            ImGui::TextWrapped("This port runs your own copy of Animal Crossing: City Folk (Wii). Choose your disc: "
+                               "a disc image (ISO, WBFS, RVZ, WIA, CISO, GCZ) or a folder extracted with Dolphin "
+                               "(Properties > Filesystem > Extract Entire Disc). One disc of any region is enough: "
+                               "every disc carries every region's events. The game is translated and compiled for "
+                               "this PC once; that takes a few minutes.");
             // Portable mode (docs/SETUP.md): where everything goes, or why it was not possible.
             if (const auto& loc = port::dataLocation(); loc.portable) {
                 const auto s = loc.root.u8string();
@@ -265,20 +303,19 @@ bool run(const Options& opts, LaunchInfo& launch) {
                 ImGui::PopStyleColor();
             }
             ImGui::Dummy(ImVec2(0, 8 * scale));
-            const char* labels[2] = {"USA disc (RUUE01)", "Europe disc (RUUP01)"};
-            const char* notes[2] = {"", "Not supported yet (the USA disc is the base)."};
-            for (int i = 0; i < 2; i++) {
+            for (GameVersion v : kVersions) {
+                const int i = int(v);
                 ImGui::PushID(i);
-                ImGui::Text("%s", labels[i]);
-                ImGui::SameLine();
-                if (*notes[i]) ImGui::TextDisabled("%s", notes[i]);
+                ImGui::Text("%s disc (%s)", port::regionName(v), port::gameId(v));
                 ImGui::TextWrapped("%s", slots[i].path.empty() ? "(none)" : slots[i].path.c_str());
-                if (ImGui::Button("Browse...")) browse(i, slots[i].path);
+                if (ImGui::Button("Disc image...")) browseImage(i, slots[i].path);
+                ImGui::SameLine();
+                if (ImGui::Button("Extracted folder...")) browseFolder(i, slots[i].path);
 #ifndef _WIN32
                 // Linux: the file dialog needs xdg-desktop-portal (or zenity/kdialog); a typed or
                 // pasted path always works (docs/LINUX.md).
                 {
-                    static char typed[2][1024];
+                    static char typed[kVersionCount][1024];
                     ImGui::SameLine();
                     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.6f);
                     const bool enter = ImGui::InputTextWithHint("##path", "or type / paste the path here",
@@ -303,9 +340,12 @@ bool run(const Options& opts, LaunchInfo& launch) {
                         slots[i] = Slot{};
                         chooseBase();
                     }
-                    ImGui::SameLine();
                     if (slots[i].valid) ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1), "%s", slots[i].message.c_str());
-                    else ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1), "%s", slots[i].message.c_str());
+                    else {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.4f, 1));
+                        ImGui::TextWrapped("%s", slots[i].message.c_str());
+                        ImGui::PopStyleColor();
+                    }
                 }
                 ImGui::Dummy(ImVec2(0, 8 * scale));
                 ImGui::PopID();
@@ -318,16 +358,19 @@ bool run(const Options& opts, LaunchInfo& launch) {
                     ImGui::PopStyleColor();
                 }
             }
-            if (slots[0].valid && slots[1].valid) {
+            int validCount = 0;
+            for (const Slot& s : slots) validCount += s.valid ? 1 : 0;
+            if (validCount > 1) {
                 ImGui::Text("Version to play:");
-                ImGui::SameLine();
-                if (ImGui::RadioButton("USA", base == GameVersion::USA)) base = GameVersion::USA;
-                ImGui::SameLine();
-                if (ImGui::RadioButton("Europe (50/60 Hz, languages)", base == GameVersion::PAL)) base = GameVersion::PAL;
-                ImGui::TextDisabled("Both versions are prepared; you can switch later in the F1 menu (Game tab).");
+                for (GameVersion v : kVersions) {
+                    if (!slots[int(v)].valid) continue;
+                    ImGui::SameLine();
+                    if (ImGui::RadioButton(port::regionName(v), base == v)) base = v;
+                }
+                ImGui::TextDisabled("Every disc chosen here is prepared; you can switch later in the F1 menu (Game tab).");
             }
             ImGui::Dummy(ImVec2(0, 8 * scale));
-            ImGui::BeginDisabled(!(slots[0].valid || slots[1].valid));
+            ImGui::BeginDisabled(validCount == 0);
             if (ImGui::Button(started ? "Continue" : "Install and play")) begin();
             ImGui::EndDisabled();
             ImGui::SameLine();
@@ -354,7 +397,8 @@ bool run(const Options& opts, LaunchInfo& launch) {
                 ImGui::Text("Compiling shaders: %u / %u", pr.done, pr.total);
                 // (No "play now": the game waits for its shaders anyway, precache.h holdGame.)
             } else if (screen == Screen::Working) {
-                ImGui::TextWrapped("Preparing the game. This happens once per disc (and again after updates).");
+                ImGui::TextWrapped("Preparing the game: translating main.dol and its 187 modules for this PC and "
+                                   "compiling them. This happens once per disc (and again after updates).");
                 ImGui::Dummy(ImVec2(0, 8 * scale));
                 ImGui::ProgressBar(f, ImVec2(-1, 0));
                 ImGui::TextWrapped("%s", stage.c_str());
@@ -383,12 +427,10 @@ bool run(const Options& opts, LaunchInfo& launch) {
     job.reset();
 
     // Ready: report what is installed and what to launch.
-    inst.usReady = slots[0].valid;
-    inst.palReady = slots[1].valid;
-    inst.hmOverlayReady = false;
+    for (GameVersion v : kVersions) inst.ready[int(v)] = slots[int(v)].valid;
     inst.running = base;
     launch.version = base;
-    launch.disc = slots[base == GameVersion::PAL ? 1 : 0].path;
+    launch.disc = slots[int(base)].disc->runPath();
     launch.module = modulePath(base);
     return true;
 }

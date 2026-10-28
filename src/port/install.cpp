@@ -34,33 +34,52 @@ std::vector<std::string> sArgs;
 
 }  // namespace
 
-const char* gameId(GameVersion v) { return v == GameVersion::PAL ? "RUUP01" : "RUUE01"; }
-const char* versionName(GameVersion v) { return v == GameVersion::PAL ? "PAL" : "USA"; }
+const char* gameId(GameVersion v) {
+    switch (v) {
+    case GameVersion::PAL: return "RUUP01";
+    case GameVersion::JPN: return "RUUJ01";
+    case GameVersion::KOR: return "RUUK01";
+    default: return "RUUE01";
+    }
+}
+const char* versionName(GameVersion v) {
+    switch (v) {
+    case GameVersion::PAL: return "PAL";
+    case GameVersion::JPN: return "JPN";
+    case GameVersion::KOR: return "KOR";
+    default: return "USA";
+    }
+}
+const char* regionName(GameVersion v) {
+    switch (v) {
+    case GameVersion::PAL: return "Europe";
+    case GameVersion::JPN: return "Japan";
+    case GameVersion::KOR: return "Korea";
+    default: return "USA";
+    }
+}
+int supportedRevision(GameVersion) { return 1; }
+int partitionRevision(GameVersion v) { return v == GameVersion::KOR ? 0 : 1; }
+bool versionFromId(const char* id, GameVersion& v) {
+    if (!id) return false;
+    for (GameVersion x : kVersions)
+        if (std::strncmp(id, gameId(x), 6) == 0) {
+            v = x;
+            return true;
+        }
+    return false;
+}
 
 Avail usCodeFeature() {
     const auto& i = sInstall;
     if (i.running == GameVersion::USA) return Avail::Yes;
-    return i.usReady ? Avail::OtherBase : Avail::NeedsUsDisc;
+    return i.isReady(GameVersion::USA) ? Avail::OtherBase : Avail::NeedsUsDisc;
 }
 
 Avail palBaseFeature() {
     const auto& i = sInstall;
     if (i.running == GameVersion::PAL) return Avail::Yes;
-    return i.palReady ? Avail::OtherBase : Avail::NeedsPalDisc;
-}
-
-// The other release's Hidden Mansion needs that release's data: the overlay setup builds from
-// both discs (docs/SETUP.md; PAL rules on the USA game, USA rules on the European game).
-Avail hiddenMansionPal() {
-    const auto& i = sInstall;
-    if (i.running == GameVersion::PAL || i.hmOverlayReady) return Avail::Yes;
-    return Avail::NeedsPalDisc;
-}
-
-Avail hiddenMansionUs() {
-    const auto& i = sInstall;
-    if (i.running == GameVersion::USA || i.hmOverlayReady) return Avail::Yes;
-    return Avail::NeedsUsDisc;
+    return i.isReady(GameVersion::PAL) ? Avail::OtherBase : Avail::NeedsPalDisc;
 }
 
 const char* availNote(Avail a) {
@@ -68,10 +87,10 @@ const char* availNote(Avail a) {
     case Avail::Yes: return nullptr;
     case Avail::OtherBase:
         return sInstall.running == GameVersion::USA ? "applies when playing the European version"
-                                                    : "applies when playing the USA version";
+                                                    : "applies when playing another installed version";
     case Avail::NeedsUsDisc: return "needs the USA disc: F1 > Game > Add or change discs";
     case Avail::NeedsPalDisc: return "needs the European disc: F1 > Game > Add or change discs";
-    case Avail::NotYet: return "not available on the European version yet; play the USA version";
+    case Avail::NotYet: return "not available on this version yet";
     }
     return nullptr;
 }
@@ -82,10 +101,7 @@ namespace {
 
 namespace fs = std::filesystem;
 
-// The product was called "Animal Crossing City Folk PC" up to 1.0.1; its folders are moved to the new
-// name on the first start (docs/SETUP.md "What lives where").
 constexpr const char* kFolderName = "Animal Crossing City Folk Recompiled";
-constexpr const char* kOldFolderName = "Animal Crossing City Folk PC";
 
 std::string u8(const fs::path& p) {
     const auto s = p.u8string();
@@ -103,67 +119,6 @@ bool onlyLauncherLogs(const fs::path& dir) {
     return !ec;
 }
 
-// Moves <base>/<old name> to <base>/<new name> when only the old one exists: settings,
-// install.ini, memory cards, game modules, overlays and caches carry over (paths inside them
-// are not tied to the folder: module.key hashes the sources, install.ini holds disc paths).
-// A rename that fails (a file held open by another program, another volume) falls back to a
-// copy; the old folder is kept then.
-void migrateOldFolder(const fs::path& base) {
-    std::error_code ec;
-    const fs::path oldDir = base / fs::path(std::u8string(reinterpret_cast<const char8_t*>(kOldFolderName)));
-    const fs::path newDir = base / fs::path(std::u8string(reinterpret_cast<const char8_t*>(kFolderName)));
-    if (!fs::is_directory(oldDir, ec)) return;
-    fs::path heldLogs;  // the launcher's logs of this run, put back after the move
-    if (fs::exists(newDir, ec)) {
-        // A 1.0.x launcher that is still used writes its log into the old data folder again:
-        // nothing else in it, so remove it (the forwarder replaces that launcher, update.cpp).
-        if (onlyLauncherLogs(oldDir) && !onlyLauncherLogs(newDir)) {
-            fs::remove_all(oldDir, ec);
-            if (!ec) std::printf("[install] removed %s (held only launcher logs)\n", u8(oldDir).c_str());
-            std::fflush(stdout);
-            return;
-        }
-        if (!fs::is_directory(newDir, ec) || !onlyLauncherLogs(newDir)) return;
-        heldLogs = base / fs::path(std::u8string(reinterpret_cast<const char8_t*>(kFolderName)) + u8".logs-tmp");
-        fs::remove_all(heldLogs, ec);
-        fs::rename(newDir, heldLogs, ec);
-        if (ec) {
-            std::printf("[install] %s holds only launcher logs, but could not be moved aside (%s); "
-                        "the old folder %s is not used\n",
-                        u8(newDir).c_str(), ec.message().c_str(), u8(oldDir).c_str());
-            return;
-        }
-    }
-    fs::rename(oldDir, newDir, ec);
-    if (!ec) {
-        std::printf("[install] moved %s to %s\n", u8(oldDir).c_str(), u8(newDir).c_str());
-    } else {
-        const std::string why = ec.message();
-        if (!heldLogs.empty()) {
-            std::error_code e2;
-            fs::rename(heldLogs, newDir, e2);
-            if (!e2) heldLogs.clear();
-        }
-        fs::create_directories(newDir, ec);
-        fs::copy(oldDir, newDir, fs::copy_options::recursive | fs::copy_options::skip_existing, ec);
-        if (!ec)
-            std::printf("[install] could not rename %s (%s); copied it to %s and kept the old folder\n",
-                        u8(oldDir).c_str(), why.c_str(), u8(newDir).c_str());
-        else
-            std::printf("[install] could not rename %s (%s) and copying it to %s failed (%s); the old folder is "
-                        "kept, copy what is missing by hand\n",
-                        u8(oldDir).c_str(), why.c_str(), u8(newDir).c_str(), ec.message().c_str());
-    }
-    if (!heldLogs.empty()) {
-        for (auto it = fs::directory_iterator(heldLogs, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
-            std::error_code e2;
-            fs::rename(it->path(), newDir / it->path().filename(), e2);  // replaces the old run's log
-        }
-        fs::remove_all(heldLogs, ec);
-    }
-    std::fflush(stdout);
-}
-
 fs::path fromU8(const std::string& s) { return fs::path(std::u8string(s.begin(), s.end())); }
 
 // ---- System folders ------------------------------------------------------------------------
@@ -173,8 +128,6 @@ enum class Kind { Config, Data, Cache };
 fs::path sysDir(Kind, bool create) {
     const wchar_t* base = _wgetenv(L"APPDATA");
     if (!base) return fs::path(L".");
-    static const bool sMigrated = (migrateOldFolder(base), true);
-    (void)sMigrated;
     fs::path dir = fs::path(base) / L"Animal Crossing City Folk Recompiled";
     std::error_code ec;
     if (create) fs::create_directories(longPath(dir), ec);
@@ -195,16 +148,6 @@ fs::path sysDir(Kind kind, bool create) {
     if (const char* v = std::getenv(var); v && v[0] == '/') base = v;
     else if (const char* home = std::getenv("HOME"); home && home[0]) base = fs::path(home) / fallback;
     else base = ".";
-    // Once per base folder (config, data and cache are separate on Linux).
-    static std::mutex sM;
-    static std::vector<fs::path> sDone;
-    {
-        std::lock_guard lk(sM);
-        if (std::find(sDone.begin(), sDone.end(), base) == sDone.end()) {
-            sDone.push_back(base);
-            migrateOldFolder(base);
-        }
-    }
     fs::path dir = base / kFolderName;
     std::error_code ec;
     if (create) fs::create_directories(dir, ec);
@@ -224,10 +167,10 @@ Kind kindOf(const std::string& name) {
 // ---- Portable mode ---------------------------------------------------------------------------
 constexpr const char* kPortableDir = "portable";
 constexpr const char* kPortableFile = "portable.txt";
-constexpr const char* kMoveRequest = ".lm-data-move";       // next to the program, read at the next start
-constexpr const char* kPortableTmp = "portable.lm-tmp";     // to-portable copy before it is switched on
-constexpr const char* kPortableOld = "portable.lm-old";     // portable folder after a move back
-constexpr const char* kTmpSuffix = ".lm-tmp";               // system folder copy before it is switched on
+constexpr const char* kMoveRequest = ".cf-data-move";       // next to the program, read at the next start
+constexpr const char* kPortableTmp = "portable.cf-tmp";     // to-portable copy before it is switched on
+constexpr const char* kPortableOld = "portable.cf-old";     // portable folder after a move back
+constexpr const char* kTmpSuffix = ".cf-tmp";               // system folder copy before it is switched on
 
 fs::path computeExeDir() {
 #ifdef _WIN32
@@ -241,7 +184,7 @@ fs::path computeExeDir() {
 }
 
 bool writableDir(const fs::path& dir) {
-    const fs::path probe = longPath(dir / ".lm-write-test");
+    const fs::path probe = longPath(dir / ".cf-write-test");
     {
         std::ofstream o(probe, std::ios::binary);
         if (!o) return false;
@@ -352,7 +295,7 @@ bool emptyOrLauncherLogs(const fs::path& dir) {
     return !fs::exists(dir, ec) || (fs::is_directory(dir, ec) && onlyLauncherLogs(dir));
 }
 
-// System folders -> <exe>/portable. Copy into portable.lm-tmp, rename it to portable (the
+// System folders -> <exe>/portable. Copy into portable.cf-tmp, rename it to portable (the
 // switch), then delete the system folders. Before the switch the system folders are untouched.
 bool moveToPortable(const fs::path& exe, std::string& err, std::string& warn) {
     std::error_code ec;
@@ -414,7 +357,7 @@ bool moveToPortable(const fs::path& exe, std::string& err, std::string& warn) {
     return true;
 }
 
-// <exe>/portable -> system folders. Each system folder is built as <dir>.lm-tmp and renamed into
+// <exe>/portable -> system folders. Each system folder is built as <dir>.cf-tmp and renamed into
 // place (the system folders must be empty: no other installation's data is overwritten), then
 // portable.txt is removed and the portable folder renamed away (the switch) and deleted.
 bool moveToSystem(const fs::path& exe, std::string& err, std::string& warn) {
@@ -442,7 +385,7 @@ bool moveToSystem(const fs::path& exe, std::string& err, std::string& warn) {
     for (Kind k : {Kind::Config, Kind::Data, Kind::Cache}) targetFor(longPath(sysDir(k, false)));
     for (auto it = fs::directory_iterator(root, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
         const std::string n = displayPath(it->path().filename());
-        if (n == ".lm-write-test") continue;
+        if (n == ".cf-write-test") continue;
         entries.push_back({it->path(), &targetFor(longPath(sysDir(kindOf(n), false)))});
     }
     if (ec) {
@@ -698,8 +641,6 @@ std::filesystem::path envPath(const char* name) {
 #endif
 }
 
-std::filesystem::path hiddenMansionOverlayDir() { return dataDir() / "hidden_mansion"; }
-
 std::filesystem::path longPath(const std::filesystem::path& p) {
 #ifdef _WIN32
     if (p.empty() || p.native().rfind(L"\\\\?\\", 0) == 0) return p;
@@ -757,7 +698,7 @@ std::string installPathProblem() {
     return "The game's folder\n\n" + dir + "\n\nis " + std::to_string(dir.size()) +
            " characters long. The graphics components the game loads from it stop working past " +
            std::to_string(kMaxInstallPath) +
-           " characters.\n\nMove the game's folder to a shorter path (for example C:\\Games\\Luigi's Mansion "
+           " characters.\n\nMove the game's folder to a shorter path (for example C:\\Games\\City Folk "
            "Recompiled) and start it from there. Settings and saves are not in that folder and stay as they are.";
 #else
     return {};
@@ -812,7 +753,7 @@ void findMovedDisc(std::string& disc, const std::string& rel) {
         tries.push_back(l.root / fromU8(n));
     }
     for (auto& t : tries)
-        if (fs::is_regular_file(t, ec)) {
+        if (fs::exists(t, ec)) {  // an image or an extracted folder
             std::printf("[install] disc %s not found; using %s\n", disc.c_str(), u8(t).c_str());
             disc = u8(t);
             return;
@@ -821,32 +762,47 @@ void findMovedDisc(std::string& disc, const std::string& rel) {
 
 }  // namespace
 
+// install.ini: "<usa|pal|jpn|kor>_disc=<path>" (+ "_disc_rel" in portable mode),
+// "base=USA|PAL|JPN|KOR".
+namespace {
+const char* iniKey(GameVersion v) {
+    switch (v) {
+    case GameVersion::PAL: return "pal";
+    case GameVersion::JPN: return "jpn";
+    case GameVersion::KOR: return "kor";
+    default: return "usa";
+    }
+}
+}  // namespace
+
 void loadInstall() {
     std::ifstream in(longPath(configDir() / "install.ini"));
-    std::string line, usRel, palRel;
+    std::string line, rel[kVersionCount];
     while (std::getline(in, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
         const auto eq = line.find('=');
         if (eq == std::string::npos || line[0] == ';' || line[0] == '[') continue;
         const std::string key = line.substr(0, eq), value = line.substr(eq + 1);
-        if (key == "us_disc") sInstall.usDisc = value;
-        else if (key == "pal_disc") sInstall.palDisc = value;
-        else if (key == "us_disc_rel") usRel = value;
-        else if (key == "pal_disc_rel") palRel = value;
-        else if (key == "base") sInstall.base = value == "PAL" ? GameVersion::PAL : GameVersion::USA;
+        for (GameVersion v : kVersions) {
+            const std::string k = iniKey(v);
+            if (key == k + "_disc") sInstall.discOf(v) = value;
+            else if (key == k + "_disc_rel") rel[int(v)] = value;
+        }
+        if (key == "base")
+            for (GameVersion v : kVersions)
+                if (value == versionName(v)) sInstall.base = v;
     }
-    findMovedDisc(sInstall.usDisc, usRel);
-    findMovedDisc(sInstall.palDisc, palRel);
+    for (GameVersion v : kVersions) findMovedDisc(sInstall.discOf(v), rel[int(v)]);
 }
 
 void saveInstall() {
     std::ofstream out(longPath(configDir() / "install.ini"));
     const bool portable = dataLocation().portable;
     out << "[install]\n";
-    out << "us_disc=" << sInstall.usDisc << '\n';
-    if (portable) out << "us_disc_rel=" << relToExe(sInstall.usDisc) << '\n';
-    out << "pal_disc=" << sInstall.palDisc << '\n';
-    if (portable) out << "pal_disc_rel=" << relToExe(sInstall.palDisc) << '\n';
+    for (GameVersion v : kVersions) {
+        out << iniKey(v) << "_disc=" << sInstall.discOf(v) << '\n';
+        if (portable) out << iniKey(v) << "_disc_rel=" << relToExe(sInstall.discOf(v)) << '\n';
+    }
     out << "base=" << versionName(sInstall.base) << '\n';
 }
 

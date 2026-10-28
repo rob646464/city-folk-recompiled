@@ -72,6 +72,10 @@ void saveConfig(std::ostream& out) {
 }();
 
 bool isPal() { return port::install().running == port::GameVersion::PAL; }
+bool isJapan() { return port::install().running == port::GameVersion::JPN; }
+bool isKorea() { return port::install().running == port::GameVersion::KOR; }
+// The console language a region's Wii starts with (and the only one the Japanese/Korean discs have).
+int regionLanguage() { return isJapan() ? Japanese : isKorea() ? Korean : English; }
 
 // --- SYSCONF ----------------------------------------------------------------------------
 
@@ -172,6 +176,8 @@ std::vector<u8> u32v(u32 v) { return {u8(v >> 24), u8(v >> 16), u8(v >> 8), u8(v
 
 // Wii country codes (IPL.SADR byte 0).
 u8 countryCode() {
+    if (isJapan()) return 1;    // Japan
+    if (isKorea()) return 136;  // South Korea
     if (!isPal()) return 49;  // United States
     switch (effectiveLanguage()) {
     case German: return 78;   // Germany
@@ -245,6 +251,10 @@ void writeSysconf() {
 // --- setting.txt ---------------------------------------------------------------------------
 
 std::string settingTxtPlain() {
+    if (isJapan())
+        return "AREA=JPN\r\nMODEL=RVL-001(JPN)\r\nDVD=0\r\nMPCH=0x7FFE\r\nCODE=LJ\r\nSERNO=100000017\r\nVIDEO=NTSC\r\nGAME=JP\r\n";
+    if (isKorea())
+        return "AREA=KOR\r\nMODEL=RVL-001(KOR)\r\nDVD=0\r\nMPCH=0x7FFE\r\nCODE=LKM\r\nSERNO=100000017\r\nVIDEO=NTSC\r\nGAME=KR\r\n";
     if (isPal())
         return "AREA=EUR\r\nMODEL=RVL-001(EUR)\r\nDVD=0\r\nMPCH=0x7FFE\r\nCODE=LEH\r\nSERNO=100000017\r\nVIDEO=PAL\r\nGAME=EU\r\n";
     return "AREA=USA\r\nMODEL=RVL-001(USA)\r\nDVD=0\r\nMPCH=0x7FFE\r\nCODE=LU\r\nSERNO=100000017\r\nVIDEO=NTSC\r\nGAME=US\r\n";
@@ -272,12 +282,14 @@ SystemSettings& settings() { return sSettings; }
 
 bool languageAvailable(int lang) {
     if (isPal()) return lang >= English && lang <= Dutch;
+    if (isJapan()) return lang == Japanese;
+    if (isKorea()) return lang == Korean;
     return lang == English || lang == French || lang == Spanish;
 }
 
 int effectiveLanguage() {
     const int l = sSettings.language;
-    return l >= 0 && languageAvailable(l) ? l : English;
+    return l >= 0 && languageAvailable(l) ? l : regionLanguage();
 }
 
 const char* languageName(int lang) {
@@ -320,7 +332,8 @@ bool drawMenu() {
         for (size_t i = 0; i < langs.size(); i++)
             if (langs[i] == s.language) idx = int(i);
         std::vector<std::string> names;
-        for (int l : langs) names.push_back(l < 0 ? std::string("Default (English)") : languageName(l));
+        for (int l : langs)
+            names.push_back(l < 0 ? std::string("Default (") + languageName(regionLanguage()) + ")" : languageName(l));
         if (ImGui::BeginCombo("Console language", names[size_t(idx)].c_str())) {
             for (size_t i = 0; i < langs.size(); i++)
                 if (ImGui::Selectable(names[i].c_str(), int(i) == idx)) {
