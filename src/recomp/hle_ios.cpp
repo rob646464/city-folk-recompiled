@@ -308,6 +308,16 @@ CF_NAND_TRACE_FD(NANDCloseAsync)
 CF_NAND_TRACE_FD(NANDSimpleSafeClose)
 CF_NAND_TRACE_FD(NANDSafeCloseAsync)
 CF_NAND_TRACE_FD(NANDInitBanner)
+CF_NAND_TRACE_FD(NWC24OpenLib)
+CF_NAND_TRACE_FD(NWC24CloseLib)
+CF_NAND_TRACE_FD(NWC24GetMyUserId)
+CF_NAND_TRACE_FD(NWC24GetIdCreationStage)
+CF_NAND_TRACE_FD(NWC24iRequestGenerateUserId)
+CF_NAND_TRACE_FD(NWC24CheckUserId)
+CF_NAND_TRACE_FD(NWC24InitDlTask)
+CF_NAND_TRACE_FD(NWC24AddDlTask)
+CF_NAND_TRACE_FD(NWC24GetDlTaskMineEx)
+CF_NAND_TRACE_FD(NWC24CreateDlVf)
 // City Folk's save worker (USA addresses): fn_800D284C(entry, args) starts the save/check thread
 // when fn_800D2968 says the previous one has ended; logged with the entry and the result.
 HLE(fn_800D284C) {
@@ -316,6 +326,15 @@ HLE(fn_800D284C) {
     char e[16];
     std::snprintf(e, sizeof(e), "entry %08X", entry);
     nandTrace("saveThreadStart", lr, e, s32(c.r[3]));
+}
+// fn_80177F44(entry, args): starts a WiiConnect24 task on the task thread (0x80621528); 0 =
+// refused because the previous task has not ended. Logged once per (entry, caller, result).
+HLE(fn_80177F44) {
+    const u32 lr = c.lr, entry = c.r[3];
+    callOriginal(c, "fn_80177F44");
+    char e[16];
+    std::snprintf(e, sizeof(e), "entry %08X", entry);
+    nandTrace("wc24TaskStart", lr, e, s32(c.r[3]));
 }
 HLE(nandConvertErrorCode) {
     const u32 lr = c.lr;

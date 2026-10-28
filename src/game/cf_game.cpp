@@ -25,8 +25,68 @@ namespace {
 std::atomic<u32> sFrames{0};
 }  // namespace
 
+// Test aid CF_FORCE_SAVE=<frame>: at that guest frame the game's own save-write request
+// (fn_800D2780: starts the save worker with entry fn_800D242C -> fn_800D3118 -> create /
+// safe-open / write rvforest.dat and the banner) is called on the game thread, as the HUD's
+// "Save" does after its checks; the worker's result word (r13-0x6930, read by fn_800D2A44:
+// 1 = done, 4 = no file, 2/3/5/6+ = errors) is logged when it changes. Exercises the whole NAND
+// write path without reaching a house first (docs/NAND.md "First save").
+static void forceSaveOnFrame(Ctx& c, u32 frame) {
+    static const u32 at = [] {
+        const char* v = std::getenv("CF_FORCE_SAVE");
+        return v ? u32(std::strtoul(v, nullptr, 10)) : 0u;
+    }();
+    static const bool logAll = std::getenv("CF_SAVE_LOG") != nullptr;  // result word changes, any time
+    if (!at && !logAll) return;
+    constexpr u32 kResultWord = 0x8074B010;  // r13 - 0x6930
+    static u32 last = ~0u;
+    if (logAll) {
+        const u32 r = rd32(kResultWord);
+        if (r != last) log("[save] result word %d at frame %u", s32(r), frame);
+        last = r;
+        if (!at) return;
+    }
+    if (frame == at) {
+        log("[save] CF_FORCE_SAVE: calling the save write request (fn_800D2780) at frame %u, result word %d", frame,
+            s32(rd32(kResultWord)));
+        guestCall(c, 0x800D2780);
+    }
+    if (frame >= at) {
+        const u32 r = rd32(kResultWord);
+        if (r != last) {
+            log("[save] result word %d at frame %u", s32(r), frame);
+            last = r;
+        }
+    }
+}
+
+// Test aid CF_FORCE_WC24=<frame>: the WiiConnect24 step the HUD save runs before writing a new
+// save (fn_801782FC: task fn_8017B2B8 on the WiiConnect24 thread, which sets up the game's
+// download task), started at that frame; its status (result word r13-0x6140 = 0x8074B800) (fn_80178498: -1 running, 1 done, 0 failed ->
+// the save shows "Could not access Wii system memory") is logged when it changes.
+static void forceWc24OnFrame(Ctx& c, u32 frame) {
+    static const u32 at = [] {
+        const char* v = std::getenv("CF_FORCE_WC24");
+        return v ? u32(std::strtoul(v, nullptr, 10)) : 0u;
+    }();
+    if (!at || frame < at) return;
+    static s32 last = 0x7FFFFFFF;
+    static bool done = false;
+    if (frame == at) log("[save] CF_FORCE_WC24: fn_801782FC -> %d at frame %u", s32(guestCall(c, 0x801782FC)), frame);
+    if (done) return;
+    const s32 st = s32(guestCall(c, 0x80178498));
+    if (st != last) {
+        log("[save] WiiConnect24 step status %d at frame %u (task result %d, NWC24 error %d)", st, frame,
+            s32(rd32(0x8074B800)), s32(rd32(0x805BEBC0 + 0x418)));
+        last = st;
+    }
+    if (st >= 0) done = true;
+}
+
 bool onGuestFrame(Ctx& c) {
-    sFrames.fetch_add(1, std::memory_order_relaxed);
+    const u32 frame = sFrames.fetch_add(1, std::memory_order_relaxed) + 1;
+    forceSaveOnFrame(c, frame);
+    forceWc24OnFrame(c, frame);
     cf::grassOnFrame(c);  // cf_grass.cpp, cf_skin.cpp (docs/FEATURES.md)
     cf::skinOnFrame(c);
     return cf::devOnGuestFrame(c);  // CF_FF fast-forward and other test aids (cf_devaids.cpp)

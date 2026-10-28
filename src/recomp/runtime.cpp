@@ -149,6 +149,12 @@ void trace_enter(u32 addr, Ctx& c) {
         const u32 f = game::guestFrames();
         if (f < sWindow.first || f >= sWindow.first + sWindow.second) return;
     }
+    // CF_TRACE_THREAD=<hex guest OSThread>: only entries on that guest thread (with CF_TRACE=all).
+    static const u32 sThreadFilter = [] {
+        const char* v = std::getenv("CF_TRACE_THREAD");
+        return v ? u32(std::strtoul(v, nullptr, 16)) : 0u;
+    }();
+    if (sThreadFilter && sched::currentGuest() != sThreadFilter) return;
     if (sTraceMode == TraceMode::All || (sTraceMode == TraceMode::Set && sTraceSet.count(addr)))
         log("[trace] %08X lr %08X r3 %08X r4 %08X r5 %08X thread %08X", addr, c.lr, c.r[3], c.r[4], c.r[5],
             sched::currentGuest());

@@ -280,7 +280,21 @@ HLE(OSRegisterVersion) {
     static const bool sLog = std::getenv("CF_OS_LOG") != nullptr;
     if (sLog) log("[os] %s", gstr(c.r[3]));
 }
-HLE(OSIsThreadTerminated) { setBool(c, sched::isTerminated(c.r[3])); }
+HLE(OSIsThreadTerminated) {
+    const bool t = sched::isTerminated(c.r[3]);
+    // CF_THREAD_LOG=1: a thread's terminated state each time a caller sees it change (who waits on whom).
+    static const bool on = std::getenv("CF_THREAD_LOG") != nullptr;
+    if (on) {
+        static std::mutex m;
+        static std::unordered_map<u32, int> last;
+        std::lock_guard lk(m);
+        auto [it, fresh] = last.try_emplace(c.r[3], -1);
+        if (it->second != int(t))
+            log("[thread] OSIsThreadTerminated(%08X) = %d (lr %08X, frame %u)", c.r[3], int(t), c.lr, game::guestFrames());
+        it->second = int(t);
+    }
+    setBool(c, t);
+}
 HLE(OSDetachThread) { sched::detach(c.r[3]); }
 HLE(OSInitThreadQueue) {
     wr32(c.r[3], 0);
@@ -543,6 +557,20 @@ HLE(OSClearContext) {}
 HLE(OSSetCurrentContext) {}
 HLE(OSFillFPUContext) {}
 HLE(OSSetErrorHandler) { c.r[3] = 0; }
+// os/OSPlayRecord-era app info (os/ TU, so HLE'd): the running title's game code and type. The
+// SDK copies the 4-character code from low memory (0x80003194 when it holds a valid code, else
+// 0x80003180, where OSInit puts the disc's id) into its static buffer at r13-0x2180 and returns
+// it. NWC24 asks for it when City Folk's WiiConnect24 task lists its download tasks.
+HLE(OSGetAppGamename) {
+    const u8 c0 = rd8(0x80003194);
+    const bool alnum = (c0 >= '0' && c0 <= '9') || (c0 >= 'A' && c0 <= 'Z');
+    const u32 src = alnum ? 0x80003194 : 0x80003180;
+    const u32 buf = c.r[13] - 0x2180;
+    for (u32 i = 0; i < 4; i++) wr8(buf + i, rd8(src + i));
+    wr8(buf + 4, 0);
+    c.r[3] = buf;
+}
+HLE(OSGetAppType) { c.r[3] = rd8(0x80003184); }
 HLE(OSPanic) { fatal("OSPanic %s:%u: %s", gstr(c.r[3]), c.r[4], gstr(c.r[5])); }
 HLE(OSReport) { std::fputs(gstr(c.r[3]), stdout); }
 

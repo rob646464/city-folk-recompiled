@@ -64,3 +64,8 @@ fn_80137924 jp
 fn_802AA1A0
 # Random::next (LCG x*0x19660D+0x3C6EF35F): CF_RNG_SEED keeps other threads off the main stream.
 fn_802AA1A8
+
+# Save diagnosis (temporary, src/recomp/hle_ios.cpp): the save/check thread start and the
+# WiiConnect24 task start the save path waits on (auto names are only hookable when listed).
+fn_800D284C
+fn_80177F44
