@@ -59,3 +59,13 @@ d_a_playerNP::fn_80_2080 us pal jp
 fn_80137D34
 fn_801379E4 pal
 fn_80137924 jp
+
+# Random::setSeed(this, seed) (stw r4,0(r3)): CF_RNG_SEED test aid in src/game/cf_game.cpp.
+fn_802AA1A0
+# Random::next (LCG x*0x19660D+0x3C6EF35F): CF_RNG_SEED keeps other threads off the main stream.
+fn_802AA1A8
+
+# Save diagnosis (temporary, src/recomp/hle_ios.cpp): the save/check thread start and the
+# WiiConnect24 task start the save path waits on (auto names are only hookable when listed).
+fn_800D284C
+fn_80177F44

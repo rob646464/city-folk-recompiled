@@ -1,0 +1,15 @@
+# Continue a saved town (USA): boot -> title -> Rover ("Ah! Came to play.") -> "Yeah!" -> in town.
+# Use with a fixture save: CF_FIXTURE=town-new (CLAUDE.md "Test runs"), CF_INPUT_CLOCK=frames.
+# Syntax: docs/CONTROLS.md "Test aids".
+
+# Wrist strap, ESRB, title "Press A", Rover's greeting lines.
+1300:A
++80:A ~12
+# "How about we get going?" -> "Yeah!" (first choice; KPAD position of the choice box line).
+2400:@0.27/0.14
++40:A
+# "Now, hang on... You are...?" -> "'rob." (the saved player, first choice).
+2700:@0.44/0.33
++40:A
++60:A ~60
++30:@0/0
