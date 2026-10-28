@@ -69,3 +69,10 @@ fn_802AA1A8
 # WiiConnect24 task start the save path waits on (auto names are only hookable when listed).
 fn_800D284C
 fn_80177F44
+
+# Enhanced world (src/game/cf_world.cpp, docs/RENDERING.md "Enhanced world"): dWeather_c's per-frame
+# update (its weather state at +0x5884).
+fn_801C92F0
+fn_801C8FE4 pal
+fn_801C9090 jp
+fn_801C90C8 kr

@@ -42,6 +42,9 @@
 
 namespace recomp {
 u32 copyDispCount();  // hle_gx.cpp
+namespace world {
+bool drawMenu();  // src/game/cf_world.cpp (F1 > Visuals > Enhanced world)
+}
 }
 
 namespace recomp::menu {
@@ -85,7 +88,7 @@ struct Page {
     const char* sub;
 };
 constexpr Page kPages[] = {
-    {"Visuals", "General"},       {"Visuals", "Rendering"},        {"Visuals", "Enhanced lighting"},
+    {"Visuals", "General"},       {"Visuals", "Rendering"},        {"Visuals", "Enhanced lighting"}, {"Visuals", "Enhanced world"},
     {"Sound", nullptr},           {"Controls", "Ports"},           {"Controls", "Bindings"},
     {"Controls", "Pointer"},      {"Controls", "Analog"},       {"Controls", "DSU"},             {"Enhancements", "General"},     {"Enhancements", "Gameplay"},
     {"Enhancements", "Silly"},          {"Enhancements", "Unused content"}, {"Enhancements", "Debug"}, {"Game", nullptr},
@@ -1936,6 +1939,10 @@ void draw() {
                     }
                     if (ImGui::BeginTabItem("Enhanced lighting", nullptr, envTab("Enhanced lighting"))) {
                         enhancedLightingTab();
+                        ImGui::EndTabItem();
+                    }
+                    if (ImGui::BeginTabItem("Enhanced world", nullptr, envTab("Enhanced world"))) {
+                        sDirty |= recomp::world::drawMenu();  // src/game/cf_world.cpp
                         ImGui::EndTabItem();
                     }
                     ImGui::EndTabBar();
