@@ -19,6 +19,7 @@
 #include "recomp/enhanced_lighting.h"
 #include "recomp/frame.h"
 #include "recomp/interp.h"
+#include "recomp/online.h"
 #include "recomp/pacing.h"
 #include "recomp/ui_scale.h"
 
@@ -1896,6 +1897,7 @@ void draw() {
         }
     }
     recomp::game::drawOverlay();
+    recomp::online::drawOverlay();
     // CF_FRAME_TAG=1 (testing, tools/interp/screen_run.py): the replay shown in this present as a
     // bar code in the top-left corner: a white and a black reference cell, then 32 bits (present
     // number low 16, tape seq low 8, alpha x 255), most significant first, 16 px cells.
@@ -1963,6 +1965,10 @@ void draw() {
             }
             if (tab("Game")) {
                 gameTab();
+                ImGui::EndTabItem();
+            }
+            if (tab("Online")) {
+                sDirty |= recomp::online::drawTab();
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar();

@@ -1,139 +1,340 @@
-# Online: Nintendo WFC and WiiConnect24, then and now
+# Online play
 
-How City Folk's online features worked, which revival services support them today, what a
-client must do to use them, and what the PC port has to emulate. ROADMAP feature "Online play
-restored".
+City Folk's Nintendo Wi-Fi Connection features (town visits, chat, Wii Speak) and WiiConnect24
+(letters) restored **between players of this port**: no Nintendo, Wiimmfi or WiiLink servers, no
+console identities, no server of ours. User decision (2026-10-27): online does not need to work
+with real consoles or revival services. Branch online-1.
 
-Confidence tags: **[disc]** = read from our discs (strings in `sys/main.dol`, file names);
-**[web-high/medium/low]** = from service pages, wikis and forums (untrusted data, not verified
-against a running game). Nothing here was tested against a live service.
+Confidence tags: **[disc]** read from our discs / disassembly; **[run]** seen in a test run;
+**[web]** from service pages and wikis (untrusted, unverified).
+
+Contents: 1 what the game has; 2 the game's online flow (disassembly); 3 why DWC-level HLE;
+4 DWC on rooms (online_dwc.cpp); 5 rooms and transport (online_net.cpp); 6 security;
+7 reachability; 8 F1 > Online; 9 test aids and the two-instance test; 10 friends and mail
+(design); 11 what is left; 12 decisions for the user.
 
 ## 1. What the game has
 
-### 1.1 Nintendo Wi-Fi Connection (DWC)
+Nintendo WFC (ended May 20, 2014 [web]): **town visits** of up to 4 players (owner + 3), friends
+only (each side registers the other's 12-digit friend code); text chat with the on-screen or a
+USB keyboard; **Wii Speak** voice chat (the first Wii Speak game); everyone hears a speaker even
+without their own Wii Speak (manual p. 22). WiiConnect24 (ended June 2013 [web]): letters to
+friends' towns, Wii Message Board messages, Nintendo item distributions.
 
-Features [web-high: manual, Nookipedia, Wikipedia]:
-- **Town visits**: up to 4 players (host + 3) in one town, friends only: each side registers the
-  other's 12-digit friend code at Copper's gate. Guests shop, fish, trade, write letters.
-- **Chat**: text chat with the on-screen keyboard or a **USB keyboard** (Nintendo verified a
-  Logitech model); emotions; **voice chat with Wii Speak** (first Wii Speak game). Everyone in
-  the session hears a speaker even without their own Wii Speak (manual p. 22).
-- Other online uses [web-medium]: Lloid's auction house, Blanca after a friend's visit,
-  "DS Suitcase" visits are local (Download Play), not online.
-- Ended May 20, 2014 [web-high].
+On the disc [disc]: RVL DWC (`<< RVL_SDK - DWC release build: Sep 17 2008 >>`) with GameSpy
+(GP presence/buddies, QR2, server browser, NAT negotiation, GT2 transport), DWC_VCT 2.0.2 (voice
+chat), PMIC (Wii Speak), KBD, SSL, NHTTP, NWC24. GameSpy game name **`acrossingwii`**, secret key
+`Z7Fm9K`, product id 0x2CC0 (all three passed to DWC_InitFriendsMatch), match key
+`str_key='rvl_forest'`. Hosts `naswii.nintendowifi.net` (NAS login/profanity), `gpcm/gpsp.gs.`,
+`%s.available/master/ms%d/natneg1-3.gs.nintendowifi.net`, `gamestats(2).gs.` (all unused now:
+section 3). WiiConnect24: `/shared2/wc24/*`, `nwcs.wapp.wii.com/ruu/rvforestdl_us.enc` (item
+distribution), `wus.wapp.wii.com/notify|inquiry`.
 
-On the disc [disc]:
-- SDK: RVL DWC with GameSpy (GP presence/buddy, QR2 server, server browser, NAT negotiation,
-  GT2 transport), **DWC_VCT 2.0.2** voice chat (codecs, peer streaming over the DWC connection),
-  `PMIC` (Wii Speak microphone library), `KBD` (USB keyboard, `/dev/usb/kbd`), `SSL`
-  (`/dev/net/ssl`), `/dev/usb/oh0` (USB host for Wii Speak).
-- Matchmaking: `DWC_ConnectToFriendsAsync`, `DWC_SetupGameServer`,
-  `DWC_ConnectToGameServerAsync`, `DWC_ConnectToGameServerByGroupID`, also
-  `DWC_ConnectToAnybodyAsync` linked in (probably unused: visits are friend-only). Host =
-  "game server" (server-client match), guests join it.
-- Hosts (in all three DOLs):
-  - `https://naswii.nintendowifi.net/ac` (account/login) and `/pr` (profanity check); `.dev.` and
-    `.test.` variants are present for development builds.
-  - `gpcm.gs.nintendowifi.net` (GameSpy presence/login), `gpsp.gs.nintendowifi.net` (search
-    profile).
-  - `%s.available.gs.nintendowifi.net`, `%s.master.gs.nintendowifi.net`,
-    `%s.ms%d.gs.nintendowifi.net` (server browsing/QR2), `%s.natneg1/2/3.gs.nintendowifi.net`,
-    `gamestats.gs.nintendowifi.net`, `gamestats2.gs.nintendowifi.net`, with `%s` =
-    **`acrossingwii`** (the GameSpy game name; game id 2187 per WiiLink's server list
-    [web-high]).
-  - `DWC_OPTION_CONNTEST` (connection test host, string not found: it lives in the Wii's
-    network settings / IOS).
-- Credentials: `/shared2/DWC_AUTHDATA` (per-console WFC user id), Nintendo client certificate and
-  root CA through IOS SSL (`DWC Auth: failed to set ClientCert / RootCA`), header
-  `X-Wii-DWCId: %08X`. The NAS login also sends the console's MAC, serial number (from
-  `/title/00000001/00000002/data/setting.txt`), the game code and the language [web-medium:
-  documented for DS/3DS NAS, assumed for Wii].
-- Ports [web-low: commonly cited, not seen on disc]: GPCM 29900, GPSP 29901, QR2 27900, NATNEG
-  27901, master 28910, then peer-to-peer UDP.
+## 2. The game's online flow [disc]
 
-### 1.2 WiiConnect24
+Read from the disassembly (scratch tools: callers of every DWC/GameSpy function, string
+references, call graphs); names in `config/RUUE01/names_manual.txt` (51 DWC functions from
+their `!!X() was called!!` traces and their use), applied to all four versions by
+`tools/discovery/apply_manual.py` (all matched by hash, LoginAsync by order). No game code
+outside DWC calls GameSpy, SO sockets, SSL or NHTTP directly; RELs never call DWC.
 
-Features [web-high]: letters to friends' towns (both consoles connected; slow or lost by
-design), messages and photos to the Wii Message Board / phones / PCs, **Nintendo item
-distributions** (letters from Nintendo carried by Pete; designs from Wendell; see
-docs/REGION_CONTENT.md section 3). Turned on when Rover asks, later at the attic phone. Ended
-June 27/28, 2013.
+Layers (USA addresses):
 
-On the disc [disc]:
-- NWC24 library (`<< RVL_SDK - NWC24`), files under `/shared2/wc24/`: `nwc24msg.cfg` (Wii number,
-  mail domain, account/check/receive/delete/send URLs), `nwc24msg.cbk`, `nwc24fl.bin` (friend
-  list), `nwc24fls.bin`, `nwc24dl.bin` (download tasks), `mbox/` (`wc24send.mbx/.ctl`,
-  `wc24recv.mbx/.ctl`, `dlcnt.bin`, `recvtmp.msg`), `misc.bin`; `wc24dl.vff` (downloaded file
-  store). MIME mail (`Boundary-NWC24-...`, `MAIL FROM:`).
-- Download URLs: `http://nwcs.wapp.wii.com/ruu/rvforestdl_us.enc` (PAL `_eu`, JP `_jp`), the item
-  distribution; `http://nwcs.wapp.wii.com/nw/f/RUD/E.enc` (`P.enc`, `J.enc`), second download,
-  purpose unknown (title code RUD, maybe the profanity list `prc_list.bin` or `game_data.bin`,
-  both named next to it: unverified). `wc24pubk.mod`: public key that verifies downloads.
-- `https://wus.wapp.wii.com/notify` and `/inquiry` with headers `X-APPVER`, `X-GAMECD`
-  (`RVL-RUDJ`), `X-RESULT`: purpose unknown (an update/notification service).
-- Boot checks WiiConnect24 state (`dScBootStatic_c::Wc24CheckState_c`).
-
-## 2. Revival services today
-
-| Service | City Folk | Client side | Notes |
-|---|---|---|---|
-| **Wiimmfi** (wiimmfi.de) | Listed as supported for years (a 2017 forum post: "Full Support"; the City Folk Deluxe mod says online "mostly supported" via Wiimmfi and WiiLink) [web-medium]. Current per-region status unverified: the site is behind a bot check. | Patch `nintendowifi.net` -> `wiimmfi.de` and the NAS URL from https to http (Wii SSL cannot be used) [web-high: mkwiiki]; newer patches add more (unverified). DNS method only for some games. | Dolphin needs a NAND dumped from a real console; generated NANDs no longer accepted [web-medium: Wiimmfi's Dolphin page, seen as a search snippet]. Error 23918: too many users sharing one Dolphin identity [web-medium]. Bans cheaters including their NAND/console [web-medium]. Old GameSpy profiles carry over only if recovered (~2.9M) [web-medium]. |
-| **WiiLink WFC** (wfc.wiilink.ca; Go server, AGPL-3.0) | Listed **"RUU - Partial"**, no notes on what works [web-high: WiiLink wiki list]. | Patcher (Gecko code / auto-patcher) loads a server-side, per-game payload ("stage 2", also security patches) [web-high: wfc-patcher-wii]. | Rules: no cheats/exploits, no multiple accounts for advantage; bans [web-high: wfc.wiilink.ca/rules]. Nothing about emulators or third-party clients. Privacy policy URL returned 404. Dolphin "may need" a real NAND. |
-| **WiiLink City Folk distribution** (wiilink.ca/services/animalcrossing) | Serves City Folk DLC items to consoles today, run by a third party for WiiLink [web-high]; which items it sends is unknown (a fork "randomly picks" a DLC file [web-medium]). | DNS 167.235.229.36, accept the EULA, WiiConnect24 + standby on; UK region for PAL, US for NTSC-U (else error 221001). | Korean copies: unverified. |
-| **WiiLink Mail** (formerly RiiConnect24) | Mail list mentions City Folk "exchanges pictures and messages", no status [web-medium]. | Mail Patcher registers via WC24 and rewrites the URLs in `nwc24msg.cfg` to WiiLink's servers [web-high]. | |
-| **AltWFC** / dwc_network_server_emulator (AGPL-3.0, Python 2) | City Folk not verified. | "No SSL" option in loaders. | Small public server. |
-
-Dolphin [web-medium]: City Folk ran on Wiimmfi in development builds (2017); Dolphin's wiki
-reports a hang on save-and-quit with WiiConnect24 enabled; Dolphin emulates Wii Speak since
-2025 (unverified how it works in City Folk) and has WiiLink WiiConnect24 built in since 2023.
-
-## 3. What the PC port must emulate
-
-Approach: keep the game's own DWC/GameSpy/VCT/NWC24 code (it is recompiled like everything
-else) and HLE only the IOS devices under it. That keeps protocol behaviour exact and needs no
-knowledge of GameSpy.
-
-| Layer | Port | Notes |
+| Layer | Where | What |
 |---|---|---|
-| `/dev/net/ip/top` (SO sockets: socket, connect, bind, sendto/recvfrom, poll, DNS `getaddrinfo`/`gethostbyname`) | host sockets (non-blocking, modelled IPC latency) | NAT: the guest's "private address" (`SBServerGetPrivateAddress`) must be a plausible LAN address; peer UDP needs real port mapping (UPnP optional) or the NATNEG relay of the service. |
-| NCD / `/dev/net/ncd/manage`, `/dev/net/kd/request` (WC24 KD), `/dev/net/kd/time` (network time), connection test | report "connected", MAC from a generated per-install value (see identity) | all device names [disc]; `/dev/net/wd/command` is DS Download Play (docs/FEATURE_RESEARCH.md, DS transfer), not internet |
-| `/dev/net/ssl` | host TLS (OS store or a bundled CA list) to the revival server; or no TLS where the service uses http | The game asks IOS to load Nintendo's client cert / root CA by id: answer success, never ship Nintendo keys. |
-| Hostname rewrite | patch the host strings in guest memory at load (`nintendowifi.net` -> service domain, `https://naswii` -> `http://` if the service requires it) or answer DNS for those names with the service's addresses | Same effect as the services' patchers; done in the HLE, no game binary is distributed. WiiLink's payload-loading patcher cannot run (it executes downloaded PowerPC code); WiiLink would need to accept a client without its payload (ask them). |
-| `/dev/usb/kbd` + KBD | host keyboard events | also useful offline (letters) |
-| Wii Speak (`/dev/usb/oh0`, PMIC) | host microphone through SDL3 audio capture, opt-in | push-to-talk option; off by default |
-| NWC24 (`/shared2/wc24/*`, KD download tasks, mail send/receive) | host HTTP(S) for download tasks; mail via WiiLink Mail | Download verification with `wc24pubk.mod`: WiiLink's service already works with retail consoles, so its files pass the game's check. |
-| NAND files | `nand/shared2/DWC_AUTHDATA`, `wc24/*`, `setting.txt` | per install, never the user's real console files unless they choose to import them |
+| Copper (gatekeeper REL `d_a_npc_sp_gatekeeper_aNP`) and the friend roster menus (`d_menu_friend*NP`) | RELs | call the online system: `fn_800DCBC8` connect, `fn_800DCC54` open the gate (host), `fn_800DCCEC(i)` visit friend *i*, `fn_800DCE44` disconnect; roster: `fn_800E5A04` = DWC_CreateFriendKeyToken (register a code), `fn_800E5B24` = DWC_CheckFriendKey |
+| Online system (`r13-0x3188`, 0x3868 bytes) | `fn_800E4A08` setup (user data = save+4, friend list = save+0x44, 32 friends, 4 players), `fn_800E4ECC` start | copies the save's DWC user data (0x40) and friend list (32 x 12) to working copies, starts the network thread; request queue +0x3678 (1 anybody, 2 host, 3 join friend, 4 cancel, 5 close all, 6 reset); per-friend mirror +0x1C40 (0xD0 each); state +0x385C (1 idle, 3 connecting, 5 hosting, 6 visiting) |
+| Network thread (`fn_800E7C20`, object `r13-0x3174` = 0x805B67E0) | `fn_800E7xxx`-`fn_800E91D4` | the only DWC caller (below) |
+| DWC | 0x80319698-0x8033F46C | friends match, matching, transport, account |
+| GameSpy / SO / NHTTP / SSL | 0x8033F46C-0x8036xxxx, 0x8043xxxx | under DWC only |
+| VCT (voice) | 0x80365xxx-0x8036Dxxx, game side `fn_8017xxxx` | sends over DWC_SendUnreliable, receives through the game's DWC receive callback (`fn_800E9164` hands it to VCT first) |
 
-Console identity: services key accounts and bans on MAC, console serial / id and (Wiimmfi, for
-Dolphin) a real NAND. A port that generates identities may be rejected like Dolphin's generated
-NANDs, and one shared identity would be banned (error 23918). Options: (1) per-install random
-identity, if the service accepts it; (2) let the user import identity files from their own
-console's NAND dump (their own data, stays local); (3) a service-side arrangement. This needs a
-conversation with Wiimmfi and WiiLink before any implementation; their positions on third-party
-clients are not published (unverified).
+Network thread, in order:
+1. `NWC24TrySuspendScheduler` (retried while busy) - WiiConnect24 paused while online.
+2. allocate (heap 0x6000), `SOInit` (alloc/free callbacks) and `SOStartup` (errors -> WFC error
+   via `fn_80412BFC`, an NCD/IOS error code).
+3. `DWC_InitFriendsMatch(NULL, userdata, 0x2CC0, "acrossingwii", "Z7Fm9K", 0x4000, 0x4000,
+   friendList, 32)`; `DWC_SetSendSplitMax(1329)`.
+4. `DWC_LoginAsync(name, NULL, fn_800E8E1C, 0)`; the callback sets `DWC_SetConnectionClosedCallback`,
+   `DWC_SetUserSendCallback`, `DWC_SetUserRecvCallback`, `DWC_SetUserPingCallback`,
+   `DWC_SetTransportTimeout(180000)`, `DWC_SetBuddyFriendCallback`, `DWC_SetOwnStatusData`
+   (0x66 bytes of game status), `DWC_ClearDirtyFlag(userdata)` (the new profile id goes to the save),
+   then `DWC_UpdateServersAsync` (friend status callback -> the game's roster; delete callback).
+5. Every frame (`fn_800E8264`): request dispatch, queued reliable sends
+   (`DWC_IsSendableReliable` / `DWC_SendReliable` per AID, queue of 0x24-byte items),
+   `DWC_ProcessFriendsMatch`, VCT, friend/roster upkeep (`DWC_CanChangeFriendList`,
+   `DWC_DeleteBuddyFriendData`), `DWC_GetLastErrorEx` -> game error states, `DWC_ClearError`;
+   every 180 frames a ping per AID (`DWC_Ping`, 40 missed -> `DWC_CloseConnectionHard`); client
+   matching timeout 180 s (`DWC_GetLastMatchingType() == 3` -> `DWC_CancelMatch`).
+6. Host (request 2): `DWC_SetupGameServer(topology 2, 4, matched fn_800E8F30, 0, newClient,
+   0, attempt fn_800E8EF0, NULL, 0)`. The attempt callback asks the game (`fn_800DDF78`: not while
+   busy).
+7. Visit (request 3, friend *i*): `DWC_GetFriendStatusDataSC(friend[i], &max, &num, NULL,
+   &size)` must return status 6 (server) with num < max (else errors 15/16), then
+   `DWC_ConnectToGameServerAsync(2, i, ...)`.
+8. Matched callback: AID bitmap rebuilt from `DWC_GetMyAID` / `DWC_IsValidAID`, receive buffers
+   per AID (`DWC_SetRecvBuffer`), the game's join callback; closed callback: bit cleared, game
+   callback, and with fewer than 2 hosts left either back to waiting (server) or
+   `DWC_CloseAllConnectionsHard`.
+9. `DWC_RequestSuspendMatchAsync` while the game must not take visitors; `DWC_CancelMatch`
+   closes the gate; `DWC_ShutdownFriendsMatch`, `SOCleanup`, `SOFinish`,
+   `NWC24ResumeScheduler`, `DWC_Shutdown` on the way out.
+10. `DWC_ConnectToAnybodyAsync(2, 4, "str_key='rvl_forest'", ...)` after
+    `DWC_AddMatchKeyString("str_key", "rvl_forest")` is linked (request 1) but no game path was
+    found that issues it (visits are friends only).
 
-## 4. Risks
+Account functions (pure computations on the 0x40-byte DWCUserData and 12-byte DWCFriendData)
+run as game code: friend data word 0 bits 11-12 type (1 login id, 2 friend key, 3 GS profile id),
+bit 13 buddy; word 1 the profile id (types 2 and 3), word 2 the friend-key checksum (type 2).
+Friend key = checksum << 32 | profile id, checksum = MD5(profile id, game code)[0] >> 1 (so
+codes are region-specific: RUUE / RUUP / RUUJ / RUUK). User data: +0x10 authentic login id
+(type 1 = logged in once), +0x1C GS profile id, +0x20 dirty flag, +0x24 game code, +0x3C CRC.
 
-- **Service terms**: neither Wiimmfi's terms/privacy policy (not reachable) nor WiiLink's
-  privacy policy (404) could be read. WiiLink's rules ban cheats/exploits; a modified client
-  (the port's enhancements: frame rate, region content, debug tools) could count as a hack.
-  Online mode should disable gameplay-changing options (debug warps, region-forced items?) or
-  the services should be asked which are acceptable.
-- **Privacy**: the NAS login sends MAC, console serial, user id, language; servers see the IP,
-  friend code and every letter. The F1 option must be off by default, say what is sent and to
-  whom, and identity files must stay on the user's machine.
-- **Nintendo data**: never redistribute DLC files, DLC keys, Nintendo certificates or keys. The
-  port only talks to services that already serve consoles.
-- **Legal**: no known action by Nintendo against Wiimmfi/WiiLink (low confidence either way).
-- **Security**: GameSpy/DWC code parses network data written in 2008; the recompiled guest runs
-  in its own memory window, but host HLE handlers (sockets, TLS, file paths in NWC24 messages)
-  must validate every length and path.
+## 3. Why DWC-level HLE
 
-## 5. Order of work (suggested)
+The game's own visiting, gate, roster, chat and VCT code calls only the public DWC API; nothing
+outside DWC touches the network. Replacing that API (about 50 functions) means:
+- the game's flow and dialogue stay exactly as on the Wii (Copper, friend roster, errors);
+- GameSpy, NAS, SSL, NAT negotiation and console identities never need emulating, nor do SO
+  sockets (SOInit/SOStartup/SOCleanup/SOFinish and the WC24 scheduler pause only answer "ok"
+  while in a room);
+- the account functions keep computing real friend codes from our profile ids.
+The IOS-device approach of the earlier research (host sockets under SO, rewrite hostnames to a
+revival service) is not needed any more. Not covered by DWC HLE: Wii Speak (PMIC/USB device),
+the USB keyboard, WiiConnect24 letters (NWC24): section 11.
 
-1. Offline completeness first: NAND files, NWC24 "disabled" path, USB keyboard.
-2. WiiLink City Folk distribution (download task only; one HTTP GET per day; lowest risk; brings
-   the distributed items back).
-3. WiiLink Mail (letters between towns).
-4. WFC visits through Wiimmfi or WiiLink WFC after the identity question is answered.
-5. Wii Speak.
+## 4. DWC on rooms (src/recomp/online_dwc.cpp)
+
+- **Login** succeeds only in a room (else error 20100, "join or host a room in F1 > Online").
+  The profile id is this install's (online.cpp: HMAC of a random 32-byte identity in
+  `<data>/online/identity.bin`), written into the game's user data as the authentic login id
+  (+0x10 type 1, +0x1C profile id, dirty flag): the game saves it and shows its own friend code,
+  which F1 shows too (`DWC_CreateFriendKey`).
+- **Friends**: a friend-list entry is a buddy when a room member has that profile id and has
+  ours in its own list (both registered each other in the game's roster, as WFC required).
+  `DWC_UpdateServersAsync` then turns friend-code entries into buddy profile entries (as DWC did
+  after GP confirmed the buddy) and reports statuses; status changes reach the game's friend
+  status callback. Status 1 online, 5 visiting, 6 hosting (with max/num players) and the game's
+  0x66 bytes of status data (`DWC_SetOwnStatusData`) go to every room member (STATUS message
+  with our friend-list profile ids, resent when the list changes).
+- **Matching**: the gate's host is the DWC server (AID 0); a visitor's JOIN request is checked
+  (server role, not suspended, room left, friends both ways, the game's attempt callback), gets
+  the next AID and the node list; other nodes get the new list. Matched / new-client / closed
+  callbacks as DWC calls them; a departing server ends the match for everyone; losing the room
+  while online is network error 80430 for the game (its own "connection lost" path).
+- **Transport**: `DWC_SendReliable` / `DWC_SendUnreliable` by AID over the room (reliable in order,
+  up to 64 KB per message here; the game sends at most its split size), receive callback with
+  the per-AID receive buffer, send callback on the next process, `DWC_Ping` round trip.
+- Matches are an overlay on the room: a room may hold four players in two towns' worth of
+  sessions only one at a time per player (DWC allows one match per console).
+
+## 5. Rooms and transport (src/recomp/online_net.cpp)
+
+Serverless (user requirement): **the hosting player's game is the room**. Members connect
+straight to the host over UDP; the host relays between members (star), enforces sender ids
+and forwards only within the room.
+- **Room code**: Crockford base32 of [version, 80-bit random room secret, up to 4 endpoints
+  (IPv4/IPv6 + port: router-mapped public address, STUN public address, LAN address, global
+  IPv6), checksum byte], in groups of five, e.g. `240G4-0R40M-30E20-9182C-P03H0-XTDD2-G` (one
+  IPv4 endpoint). A new code every time a room is hosted; the joiner tries every endpoint, the
+  first answer wins. The password is never in the code.
+- **LAN rooms**: the host broadcasts a beacon every 2 s on UDP 29911 (name, host, game id,
+  version, players, lock, port, room secret); F1 lists rooms heard in the last 6 s.
+- **Direct connect**: IP:port (port forwarding, Tailscale, ZeroTier, Hamachi). Allowed unless
+  the host turns it off; then only the code works.
+- **Handshake**: HELLO (game id, port version, name, nonce, room id from the secret, profile id)
+  -> CHALLENGE (host nonce, password flag, PBKDF2 salt + iterations) -> AUTH (proof) -> WELCOME
+  (sealed) or WAIT (host asked) or REJECT (reason text).
+- **Sealed packets**: ChaCha20 + HMAC-SHA256/128 (encrypt-then-MAC) under a per-join session key,
+  one key per direction, 64-packet replay window. Reliable messages: sequence numbers,
+  selective acks, retransmission (RTT-based, backoff), window 64, in-order delivery,
+  fragmentation (1100-byte fragments, 256 KB per message); unreliable messages up to 1000 bytes;
+  pings every second, 15 s timeout, BYE on leave.
+- **Members**: up to 4 (City Folk's limit), ids 0 (host) to 3; member list with names, profile ids,
+  friend codes and pings, sent by the host on every change.
+- **Version check**: same online protocol, same port version, same game id. Towns visit only
+  within one region (USA with USA, Europe with Europe, Japan with Japan, Korea with Korea): DWC's
+  friend codes embed the game code, the save formats and text encodings differ, and Nintendo WFC
+  kept the regions apart too. All European languages share RUUP01.
+- Tested by `cf_online_test` (tools/tests/online_net_test.cpp, ctest `online_net`): codes
+  (round trip, lower case, typo detection), no / wrong / right password, direct connect, other
+  region refused, 200 KB reliable message relayed member to member, host broadcast, unreliable,
+  room full, kick, leave, room closed, ask before join (accept / decline), old code, LAN list.
+
+## 6. Security and privacy
+
+- No accounts. A random per-install identity; profile ids are derived from it (31 bits).
+- The room secret (in the code) and the password are both needed to derive the session key:
+  master = HMAC(secret, "cf-room" | PBKDF2-HMAC-SHA256(password, salt, 100000)), proof and
+  session key = HMAC(master, label | nonces). The password is never sent or saved; a wrong one
+  is refused ("Wrong password or room code"); 5 failures from one address within a minute block
+  it for a minute. No forward secrecy: anyone with the code (and password) who recorded the
+  traffic could decrypt it. LAN beacons carry the room secret (anyone on the LAN can join a room
+  without a password, by design).
+- Kick: the member is dropped and refused for the rest of the room (by profile id and address).
+  "Ask me before someone joins": the host gets a notice with Let in / Decline.
+- Limits: datagrams over 1400 bytes dropped, 16 handshakes in flight, 4 members, 256 KB per
+  message, 4096 queued messages, every length checked before use, text from the network
+  stripped of control characters and cut to 32 characters.
+- What others see: your player name, profile id / friend code, your IP address (the host sees
+  every member's; members see only the host's), and what the game itself sends (your town while
+  visited, chat). Nothing is stored by anyone but the game's own save. No server.
+- STUN asks a public STUN server (Google, Cloudflare) for the host's public address when port
+  mapping is on; nothing else leaves the room.
+- Crypto written from the specifications (FIPS 180-4, RFC 2104, 8018, 8439) with known-answer
+  self tests; the OS random generator (BCryptGenRandom / getrandom / arc4random).
+
+## 7. Reachability
+
+Hosting, with "Map the port on my router" (default on): UPnP-IGD (SSDP search, the router's
+WANIPConnection/WANPPPConnection AddPortMapping UDP, 4 h lease, removed on Close room) and, if
+that fails, NAT-PMP (gateway UDP 5351); STUN from the room's own socket for the public address.
+F1 shows the result: "Reachable from the internet at a.b.c.d:29910 (checked through the router)"
+when a test packet sent to the public address comes back (router hairpin), "Port mapped ... could
+not be checked from here" when the router does not loop packets back, "Not reachable from the
+internet: <why>" otherwise (also double NAT / carrier-grade NAT: the router reports a private
+address). Fallbacks, documented in F1: friends on the same network (LAN list), a manual port
+forward (UDP 29910) + Direct connect, or a VPN (Tailscale, ZeroTier, Hamachi) + Direct connect
+with the VPN address. Global IPv6 addresses go into the code too (no NAT; the host's firewall
+must allow the port: Windows asks the first time). Not done: NAT hole punching without a server
+(both players exchanging codes; section 11).
+
+## 8. F1 > Online
+
+Status (room, game: logged in / hosting / visiting, your friend code), player name, then:
+- **Host a room**: room name, password (optional), UDP port, ask before join, map the port on
+  the router, show on the local network, allow direct connections, Host. While hosting: the
+  code with Copy, LAN / internet addresses, reachability, member list with ping and Kick, join
+  requests (Let in / Decline), Close room.
+- **Join with a code** (+ password), **Rooms on this network** (locked rooms marked; other
+  regions greyed out), **Direct connect** (IP:port + password, with the port-forward / VPN
+  help).
+- While in a room: the member list (friend codes, so players can register each other in the
+  game's roster) and Leave.
+- Room notices over the game (joined / left / refused, join requests with buttons).
+Settings `[online]` in settings.ini (player_name, room_name, port, ask_before_join, allow_direct,
+lan_visible, port_mapping, last_direct, notices); passwords are never saved.
+
+## 9. Test aids and the two-instance test
+
+- `CF_ONLINE_LOG=1`: every DWC call and room event. `CF_ONLINE_NAME=<name>`.
+- `CF_ONLINE_HOST=<port>` hosts at start (no port mapping unless `CF_ONLINE_UPNP=1`;
+  `CF_ONLINE_PASSWORD`), `CF_ONLINE_CODE_FILE=<file>` gets the code; `CF_ONLINE_JOIN=<code>|
+  <ip:port>|file` joins (file = wait for the code file). `CF_ONLINE_PID_FILE=<file>` writes this
+  install's profile id.
+- `CF_ONLINE_TEST=<frame>:<action>;...` (game thread). USA only: `userdata` (creates the save's
+  DWC user data the way the game does when it writes the save, if missing: a never-saved new town
+  has none and the online system refuses to start), `setup` (`fn_800DCBC4`, Copper calls it first),
+  `connect`, `host` (open the gate), `visit:<friend index>` (polled every frame until it returns 1,
+  as Copper does), `disconnect`, `diag` (the start conditions), `start`, and
+  `friend:<slot>:<pid>|@<file>` (a profile-id entry in the save's friend list at save+0x44, as
+  registering a friend code would). Any version: `addfriend:<member id>`, `acceptfriends`,
+  `friends`. With `CF_ONLINE_LOG` the online system's / network thread's / session states are
+  logged on change, and the first reliable sends/receives.
+- Transport and crypto alone: `build/windows-clang/cf_online_test.exe` (ctest `online_net`).
+
+Two-instance runs (2026-10-27/28, this PC, scratch APPDATA/NAND/cache per instance):
+- New towns from `tools/routes/town.txt` (never saved): the online system refused to start until
+  the `userdata` step (the save's DWC user data is created with the first save).
+- `CF_FIXTURE=user-town` + `tools/routes/continue.txt` on both (the same town twice):
+  room joined (LAN address), both games log in (`[dwc] logged in`, profile ids from the keys,
+  the game's friend codes), `UpdateServers` turns the profile-id entries into buddies, the host
+  opens the gate (`SetupGameServer`, network thread state 9), the visitor sees status 6 (1/4),
+  `ConnectToGameServer` -> both matched (thread state 10), the visitor's `fn_800DCCEC` returns 1 on
+  the 4th poll and both online systems reach session state 3; the host's game then sends a
+  2-byte message every frame and the visitor receives them (3100+ in a minute). The visitor's
+  HUD disappears (trip prepared) but no trip starts and no town data moves: the rest of the visit
+  is driven by Copper's conversation (REL `d_a_npc_sp_gatekeeper_aNP`), which the test actions
+  skip. Next step: a route that walks both players to the gate and talks to Copper ("Host" /
+  "Visit"), and a second, different town (the same town on both sides may be refused by the game).
+- F1 friends between two instances at the title: keys proved both ways, `addfriend:0` ->
+  "Bob sent you a friend request" on the host -> accepted -> "Alice accepted your friend request",
+  both `friends.txt` list each other as friends.
+
+## 10. Friends and mail (friends done; roster, presence and mail are design)
+
+User request: a friend system in F1 and letters between friends at any time, replacing
+WiiConnect24 letters.
+- **Identity (done)**: each install's Ed25519 key (seed = HMAC of the identity file; our own
+  SHA-512/Ed25519/X25519, src/recomp/online_ed25519.cpp, RFC test vectors pass). F1 friend code =
+  base32 of SHA-256(public key)[0..10], `XXXX-XXXX-XXXX-XXXX`. The DWC profile id is
+  HMAC("cf-dwc-profile-id", public key) (31 bits), so the game's own 12-digit friend code belongs to
+  the key; a member whose room profile id does not match its key is not trusted.
+- **Adding friends (done, src/recomp/online_friends.cpp)**: members send IDENT (key, nonce, name)
+  and PROVE (signature over the peer's nonce) to each other on joining; the member list shows
+  "checking key..." / **Add friend** / Friend / Request sent / Accept request / Blocked. A request
+  is a notice with Accept / Decline / Block (also in F1 > Online > Friends); accepting (or both
+  asking) makes both friends. Requests only from proved keys, at most one per 20 s and 5 per room
+  session per member, none from blocked keys. Friends in `<data>/online/friends.txt` (state, key,
+  name). Codes can be shown/copied; typing a code for a friend met elsewhere needs presence
+  (below).
+- **The game's roster**: F1 friends are written into the save's DWC friend list as buddy profile
+  entries **through the game's own registration path** (the call the roster menu makes after a
+  code is typed: `d_menu_friend03NP`/`friend08NP` -> `fn_800E5A04` DWC_CreateFriendKeyToken and
+  the name fields of the roster entry, to be traced), never by editing other save fields; friends
+  removed in F1 are removed in the game with `DWC_DeleteBuddyFriendData`. Then both can visit each
+  other directly when online (presence below), and rooms stay for quick sessions.
+- **Presence without a room**: each friend publishes its current endpoint (signed, encrypted to
+  each friend) where friends look: the BitTorrent mainline DHT (BEP 44 mutable item keyed by a
+  per-friendship value) or a direct UDP ping to the last known endpoint. When both are online the
+  game connects directly (the same transport, a two-member room).
+- **Mail**: the game's letters to Wii friends go through NWC24 (`NWC24CommitMsg`, message box
+  files under `/shared2/wc24/mbox`, MIME with the letter as an attachment; the game's letter
+  format and attached item to be traced in the NWC24 calls of the letter scene). HLE the send:
+  the committed message goes into our outbox (encrypted to the recipient's X25519 key, signed);
+  delivery: directly when both are online; otherwise store-and-forward in the DHT (BEP 44:
+  1000-byte values, signed by the sender's key, keyed by recipient + sequence; the sender
+  re-publishes every ~30 minutes until the recipient acknowledges). Incoming letters are written
+  where the game's WiiConnect24 receive path reads them (`wc24recv.mbx` + control file), so Pete
+  delivers them as he did WiiConnect24 letters. Only friends can mail you; per-friend rate limits;
+  letters never in plain text on the wire.
+- **Reliability, honestly**: direct delivery is reliable whenever both play at the same time.
+  DHT items live about 2 hours unless re-published; a sender's game re-publishes only while it
+  runs, so a letter between two players who are never online at the same time arrives when the
+  recipient starts the game within ~2 hours of the sender's last session, else later when they
+  overlap. Mainline DHT nodes may drop or not store items (it works in practice for BEP 44 users,
+  but nothing guarantees it). A self-hostable mailbox server (any friend group can run one, the
+  F1 setting names it) would make offline delivery dependable; optional, later.
+
+## 11. Status and what is left
+
+Done (branch online-1): the DWC-level HLE (51 named DWC functions + IOS_Open2/IOS_Close2 the USB
+library needs), the room transport (tests pass), port mapping + STUN + reachability, F1 > Online,
+F1 friends with keys, test aids. Two-instance result: section 9 (DWC login, buddies, hosting,
+matching and game traffic work; the trip itself waits for Copper's conversation, not yet scripted).
+
+Left:
+- **Wii Speak voice chat** with the PC microphone: PMIC / the USB device under it
+  (`/dev/usb/oh0`) are absent, so VCT never records; the transport already carries VCT packets
+  (unreliable, the game hands them to VCT). Needs a PMIC-level HLE (SDL3 audio capture, opt-in,
+  push-to-talk) and testing the VCT streaming between two instances.
+- **USB keyboard** for chat (KBD library on `/dev/usb/kbd`): host keyboard events.
+- **The visit itself** end to end: a gate route for both players (and a second town fixture).
+- **WiiConnect24 letters** between towns: section 10. Coordinate with main's WC24 setup (KD device
+  present-but-off, `/shared2/wc24` files from sysconf.cpp prepareWc24; the game's NWC24 tasks run on
+  the save path) and with the distributions agent (NWC24 downloads): the mail HLE must leave the
+  "WC24 off" behaviour unchanged while online is off.
+- **Friends in the game's roster** and **presence** without a room: section 10. Leads for the
+  roster: the roster menu `d_menu_friendNP` fn_139_10EC builds the entry with
+  DWC_CreateFriendKeyToken, checks duplicates with `fn_8017BD64` and stores it at menu+0x5A0; the
+  game's friend manager is `fn_8017BAC8`-`fn_8017C480` (names/towns of the 32 entries).
+- **NAT hole punching** without a server: both players exchange codes (each code carries the
+  STUN endpoint), then both send to each other at once; works for most home routers
+  (endpoint-independent mapping), not for symmetric NAT. Not done; port mapping, LAN and VPN
+  cover the rest.
+- **Optional lobby/relay server** (self-hostable, lowest priority): room codes without
+  reachable hosts, relaying for symmetric NAT. Not written.
+- Region: PAL/Japan/Korea use the same HLE by name (tables carried); the CF_ONLINE_TEST actions
+  are USA-only.
+
+## 12. Decisions for the user
+
+- Default UDP port 29910 (and 29911 for LAN beacons): fine, or another?
+- STUN servers (Google, Cloudflare) are contacted when hosting with port mapping on: acceptable,
+  or should that be its own checkbox?
+- Friend codes: keep the game's own registration (both type each other's code in the game's
+  roster, as on the Wii; works now), or also write F1 friends into the roster automatically
+  (section 10)?
+- Mail without a common online time: DHT store-and-forward (best effort) or a hosted mailbox
+  server (dependable, someone runs it)?
+- Who hosts an optional public relay/lobby, if ever (none needed for rooms).
