@@ -253,6 +253,68 @@ void ipcBufferInit() {
     }
 }
 }  // namespace
+// Save-error diagnosis (2026-10-27, temporary): the NAND library calls a save makes, with their
+// path, caller and result, once per (function, caller, result); nandConvertErrorCode shows every
+// ISFS error the library turns into a NAND result, including ones that never reach IOS.
+namespace {
+void nandTrace(const char* fn, u32 lr, const std::string& path, s32 result) {
+    static std::set<std::string> seen;
+    static std::mutex m;
+    char key[160];
+    std::snprintf(key, sizeof(key), "%s %08X %d %s", fn, lr, result, path.c_str());
+    std::lock_guard lk(m);
+    if (seen.size() < 400 && seen.insert(key).second)
+        log("[nand] %s(%s) from %08X -> %d", fn, path.c_str(), lr, result);
+}
+}  // namespace
+#define CF_NAND_TRACE_PATH(fn)                                \
+    HLE(fn) {                                                 \
+        const u32 lr = c.lr;                                  \
+        const std::string path = c.r[3] ? gstr(c.r[3]) : "";  \
+        callOriginal(c, #fn);                                 \
+        nandTrace(#fn, lr, path, s32(c.r[3]));                \
+    }
+#define CF_NAND_TRACE_FD(fn)                                  \
+    HLE(fn) {                                                 \
+        const u32 lr = c.lr;                                  \
+        callOriginal(c, #fn);                                 \
+        nandTrace(#fn, lr, "", s32(c.r[3]));                  \
+    }
+CF_NAND_TRACE_PATH(NANDCreate)
+CF_NAND_TRACE_PATH(NANDPrivateCreate)
+CF_NAND_TRACE_PATH(NANDPrivateCreateAsync)
+CF_NAND_TRACE_PATH(NANDOpen)
+CF_NAND_TRACE_PATH(NANDOpenAsync)
+CF_NAND_TRACE_PATH(NANDPrivateOpen)
+CF_NAND_TRACE_PATH(NANDPrivateOpenAsync)
+CF_NAND_TRACE_PATH(NANDSimpleSafeOpen)
+CF_NAND_TRACE_PATH(NANDPrivateSafeOpenAsync)
+CF_NAND_TRACE_PATH(NANDGetType)
+CF_NAND_TRACE_PATH(NANDPrivateGetTypeAsync)
+CF_NAND_TRACE_PATH(NANDPrivateCreateDir)
+CF_NAND_TRACE_PATH(NANDPrivateCreateDirAsync)
+CF_NAND_TRACE_PATH(NANDMove)
+CF_NAND_TRACE_PATH(NANDDelete)
+CF_NAND_TRACE_PATH(NANDPrivateDelete)
+CF_NAND_TRACE_PATH(NANDPrivateDeleteAsync)
+CF_NAND_TRACE_PATH(NANDGetStatus)
+CF_NAND_TRACE_PATH(NANDPrivateGetStatus)
+CF_NAND_TRACE_PATH(NANDPrivateGetStatusAsync)
+CF_NAND_TRACE_PATH(NANDChangeDir)
+CF_NAND_TRACE_FD(NANDWrite)
+CF_NAND_TRACE_FD(NANDWriteAsync)
+CF_NAND_TRACE_FD(NANDClose)
+CF_NAND_TRACE_FD(NANDCloseAsync)
+CF_NAND_TRACE_FD(NANDSimpleSafeClose)
+CF_NAND_TRACE_FD(NANDSafeCloseAsync)
+CF_NAND_TRACE_FD(NANDInitBanner)
+HLE(nandConvertErrorCode) {
+    const u32 lr = c.lr;
+    const s32 isfs = s32(c.r[3]);
+    callOriginal(c, "nandConvertErrorCode");
+    if (isfs < 0) nandTrace("nandConvertErrorCode", lr, "ISFS " + std::to_string(isfs), s32(c.r[3]));
+}
+
 // NANDCheck(fsBlocks, inodes, &answer): the SDK's free-space check before a save. Logged with
 // its answer (bits: 1/2 home blocks/inodes, 4/8 system blocks/inodes over the limits), so a
 // "Could not access / not enough space" save error in a player's log shows its cause.
