@@ -183,7 +183,10 @@ Settings: `[controls]`, `[controls.keyboard]`, `[controls.pad.<guid>]` (bindings
   (-1..1, up = +y), `@x/y` = pointer at KPAD position (stays until the next one), `@off` = pointing
   away. Time in retraces, or in guest frames with `CF_INPUT_CLOCK=frames` (matches `CF_SHOT` frame
   numbers). A time `+N` = N after the previous item's start; `~N` after an item repeats it N times
-  (`+60:A ~10` = ten presses 60 apart).
+  (`+60:A ~10` = ten presses 60 apart). `after link <REL module> [n]` in a route file: the items
+  after it are timed (`+N`) from the n-th time the game links that module (scene changes, e.g.
+  `d_bgi_drawNP` when a building's interior loads), until the next absolute time; `CF_INPUT_LOG=1`
+  lists every link with its frame.
 - **Route files** (`--input @file`, `tools/routes/*.txt`): items one per line or comma-separated,
   `#` comments, `include <file>` (relative to the including file) chains routes. `CF_INPUT_LOG=1`
   prints the expanded script. Routes: `new_game.txt` (boot -> new game "rob" / town "Aa" -> the
@@ -194,7 +197,7 @@ Settings: `[controls]`, `[controls.keyboard]`, `[controls.pad.<guid>]` (bindings
 - **Same town every run**: a new town's layout and villagers come from random numbers and the
   clock. `CF_RNG_SEED=<hex>` (seeds from (seed, caller, call count), one main-generator stream per
   guest thread; src/game/cf_game.cpp), `CF_CLOCK_START="YYYY-MM-DD HH:MM"` and `CF_CLOCK_FRAMES=1`
-  (the game's clock follows guest frames) make it repeatable; run.ps1 sets all three
+  (the game's clock and the Wii Remote report timing follow guest frames) make it repeatable; run.ps1 sets all three
   (12345678, 2026-10-27 10:00). Diagnostics: `CF_RNG_LOG=1` (every setSeed), `CF_RNG_DRAWS=a,b`
   (every main-generator draw in frames a..b), `CF_TIME_LOG=1` (who reads the clock).
 - `CF_WPAD_LOG=1`: Remote state changes, callbacks, motor/DPD/speaker commands.

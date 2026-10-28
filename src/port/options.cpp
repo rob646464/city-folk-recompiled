@@ -48,6 +48,9 @@ std::string trim(const std::string& s) {
 // comment, `include <file>` (relative to the including file) inserts another route. An item's
 // time may be `+N`: N after the previous item's start (in the same clock), so routes can be
 // edited and chained without renumbering. Output: the plain comma list the parsers read.
+std::string anchor;  // current `after link` module ("" = absolute times)
+unsigned long anchorCount = 1, anchorLast = 0;
+
 void expandScript(const std::string& text, const std::string& dir, std::string& out, unsigned long& last, int depth) {
     size_t pos = 0;
     while (pos <= text.size()) {
@@ -70,6 +73,17 @@ void expandScript(const std::string& text, const std::string& dir, std::string& 
             } else {
                 std::fprintf(stderr, "--input: cannot include %s\n", path.c_str());
             }
+            continue;
+        }
+        // `after link <REL module> [n]`: the following items are timed from the n-th (default 1st)
+        // time the game links that module (a scene change: d_bgi_drawNP = indoors), +N relative,
+        // until an item with an absolute time. Emitted as E<module>.<n>.<offset>:<tokens>.
+        if (line.rfind("after link ", 0) == 0) {
+            std::string rest = trim(line.substr(11));
+            const auto sp = rest.find(' ');
+            anchor = rest.substr(0, sp);
+            anchorCount = sp == std::string::npos ? 1 : std::max(1ul, std::strtoul(rest.c_str() + sp + 1, nullptr, 10));
+            anchorLast = 0;
             continue;
         }
         size_t ip = 0;
@@ -95,10 +109,17 @@ void expandScript(const std::string& text, const std::string& dir, std::string& 
             const std::string t = trim(item.substr(0, colon));
             const bool relative = !t.empty() && t[0] == '+';
             const unsigned long v = std::strtoul(t.c_str() + (relative ? 1 : 0), nullptr, 10);
+            if (!relative) anchor.clear();  // an absolute time ends an `after link` block
             for (unsigned long r = 0; r < repeat; r++) {
+                if (!out.empty()) out += ',';
+                if (!anchor.empty()) {
+                    anchorLast += v;
+                    out += prefix + "E" + anchor + "." + std::to_string(anchorCount) + "." + std::to_string(anchorLast) +
+                           item.substr(colon);
+                    continue;
+                }
                 const unsigned long at = relative ? last + v : (r == 0 ? v : last);
                 last = at;
-                if (!out.empty()) out += ',';
                 out += prefix + std::to_string(at) + item.substr(colon);
             }
         }
