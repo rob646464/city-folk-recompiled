@@ -36,8 +36,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 int logLevel() {
-    // TEMPORARY (save-error diagnosis 2026-10-27): every request logged by default; back to 0 after.
-    static const int level = std::getenv("CF_IOS_LOG") ? std::atoi(std::getenv("CF_IOS_LOG")) : 2;
+    static const int level = std::getenv("CF_IOS_LOG") ? std::atoi(std::getenv("CF_IOS_LOG")) : 0;
     return level;
 }
 
@@ -253,7 +252,7 @@ void ipcBufferInit() {
     }
 }
 }  // namespace
-// Save-error diagnosis (2026-10-27, temporary): the NAND library calls a save makes, with their
+// CF_NAND_TRACE=1 (save-error diagnosis aid, 2026-10-27): the NAND library calls a save makes, with their
 // path, caller and result, once per (function, caller, result); nandConvertErrorCode shows every
 // ISFS error the library turns into a NAND result, including ones that never reach IOS.
 namespace {
@@ -263,6 +262,8 @@ void nandTrace(const char* fn, u32 lr, const std::string& path, s32 result) {
     char key[160];
     std::snprintf(key, sizeof(key), "%s %08X %d %s", fn, lr, result, path.c_str());
     std::lock_guard lk(m);
+    static const bool on = std::getenv("CF_NAND_TRACE") != nullptr;  // CF_NAND_TRACE=1
+    if (!on) return;
     if (seen.size() < 400 && seen.insert(key).second)
         log("[nand] %s(%s) from %08X -> %d", fn, path.c_str(), lr, result);
 }
