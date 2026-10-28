@@ -141,6 +141,8 @@ s32 readFile(HostFile& f, void* dst, s32 len, s32 off, s32 prio) {
 
 HLE(DVDInit) {}
 HLE(DVDGetDriveStatus) { c.r[3] = 0; }
+// The disc header id (game code, maker, disc, version) the apploader leaves at 0x80000000.
+HLE(DVDGetCurrentDiskID) { c.r[3] = 0x80000000; }
 HLE(DVDCheckDisk) { c.r[3] = 1; }
 // DVDCheckDiskAsync(DVDCommandBlock*, callback): the disc is always in the drive (the game asks
 // before a reset). The callback gets 1 (disc present) after a drive status round trip.

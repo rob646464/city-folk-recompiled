@@ -6,6 +6,7 @@
 #include "recomp/game.h"
 #include "recomp/system.h"
 #include "port/recovery.h"
+#include "recompiler/rel_format.h"
 
 #include <dolphin/gx.h>
 
@@ -148,6 +149,12 @@ void trace_enter(u32 addr, Ctx& c) {
         const u32 f = game::guestFrames();
         if (f < sWindow.first || f >= sWindow.first + sWindow.second) return;
     }
+    // CF_TRACE_THREAD=<hex guest OSThread>: only entries on that guest thread (with CF_TRACE=all).
+    static const u32 sThreadFilter = [] {
+        const char* v = std::getenv("CF_TRACE_THREAD");
+        return v ? u32(std::strtoul(v, nullptr, 16)) : 0u;
+    }();
+    if (sThreadFilter && sched::currentGuest() != sThreadFilter) return;
     if (sTraceMode == TraceMode::All || (sTraceMode == TraceMode::Set && sTraceSet.count(addr)))
         log("[trace] %08X lr %08X r3 %08X r4 %08X r5 %08X thread %08X", addr, c.lr, c.r[3], c.r[4], c.r[5],
             sched::currentGuest());
@@ -378,7 +385,23 @@ void callOriginal(Ctx& c, const char* name) {
     // frame): the original is looked up once per name (callers pass string literals) per thread.
     thread_local std::unordered_map<const char*, HleFn> sCache;
     if (const auto it = sCache.find(name); it != sCache.end()) return it->second(c);
-    const u32 addr = guestSymbol(name);
+    // "<module>::<name>": a hooked REL function, keyed by relfmt::relOrigKey in the same table.
+    u32 addr = 0;
+    if (const char* sep = std::strstr(name, "::")) {
+        const std::string mod(name, size_t(sep - name));
+        for (u32 m = 0; m < g_module->relCount && !addr; m++) {
+            const RelModuleDesc& d = g_module->rels[m];
+            if (mod != d.name) continue;
+            for (u32 i = 0; i < d.funcCount; i++)
+                if (std::strcmp(d.names[i], sep + 2) == 0) {
+                    addr = relfmt::relOrigKey(d.id, d.funcs[i].key >> 24, d.funcs[i].key & 0xFFFFFF);
+                    break;
+                }
+        }
+        if (!addr) fatal("callOriginal: no REL function %s", name);
+    } else {
+        addr = guestSymbol(name);
+    }
     for (u32 i = 0; i < g_module->origCount; i++) {
         if (g_module->orig[i].addr == addr) {
             sCache.emplace(name, g_module->orig[i].fn);
@@ -487,7 +510,28 @@ void initTimeBase() {
     g.tm_isdst = -1;
     const s64 tz = s64(now) - s64(std::mktime(&g));
     // The console clock: the host's local time plus the clock offset setting (time travel).
-    const s64 secs = s64(now) + tz - 946684800 + s64(sys::clockOffsetSeconds());
+    s64 secs = s64(now) + tz - 946684800 + s64(sys::clockOffsetSeconds());
+    // CF_CLOCK_START="YYYY-MM-DD HH:MM[:SS]": the console clock starts at that time (test aid:
+    // routes that depend on the time of day, the date or a clock-seeded random number).
+    if (const char* cs = std::getenv("CF_CLOCK_START")) {
+        int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0;
+        if (std::sscanf(cs, "%d-%d-%d %d:%d:%d", &y, &mo, &d, &h, &mi, &s) >= 5 && y >= 2000) {
+            std::tm t{};
+            t.tm_year = y - 1900;
+            t.tm_mon = mo - 1;
+            t.tm_mday = d;
+            t.tm_hour = h;
+            t.tm_min = mi;
+            t.tm_sec = s;
+#ifdef _WIN32
+            const s64 asUtc = s64(_mkgmtime(&t));
+#else
+            const s64 asUtc = s64(timegm(&t));
+#endif
+            secs = asUtc - 946684800;
+            log("[time] console clock starts at %04d-%02d-%02d %02d:%02d:%02d (CF_CLOCK_START)", y, mo, d, h, mi, s);
+        }
+    }
     sTbBias = u64(double(std::max<s64>(secs, 0)) * kTimerClock);
     if (sys::clockOffsetSeconds()) log("[time] console clock offset %lld s", (long long)sys::clockOffsetSeconds());
 }
@@ -499,6 +543,7 @@ u64 timeBase() {
 }
 
 void setTimeBaseBias(u64 bias) { sTbBias = bias; }
+u64 timeBaseStart() { return sTbBias; }
 
 u32 Ctx::mfspr(u32 spr) { return sSpr[spr & 1023]; }
 void Ctx::mtspr(u32 spr, u32 v) { sSpr[spr & 1023] = v; }
