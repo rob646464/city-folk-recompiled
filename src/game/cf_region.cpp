@@ -298,7 +298,16 @@ void eventHook(Ctx& c, const char* orig) {
     if (!addrs() || !anyEnabled()) return callOriginal(c, orig);
     const u32 idxPtr = c.r[3], date = c.r[4];
     const int index = int(rd32(idxPtr));
+    const u32 lr = c.lr;
     const int d = decide(c, index, date);
+    if (sLog && d >= 0) {  // who asks about a foreign event (once per caller)
+        static std::vector<u64> sSeen;
+        const u64 k = (u64(lr) << 8) | u32(index);
+        if (std::find(sSeen.begin(), sSeen.end(), k) == sSeen.end()) {
+            sSeen.push_back(k);
+            log("[region] event %d asked by %08X -> %d", index, lr, d);
+        }
+    }
     if (d < 0) {
         c.r[3] = idxPtr;
         c.r[4] = date;
@@ -624,7 +633,7 @@ std::vector<ActorHit> findActors(std::initializer_list<u32> modules) {
 
 // CF_ACTOR_LOG=<every n frames>: player / holiday Tortimer actors and positions.
 // CF_TELEPORT=<frame>:<x>,<y>,<z>|tortimer|mod<N>[:dx,dz][;...]: the player moved there
-// (tortimer = 48 units in front of the holiday Tortimer; mod<N> = next to the (last) actor of
+// (tortimer = 48 units in front of the holiday Tortimer; mod<N>[#k][t<type>][:dx,dz] = next to the k-th / last actor of
 // module N, e.g. mod13 = the bulletin board's bird).
 void actorAids(u32 frame) {
     static const u32 every = [] {
@@ -675,15 +684,18 @@ void actorAids(u32 frame) {
             float dx = 0, dz = 48;
             if (!std::strncmp(arg, "tortimer", 8)) mod = 36;
             int pick = -1;
+            u32 pickType = 0;
             if (!std::strncmp(arg, "mod", 3)) {  // mod<N>[#k][:dx,dz]
                 char* e2 = nullptr;
                 mod = u32(std::strtoul(arg + 3, &e2, 10));
                 if (*e2 == '#') pick = int(std::strtol(e2 + 1, &e2, 10));
+                if (*e2 == 't') pickType = u32(std::strtoul(e2 + 1, &e2, 16));  // structure type (+0x8)
                 if (*e2 == ':') std::sscanf(e2 + 1, "%f,%f", &dx, &dz);
             }
             if (mod) {
                 int k = 0;
                 for (const ActorHit& h : findActors({mod})) {
+                    if (pickType && rd32(h.addr + 8) >> 16 != pickType) continue;
                     if (pick < 0 || k++ == pick) {
                         x = rdf32(h.addr + 0x64) + dx;
                         y = rdf32(h.addr + 0x68);
