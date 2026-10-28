@@ -40,6 +40,13 @@ enum : std::uint8_t {
     R_DOLPHIN_END = 203,
 };
 
+// Key of a hooked REL function's original body in GameModule::orig (func_table.cpp kOrigTable),
+// next to the DOL originals: 0x40000000 | module id << 19 | section << 16 | offset / 4. No DOL
+// address (0x80000000+) can equal it. callOriginal(c, "<module>::<name>") looks it up (runtime.cpp).
+constexpr std::uint32_t relOrigKey(std::uint32_t module, std::uint32_t section, std::uint32_t offset) {
+    return 0x40000000u | (module & 0xFF) << 19 | (section & 7) << 16 | (offset >> 2 & 0xFFFF);
+}
+
 inline std::uint32_t be32(const std::uint8_t* p) {
     return std::uint32_t(p[0]) << 24 | std::uint32_t(p[1]) << 16 | std::uint32_t(p[2]) << 8 | p[3];
 }

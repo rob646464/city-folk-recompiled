@@ -3,6 +3,7 @@
 // %APPDATA%\Animal Crossing City Folk Recompiled\settings.ini. Read them wherever they apply;
 // changes take effect immediately unless noted.
 #include <iosfwd>
+#include <map>
 #include <string>
 
 namespace port {
@@ -141,6 +142,11 @@ struct GameplaySettings {
     float vacuumStrength = 1.0f;         // Poltergust drain rate on ghost HP, 0.25..4
     bool alwaysRide = false;             // Luigi always uses the Poltergust-riding movement (PAL Boolossus mode)
     bool mirrorWorld = false;            // the European Hidden Mansion's left/right mirror in every mode (hm::mirrorWorld)
+    // City Folk (docs/FEATURES.md): grass wear 0 Original, 1 New Leaf style, 2 Off (src/game/cf_grass.cpp).
+    int grassWear = 0;
+    // Skin tone per resident (src/game/cf_skin.cpp): "<town id>-<player id>" (hex) -> fixed tone 1..8
+    // (absent = the game's tanning). Saved as the [skin_tone] section by cf_skin.cpp.
+    std::map<std::string, int> skinTone;
 };
 
 // Hardware-accuracy rendering features (F1 > Visuals > Rendering). Every costly accuracy

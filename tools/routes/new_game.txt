@@ -1,0 +1,59 @@
+# New game on the USA disc (RUUE01), from boot to the player standing at the town gate.
+# Run with CF_INPUT_CLOCK=frames (guest frames, as CF_SHOT numbers them) and a scratch NAND
+# without rvforest.dat: cfrecomp --input @tools/routes/new_game.txt
+# Syntax (docs/CONTROLS.md "Test aids"): <frame>:<tokens>[*<frames>], +N = N frames after the
+# previous item, ~N = the item N times, @x/y = pointer at a KPAD position (stays), # comments,
+# include <file>.
+
+# Wrist strap, title "Press A", Rover's first lines: A every 80 frames.
+1300:A
++80:A ~41
+
+# "Start fresh!" (choice box right of the text), then Rover's questions ("That's right!").
+4620:@0.41/0.42
++20:A
++60:A ~47
+
+# Name keyboard ("What's your name?", open from about frame 7480): r, o, b, Confirm.
+# Key positions in KPAD units (x = px/640 - 1, y = py/360 - 1 on a 1280x720 shot).
+7600:@-0.339/0.017
++15:A
++30:@0.367/0.017
++15:A
++30:@0.052/0.292
++15:A
++30:@0.656/0.778
++15:A
+# Rover: "Oh, 'rob', is it?" ... "fun and feminine!" -> "That's right!" ... "this town that
+# you're moving to..."
++60:@0.41/0.42
++20:A
++60:A ~14
+
+# Town-name keyboard ("What's your town's name?", open from about frame 8750): Shift, a, a,
+# Confirm -> "Aa".
+8850:@-0.75/0.286
++15:A
++30:@-0.547/0.15
++15:A
++30:@-0.547/0.15
++15:A
++30:@0.656/0.778
++15:A
+
+# "Aa, huh?" -> "That's it!" (upper choice, right).
++100:@0.625/0.508
++100:A
++60:A ~3
+# Rover's talk about houses ("You must be so excited..." -> "SO excited!", the upper choice at
+# the pointer), then the town map ("Aa Town Map", about frame 11900): the pointer waits on its
+# "OK!" button (bottom right; dialogue lines advance with A wherever it points).
++30:@0.41/0.42
++60:A ~38
++30:@0.656/0.778
+# Kapp'n's bus, arrival (white fade ~13250), Rover at the bus stop ("Head on over to the town
+# hall"), the HUD hint "To open the map, point the Wii Remote...": the last A (frame 14840)
+# closes it. The HUD's Map button is where the pointer waits, so no further A here.
++60:A ~52
+# The player stands at the town gate, controllable, from about frame 14900.
++60:@0/0

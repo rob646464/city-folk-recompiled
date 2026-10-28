@@ -150,8 +150,11 @@ Reply makeReply(u32 cb, u32 arg) {
     return r;
 }
 
+// Failed requests are always logged (once per request kind, path and error), so a player's
+// last_run.log shows what the game was refused (e.g. a save error); CF_IOS_LOG=2 logs every one.
 void logResult(const char* op, s32 fd, const std::string& path, s32 result, const char* extra = "") {
     if (logLevel() >= 2) recomp::log("[ios] %s fd %d %s%s -> %d", op, fd, path.c_str(), extra, result);
+    else if (result < 0) logOnce(std::string(op) + " " + path + extra + " -> error " + std::to_string(result));
 }
 
 s32 doOpen(u32 pathAddr, u32 mode, u32 cb, u32 arg, bool async) {
@@ -175,7 +178,7 @@ s32 doOpen(u32 pathAddr, u32 mode, u32 cb, u32 arg, bool async) {
             }
     }
     if (result >= 0) logOnce("open " + path + " (mode " + std::to_string(mode) + ") -> fd " + std::to_string(result));
-    else if (logLevel() >= 2) recomp::log("[ios] open %s (mode %u) -> %d", path.c_str(), mode, result);
+    else logOnce("open " + path + " (mode " + std::to_string(mode) + ") -> error " + std::to_string(result));
     const auto at = schedule(q, cost);
     return deliver(result, at, makeReply(cb, arg), async);
 }
@@ -249,6 +252,114 @@ void ipcBufferInit() {
     }
 }
 }  // namespace
+// CF_NAND_TRACE=1 (save-error diagnosis aid, 2026-10-27): the NAND library calls a save makes, with their
+// path, caller and result, once per (function, caller, result); nandConvertErrorCode shows every
+// ISFS error the library turns into a NAND result, including ones that never reach IOS.
+namespace {
+void nandTrace(const char* fn, u32 lr, const std::string& path, s32 result) {
+    static std::set<std::string> seen;
+    static std::mutex m;
+    char key[160];
+    std::snprintf(key, sizeof(key), "%s %08X %d %s", fn, lr, result, path.c_str());
+    std::lock_guard lk(m);
+    static const bool on = std::getenv("CF_NAND_TRACE") != nullptr;  // CF_NAND_TRACE=1
+    if (!on) return;
+    if (seen.size() < 400 && seen.insert(key).second)
+        log("[nand] %s(%s) from %08X -> %d", fn, path.c_str(), lr, result);
+}
+}  // namespace
+#define CF_NAND_TRACE_PATH(fn)                                \
+    HLE(fn) {                                                 \
+        const u32 lr = c.lr;                                  \
+        const std::string path = c.r[3] ? gstr(c.r[3]) : "";  \
+        callOriginal(c, #fn);                                 \
+        nandTrace(#fn, lr, path, s32(c.r[3]));                \
+    }
+#define CF_NAND_TRACE_FD(fn)                                  \
+    HLE(fn) {                                                 \
+        const u32 lr = c.lr;                                  \
+        callOriginal(c, #fn);                                 \
+        nandTrace(#fn, lr, "", s32(c.r[3]));                  \
+    }
+CF_NAND_TRACE_PATH(NANDCreate)
+CF_NAND_TRACE_PATH(NANDPrivateCreate)
+CF_NAND_TRACE_PATH(NANDPrivateCreateAsync)
+CF_NAND_TRACE_PATH(NANDOpen)
+CF_NAND_TRACE_PATH(NANDOpenAsync)
+CF_NAND_TRACE_PATH(NANDPrivateOpen)
+CF_NAND_TRACE_PATH(NANDPrivateOpenAsync)
+CF_NAND_TRACE_PATH(NANDSimpleSafeOpen)
+CF_NAND_TRACE_PATH(NANDPrivateSafeOpenAsync)
+CF_NAND_TRACE_PATH(NANDGetType)
+CF_NAND_TRACE_PATH(NANDPrivateGetTypeAsync)
+CF_NAND_TRACE_PATH(NANDPrivateCreateDir)
+CF_NAND_TRACE_PATH(NANDPrivateCreateDirAsync)
+CF_NAND_TRACE_PATH(NANDMove)
+CF_NAND_TRACE_PATH(NANDDelete)
+CF_NAND_TRACE_PATH(NANDPrivateDelete)
+CF_NAND_TRACE_PATH(NANDPrivateDeleteAsync)
+CF_NAND_TRACE_PATH(NANDGetStatus)
+CF_NAND_TRACE_PATH(NANDPrivateGetStatus)
+CF_NAND_TRACE_PATH(NANDPrivateGetStatusAsync)
+CF_NAND_TRACE_PATH(NANDChangeDir)
+CF_NAND_TRACE_FD(NANDWrite)
+CF_NAND_TRACE_FD(NANDWriteAsync)
+CF_NAND_TRACE_FD(NANDClose)
+CF_NAND_TRACE_FD(NANDCloseAsync)
+CF_NAND_TRACE_FD(NANDSimpleSafeClose)
+CF_NAND_TRACE_FD(NANDSafeCloseAsync)
+CF_NAND_TRACE_FD(NANDInitBanner)
+CF_NAND_TRACE_FD(NWC24OpenLib)
+CF_NAND_TRACE_FD(NWC24CloseLib)
+CF_NAND_TRACE_FD(NWC24GetMyUserId)
+CF_NAND_TRACE_FD(NWC24GetIdCreationStage)
+CF_NAND_TRACE_FD(NWC24iRequestGenerateUserId)
+CF_NAND_TRACE_FD(NWC24CheckUserId)
+CF_NAND_TRACE_FD(NWC24InitDlTask)
+CF_NAND_TRACE_FD(NWC24AddDlTask)
+CF_NAND_TRACE_FD(NWC24GetDlTaskMineEx)
+CF_NAND_TRACE_FD(NWC24CreateDlVf)
+// City Folk's save worker (USA addresses): fn_800D284C(entry, args) starts the save/check thread
+// when fn_800D2968 says the previous one has ended; logged with the entry and the result.
+HLE(fn_800D284C) {
+    const u32 lr = c.lr, entry = c.r[3];
+    callOriginal(c, "fn_800D284C");
+    char e[16];
+    std::snprintf(e, sizeof(e), "entry %08X", entry);
+    nandTrace("saveThreadStart", lr, e, s32(c.r[3]));
+}
+// fn_80177F44(entry, args): starts a WiiConnect24 task on the task thread (0x80621528); 0 =
+// refused because the previous task has not ended. Logged once per (entry, caller, result).
+HLE(fn_80177F44) {
+    const u32 lr = c.lr, entry = c.r[3];
+    callOriginal(c, "fn_80177F44");
+    char e[16];
+    std::snprintf(e, sizeof(e), "entry %08X", entry);
+    nandTrace("wc24TaskStart", lr, e, s32(c.r[3]));
+}
+HLE(nandConvertErrorCode) {
+    const u32 lr = c.lr;
+    const s32 isfs = s32(c.r[3]);
+    callOriginal(c, "nandConvertErrorCode");
+    if (isfs < 0) nandTrace("nandConvertErrorCode", lr, "ISFS " + std::to_string(isfs), s32(c.r[3]));
+}
+
+// NANDCheck(fsBlocks, inodes, &answer): the SDK's free-space check before a save. Logged with
+// its answer (bits: 1/2 home blocks/inodes, 4/8 system blocks/inodes over the limits), so a
+// "Could not access / not enough space" save error in a player's log shows its cause.
+HLE(NANDCheck) {
+    const u32 blocks = c.r[3], inodes = c.r[4], answerAddr = c.r[5];
+    callOriginal(c, "NANDCheck");
+    const u32 answer = answerAddr ? rd32(answerAddr) : 0;
+    log("[nand] NANDCheck(%u blocks, %u inodes) -> %d, answer 0x%X", blocks, inodes, s32(c.r[3]), answer);
+}
+HLE(NANDSecretGetUsage) {
+    const u32 path = c.r[3], fsBlockAddr = c.r[4], inodeAddr = c.r[5];
+    callOriginal(c, "NANDSecretGetUsage");
+    log("[nand] NANDSecretGetUsage(%s) -> %d (%u blocks, %u inodes)", gstr(path), s32(c.r[3]),
+        fsBlockAddr ? rd32(fsBlockAddr) : 0, inodeAddr ? rd32(inodeAddr) : 0);
+}
+
 HLE(IPCInit) { ipcBufferInit(); }
 HLE(IPCGetBufferHi) {
     ipcBufferInit();
