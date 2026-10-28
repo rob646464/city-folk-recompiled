@@ -510,10 +510,41 @@ region's archive (arcdiff of the field archives: only obj_house_tex, TN_obj_hous
 shops `obj_nc/ng/nk/nw`, `obj_cdbbs`, `obj_tailor` differ), so Nook's remodels look the same in
 every region; roof colours etc. come from the same data.
 
-### 10.5 Not done yet / later
+### 10.5 Title screen logo
 
-- Title screen variant (`title_us/eu/jp/kr.arc`: d_title_demoNP hard-codes its disc's name) and
-  the EU TV test card: cosmetic, not started (a string patch / overlay would do it).
+d_title_demoNP opens its disc's `/Layout/title_<us|eu|jp|kr>.arc` (the only difference of that
+REL between versions). "Title screen logo" serves the chosen region's file under that name (disc
+overlay); every disc has the US/EU/JP files, `title_kr.arc` only the Korean disc (with another
+disc that choice keeps the disc's own). Verified: "Let's Go to the City" logo on the USA disc.
+
+### 10.6 Verification (USA disc, 2026-10-28)
+
+Runs from the user's town save (`CF_FIXTURE=user-town`, `tools/routes/continue.txt`, then the
+holiday Tortimer found by his actor and the player moved in front of him, `CF_TELEPORT=<f>:tortimer`,
+A presses + D-pad for the choices; scratch route files). On the move-in day (a new game) no
+holiday Tortimer appears, also not for the town's own holidays: check events from a save.
+
+| Date | Setting | Result |
+|---|---|---|
+| 2027-02-03 | Bean Day on | Tortimer at the town hall: "It's Bean Day!", the red/blue question, gives the **blue ogre mask**, Bean Day lines (English) |
+| 2027-02-03 | all off | no holiday Tortimer, today's event list empty (retail) |
+| 2026-12-06 | Naughty-or-Nice Day on (Europe) | "Today is Naughty-or-Nice Day", nice/naughty question, **stuffed stocking** |
+| 2026-07-07 | Tanabata on | "Today is Starcrossed Day", **bamboo grass**, the wish-paper lines |
+| 2026-09-25 20:00 | Autumn Moon = Japan | "Today is the Tsukimi moon-viewing", **dango** (the town's own USA moon is 2026-09-26 in the game's table) |
+| 2026-10-12 | all off | the town's own Explorer's Day Tortimer as before |
+| 2027-02-07 | Lunar New Year on (Korea) | "Today is Lunar New Year", **yut** |
+| 2026-06-21 | Midsummer's Day on (Europe) | in today's event list (with the town's own Father's Day, #46: June 21 2026 is the 3rd Sunday), but no Tortimer that day; not checked on another year (open) |
+| 2026-12-27 | Japan's New Year decorations | the shop's "region == Japan" question (0x80145AD0) answered yes (log); Nook's interior not looked at |
+| 2026-10-29 | Villager houses own / Europe / Japan | the same villager's house (same style index) drawn as the USA Pink house, the European Brick house and the Japanese one; signs unchanged |
+| title | Title logo = Europe | "Let's Go to the City" logo |
+
+Lunar dates come from the game's tables (Lunar New Year 2027 = Feb 7 there, not Feb 6). Rover's
+greeting differs after a long absence (the continue route only fits dates within about four
+months of the save; earlier dates work too).
+
+### 10.7 Not done yet / later
+
+- The EU TV test card: cosmetic, not started.
 - Korean Parent's Day letter: the template switch follows the Mother's Day rule; not checked in
   play.
 - Distributed items (section 3): no disc has them (WiiLink / user files, translation of JP/KR-only

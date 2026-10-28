@@ -723,8 +723,10 @@ void actorAids(u32 frame) {
             if (!std::strncmp(arg, "mod", 3)) {  // mod<N>[#k][:dx,dz]
                 char* e2 = nullptr;
                 mod = u32(std::strtoul(arg + 3, &e2, 10));
-                if (*e2 == '#') pick = int(std::strtol(e2 + 1, &e2, 10));
-                if (*e2 == 't') pickType = u32(std::strtoul(e2 + 1, &e2, 16));  // structure type (+0x8)
+                for (int n = 0; n < 2; n++) {  // "#k" and "t<type>" (structure type, +0x8) in either order
+                    if (*e2 == '#') pick = int(std::strtol(e2 + 1, &e2, 10));
+                    if (*e2 == 't') pickType = u32(std::strtoul(e2 + 1, &e2, 16));
+                }
                 if (*e2 == ':') std::sscanf(e2 + 1, "%f,%f", &dx, &dz);
             }
             if (mod) {
