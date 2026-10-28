@@ -304,6 +304,7 @@ std::vector<Field> fields() {
         flag("nintendo_events", "original_yearly", sSettings.events.originalYearly),
         flag("nintendo_events", "other_regions", sSettings.events.otherRegions),
         flag("nintendo_events", "live_delivery", sSettings.events.liveDelivery),
+        flag("nintendo_events", "town_wc24", sSettings.events.townWc24),
     };
 }
 

@@ -133,7 +133,8 @@ void check() {
     const auto tasks = titleTasks(dl);
     const std::string vffPath = titleFile("wc24dl.vff");
     Status st;
-    st.taskRegistered = !tasks.empty();
+    st.anyTask = !tasks.empty();
+    for (const Task& t : tasks) st.taskRegistered |= t.url.find("/ruu/rvforestdl_") != std::string::npos;
     {
         std::error_code ec;
         st.keyInstalled = fs::exists(ios::hostPath(titleFile("wc24pubk.mod")), ec);

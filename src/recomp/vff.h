@@ -4,7 +4,7 @@
 // game code); the host side here is what IOS's KD does: it writes a downloaded file into the
 // title's wc24dl.vff, and the provisioning formats empty message boxes. docs/DISTRIBUTIONS.md
 // "VFF". Layout: a 0x20-byte header ("VFF ", size), two FAT copies (FAT12 or FAT16 by cluster
-// count), a 0x1000-byte root directory, then 0x200-byte clusters. 8.3 names, no long names.
+// count), a 0x1000-byte root directory, then 0x200-byte clusters. Long (VFAT) names, as the game uses ("game_data.bin").
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -18,14 +18,14 @@ using Bytes = std::vector<std::uint8_t>;
 // A new empty volume of `size` bytes (a multiple of 0x200).
 Bytes format(std::uint32_t size);
 
-// Files in the root directory (upper-case 8.3 names as stored, e.g. "INFO.BIN").
+// Files in the root directory (long names when present, else 8.3 names).
 struct Entry {
     std::string name;
     std::uint32_t size = 0;
 };
 std::optional<std::vector<Entry>> list(const Bytes& vol, std::string* error = nullptr);
 std::optional<Bytes> read(const Bytes& vol, const std::string& name, std::string* error = nullptr);
-// Writes (replaces) a root-directory file. False with `error` when the name is not a valid 8.3
+// Writes (replaces) a root-directory file. False with `error` when the name is not a valid file
 // name, the volume is not a VFF or there is no room.
 bool write(Bytes& vol, const std::string& name, const Bytes& data, std::string* error = nullptr);
 bool remove(Bytes& vol, const std::string& name);

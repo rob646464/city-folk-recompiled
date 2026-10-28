@@ -49,7 +49,8 @@ void setNcdOwner(std::function<std::unique_ptr<ios::Handle>(const std::string&, 
 void requestDownload();
 // Status for the F1 page: last download (seconds of the game clock), its result text.
 struct Status {
-    bool taskRegistered = false;  // the game has its distribution task in nwc24dl.bin
+    bool taskRegistered = false;  // the game has its distribution task (rvforestdl) in nwc24dl.bin
+    bool anyTask = false;         // the game has any download task (it ran its WiiConnect24 job for a town)
     bool keyInstalled = false;    // the title's wc24pubk.mod exists
     bool vffPresent = false;      // the title's wc24dl.vff exists
     long long lastCheck = 0;      // host time (s) of the last check

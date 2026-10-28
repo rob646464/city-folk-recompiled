@@ -369,6 +369,7 @@ struct NintendoEventSettings {
     bool originalYearly = true; // original dates: every year (month/day); false = only in the original years
     bool otherRegions = false;  // include other regions' distributions
     bool liveDelivery = true;   // USA: run the game's own WiiConnect24 check while playing
+    bool townWc24 = true;       // USA: turn the town's own WiiConnect24 setting on (the game's setter) when it is off
 };
 
 struct Settings {

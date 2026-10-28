@@ -374,6 +374,7 @@ struct State {
     std::string town = "town";
     std::map<std::string, TownState> towns;
     u32 manualCounter = 0;
+    u32 lastStored = 0;  // letter id of the package KD stored last ("not modified" after it)
     int pending = -1;      // "Receive now": catalogue index waiting for KD
     u32 pendingId = 0;
     std::string pendingLocal;  // "Receive now" of an original .enc from the folder
@@ -402,6 +403,7 @@ void loadState() {
         if (section == "state") {
             if (k == "town") sState.town = v;
             else if (k == "manual_counter") sState.manualCounter = u32(std::strtoul(v.c_str(), nullptr, 10));
+            else if (k == "last_stored") sState.lastStored = u32(std::strtoul(v.c_str(), nullptr, 16));
         } else if (section.rfind("town.", 0) == 0) {
             TownState& t = sState.towns[section.substr(5)];
             if (k == "last_delivery") t.lastDelivery = std::atoll(v.c_str());
@@ -422,7 +424,11 @@ void saveState() {
     fs::create_directories(folder(), ec);
     std::ofstream f(folder() / "state.ini", std::ios::trunc);
     f << "# Nintendo events: what each town received (written by the game; docs/DISTRIBUTIONS.md)\n";
-    f << "[state]\ntown=" << sState.town << "\nmanual_counter=" << sState.manualCounter << "\n";
+    {
+        char b[16];
+        std::snprintf(b, sizeof(b), "%08X", sState.lastStored);
+        f << "[state]\ntown=" << sState.town << "\nmanual_counter=" << sState.manualCounter << "\nlast_stored=" << b << "\n";
+    }
     for (auto& [name, t] : sState.towns) {
         f << "[town." << name << "]\nlast_delivery=" << t.lastDelivery << "\n";
         for (auto& [k, when] : t.received) f << k << "=" << when << "," << t.cycle[k] << "\n";
@@ -867,7 +873,13 @@ Reply serve(const std::string& url) {
             if (s.dist >= 0) {
                 auto c = t.cycle.find(kDefs[s.dist].key);
                 const bool had = c != t.cycle.end() && c->second >= s.cycle && t.received.count(kDefs[s.dist].key);
-                if (!had) di = s.dist, id = 0x4C000000u | u32(s.index & 0xFFFFFF), why = "loop slot " + std::to_string(s.index);
+                // One delivery per slot: one came in this slot already (e.g. "Receive now"): the
+                // slot's own waits for the next one (the game keeps one Nintendo letter at a time).
+                const bool slotUsed = t.lastDelivery && consoleDay(t.lastDelivery) >= s.startDay;
+                if (slotUsed && !had) {
+                    r.kind = Reply::NotModified;
+                    r.what = "a letter came in this slot already; next slot";
+                } else if (!had) di = s.dist, id = 0x4C000000u | u32(s.index & 0xFFFFFF), why = "loop slot " + std::to_string(s.index);
                 else r.kind = Reply::NotModified, r.what = std::string(kDefs[s.dist].key) + " already received this cycle";
             }
         } else if (mode() == Mode::Original) {
@@ -889,6 +901,11 @@ Reply serve(const std::string& url) {
             return r;
         }
         if (di < 0) return r;
+    }
+    if (id == sState.lastStored) {
+        r.kind = Reply::NotModified;
+        r.what = std::string(kDefs[di].key) + " (already in wc24dl.vff)";
+        return r;
     }
     if (!archiveReady(kDefs[di])) {
         r.kind = Reply::NotFound;
@@ -918,6 +935,7 @@ void onStored(const Reply& r, bool ok, const std::string& why) {
     }
     if (!r.localFile.empty()) sLocalResult[r.localFile] = "stored";
     if (sState.pending >= 0 && r.letterId == sState.pendingId) sState.pending = -1;
+    if (r.letterId) sState.lastStored = r.letterId;
     if (!r.localFile.empty() && r.localFile == sState.pendingLocal) sState.pendingLocal.clear();
     sState.syncWanted = true;
     // Bases without the USA hook: the stored package counts as received.
@@ -986,7 +1004,7 @@ void onGuestFrame(Ctx& c) {
     }
     // Live delivery (USA): the game's own WiiConnect24 job (the one it starts when a town is
     // loaded, fn_801783B4 -> fn_8017B6F4) reads the stored package; Pete brings the letter.
-    if (port::install().running != port::GameVersion::USA || !port::settings().events.liveDelivery) return;
+    if (port::install().running != port::GameVersion::USA) return;
     const u32 save = rd32(0x8074E960u);  // the town's save data (null before a town is loaded)
     const bool town = save >= 0x80000000u && save < 0x94000000u;
     static u32 sFrame = 0;
@@ -1000,14 +1018,31 @@ void onGuestFrame(Ctx& c) {
         std::ofstream(folder() / "save_dump.bin", std::ios::binary).write(reinterpret_cast<const char*>(hostp(save)), 0x100000);
         recomp::log("[distrib] save data dumped (1 MiB at %08X)", save);
     }
-    if (!town || !rd8(save + 0x735E4u)) return;  // no town yet, or its own WiiConnect24 setting is off
-    // Once a town is in play: the game's job registers the download task (the game does it when a
-    // town is loaded); later, each time KD stored a package.
+    // A town is in play once the game has run its WiiConnect24 job for it (player select registers
+    // the download tasks; the second one, prc_list.bin, is there for every town).
+    const auto st = nwc24::status();
+    if (!town || !st.anyTask) return;
+    if (!rd8(save + 0x735E4u)) {
+        // The town's own WiiConnect24 setting is off (a town started while WiiConnect24 was off):
+        // turned on with the game's own setter (fn_80177DE0, what Rover's question and the attic
+        // phone call; it sets the flag only while the game's WiiConnect24 check says "available").
+        static bool sTried = false;
+        if (port::settings().events.townWc24 && !sTried && rd32(0x8074EBCCu) == 1) {
+            sTried = true;
+            const u32 r = guestCall(c, 0x80177DE0u);
+            recomp::log("[distrib] turned the town's WiiConnect24 setting on (fn_80177DE0 -> %u, flag %u)", r,
+                        rd8(save + 0x735E4u));
+        }
+        return;
+    }
+    if (!port::settings().events.liveDelivery) return;
+    // The game's job registers the distribution task (when a town is loaded with the setting on);
+    // later it reads each package KD stored.
     static bool sRegistered = false;
     bool want;
     {
         std::lock_guard lk(sM);
-        want = sState.syncWanted || (!sRegistered && !nwc24::status().taskRegistered && sFrame > 600);
+        want = sState.syncWanted || (!sRegistered && !st.taskRegistered);
     }
     if (!want) return;
     if (guestCall(c, 0x801783B4u)) {
@@ -1070,6 +1105,10 @@ bool drawMenuPage() {
         ImGui::SetItemTooltip("Also the ones sent only in other regions, when the item has a name in your game's language.\n"
                               "Their letters are the English ones from the archive.");
         if (port::install().running == port::GameVersion::USA) {
+            dirty |= recomp::menu::Checkbox("Turn WiiConnect24 on for my town", &es.townWc24);
+            ImGui::SetItemTooltip("A town started while WiiConnect24 was off has its own WiiConnect24 setting off, and the game\n"
+                                  "then ignores Nintendo's letters. On: the port switches it on with the game's own setting\n"
+                                  "(what Rover's question does), kept when you save.");
             dirty |= recomp::menu::Checkbox("Deliver while playing", &es.liveDelivery);
             ImGui::SetItemTooltip("Runs the game's own WiiConnect24 check as soon as a letter is downloaded, so it does\n"
                                   "not wait until you load your town again (on a Wii the game checks when the town loads).");
