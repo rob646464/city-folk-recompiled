@@ -21,6 +21,7 @@
 #include "recomp/interp.h"
 #include "recomp/online.h"
 #include "recomp/pacing.h"
+#include "recomp/texture_packs.h"
 #include "recomp/ui_scale.h"
 
 #include <aurora/aurora.h>
@@ -86,7 +87,7 @@ struct Page {
     const char* sub;
 };
 constexpr Page kPages[] = {
-    {"Visuals", "General"},       {"Visuals", "Rendering"},        {"Visuals", "Enhanced lighting"},
+    {"Visuals", "General"},       {"Visuals", "Rendering"},        {"Visuals", "Enhanced lighting"}, {"Visuals", "Texture packs"},
     {"Sound", nullptr},           {"Controls", "Ports"},           {"Controls", "Bindings"},
     {"Controls", "Pointer"},      {"Controls", "Analog"},       {"Controls", "DSU"},             {"Enhancements", "General"},     {"Enhancements", "Gameplay"},
     {"Enhancements", "Silly"},          {"Enhancements", "Unused content"}, {"Enhancements", "Debug"}, {"Game", nullptr},
@@ -1874,6 +1875,7 @@ void draw() {
     click::frame();
     recomp::wiimote::hostFrame();  // mouse cursor over the game (pointer from the mouse)
     scriptedSettings();
+    recomp::texpacks::hostFrame();
     recomp::gx::applyAccuracySettings();
     recomp::enh::applySettings();
     recomp::crt::update();
@@ -1938,6 +1940,10 @@ void draw() {
                     }
                     if (ImGui::BeginTabItem("Enhanced lighting", nullptr, envTab("Enhanced lighting"))) {
                         enhancedLightingTab();
+                        ImGui::EndTabItem();
+                    }
+                    if (ImGui::BeginTabItem("Texture packs", nullptr, envTab("Texture packs"))) {
+                        sDirty |= recomp::texpacks::drawMenu();  // src/recomp/texture_packs.cpp
                         ImGui::EndTabItem();
                     }
                     ImGui::EndTabBar();
