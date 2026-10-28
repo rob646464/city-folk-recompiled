@@ -308,6 +308,15 @@ CF_NAND_TRACE_FD(NANDCloseAsync)
 CF_NAND_TRACE_FD(NANDSimpleSafeClose)
 CF_NAND_TRACE_FD(NANDSafeCloseAsync)
 CF_NAND_TRACE_FD(NANDInitBanner)
+// City Folk's save worker (USA addresses): fn_800D284C(entry, args) starts the save/check thread
+// when fn_800D2968 says the previous one has ended; logged with the entry and the result.
+HLE(fn_800D284C) {
+    const u32 lr = c.lr, entry = c.r[3];
+    callOriginal(c, "fn_800D284C");
+    char e[16];
+    std::snprintf(e, sizeof(e), "entry %08X", entry);
+    nandTrace("saveThreadStart", lr, e, s32(c.r[3]));
+}
 HLE(nandConvertErrorCode) {
     const u32 lr = c.lr;
     const s32 isfs = s32(c.r[3]);
