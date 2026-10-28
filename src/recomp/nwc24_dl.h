@@ -2,14 +2,14 @@
 // WiiConnect24's download side as IOS runs it (docs/DISTRIBUTIONS.md, docs/ONLINE.md 1.2): the KD
 // daemon (/dev/net/kd/request, /dev/net/kd/time), a network configuration for NCD
 // (/dev/net/ncd/manage) and the NAND files the System Menu creates when WiiConnect24 is set up
-// (/shared2/wc24/...). The game's own NWC24 library (recompiled code) registers its download
+// (sysconf.cpp prepareWc24). The game's own NWC24 library (recompiled code) registers its download
 // tasks in nwc24dl.bin, installs its key file wc24pubk.mod and creates wc24dl.vff; this KD
 // processes the tasks: fetches the file (from the Nintendo event archive, distributions.h),
 // checks the WC24 container's RSA signature with the title's wc24pubk.mod, decrypts it with its
 // AES key and stores the result in wc24dl.vff, where the game reads it.
 //
-// Only present while F1 > Online > Nintendo events is on; otherwise /dev/net/kd/* stays absent
-// (the game sees WiiConnect24 off, as before) and nothing is downloaded or written.
+// Only while F1 > Online > Nintendo events is on; otherwise ios_devices.cpp's KdDevice answers
+// (WiiConnect24 off: every request accepted, nothing downloaded or written) and NCD stays absent.
 //
 // Ownership (docs/ONLINE.md "Who owns what"): this file is the download side. The mail side
 // (message boxes, friend mail, KD's mail ioctls 0x0A-0x0D) belongs to branch online-1, which
@@ -32,11 +32,8 @@ bool wc24On();
 // IPC_ENOENT) while WiiConnect24 is off or the path is not one of them.
 std::unique_ptr<ios::Handle> openDevice(const std::string& path, s32& err);
 
-// Creates the System Menu's WiiConnect24 files when missing (nwc24msg.cfg + .cbk, nwc24fl.bin,
-// nwc24dl.bin, mbox/wc24send/recv .ctl + .mbx). Called once when the NAND is prepared, only while
-// wc24On(). Existing files are left alone (a player's own copies keep working).
-void provisionNand();
-// SYSCONF items for WiiConnect24 (NET.WCFG bit 0 = WiiConnect24 on): sysconf.cpp asks here.
+// The System Menu's WiiConnect24 files (/shared2/wc24) are created by sysconf.cpp prepareWc24,
+// with WiiConnect24 on or off. SYSCONF items for WiiConnect24 (NET.WCFG bit 0 = WiiConnect24 on): sysconf.cpp asks here.
 u32 sysconfWcFlags();
 
 // KD mail ioctls (0x0A check, 0x0B send, 0x0C receive, 0x0D save): online-1's mail HLE. The

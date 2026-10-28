@@ -1,0 +1,18 @@
+# Play-loop checks right after arrival (USA, new game): Nunchuk walking and running, the HUD's
+# pockets and town map by pointer. include new_game.txt first (player at the gate ~14900).
+include new_game.txt
+
+# Walk down (towards the camera) off the bus stop, then left, then run (B held) right.
+15000:STICKDOWN*60
++90:STICKLEFT*60
++90:STICKRIGHT+B*90
++120:STICK=0.7/0.7*60
+# Pockets: the bag button (HUD bottom left), close with B.
++120:@-0.82/0.82
++30:A
++150:B
+# Town map: Map button (HUD bottom, house icon), close with B.
++90:@0.578/0.82
++30:A
++150:B
++60:@0/0

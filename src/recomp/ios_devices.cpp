@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <cstring>
 #include <mutex>
 #include <optional>
@@ -216,6 +217,26 @@ public:
     }
 };
 
+// WiiConnect24's daemon (/dev/net/kd/request, /dev/net/kd/time): present, as on every Wii, but
+// with WiiConnect24 switched off in SYSCONF it never connects. Every request is accepted and
+// its result word (first output word) is 0. Absent, the NWC24 library retried it every ~2 s and
+// City Folk's "Save and quit" refused with "Could not access Wii system memory" (save-error
+// diagnosis 2026-10-27; Dolphin, where saving works, provides the device).
+class KdDevice final : public Handle {
+public:
+    s32 ioctl(u32 cmd, u32, u32, u32 out, u32 outLen, const Reply&) override {
+        logOnce(path + " ioctl " + std::to_string(cmd) + " (WiiConnect24 off: result 0)");
+        if (out && outLen >= 4) std::memset(hostp(out), 0, std::min<u32>(outLen, 0x20));
+        return IPC_OK;
+    }
+    s32 ioctlv(u32 cmd, u32 nin, u32 nout, const Vec* v, const Reply&) override {
+        logOnce(path + " ioctlv " + std::to_string(cmd) + " (WiiConnect24 off: result 0)");
+        for (u32 i = nin; i < nin + nout; i++)
+            if (v[i].addr && v[i].len >= 4) std::memset(hostp(v[i].addr), 0, std::min<u32>(v[i].len, 0x20));
+        return IPC_OK;
+    }
+};
+
 // An SD slot with no card: status 0 (no card inserted); commands to a card fail.
 class SdSlot final : public Handle {
 public:
@@ -281,12 +302,14 @@ std::unique_ptr<Handle> openDevice(const std::string& path, u32, s32& err, doubl
     if (path == "/dev/es") return std::make_unique<EsDevice>();
     if (path == "/dev/stm/eventhook") return std::make_unique<StmHook>();
     if (path == "/dev/stm/immediate") return std::make_unique<StmImmediate>();
+    // While a WiiConnect24 feature is on (Nintendo events), KD / NCD are the working ones (nwc24_dl.cpp).
+    if (path.rfind("/dev/net/", 0) == 0)
+        if (auto h = nwc24::openDevice(path, err)) return h;
+    if (path == "/dev/net/kd/request" || path == "/dev/net/kd/time") return std::make_unique<KdDevice>();
     if (path == "/dev/di") return std::make_unique<AcceptAll>();
     if (path == "/dev/sdio/slot0" || path == "/dev/sdio/slot1") return std::make_unique<SdSlot>();
     if (path == "/dev/usb/kbd" && std::getenv("CF_USB_KBD_DEVICE")) return std::make_unique<UsbKeyboard>();
     if (path == "/dev/usb/oh0") return std::make_unique<UsbHost>();
-    if (path.rfind("/dev/net/", 0) == 0)
-        if (auto h = nwc24::openDevice(path, err)) return h;
     logOnce("open " + path + ": no such device");
     err = IPC_ENOENT;
     return nullptr;

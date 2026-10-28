@@ -48,92 +48,6 @@ u16 be16(const u8* p) { return u16(p[0] << 8 | p[1]); }
 void put32(u8* p, u32 v) { p[0] = u8(v >> 24), p[1] = u8(v >> 16), p[2] = u8(v >> 8), p[3] = u8(v); }
 void put16(u8* p, u32 v) { p[0] = u8(v >> 8), p[1] = u8(v); }
 
-// --- NAND files the System Menu creates for WiiConnect24 ---------------------------------------
-
-void fileIfMissing(const std::string& nandPath, const std::vector<u8>& data, u32 owner = 0x1000) {
-    const fs::path p = ios::hostPath(nandPath);
-    std::error_code ec;
-    if (fs::exists(p, ec)) return;
-    fs::create_directories(p.parent_path(), ec);
-    writeNand(nandPath, data);
-    ios::Attr a;
-    a.owner = owner;  // the System Menu; read/write for everyone, as on a console
-    a.group = 1;
-    ios::setAttr(nandPath, a);
-    recomp::log("[nwc24] created %s (%zu bytes)", nandPath.c_str(), data.size());
-}
-
-std::vector<u8> makeConfig() {
-    std::vector<u8> c(0x400, 0);
-    std::memcpy(c.data(), "WcCf", 4);
-    put32(&c[0x04], 8);  // version (release IOS)
-    // Wii number: a fixed per-install value; only the mail side (online-1) needs it to be a
-    // registered one. Creation stage 2 = registered, as after the System Menu's setup.
-    put32(&c[0x08], 0x00000000u);
-    put32(&c[0x0C], 0x00000001u);
-    put32(&c[0x10], 1);  // id generation
-    put32(&c[0x14], 2);  // creation stage: registered
-    std::strcpy(reinterpret_cast<char*>(&c[0x18]), "@wii.com");
-    const char* urls[5] = {"https://amw.wc24.wii.com/cgi-bin/account.cgi", "http://rcw.wc24.wii.com/cgi-bin/check.cgi",
-                           "https://mtw.wc24.wii.com/cgi-bin/receive.cgi", "https://mtw.wc24.wii.com/cgi-bin/delete.cgi",
-                           "https://mtw.wc24.wii.com/cgi-bin/send.cgi"};
-    for (int i = 0; i < 5; i++) std::strcpy(reinterpret_cast<char*>(&c[0x9C + 0x80 * i]), urls[i]);
-    u32 sum = 0;
-    for (u32 o = 0; o < 0x3FC; o += 4) sum += be32(&c[o]);
-    put32(&c[0x3FC], sum);
-    return c;
-}
-
-std::vector<u8> makeFriendList() {
-    std::vector<u8> f(0x360 + 100 * 320, 0);
-    std::memcpy(f.data(), "WcFl", 4);
-    put32(&f[0x04], 2);
-    put32(&f[0x08], 100);  // capacity
-    return f;
-}
-
-// Secret friend list (DWC friends; 'WcFs', version 2): a 0x800-byte header (capacity, count, a
-// slot table from 0x20) as GetCachedSecretFLHeader checks it, then the entries. Empty.
-std::vector<u8> makeSecretFriendList() {
-    std::vector<u8> f(0x800 + 32 * 0x200, 0);
-    std::memcpy(f.data(), "WcFs", 4);
-    put32(&f[0x04], 2);
-    put32(&f[0x08], 32);  // capacity
-    return f;
-}
-
-std::vector<u8> makeDlList() {
-    std::vector<u8> d(0xF800, 0);
-    std::memcpy(d.data(), "WcDl", 4);
-    put32(&d[0x04], 1);
-    put16(&d[0x10], 0x20);  // max subtasks
-    put16(&d[0x12], 8);     // reserved entries
-    put16(&d[0x14], 0x78);  // entries
-    for (u32 i = 0; i < 0x78; i++) {
-        u8* e = &d[0x800 + 0x200 * i];
-        put16(e, i);     // index
-        e[2] = 0xFF;     // unused
-    }
-    return d;
-}
-
-// Message box table of contents ('WcTf', version 4): header fields as the game's
-// GetCachedMBCHeader / NWC24iMBoxCheck read them (docs/DISTRIBUTIONS.md "NAND files").
-std::vector<u8> makeMboxCtl(u32 size, u32 mbxSize) {
-    std::vector<u8> t(size, 0);
-    std::memcpy(t.data(), "WcTf", 4);
-    put32(&t[0x04], 4);
-    put32(&t[0x08], 0);  // messages
-    put32(&t[0x0C], (size - 0x80) / 0x80);  // capacity (entries of 0x80 after the header)
-    put32(&t[0x10], 0x80);
-    put32(&t[0x14], 0x80);
-    put32(&t[0x18], 1);
-    put32(&t[0x1C], 0);       // must be a multiple of 32
-    put32(&t[0x20], 0x80);
-    put32(&t[0x24], mbxSize);  // free bytes in the .mbx
-    return t;
-}
-
 // --- the title's files ------------------------------------------------------------------------
 
 std::string titleFile(const char* name) { return ios::titleDataDir() + "/" + name; }
@@ -413,19 +327,6 @@ std::unique_ptr<ios::Handle> openDevice(const std::string& path, s32& err) {
         return std::make_unique<KdTime>();
     }
     return nullptr;
-}
-
-void provisionNand() {
-    if (!wc24On()) return;
-    fileIfMissing("/shared2/wc24/nwc24msg.cfg", makeConfig());
-    fileIfMissing("/shared2/wc24/nwc24msg.cbk", makeConfig());
-    fileIfMissing("/shared2/wc24/nwc24fl.bin", makeFriendList());
-    fileIfMissing("/shared2/wc24/nwc24fls.bin", makeSecretFriendList());
-    fileIfMissing("/shared2/wc24/nwc24dl.bin", makeDlList());
-    fileIfMissing("/shared2/wc24/mbox/wc24send.ctl", makeMboxCtl(0x4000, 0x200000));
-    fileIfMissing("/shared2/wc24/mbox/wc24recv.ctl", makeMboxCtl(0x8000, 0x700000));
-    fileIfMissing("/shared2/wc24/mbox/wc24send.mbx", vff::format(0x200000));
-    fileIfMissing("/shared2/wc24/mbox/wc24recv.mbx", vff::format(0x700000));
 }
 
 void setMailHandler(MailHandler h) {

@@ -15,6 +15,61 @@
 # InitSoundSystem (in fn_801CE6B0) becomes a nop. Switched by hle_audio.cpp (SCGetSoundMode).
 patch 30 801CE714 60000000
 
+# Calendar / hemisphere / real-time weather (src/game/cf_calendar.cpp, cf_weather.cpp; docs/CALENDAR.md).
+fn_8016D40C          # game clock getter
+fn_8016D0E0 pal
+fn_8016CFFC jp
+fn_8016DD58          # date -> term index
+fn_8016DA2C pal
+fn_8016D948 jp
+fn_8016DDA8          # date -> spring/summer/fall/winter
+fn_8016DA7C pal
+fn_8016D998 jp
+fn_80090E2C          # date -> fish period
+fn_80090E4C pal
+fn_80090DB4 jp
+fn_800BD450          # month -> insect table
+fn_800BD470 pal
+fn_800BD3D8 jp
+fn_800C6024          # month/day -> item season
+fn_800C6044 pal
+fn_800C5FAC jp
+fn_801C973C          # month/day -> weather period
+fn_801C9430 pal
+fn_801C94DC jp
+fn_801C9E48          # town weather of an hour
+fn_801C9B3C pal
+fn_801C9BE8 jp
+fn_801C9EC0          # city weather of an hour
+fn_801C9BB4 pal
+fn_801C9C60 jp
+
+# Grass wear (src/game/cf_grass.cpp, docs/FEATURES.md "Grass wear"): the step wear (player steps and
+# town generation) and the daily regrowth.
+fn_8008D6B4
+fn_800A7F9C
+fn_8008D6D4 pal
+fn_800A7FBC pal
+fn_8008D63C jp
+fn_800A7F24 jp
+
+# Skin tone (src/game/cf_skin.cpp, docs/FEATURES.md "Skin tone"): the player's skin palette index
+# (d_a_playerNP, same offset in all versions) and the daily tan update.
+d_a_playerNP::fn_80_2080 us pal jp
+fn_80137D34
+fn_801379E4 pal
+fn_80137924 jp
+
+# Random::setSeed(this, seed) (stw r4,0(r3)): CF_RNG_SEED test aid in src/game/cf_game.cpp.
+fn_802AA1A0
+# Random::next (LCG x*0x19660D+0x3C6EF35F): CF_RNG_SEED keeps other threads off the main stream.
+fn_802AA1A8
+
+# Save diagnosis (temporary, src/recomp/hle_ios.cpp): the save/check thread start and the
+# WiiConnect24 task start the save path waits on (auto names are only hookable when listed).
+fn_800D284C
+fn_80177F44
+
 # Nintendo events (docs/DISTRIBUTIONS.md): the game keeps a Nintendo letter from a WiiConnect24
 # package (save letter slot, letter, item, letter id); src/recomp/distributions.cpp records which
 # distribution the town received and calls the original. USA only.

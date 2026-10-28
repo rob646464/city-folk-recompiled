@@ -189,19 +189,68 @@ All runs use scratch `APPDATA`, `CF_NAND_DIR`, `CF_CACHE_DIR`, `CF_CARD_DIR` (ne
 - Language / aspect: a scratch settings.ini with `[system]` `language=3` -> French strap screen
   and title (`[sys] SYSCONF created: language French, 16:9, stereo, sensor bar below`).
 
-Not testable yet (2026-10-27): a new game up to the first save and a restart that loads it. The
-title screen does not react to scripted buttons (A, START, ...) on main either (the Wii Remote
-HLE is the wpad agent's work), and with Aurora's FIFO thread the title intro ends in
-`FIFO processing range ... is outside buffered range` (AURORA_FIFO_INLINE=1 avoids it; rendering
-work). The save path below the game (the NAND library on our IOS) is covered by the self-test; the
-game itself so far only checks for `rvforest.dat` at boot (not found -> new game).
+## The game's save (branch play-1)
+
+What City Folk writes, seen in the port (USA, 2026-10-27):
+
+| File | Size | How |
+|---|---|---|
+| `/title/00010000/52555545/data/rvforest.dat` | 4,256,576 bytes | NANDCreate (EXISTS -6 on later saves is fine) -> NANDSimpleSafeOpen (copy in `/tmp/sys/rvforest.dat`) -> one NANDWrite -> NANDSimpleSafeClose (rename back) |
+| `/title/00010000/52555545/data/banner.bin` | 61,600 bytes | same sequence (NANDInitBanner built it) |
+| `/title/00010000/52555545/data/wc24dl.vff` | VF volume | WiiConnect24 download-task box, written by the session-start WiiConnect24 task (see below) |
+
+Owner 0x1001 / group 0x3031, permissions owner rw (`~attributes.txt`). The write takes 181
+guest frames (about 3 s, "Saving... Please do not touch the Power Button" stays up that long)
+with the modelled IOS costs. A restart reads it: the title shows the saved town, Rover greets
+the saved player ("Ah! Came to play. Right now, in Aa, ...", "You are...? 'rob."), "Preparing
+saved data" rewrites the save at session start.
+
+The save worker: fn_800D284C(entry, args) starts it on thread 0x805A3000 when the previous one
+has ended (fn_800D2968); entries fn_800D242C (write: fn_800D3118 -> fn_800D2FCC), fn_800D251C
+(boot check), fn_800D2544, fn_800D2454, fn_800D24F4. Its result word r13-0x6930 (0x8074B010,
+read by fn_800D2A44): 1 done, 4 no file, 0 running, 2/3/5/6+ errors; the title (fn_801094DC)
+and the in-game save menu (fn_801BEA5C) turn 0/negative/6+ into SYS_Save_and_Load message 0x12
+"Could not access Wii system memory", 2 into 0x0C (damaged), 3/5 into 0x02 (corrupted).
+
+### WiiConnect24 before the first save ("Could not access Wii system memory")
+
+Before the first save of a new town (no `rvforest.dat` yet) the save menu (state handlers
+0x801C36F4 / 0x801C380C, which poll NANDGetType(rvforest.dat) every frame) runs a WiiConnect24
+step: fn_801782FC starts task fn_8017B2B8 on the WiiConnect24 thread 0x80621528 (through
+fn_80177F44, one task at a time): NWC24OpenLib, look up / create the game's download task,
+create `wc24dl.vff`. fn_80178498 returns its status: -1 running, 1 done, 0 failed; 0 leads to
+message 0x13 "Could not access Wii system memory" (NWC24 error code via fn_8017856C, 0x0C for
+some). Other tasks (fn_80178640 at boot, fn_8017B6F4 at a continue, ...) use the same thread.
+
+NWC24OpenLib needs the WiiConnect24 files every Wii has in `/shared2/wc24` (the System Menu
+creates them at first setup, whether WiiConnect24 is used or not); without them it fails with
+-20 and the first save always failed (the user's report, 2026-10-27). `sysconf.cpp` prepareWc24
+writes them once when missing, as a console that never set WiiConnect24 up:
+
+| File | Content |
+|---|---|
+| `nwc24msg.cfg`, `nwc24msg.cbk` (0x400) | "WcCf", version 8, no user id (creation stage 0), `@wii.com`, the five standard server URLs at 0x9C + 0x80 n, checksum at 0x3FC = sum of the 255 words before |
+| `nwc24fl.bin` (32,864) | "WcFl" v2, 100 friend slots, empty |
+| `nwc24fls.bin` (12,800) | "WcFs" v2, 0x150, empty |
+| `nwc24dl.bin` (63,488) | "WcDl" v1, 120 tasks of 0x20 subtasks, 8 reserved, empty |
+| `mbox/wc24send.ctl` (16 KiB), `mbox/wc24recv.ctl` (32 KiB) | "WcTf" v4, one 0x80 record per message slot, free slots chained |
+| `mbox/wc24send.mbx`, `mbox/wc24recv.mbx` | VFF volume headers (2 MiB / 7 MiB volumes, empty FAT) |
+
+With them: status 1, then the save write above. `CF_WC24_FILES=0` leaves them out (A/B: status 0).
+The WiiConnect24 tasks then also need `OSGetAppGamename`/`OSGetAppType` and
+`DVDGetCurrentDiskID` (HLE'd: game code from 0x80003180, disc id at 0x80000000).
+
+Test aids (src/game/cf_game.cpp): `CF_FORCE_WC24=<frame>` runs that WiiConnect24 step and logs
+its status; `CF_FORCE_SAVE=<frame>` calls the save write request fn_800D2780 (what the HUD's
+"Save" does after its checks) and logs the result word; `CF_SAVE_LOG=1` logs every change of the
+result word; `CF_THREAD_LOG=1` logs OSIsThreadTerminated results per thread (who waits on whom).
+A save forced at the town gate (before the house) loads only up to Rover's "Sorry for keeping
+you waiting" (the game expects a house), so fixtures come from the real save flow.
 
 ## Not done / next
 
-- **First save and load in the game** once input reaches the bus scene and Rover's questions
-  (needs the Wii Remote HLE's pointer for the name keyboard): check `rvforest.dat` / `banner.bin`
-  creation (sizes, the NAND banner via NANDInitBanner), the save icon and bed save, a restart
-  loading the town, and the "Saving..." duration against a console.
+- **First save through the HUD** (house from Tom Nook, Save icon, "Save and quit") played by a
+  script end to end, and the bed save; "Saving..." duration against a console.
 - **SD card**: the game reaches the card through `/dev/sdio/slot0` with its own FAT code (VF has
   no SD driver linked). Plan: an SD host (ioctls ResetCard 4, SetClock 6, SendCommand 7 with
   CMD17/18/24/25 block reads/writes, GetStatus 0x0B, GetOCR 0x0C) over a FAT image in

@@ -12,7 +12,7 @@
 // J = Japan, K = South Korea.
 #include "recomp/distributions.h"
 
-#include "port/http_get.h"
+#include "port/http.h"
 #include "port/install.h"
 #include "port/settings.h"
 #include "recomp/hle.h"
@@ -317,7 +317,12 @@ void fetchArchive() {
                 }
             }
             if (!enabled()) break;  // the download only happens while the feature is on
-            const auto r = port::http::get(std::string(kArchiveBase) + a.path, {}, 64 * 1024);
+            const auto res = port::http::get(std::string(kArchiveBase) + a.path, 15000, 64 * 1024);
+            struct {
+                int status;
+                std::string error;
+                std::vector<u8> body;
+            } r{res.status, res.error, std::vector<u8>(res.body.begin(), res.body.end())};
             if (r.status == 200 && r.error.empty() && r.body.size() == a.size && sha1Hex(r.body) == a.sha1) {
                 std::error_code ec;
                 const fs::path p = cacheFolder() / a.path;
