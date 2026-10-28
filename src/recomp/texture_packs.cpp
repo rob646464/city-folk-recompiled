@@ -22,7 +22,7 @@
 // (it is a pack-maker session switch).
 //
 // Test aids: CF_TEXPACK_DIR=<dir> (packs folder), CF_TEXPACKS=0|1 (master switch),
-// CF_TEXDUMP=1|<dir> (dump from the start), CF_TEXPACK_AT=<frame>:<action>[,...][;...] with
+// CF_TEXDUMP=1|<dir> (dump from the start), CF_TEXPACK_AT=<frame>:<action>[,...][;...] (or '|') with
 // actions reload, on, off, dump, nodump, budget=<MB>, pack=<name>:<0|1>, top=<name> (guest frames),
 // CF_TEXPACK_LOG=<s> (stats line every s seconds, default 5 when set to 1).
 #include "recomp/texture_packs.h"
@@ -465,7 +465,8 @@ void hostFrame() {
         std::vector<Step> out;
         const char* v = std::getenv("CF_TEXPACK_AT");
         if (!v) return out;
-        const std::string s = v;
+        std::string s = v;
+        std::replace(s.begin(), s.end(), '|', ';');  // '|' too: tools/routes/run.ps1 -Env splits at ';'
         size_t pos = 0;
         while (pos < s.size()) {
             size_t end = s.find(';', pos);

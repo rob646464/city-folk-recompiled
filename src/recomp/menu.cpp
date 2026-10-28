@@ -87,7 +87,7 @@ struct Page {
     const char* sub;
 };
 constexpr Page kPages[] = {
-    {"Visuals", "General"},       {"Visuals", "Rendering"},        {"Visuals", "Enhanced lighting"},
+    {"Visuals", "General"},       {"Visuals", "Rendering"},        {"Visuals", "Enhanced lighting"}, {"Visuals", "Texture packs"},
     {"Sound", nullptr},           {"Controls", "Ports"},           {"Controls", "Bindings"},
     {"Controls", "Pointer"},      {"Controls", "Analog"},       {"Controls", "DSU"},             {"Enhancements", "General"},     {"Enhancements", "Gameplay"},
     {"Enhancements", "Silly"},          {"Enhancements", "Unused content"}, {"Enhancements", "Debug"}, {"Game", nullptr},
