@@ -1,6 +1,7 @@
 // Animal Crossing: City Folk: the game side of recomp/game.h. Nothing game-specific is hooked
 // yet (boot work, docs/WII.md "Order of work"); these defaults leave the game untouched.
 #include "recomp/game.h"
+#include "recomp/online.h"
 #include "recomp/hle.h"
 #include "recomp/runtime.h"
 #include "recomp/sched.h"
@@ -92,6 +93,7 @@ bool onGuestFrame(Ctx& c) {
     cf::grassOnFrame(c);  // cf_grass.cpp, cf_skin.cpp (docs/FEATURES.md)
     cf::skinOnFrame(c);
     distrib::onGuestFrame(c);  // Nintendo events (docs/DISTRIBUTIONS.md)
+    online::onGuestFrame(c);  // CF_ONLINE_* test aids (online.cpp)
     return cf::devOnGuestFrame(c);  // CF_FF fast-forward and other test aids (cf_devaids.cpp)
 }
 u32 guestFrames() { return sFrames.load(std::memory_order_relaxed); }

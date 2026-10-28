@@ -20,6 +20,7 @@
 #include "recomp/enhanced_lighting.h"
 #include "recomp/frame.h"
 #include "recomp/interp.h"
+#include "recomp/online.h"
 #include "recomp/pacing.h"
 #include "recomp/ui_scale.h"
 
@@ -89,7 +90,7 @@ constexpr Page kPages[] = {
     {"Visuals", "General"},       {"Visuals", "Rendering"},        {"Visuals", "Enhanced lighting"},
     {"Sound", nullptr},           {"Controls", "Ports"},           {"Controls", "Bindings"},
     {"Controls", "Pointer"},      {"Controls", "Analog"},       {"Controls", "DSU"},             {"Enhancements", "General"},     {"Enhancements", "Gameplay"},
-    {"Enhancements", "Silly"},          {"Enhancements", "Unused content"}, {"Enhancements", "Debug"}, {"Online", "Nintendo events"}, {"Game", nullptr},
+    {"Enhancements", "Silly"},          {"Enhancements", "Unused content"}, {"Enhancements", "Debug"}, {"Game", nullptr}, {"Online", "Play together"}, {"Online", "Nintendo events"},
 };
 constexpr int kPageCount = int(sizeof(kPages) / sizeof(kPages[0]));
 constexpr float kXs[] = {0.05f, 0.3f, 0.6f, 0.88f};
@@ -1894,6 +1895,7 @@ void draw() {
         }
     }
     recomp::game::drawOverlay();
+    recomp::online::drawOverlay();
     // CF_FRAME_TAG=1 (testing, tools/interp/screen_run.py): the replay shown in this present as a
     // bar code in the top-left corner: a white and a black reference cell, then 32 bits (present
     // number low 16, tape seq low 8, alpha x 255), most significant first, 16 px cells.
@@ -1955,18 +1957,22 @@ void draw() {
                 enhancementsTab();
                 ImGui::EndTabItem();
             }
+            if (tab("Game")) {
+                gameTab();
+                ImGui::EndTabItem();
+            }
             if (tab("Online")) {
                 if (ImGui::BeginTabBar("##online")) {
+                    if (ImGui::BeginTabItem("Play together", nullptr, envTab("Play together"))) {
+                        sDirty |= recomp::online::drawTab();
+                        ImGui::EndTabItem();
+                    }
                     if (ImGui::BeginTabItem("Nintendo events", nullptr, envTab("Nintendo events"))) {
-                        sDirty |= recomp::distrib::drawMenuPage();
+                        sDirty |= recomp::distrib::drawMenuPage();  // docs/DISTRIBUTIONS.md
                         ImGui::EndTabItem();
                     }
                     ImGui::EndTabBar();
                 }
-                ImGui::EndTabItem();
-            }
-            if (tab("Game")) {
-                gameTab();
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar();

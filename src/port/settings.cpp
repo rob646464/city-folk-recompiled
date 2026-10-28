@@ -305,6 +305,15 @@ std::vector<Field> fields() {
         flag("nintendo_events", "other_regions", sSettings.events.otherRegions),
         flag("nintendo_events", "live_delivery", sSettings.events.liveDelivery),
         flag("nintendo_events", "town_wc24", sSettings.events.townWc24),
+        str("online", "player_name", sSettings.online.playerName),
+        str("online", "room_name", sSettings.online.roomName),
+        num("online", "port", sSettings.online.port),
+        flag("online", "ask_before_join", sSettings.online.askBeforeJoin),
+        flag("online", "allow_direct", sSettings.online.allowDirect),
+        flag("online", "lan_visible", sSettings.online.lanVisible),
+        flag("online", "port_mapping", sSettings.online.portMapping),
+        str("online", "last_direct", sSettings.online.lastDirect),
+        flag("online", "notices", sSettings.online.notices),
     };
 }
 
@@ -327,6 +336,8 @@ void sanitize() {
     auto& v = sSettings.video;
     // Menu size: 0 (Auto) or a percentage (the UI snaps it to its nearest step).
     if (sSettings.ui.menuScale != 0) clampTo(sSettings.ui.menuScale, 75, 300);
+    clampTo(sSettings.online.port, 1024, 65535);
+    if (sSettings.online.playerName.size() > 24) sSettings.online.playerName.resize(24);
     clampTo(v.targetFps, kMinFps, kMaxFps);
     clampTo(sSettings.events.mode, 0, 3);
     clampTo(sSettings.events.loopPeriod, 0, 2);
