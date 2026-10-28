@@ -18,6 +18,7 @@
 // Remotes connect about a second after WPADInit, as paired Remotes do after the system starts.
 // CF_WPAD_LOG=1 logs state changes and every callback.
 #include "recomp/audio.h"
+#include "recomp/game.h"
 #include "recomp/hle.h"
 #include "recomp/runtime.h"
 #include "recomp/sched.h"
@@ -491,7 +492,12 @@ HLE(KPADRead) {
         c.r[3] = 0;
         return;
     }
-    const u64 now = timeBase();
+    // CF_CLOCK_FRAMES=1 (deterministic scripted runs, tools/routes/run.ps1): reports are counted on
+    // the guest-frame clock (59.94 frames/s), so the number of samples per read and their blend no
+    // longer depend on host timing; with real time a scripted walk drifted by fractions of a step
+    // per stick change and routes diverged.
+    static const bool frameClock = std::getenv("CF_CLOCK_FRAMES") != nullptr;
+    const u64 now = frameClock ? u64(double(game::guestFrames()) * (kTimerClock / 59.94)) : timeBase();
     const double perSample = kTimerClock / kReportHz;
     u32 n = 1;
     if (ch.haveRead) {

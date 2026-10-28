@@ -40,6 +40,7 @@
 #include <ostream>
 #include <sstream>
 #include <string>
+#include <map>
 #include <vector>
 
 namespace recomp {
@@ -176,6 +177,8 @@ void mouseToPointer(const Mouse& m, float& px, float& py) {
 struct ScriptItem {
     int port = 0;
     u32 start = 0, frames = 6;
+    std::string anchor;  // E<module>.<n>.<offset> items: start = offset after that event (see eventTime)
+    u32 anchorCount = 0;
     u32 buttons = 0;  // kBtn*
     float sx = 0, sy = 0;
     bool pointer = false, pointerOff = false;
@@ -194,7 +197,15 @@ std::vector<ScriptItem> parseScript(const std::string& script) {
         }
         const auto colon = item.find(':');
         if (colon == std::string::npos) continue;
-        p.start = u32(std::strtoul(item.c_str(), nullptr, 10));
+        if (item[0] == 'E') {  // E<module>.<n>.<offset> (route `after link`)
+            const auto d2 = item.rfind('.', colon), d1 = item.rfind('.', d2 - 1);
+            if (d1 == std::string::npos || d2 == std::string::npos || d1 < 1) continue;
+            p.anchor = item.substr(1, d1 - 1);
+            p.anchorCount = u32(std::strtoul(item.c_str() + d1 + 1, nullptr, 10));
+            p.start = u32(std::strtoul(item.c_str() + d2 + 1, nullptr, 10));
+        } else {
+            p.start = u32(std::strtoul(item.c_str(), nullptr, 10));
+        }
         std::string rest = item.substr(colon + 1);
         if (const auto star = rest.find('*'); star != std::string::npos) {
             p.frames = u32(std::strtoul(rest.c_str() + star + 1, nullptr, 10));
@@ -245,6 +256,24 @@ u32 scriptClock() {
         return v && std::string(v) == "frames";
     }();
     return byFrames ? game::guestFrames() : viRetraceCount();
+}
+
+// Script anchors (route `after link <module>`): the script clock at each time a REL module was
+// linked (rel.cpp calls noteScriptEvent), so items can follow scene changes whose frame varies.
+std::mutex sEventMutex;
+std::map<std::string, std::vector<u32>> sEvents;
+
+// The item's start in script clock, or false while its anchor event has not happened yet.
+bool itemStart(const ScriptItem& p, u32& start) {
+    if (p.anchor.empty()) {
+        start = p.start;
+        return true;
+    }
+    std::lock_guard lk(sEventMutex);
+    const auto it = sEvents.find(p.anchor);
+    if (it == sEvents.end() || it->second.size() < p.anchorCount || p.anchorCount == 0) return false;
+    start = it->second[p.anchorCount - 1] + p.start;
+    return true;
 }
 
 bool scriptUses(int port) {
@@ -321,14 +350,15 @@ public:
         if (!script().empty()) {
             const u32 clk = scriptClock();
             for (const auto& p : script()) {
-                if (p.port != chan || clk < p.start) continue;
+                u32 start = 0;
+                if (p.port != chan || !itemStart(p, start) || clk < start) continue;
                 if (p.pointer) {  // the latest started pointer item wins and persists
                     ps.scriptPointer = true;
                     ps.scriptOff = p.pointerOff;
                     ps.scriptX = p.px;
                     ps.scriptY = p.py;
                 }
-                if (clk >= p.start + p.frames) continue;
+                if (clk >= start + p.frames) continue;
                 buttons |= p.buttons;
                 if (p.sx) sx = p.sx;
                 if (p.sy) sy = p.sy;
@@ -443,6 +473,15 @@ const bool sLog = [] {
 }();
 
 }  // namespace
+
+void noteScriptEvent(const std::string& name) {
+    if (script().empty()) return;
+    const u32 clk = scriptClock();
+    std::lock_guard lk(sEventMutex);
+    auto& v = sEvents[name];
+    v.push_back(clk);
+    if (std::getenv("CF_INPUT_LOG")) log("[input] event %s #%zu at %u", name.c_str(), v.size(), clk);
+}
 
 void sample(int chan, State& out) {
     out = State{};
