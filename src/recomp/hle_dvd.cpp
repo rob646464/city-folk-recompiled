@@ -17,6 +17,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace recomp {
 namespace {
@@ -50,6 +51,8 @@ struct HostFile {
     u32 start = 0;  // the disc start address the game sees (+0x30)
 };
 std::mutex sFilesM;
+std::mutex sCancelM;
+std::unordered_set<u32> sCancelled;  // async reads cancelled before their completion interrupt
 std::unordered_map<u32, HostFile> sFiles;
 // Files by their disc start address (DVDFileInfo +0x30). Games copy DVDFileInfo structs (NW4R's
 // DvdFileStream keeps its own copy of the archive's) and read through the copy: the copy is
@@ -234,9 +237,43 @@ HLE(DVDReadAsyncPrio) {
     wr32(guest + 0x0C, 1);  // busy until the completion interrupt
     wr32(guest + 0x38, cb);
     wr32(guest + 0x20, u32(result));
+    {
+        std::lock_guard lk(sCancelM);
+        sCancelled.erase(guest);
+    }
     sched::postIrqAfter(readLatency(c.r[5]), [guest, cb, result](Ctx& ic) {
+        {
+            std::lock_guard lk(sCancelM);
+            if (sCancelled.erase(guest)) return;  // DVDCancel ran: its callback was called there
+        }
         wr32(guest + 0x0C, 0);
         if (cb) guestCall(ic, cb, u32(result), guest);
+    });
+    c.r[3] = 1;
+}
+
+// DVDCancel(block) (NW4R's DvdLockedFileStream::Cancel): a read still in flight ends as
+// DVD_STATE_CANCELED (10), its callback gets DVD_RESULT_CANCELED (-3); the data may already be in
+// the buffer (the host read is done at once). Returns 0. DVDCancelAsync(block, cb): the same, then
+// cb(0, block).
+static void cancelBlock(Ctx& c, u32 block) {
+    if (!block || rd32(block + 0x0C) != 1) return;  // not busy
+    {
+        std::lock_guard lk(sCancelM);
+        sCancelled.insert(block);
+    }
+    wr32(block + 0x0C, 10);
+    if (const u32 cb = rd32(block + 0x38)) guestCall(c, cb, u32(-3), block);
+}
+HLE(DVDCancel) {
+    cancelBlock(c, c.r[3]);
+    c.r[3] = 0;
+}
+HLE(DVDCancelAsync) {
+    const u32 block = c.r[3], cb = c.r[4];
+    cancelBlock(c, block);
+    sched::postIrq([block, cb](Ctx& ic) {
+        if (cb) guestCall(ic, cb, 0, block);
     });
     c.r[3] = 1;
 }

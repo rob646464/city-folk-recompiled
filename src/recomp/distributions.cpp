@@ -947,6 +947,23 @@ void onGuestFrame(Ctx& c) {
     if (!enabled()) return;
     if (sTestNow == -2) {
         sTestNow = -1;
+        // CF_DISTRIB_DESCRIBE=<n>: the catalogue per region and the next n loop slots (docs).
+        if (const char* e = std::getenv("CF_DISTRIB_DESCRIBE")) {
+            for (char reg : {'E', 'P', 'J', 'K'}) {
+                int total = 0, archived = 0;
+                std::string missing;
+                for (const Def& d : kDefs) {
+                    if (d.unreleased || !distributedIn(d, reg)) continue;
+                    total++;
+                    if (inArchive(d)) archived++;
+                    else missing += std::string(missing.empty() ? "" : ", ") + d.name;
+                }
+                recomp::log("[distrib] region %c: %d distributions, %d in the archive; missing: %s", reg, total, archived,
+                            missing.c_str());
+            }
+            std::istringstream lines(describeSchedule(consoleNow(), std::max(1, std::atoi(e))));
+            for (std::string l; std::getline(lines, l);) recomp::log("[distrib] slot %s", l.c_str());
+        }
         if (const char* e = std::getenv("CF_DISTRIB_NOW")) {
             std::string v = e;
             const auto at = v.find('@');
