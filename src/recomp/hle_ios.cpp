@@ -383,6 +383,10 @@ HLE(IPCInterruptHandler) {}
 HLE(IOS_Open) { c.r[3] = u32(doOpen(c.r[3], c.r[4], 0, 0, false)); }
 HLE(IOS_OpenAsync) { c.r[3] = u32(doOpen(c.r[3], c.r[4], c.r[5], c.r[6], true)); }
 HLE(IOS_Close) { c.r[3] = u32(doClose(s32(c.r[3]), 0, 0, false)); }
+// Same calls through the IPC client's second send path (only the USB library: Wii Speak device
+// list while online; names_manual.txt).
+HLE(IOS_Open2) { c.r[3] = u32(doOpen(c.r[3], c.r[4], 0, 0, false)); }
+HLE(IOS_Close2) { c.r[3] = u32(doClose(s32(c.r[3]), 0, 0, false)); }
 HLE(IOS_CloseAsync) { c.r[3] = u32(doClose(s32(c.r[3]), c.r[4], c.r[5], true)); }
 
 HLE(IOS_Read) {

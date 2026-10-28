@@ -319,6 +319,15 @@ std::vector<Field> fields() {
         rgb("silly_luigi", "poltergust_color", sSettings.sillyLuigi.colorRgb[kSillyPoltergust]),
         flag("updates", "check_at_startup", sSettings.updates.checkAtStartup),
         str("updates", "skip_version", sSettings.updates.skipVersion),
+        str("online", "player_name", sSettings.online.playerName),
+        str("online", "room_name", sSettings.online.roomName),
+        num("online", "port", sSettings.online.port),
+        flag("online", "ask_before_join", sSettings.online.askBeforeJoin),
+        flag("online", "allow_direct", sSettings.online.allowDirect),
+        flag("online", "lan_visible", sSettings.online.lanVisible),
+        flag("online", "port_mapping", sSettings.online.portMapping),
+        str("online", "last_direct", sSettings.online.lastDirect),
+        flag("online", "notices", sSettings.online.notices),
     };
 }
 
@@ -341,6 +350,8 @@ void sanitize() {
     auto& v = sSettings.video;
     // Menu size: 0 (Auto) or a percentage (the UI snaps it to its nearest step).
     if (sSettings.ui.menuScale != 0) clampTo(sSettings.ui.menuScale, 75, 300);
+    clampTo(sSettings.online.port, 1024, 65535);
+    if (sSettings.online.playerName.size() > 24) sSettings.online.playerName.resize(24);
     clampTo(v.targetFps, kMinFps, kMaxFps);
     clampEnum(v.aspect, AspectMode::Ultra32x9, AspectMode::Auto);
     clampTo(v.resolutionScale, 0, 8);
