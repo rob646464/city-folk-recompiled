@@ -222,30 +222,52 @@ lan_visible, port_mapping, last_direct, notices); passwords are never saved.
   `CF_ONLINE_PASSWORD`), `CF_ONLINE_CODE_FILE=<file>` gets the code; `CF_ONLINE_JOIN=<code>|
   <ip:port>|file` joins (file = wait for the code file). `CF_ONLINE_PID_FILE=<file>` writes this
   install's profile id.
-- `CF_ONLINE_TEST=<frame>:<action>;...` (USA only, game thread): `connect`, `host` (open the
-  gate), `visit:<friend index>`, `disconnect` (the online-system calls Copper makes), and
-  `friend:<slot>:<pid>|@<file>` (writes a profile-id entry into the save's friend list, as
-  registering a friend code would).
-- Transport alone: `build/windows-clang/cf_online_test.exe`.
+- `CF_ONLINE_TEST=<frame>:<action>;...` (game thread). USA only: `userdata` (creates the save's
+  DWC user data the way the game does when it writes the save, if missing: a never-saved new town
+  has none and the online system refuses to start), `setup` (`fn_800DCBC4`, Copper calls it first),
+  `connect`, `host` (open the gate), `visit:<friend index>` (polled every frame until it returns 1,
+  as Copper does), `disconnect`, `diag` (the start conditions), `start`, and
+  `friend:<slot>:<pid>|@<file>` (a profile-id entry in the save's friend list at save+0x44, as
+  registering a friend code would). Any version: `addfriend:<member id>`, `acceptfriends`,
+  `friends`. With `CF_ONLINE_LOG` the online system's / network thread's / session states are
+  logged on change, and the first reliable sends/receives.
+- Transport and crypto alone: `build/windows-clang/cf_online_test.exe` (ctest `online_net`).
 
-Two-instance run (2026-10-27, this PC, two scratch APPDATA/NAND/cache folders, both through
-`tools/routes/town.txt` into a new town): see section 11 for the result.
+Two-instance runs (2026-10-27/28, this PC, scratch APPDATA/NAND/cache per instance):
+- New towns from `tools/routes/town.txt` (never saved): the online system refused to start until
+  the `userdata` step (the save's DWC user data is created with the first save).
+- `CF_FIXTURE=user-town` + `tools/routes/continue.txt` on both (the same town twice):
+  room joined (LAN address), both games log in (`[dwc] logged in`, profile ids from the keys,
+  the game's friend codes), `UpdateServers` turns the profile-id entries into buddies, the host
+  opens the gate (`SetupGameServer`, network thread state 9), the visitor sees status 6 (1/4),
+  `ConnectToGameServer` -> both matched (thread state 10), the visitor's `fn_800DCCEC` returns 1 on
+  the 4th poll and both online systems reach session state 3; the host's game then sends a
+  2-byte message every frame and the visitor receives them (3100+ in a minute). The visitor's
+  HUD disappears (trip prepared) but no trip starts and no town data moves: the rest of the visit
+  is driven by Copper's conversation (REL `d_a_npc_sp_gatekeeper_aNP`), which the test actions
+  skip. Next step: a route that walks both players to the gate and talks to Copper ("Host" /
+  "Visit"), and a second, different town (the same town on both sides may be refused by the game).
+- F1 friends between two instances at the title: keys proved both ways, `addfriend:0` ->
+  "Bob sent you a friend request" on the host -> accepted -> "Alice accepted your friend request",
+  both `friends.txt` list each other as friends.
 
-## 10. Friends and mail (design; not implemented yet)
+## 10. Friends and mail (friends done; roster, presence and mail are design)
 
 User request: a friend system in F1 and letters between friends at any time, replacing
 WiiConnect24 letters.
-- **Identity**: each install gets an Ed25519 key pair (from the existing identity seed; a small
-  public-domain implementation such as TweetNaCl's or our own from RFC 8032, plus X25519 for
-  encryption). The F1 friend code is a short base32 of the public key's hash (with the player
-  and town name for display). The DWC profile id becomes a hash of the public key, so the
-  game's own 12-digit friend code identifies the same key, and a peer proves it in the room
-  handshake by signing the nonces (collisions in 31 bits are then detected, not trusted).
-- **Adding friends**: in a room's member list, "Add friend" sends a friend request over the room
-  (the key comes with it: nobody copies codes); the other player gets an accept/decline notice
-  (also listed under F1 > Online > Friends as pending); accepting makes both friends. Requests
-  rate-limited (e.g. 3 per minute per member), ignorable and blockable. Member list shows who is
-  a friend already. Codes can still be typed for friends met elsewhere.
+- **Identity (done)**: each install's Ed25519 key (seed = HMAC of the identity file; our own
+  SHA-512/Ed25519/X25519, src/recomp/online_ed25519.cpp, RFC test vectors pass). F1 friend code =
+  base32 of SHA-256(public key)[0..10], `XXXX-XXXX-XXXX-XXXX`. The DWC profile id is
+  HMAC("cf-dwc-profile-id", public key) (31 bits), so the game's own 12-digit friend code belongs to
+  the key; a member whose room profile id does not match its key is not trusted.
+- **Adding friends (done, src/recomp/online_friends.cpp)**: members send IDENT (key, nonce, name)
+  and PROVE (signature over the peer's nonce) to each other on joining; the member list shows
+  "checking key..." / **Add friend** / Friend / Request sent / Accept request / Blocked. A request
+  is a notice with Accept / Decline / Block (also in F1 > Online > Friends); accepting (or both
+  asking) makes both friends. Requests only from proved keys, at most one per 20 s and 5 per room
+  session per member, none from blocked keys. Friends in `<data>/online/friends.txt` (state, key,
+  name). Codes can be shown/copied; typing a code for a friend met elsewhere needs presence
+  (below).
 - **The game's roster**: F1 friends are written into the save's DWC friend list as buddy profile
   entries **through the game's own registration path** (the call the roster menu makes after a
   code is typed: `d_menu_friend03NP`/`friend08NP` -> `fn_800E5A04` DWC_CreateFriendKeyToken and
@@ -276,9 +298,10 @@ WiiConnect24 letters.
 
 ## 11. Status and what is left
 
-Done (branch online-1): the DWC-level HLE (51 named functions), the room transport (tests pass),
-port mapping + STUN + reachability, F1 > Online, test aids. See CLAUDE.md status for the
-two-instance result.
+Done (branch online-1): the DWC-level HLE (51 named DWC functions + IOS_Open2/IOS_Close2 the USB
+library needs), the room transport (tests pass), port mapping + STUN + reachability, F1 > Online,
+F1 friends with keys, test aids. Two-instance result: section 9 (DWC login, buddies, hosting,
+matching and game traffic work; the trip itself waits for Copper's conversation, not yet scripted).
 
 Left:
 - **Wii Speak voice chat** with the PC microphone: PMIC / the USB device under it
@@ -286,8 +309,15 @@ Left:
   (unreliable, the game hands them to VCT). Needs a PMIC-level HLE (SDL3 audio capture, opt-in,
   push-to-talk) and testing the VCT streaming between two instances.
 - **USB keyboard** for chat (KBD library on `/dev/usb/kbd`): host keyboard events.
-- **WiiConnect24 letters** between towns: section 10.
-- **Friends system and presence**: section 10.
+- **The visit itself** end to end: a gate route for both players (and a second town fixture).
+- **WiiConnect24 letters** between towns: section 10. Coordinate with main's WC24 setup (KD device
+  present-but-off, `/shared2/wc24` files from sysconf.cpp prepareWc24; the game's NWC24 tasks run on
+  the save path) and with the distributions agent (NWC24 downloads): the mail HLE must leave the
+  "WC24 off" behaviour unchanged while online is off.
+- **Friends in the game's roster** and **presence** without a room: section 10. Leads for the
+  roster: the roster menu `d_menu_friendNP` fn_139_10EC builds the entry with
+  DWC_CreateFriendKeyToken, checks duplicates with `fn_8017BD64` and stores it at menu+0x5A0; the
+  game's friend manager is `fn_8017BAC8`-`fn_8017C480` (names/towns of the 32 entries).
 - **NAT hole punching** without a server: both players exchange codes (each code carries the
   STUN endpoint), then both send to each other at once; works for most home routers
   (endpoint-independent mapping), not for symmetric NAT. Not done; port mapping, LAN and VPN
