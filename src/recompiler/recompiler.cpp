@@ -1727,11 +1727,45 @@ bool recompile(const Input& in, Output& out, std::string& error) {
                 throw std::runtime_error(fmt("%s: module id %u is used twice", ri.name.c_str(), rels.back().id));
         }
         Recompiler rc(dol, rels);
-        // hooks.txt: "<symbol> [us] [pal] [jp] [kr]". A line applies to the US build unless it
-        // lists only other versions, and to PAL / Japan / Korea only when tagged "pal" / "jp" / "kr".
+        // hooks.txt: "<symbol> [us] [pal] [jp] [kr] | all". A line applies to the US build unless it
+        // lists only other versions, and to PAL / Japan / Korea only when tagged "pal" / "jp" / "kr"
+        // (then <symbol> is that version's own name). "all": <symbol> (or a patch address) is the
+        // USA one and applies to every version, found through us_map.txt / rels_us_map.txt; the
+        // matched function is renamed to the USA name, so HLE(<USA name>) and callOriginal work
+        // unchanged on every version.
         const bool pal = in.version.size() >= 4 && in.version[3] == 'P';
         const bool jp = in.version.size() >= 4 && in.version[3] == 'J';
         const bool kr = in.version.size() >= 4 && in.version[3] == 'K';
+        const bool usBuild = !(pal || jp || kr);
+        // us_map.txt: USA name -> this version's address, USA function starts -> (address, method).
+        std::unordered_map<std::string, u32> usNameMap;
+        std::map<u32, std::pair<u32, std::string>> usAddrMap;
+        for (std::string_view line : splitLines(in.usMap)) {
+            line = trim(line);
+            if (line.empty() || line[0] == '#') continue;
+            std::vector<std::string_view> w;
+            size_t p = 0;
+            while (p < line.size()) {
+                size_t q = line.find_first_of(" \t", p);
+                if (q == std::string_view::npos) q = line.size();
+                if (q > p) w.push_back(line.substr(p, q - p));
+                p = q + 1;
+            }
+            u32 va = 0, ua = 0;
+            if (w.size() < 4 || !parseHex(w[0], va) || !parseHex(w[1], ua)) continue;
+            usNameMap[std::string(w[3])] = va;
+            usAddrMap[ua] = {va, std::string(w[2])};
+        }
+        // rels_us_map.txt: (module, USA offset) -> offset.
+        std::map<std::pair<u32, u32>, u32> relOffMap;
+        for (std::string_view line : splitLines(in.relUsMap)) {
+            line = trim(line);
+            if (line.empty() || line[0] == '#') continue;
+            unsigned m = 0, vo = 0, uo = 0;
+            if (std::sscanf(std::string(line).c_str(), "%u %x %x", &m, &vo, &uo) == 3) relOffMap[{m, uo}] = vo;
+        }
+        std::vector<std::string> mappedHooks;  // "all" hooks of a non-USA build (USA names)
+        std::string mapError;
         std::vector<std::pair<u32, std::pair<u32, u32>>> patchList;
         for (std::string_view line : splitLines(in.hooks)) {
             line = trim(line);
@@ -1744,31 +1778,88 @@ bool recompile(const Input& in, Output& out, std::string& error) {
                 if (q > p) words.push_back(line.substr(p, q - p));
                 p = q + 1;
             }
-            bool tagUs = false, tagPal = false, tagJp = false, tagKr = false;
+            bool tagUs = false, tagPal = false, tagJp = false, tagKr = false, tagAll = false;
             const bool isPatch = words[0] == "patch";
             for (size_t i = isPatch ? 4 : 1; i < words.size(); i++) {
                 if (words[i] == "us") tagUs = true;
                 else if (words[i] == "pal") tagPal = true;
                 else if (words[i] == "jp") tagJp = true;
                 else if (words[i] == "kr") tagKr = true;
+                else if (words[i] == "all") tagAll = true;
             }
-            const bool applies = pal ? tagPal : jp ? tagJp : kr ? tagKr : (tagUs || !(tagPal || tagJp || tagKr));
+            const bool applies =
+                tagAll || (pal ? tagPal : jp ? tagJp : kr ? tagKr : (tagUs || !(tagPal || tagJp || tagKr)));
             if (!applies) continue;
-            if (isPatch) {  // "patch <id> <address> <instruction word> [us] [pal]"
+            const bool mapped = tagAll && !usBuild;
+            if (isPatch) {  // "patch <id> <address> <instruction word> [us] [pal] [jp] [kr] | all"
                 u32 addr = 0, word = 0;
                 if (words.size() >= 4 && parseHex(words[2], addr) && parseHex(words[3], word)) {
                     const u32 id = u32(std::strtoul(std::string(words[1]).c_str(), nullptr, 10));
+                    if (mapped) {  // the USA address inside a hash-matched function, same offset
+                        auto it = usAddrMap.upper_bound(addr);
+                        if (it == usAddrMap.begin() || std::prev(it)->second.second != "hash") {
+                            mapError += fmt("%spatch %u at USA %08X (no hash-matched function)", mapError.empty() ? "" : ", ",
+                                            id, addr);
+                            continue;
+                        }
+                        --it;
+                        addr = it->second.first + (addr - it->first);
+                    }
                     patchList.push_back({addr, {id, word}});
                 }
                 continue;
             }
+            if (mapped) mappedHooks.push_back(std::string(words[0]));
             rc.hooks.insert(std::string(words[0]));
+        }
+        // "all" hooks on a non-USA build: rename the matched function to its USA name (a function of
+        // this version that already has that name, an unrelated one at the USA address, gets a suffix).
+        auto renameTo = [&](std::map<u32, Func>& fs, u32 key, const std::string& usName) {
+            for (auto& [k, f] : fs)
+                if (k != key && f.name == usName) f.name += "_" + in.version;
+            fs[key].name = usName;
+        };
+        for (const std::string& h : mappedHooks) {
+            if (h.find("::") != std::string::npos) continue;  // REL hooks: below, per module
+            auto it = usNameMap.find(h);
+            if (it == usNameMap.end() || !funcs.count(it->second)) {
+                mapError += (mapError.empty() ? "" : ", ") + h;
+                continue;
+            }
+            renameTo(funcs, it->second, h);
+        }
+        if (!mapError.empty()) {
+            error = "hooks.txt \"all\" entries with no match in " + in.version + " (us_map.txt): " + mapError;
+            return false;
         }
         rc.setupDol(std::move(funcs), objs, haveMap ? std::vector<TuRange>{} : loadHleRanges(in.splits), haveMap ? &vmap : nullptr);
         for (size_t i = 0; i < rels.size(); i++) {
             std::map<u32, Func> rf;
             std::map<std::string, std::pair<u32, u32>> ro;
             if (!in.rels[i].map.empty()) loadSymbols(in.rels[i].map, rf, ro, &rels[i]);
+            // "all" REL hooks "<module>::fn_<id>_<USA offset>": this version's function at the
+            // matched offset (rels_us_map.txt) takes the USA name.
+            for (const std::string& h : mappedHooks) {
+                const size_t sep = h.find("::");
+                if (sep == std::string::npos || h.compare(0, sep, in.rels[i].name) != 0) continue;
+                const std::string usName = h.substr(sep + 2);
+                unsigned id = 0, usOff = 0;
+                char tail = 0;
+                if (std::sscanf(usName.c_str(), "fn_%u_%x%c", &id, &usOff, &tail) != 2 || id != rels[i].id) continue;
+                const auto mo = relOffMap.find({id, usOff});
+                bool done = false;
+                if (mo != relOffMap.end())
+                    for (auto& [k, f] : rf)
+                        if (keyOff(k) == mo->second && keySec(k) < rels[i].secs.size() && rels[i].secs[keySec(k)].exec) {
+                            renameTo(rf, k, usName);
+                            done = true;
+                            break;
+                        }
+                if (!done) {
+                    error = "hooks.txt \"all\" entry " + h + " has no match in " + in.version + " (rels_us_map.txt)";
+                    return false;
+                }
+            }
             rc.setupRel(rc.relSpaces[i], std::move(rf), ro);
         }
         for (auto& [addr, pw] : patchList) rc.dolSpace.patches[addr].push_back(pw);

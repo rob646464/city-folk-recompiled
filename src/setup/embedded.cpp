@@ -20,6 +20,12 @@ CF_EMBEDDED_VERSION(RUUE01)
 CF_EMBEDDED_VERSION(RUUP01)
 CF_EMBEDDED_VERSION(RUUJ01)
 CF_EMBEDDED_VERSION(RUUK01)
+CF_EMBEDDED(kUsMap_RUUP01)
+CF_EMBEDDED(kRelUsMap_RUUP01)
+CF_EMBEDDED(kUsMap_RUUJ01)
+CF_EMBEDDED(kRelUsMap_RUUJ01)
+CF_EMBEDDED(kUsMap_RUUK01)
+CF_EMBEDDED(kRelUsMap_RUUK01)
 CF_EMBEDDED(kHooks)
 CF_EMBEDDED(kCtxHeader)
 CF_EMBEDDED(kModuleAbiHeader)
@@ -65,6 +71,11 @@ const Tables& tables(port::GameVersion v) {
         CF_TABLES(2, RUUJ01)
         CF_TABLES(3, RUUK01)
 #undef CF_TABLES
+#define CF_US_MAPS(i, id)                                                             sTables[i].usMap = view(kUsMap_##id, kUsMap_##id##Size);                         sTables[i].relUsMap = view(kRelUsMap_##id, kRelUsMap_##id##Size);
+        CF_US_MAPS(1, RUUP01)
+        CF_US_MAPS(2, RUUJ01)
+        CF_US_MAPS(3, RUUK01)
+#undef CF_US_MAPS
     });
     return sTables[int(v)];
 }

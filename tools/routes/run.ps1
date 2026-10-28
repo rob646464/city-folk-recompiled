@@ -12,7 +12,10 @@ param(
     [string]$Nand = "",
     [switch]$KeepNand,
     [string]$Env = "",
-    [string]$Disc = "C:\Users\rmelv\Desktop\Animal Crossing City Folk Recompiled\US DATA\DATA"
+    [string]$Disc = "C:\Users\rmelv\Desktop\Animal Crossing City Folk Recompiled\US DATA\DATA",
+    # Build folder under build/ (another version's dev build: windows-clang-RUUP01 etc., made by
+    # tools\build.ps1 -Game <id>; pass that version's -Disc too).
+    [string]$Build = "windows-clang"
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -43,7 +46,7 @@ foreach ($kv in ($Env -split ';')) {
 }
 foreach ($k in $vars.Keys) { Set-Item -Path "env:$k" -Value $vars[$k] }
 
-$exe = Join-Path $root "build\windows-clang\cfrecomp.exe"
+$exe = Join-Path $root "build\$Build\cfrecomp.exe"
 $argList = @("--disc", $Disc)
 if ($Route) { $argList += @("--input", "@$((Resolve-Path $Route).Path)") }
 elseif ($Script) { $argList += @("--input", $Script) }

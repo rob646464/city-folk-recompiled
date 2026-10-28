@@ -1,7 +1,7 @@
 // Real-time weather (F1 > Enhancements > Gameplay "Real-time weather", off by default;
 // docs/CALENDAR.md "Real-time weather").
 //
-// How City Folk decides its weather (USA addresses; PAL/Japan in cf_calendar.cpp versionAddr):
+// How City Folk decides its weather (USA addresses; every version through VA(), recomp/version.h):
 // each day gets one of 32 day patterns (fn_801C9AA0: a fixed pattern for event days from
 // 0x8047EC00 via fn_801C99F8, otherwise a seeded random pick weighted by the weather period of the
 // date, fn_801C973C -> 0x805005D8[period]); today's and tomorrow's patterns for the town and the
@@ -34,6 +34,7 @@
 // and presses Search once: the pick list), CF_WEATHER_LOG=1 (fetches, and every hourly answer that
 // differs from the game's own).
 #include "game/cf_calendar.h"
+#include "recomp/version.h"
 
 #include "port/http.h"
 #include "port/settings.h"
@@ -438,7 +439,7 @@ long timeKey(u32 t) {
 }
 
 u32 gameClock() {
-    const u32 f = versionAddr(0x8016D40C);
+    const u32 f = VA(0x8016D40C);
     const u32 lis = rd32(f), addi = rd32(f + 4);
     return ((lis & 0xFFFF) << 16) + u32(int32_t(int16_t(addi & 0xFFFF)));
 }
@@ -482,7 +483,7 @@ void hourHook(Ctx& c, const char* name, int kind) {
     const long now = timeKey(clk);
     const int minute = int(rd32(clk + 4));
     for (auto it = latched.begin(); it != latched.end();) it = it->first < now - 2 ? latched.erase(it) : std::next(it);
-    const bool snowSeason = guestCall(c, versionAddr(0x801C9FC4)) != 0;
+    const bool snowSeason = guestCall(c, VA(0x801C9FC4)) != 0;
     const int real = mapState(w, snowSeason);
     int state = orig;
     if (fakeName()) {
@@ -601,10 +602,6 @@ namespace {
 void hTown(Ctx& c, const char* n) { calendar::hourHook(c, n, 0); }
 void hCity(Ctx& c, const char* n) { calendar::hourHook(c, n, 1); }
 }  // namespace
-HLE(fn_801C9E48) { hTown(c, "fn_801C9E48"); }
-HLE(fn_801C9B3C) { hTown(c, "fn_801C9B3C"); }
-HLE(fn_801C9BE8) { hTown(c, "fn_801C9BE8"); }
+HLE(fn_801C9E48) { hTown(c, "fn_801C9E48"); }  // hooks.txt "all"
 HLE(fn_801C9EC0) { hCity(c, "fn_801C9EC0"); }
-HLE(fn_801C9BB4) { hCity(c, "fn_801C9BB4"); }
-HLE(fn_801C9C60) { hCity(c, "fn_801C9C60"); }
 }  // namespace recomp

@@ -38,6 +38,7 @@
 // lookup whose result changed: input date, date used, result), CF_CAL_PROBE=1 (each distinct
 // caller of the clock getter once, with the guest frame: how the lookups above were found).
 #include "game/cf_calendar.h"
+#include "recomp/version.h"
 
 #include "port/dol.h"
 #include "port/settings.h"
@@ -150,7 +151,7 @@ void monthDayHook(Ctx& c, const char* name, const char* what, bool hasDay) {
 u32 sClock = 0;
 u32 clockAddr() {
     if (!sClock) {
-        const u32 f = versionAddr(0x8016D40C);
+        const u32 f = VA(0x8016D40C);
         const u32 lis = rd32(f), addi = rd32(f + 4);
         sClock = ((lis & 0xFFFF) << 16) + u32(int32_t(int16_t(addi & 0xFFFF)));
     }
@@ -178,28 +179,6 @@ void seasonDate(int& month, int& day, bool leapYear) {
     if (day > dim) day = dim;
 }
 
-u32 versionAddr(u32 usa) {
-    struct Row {
-        u32 us, pal, jp;
-    };
-    static constexpr Row kRows[] = {
-        {0x8016D40C, 0x8016D0E0, 0x8016CFFC},  // clock getter
-        {0x8016DD58, 0x8016DA2C, 0x8016D948},  // term index
-        {0x8016DDA8, 0x8016DA7C, 0x8016D998},  // 4 seasons
-        {0x80090E2C, 0x80090E4C, 0x80090DB4},  // fish period
-        {0x800BD450, 0x800BD470, 0x800BD3D8},  // insect table
-        {0x800C6024, 0x800C6044, 0x800C5FAC},  // item season
-        {0x801C973C, 0x801C9430, 0x801C94DC},  // weather period
-        {0x801C9E48, 0x801C9B3C, 0x801C9BE8},  // town hour weather
-        {0x801C9EC0, 0x801C9BB4, 0x801C9C60},  // city hour weather
-        {0x801C9FC4, 0x801C9CB8, 0x801C9D64},  // rain -> snow check
-    };
-    const auto v = port::dol::version();
-    for (const Row& r : kRows)
-        if (r.us == usa) return v == port::dol::Version::RUUP01 ? r.pal : v == port::dol::Version::RUUJ01 ? r.jp : r.us;
-    return usa;
-}
-
 bool drawHemisphereMenu() {
     bool dirty = false;
     int h = sSouthern ? 1 : 0;
@@ -222,14 +201,12 @@ bool drawHemisphereMenu() {
 
 }  // namespace recomp::calendar
 
-// ---- hooks (USA / PAL / Japan names: tools/recomp/hooks.txt) ---------------------------------
+// ---- hooks (USA names on every version: tools/recomp/hooks.txt "all") ---------------------------------
 namespace recomp {
 using namespace recomp::calendar;
 
-#define CAL_HOOK3(us, pal, jp, body)   \
-    HLE(us) { body(c, #us); }          \
-    HLE(pal) { body(c, #pal); }        \
-    HLE(jp) { body(c, #jp); }
+#define CAL_HOOK(us, body) \
+    HLE(us) { body(c, #us); }
 
 namespace {
 void hTerm(Ctx& c, const char* n) { timeHook(c, n, "term index", 0); }
@@ -251,12 +228,12 @@ void hWeatherPeriod(Ctx& c, const char* n) { monthDayHook(c, n, "weather period"
 void hClock(Ctx& c, const char*) { clockGetter(c); }
 }  // namespace
 
-CAL_HOOK3(fn_8016D40C, fn_8016D0E0, fn_8016CFFC, hClock)
-CAL_HOOK3(fn_8016DD58, fn_8016DA2C, fn_8016D948, hTerm)
-CAL_HOOK3(fn_8016DDA8, fn_8016DA7C, fn_8016D998, hSeason4)
-CAL_HOOK3(fn_80090E2C, fn_80090E4C, fn_80090DB4, hFish)
-CAL_HOOK3(fn_800BD450, fn_800BD470, fn_800BD3D8, hInsect)
-CAL_HOOK3(fn_800C6024, fn_800C6044, fn_800C5FAC, hItemSeason)
-CAL_HOOK3(fn_801C973C, fn_801C9430, fn_801C94DC, hWeatherPeriod)
+CAL_HOOK(fn_8016D40C, hClock)
+CAL_HOOK(fn_8016DD58, hTerm)
+CAL_HOOK(fn_8016DDA8, hSeason4)
+CAL_HOOK(fn_80090E2C, hFish)
+CAL_HOOK(fn_800BD450, hInsect)
+CAL_HOOK(fn_800C6024, hItemSeason)
+CAL_HOOK(fn_801C973C, hWeatherPeriod)
 
 }  // namespace recomp
