@@ -150,8 +150,11 @@ Reply makeReply(u32 cb, u32 arg) {
     return r;
 }
 
+// Failed requests are always logged (once per request kind, path and error), so a player's
+// last_run.log shows what the game was refused (e.g. a save error); CF_IOS_LOG=2 logs every one.
 void logResult(const char* op, s32 fd, const std::string& path, s32 result, const char* extra = "") {
     if (logLevel() >= 2) recomp::log("[ios] %s fd %d %s%s -> %d", op, fd, path.c_str(), extra, result);
+    else if (result < 0) logOnce(std::string(op) + " " + path + extra + " -> error " + std::to_string(result));
 }
 
 s32 doOpen(u32 pathAddr, u32 mode, u32 cb, u32 arg, bool async) {
@@ -175,7 +178,7 @@ s32 doOpen(u32 pathAddr, u32 mode, u32 cb, u32 arg, bool async) {
             }
     }
     if (result >= 0) logOnce("open " + path + " (mode " + std::to_string(mode) + ") -> fd " + std::to_string(result));
-    else if (logLevel() >= 2) recomp::log("[ios] open %s (mode %u) -> %d", path.c_str(), mode, result);
+    else logOnce("open " + path + " (mode " + std::to_string(mode) + ") -> error " + std::to_string(result));
     const auto at = schedule(q, cost);
     return deliver(result, at, makeReply(cb, arg), async);
 }

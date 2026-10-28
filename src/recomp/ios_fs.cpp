@@ -348,7 +348,27 @@ AttrBlock readAttrBlock(u32 a) {
 
 class FsDevice final : public Handle {
 public:
-    s32 ioctl(u32 cmd, u32 in, u32 inLen, u32 out, u32 outLen, const Reply&) override {
+    // Every refused /dev/fs request is logged once with its path (save errors in player logs).
+    s32 ioctl(u32 cmd, u32 in, u32 inLen, u32 out, u32 outLen, const Reply& r) override {
+        const s32 res = ioctlImpl(cmd, in, inLen, out, outLen, r);
+        if (res < 0) {
+            std::string path = in && cmd != 0x02 ? readPath(cmd == 0x03 || cmd == 0x05 || cmd == 0x09 ? in + 6 : in) : "";
+            if (cmd == 0x08 && in) path += " -> " + readPath(in + 0x40);
+            logOnce("/dev/fs ioctl " + std::to_string(cmd) + " " + path + " -> error " + std::to_string(res));
+        }
+        return res;
+    }
+    s32 ioctlv(u32 cmd, u32 nin, u32 nout, const Vec* v, const Reply& r) override {
+        const s32 res = ioctlvImpl(cmd, nin, nout, v, r);
+        if (res < 0) {
+            const std::string path = nin >= 1 && v[0].addr ? readPath(v[0].addr) : "";
+            logOnce("/dev/fs ioctlv " + std::to_string(cmd) + " " + path + " -> error " + std::to_string(res));
+        }
+        return res;
+    }
+
+private:
+    s32 ioctlImpl(u32 cmd, u32 in, u32 inLen, u32 out, u32 outLen, const Reply&) {
         std::lock_guard lk(sFsM);
         std::error_code ec;
         cost_ = 0.0003;
@@ -460,7 +480,7 @@ public:
         logOnce("/dev/fs ioctl " + std::to_string(cmd) + " not handled");
         return FS_EINVAL;
     }
-    s32 ioctlv(u32 cmd, u32 nin, u32 nout, const Vec* v, const Reply&) override {
+    s32 ioctlvImpl(u32 cmd, u32 nin, u32 nout, const Vec* v, const Reply&) {
         std::lock_guard lk(sFsM);
         std::error_code ec;
         cost_ = 0.0005;
@@ -513,6 +533,7 @@ public:
         logOnce("/dev/fs ioctlv " + std::to_string(cmd) + " not handled");
         return FS_EINVAL;
     }
+public:
     double cost() const override { return cost_; }
     Queue queue() const override { return Queue::Fs; }
 
