@@ -387,6 +387,8 @@ private:
             wr32(out + 16, 0x1000);
             wr32(out + 20, 0x17FF - (inodes + 0x200));
             wr32(out + 24, inodes + 0x200);
+            logOnce("/dev/fs GetStats: free " + std::to_string(used < total ? total - used : 0) + " clusters, " +
+                    std::to_string(0x17FF - (inodes + 0x200)) + " inodes");
             return IPC_OK;
         }
         case 0x03:    // CreateDir
@@ -528,6 +530,7 @@ private:
             cost_ += 0.00002 * double(inodes);
             wr32(v[nin].addr, clusters);
             wr32(v[nin + 1].addr, inodes);
+            logOnce("/dev/fs GetUsage " + path + ": " + std::to_string(clusters) + " clusters, " + std::to_string(inodes) + " inodes");
             return IPC_OK;
         }
         logOnce("/dev/fs ioctlv " + std::to_string(cmd) + " not handled");

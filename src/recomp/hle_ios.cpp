@@ -36,7 +36,8 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 int logLevel() {
-    static const int level = std::getenv("CF_IOS_LOG") ? std::atoi(std::getenv("CF_IOS_LOG")) : 0;
+    // TEMPORARY (save-error diagnosis 2026-10-27): every request logged by default; back to 0 after.
+    static const int level = std::getenv("CF_IOS_LOG") ? std::atoi(std::getenv("CF_IOS_LOG")) : 2;
     return level;
 }
 
@@ -252,6 +253,22 @@ void ipcBufferInit() {
     }
 }
 }  // namespace
+// NANDCheck(fsBlocks, inodes, &answer): the SDK's free-space check before a save. Logged with
+// its answer (bits: 1/2 home blocks/inodes, 4/8 system blocks/inodes over the limits), so a
+// "Could not access / not enough space" save error in a player's log shows its cause.
+HLE(NANDCheck) {
+    const u32 blocks = c.r[3], inodes = c.r[4], answerAddr = c.r[5];
+    callOriginal(c, "NANDCheck");
+    const u32 answer = answerAddr ? rd32(answerAddr) : 0;
+    log("[nand] NANDCheck(%u blocks, %u inodes) -> %d, answer 0x%X", blocks, inodes, s32(c.r[3]), answer);
+}
+HLE(NANDSecretGetUsage) {
+    const u32 path = c.r[3], fsBlockAddr = c.r[4], inodeAddr = c.r[5];
+    callOriginal(c, "NANDSecretGetUsage");
+    log("[nand] NANDSecretGetUsage(%s) -> %d (%u blocks, %u inodes)", gstr(path), s32(c.r[3]),
+        fsBlockAddr ? rd32(fsBlockAddr) : 0, inodeAddr ? rd32(inodeAddr) : 0);
+}
+
 HLE(IPCInit) { ipcBufferInit(); }
 HLE(IPCGetBufferHi) {
     ipcBufferInit();
