@@ -124,6 +124,7 @@ struct Config {
     int moon = 0;     // index into kMoonRecord
     int parents = 0;  // index into kParentLang
     int houses = 0;   // villager house set: 0 the town's own, 1 North America, 2 Europe, 3 Japan/Korea
+    int title = 0;    // title screen logo: 0 the disc's own, 1 USA, 2 Europe, 3 Japan, 4 Korea
 };
 Config sCfg;
 
@@ -139,6 +140,8 @@ void loadKey(const std::string& section, const std::string& key, const std::stri
     if (key == "parents_days") sCfg.parents = std::atoi(value.c_str());
     if (key == "villager_houses") sCfg.houses = std::atoi(value.c_str());
     if (sCfg.houses < 0 || sCfg.houses > 3) sCfg.houses = 0;
+    if (key == "title_screen") sCfg.title = std::atoi(value.c_str());
+    if (sCfg.title < 0 || sCfg.title > 4) sCfg.title = 0;
     if (sCfg.moon < 0 || sCfg.moon > 3) sCfg.moon = 0;
     if (sCfg.parents < 0 || sCfg.parents > 7) sCfg.parents = 0;
 }
@@ -149,6 +152,7 @@ void saveConfig(std::ostream& out) {
     out << "autumn_moon = " << sCfg.moon << "\n";
     out << "parents_days = " << sCfg.parents << "\n";
     out << "villager_houses = " << sCfg.houses << "\n";
+    out << "title_screen = " << sCfg.title << "\n";
 }
 const bool sRegistered = [] {
     port::addSettingsExtension({&resetConfig, &loadKey, &saveConfig});
@@ -181,6 +185,8 @@ const EnvOverride sEnv = [] {
             e.cfg.parents = std::atoi(tok.c_str() + 8) & 7;
         else if (tok.rfind("houses=", 0) == 0)
             e.cfg.houses = std::atoi(tok.c_str() + 7) & 3;
+        else if (tok.rfind("title=", 0) == 0)
+            e.cfg.title = std::atoi(tok.c_str() + 6) % 5;
         else
             for (int i = 0; i < kEventCount; i++)
                 if (tok == kEvents[i].key) e.cfg.event[i] = true;
@@ -501,17 +507,46 @@ std::vector<u8> buildHouseArchive(const std::vector<u8>& own, const std::vector<
 int housesOption() { return cfg().houses; }
 bool isOverlayEntryLocked(s32 e) { return e >= kOverlayBase && size_t(e - kOverlayBase) < sOverlays.size(); }
 
+
+// Title screen logo of another region: d_title_demoNP opens its disc's /Layout/title_<us|eu|jp|kr>.arc
+// (the only difference of that REL between versions); every disc has title_us/eu/jp, the Korean
+// one has title_kr too. The chosen file is served under the opened name.
+s32 titleOverlay(const std::string& p) {
+    const int t = cfg().title;
+    static const char* const kTitle[] = {nullptr, "us", "eu", "jp", "kr"};
+    if (!t || p.size() != std::strlen("/layout/title_us.arc") || p.compare(0, 14, "/layout/title_") != 0 ||
+        p.compare(16, 4, ".arc") != 0 || p.compare(14, 2, kTitle[t]) == 0)
+        return -1;
+    const std::string want = std::string("/Layout/title_") + kTitle[t] + ".arc";
+    const std::string key = p + "#title" + char('0' + t);
+    std::lock_guard lk(sOvM);
+    for (size_t i = 0; i < sOverlays.size(); i++)
+        if (sOverlays[i].key == key) return kOverlayBase + s32(i);
+    std::vector<u8> data;
+    if (!readDiscFile(want, data)) return -1;  // e.g. title_kr on a non-Korean disc
+    log("[region] title screen: %s served as %s", want.c_str(), p.c_str());
+    sOverlays.push_back({key, std::move(data)});
+    return kOverlayBase + s32(sOverlays.size() - 1);
+}
+
 }  // namespace
 
 s32 overlayEntry(const char* path) {
+    if (!path) return -1;
     const int h = housesOption();
-    if (!h || !path) return -1;
-    const std::string p = lower(path);
+    if (!h && !cfg().title) return -1;
+    std::string p = lower(path);
+    if (p.empty() || p[0] != '/') p = "/" + p;  // relative paths are relative to the root here
+    if (cfg().title) {
+        const s32 e = titleOverlay(p);
+        if (e >= 0) return e;
+    }
+    if (!h) return -1;
     // "/str/brres/field" + region(3) + language(3) + "strbrres" + season + ".arc"
     static const std::string pre = "/str/brres/field";
     if (p.size() != pre.size() + 6 + 8 + 1 + 4 || p.compare(0, pre.size(), pre) != 0) return -1;
     const std::string rgn = p.substr(pre.size(), 3);
-    const char season = path[pre.size() + 6 + 8];
+    const char season = char(std::toupper(u8(p[pre.size() + 6 + 8])));
     if (p.compare(pre.size() + 6, 8, "strbrres") != 0 || p.compare(p.size() - 4, 4, ".arc") != 0) return -1;
     if (rgn == kHouseRegion[h] || (h == 3 && rgn == "kor")) return -1;  // already that region's houses
     const std::string key = p + char('0' + h);
@@ -708,7 +743,7 @@ void actorAids(u32 frame) {
                 ok = std::sscanf(arg, "%f,%f,%f", &x, &y, &z) == 3;
             }
             for (const ActorHit& h : hits)
-                if (ok && h.module == 80) {
+                if (ok && h.module == 80 && rd32(h.addr + 0x60) == relBase(80, 5) + 0x1280) {  // the player class vtable
                     for (u32 o : {0x64u, 0x70u}) {
                         wrf32(h.addr + o, x);
                         wrf32(h.addr + o + 4, y);
@@ -774,6 +809,13 @@ bool menuSection() {
         "moves Mother's Day to May 8 (Parent's Day) and has no Father's Day (Korea's Teacher's Day "
         "is a separate event above). The Mother's Day letter from your mom follows the same "
         "country.");
+    static const char* const kTitleName[] = {"The disc's own", "North America (City Folk)", "Europe (Let's Go to the City)",
+                                             "Japan (Machi e Ikou yo)", "Korea (needs the Korean disc)"};
+    if (ImGui::Combo("Title screen logo", &sCfg.title, kTitleName, 5)) dirty = true;
+    ImGui::SetItemTooltip(
+        "The title screen's logo layout of another region (every disc carries the North American, "
+        "European and Japanese ones; the Korean one is only on the Korean disc, so with another disc "
+        "that choice keeps the disc's own). Takes effect the next time the title screen loads.");
     if (ImGui::Combo("Villager house styles", &sCfg.houses, kHouseName, 4)) dirty = true;
     ImGui::SetItemTooltip(
         "The five villager house exteriors come in a set per region: North America (two of them "
