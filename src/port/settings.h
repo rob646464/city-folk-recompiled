@@ -361,6 +361,20 @@ struct InterfaceSettings {
     bool startHint = true;  // "Press F1 for options" notice for the first seconds of play (menu.cpp)
 };
 
+// Online play between players of this port (F1 > Online; src/recomp/online.cpp, docs/ONLINE.md).
+// Room passwords are never saved.
+struct OnlineSettings {
+    std::string playerName;     // shown to the others in a room; empty = "Player"
+    std::string roomName;       // empty = "<name>'s town"
+    int port = 29910;           // UDP port when hosting (1024..65535)
+    bool askBeforeJoin = false; // the host accepts each joiner
+    bool allowDirect = true;    // joiners that know only IP:port (no room code) may join
+    bool lanVisible = true;     // announce the room on the local network
+    bool portMapping = true;    // UPnP / NAT-PMP mapping on the router + public address via STUN
+    std::string lastDirect;     // last "Direct connect" address
+    bool notices = true;        // room events as notices over the game
+};
+
 struct Settings {
     InterfaceSettings ui;  // (not "interface": a macro in the Windows headers)
     VideoSettings video;
@@ -376,6 +390,7 @@ struct Settings {
     SillyWorldSettings sillyWorld;
     SillyLuigiSettings sillyLuigi;
     UpdateSettings updates;
+    OnlineSettings online;
 };
 
 Settings& settings();

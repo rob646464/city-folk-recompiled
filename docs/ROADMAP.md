@@ -42,11 +42,13 @@ Engine work for the Wii: docs/WII.md. This file tracks the phases and the user's
   for the season). Only the chosen place's rounded coordinates (~10 km) are sent, and only while
   the option is on; no automatic IP location (at most an explicit "use my approximate location"
   button). Refreshed every 30-60 minutes; the game's own weather when offline.
-- **Online play restored** however possible: Nintendo WFC (DWC: visiting towns, friend codes,
-  Wii Speak chat) through a revival server such as Wiimmfi, and WiiConnect24 (letters, Nintendo
-  event distributions) through a revival service such as WiiLink/RiiConnect24, if they support
-  City Folk. Needs real sockets/HTTP/SSL under the IOS network HLE. Research first:
-  docs/ONLINE.md.
+- **Online play restored** between players of this port (user decision 2026-10-27: not with
+  real consoles or revival services). Done on branch online-1: DWC-level HLE (the game's own
+  gate/visit/roster code on top), serverless rooms (the host's game is the room: room code with
+  the host's endpoints, LAN list, direct IP:port, UPnP/NAT-PMP + STUN, encrypted, optional
+  password, kick, ask before join), F1 > Online. Next: Wii Speak from the PC microphone, USB
+  keyboard chat, friends system with automatic roster entries, letters between friends
+  (WiiConnect24 replacement), NAT hole punching, optional self-hosted relay. docs/ONLINE.md.
 
 ## Ideas to look at later
 - Texture packs (Aurora has Dolphin-compatible replacement; the RUUE01HD project recreates
