@@ -5010,6 +5010,34 @@ void replayPair(const Tape* a, const Tape& b, float alpha, void* dump) {
                 if (key)
                     if (const auto it = byKey.find(key); it != byKey.end()) la = it->second;
                 f32 pb[3] = {loadBE(lb), loadBE(lb + 4), loadBE(lb + 8)}, wb[3] = {}, wa[3] = {};
+                if (u32At(lb + 32) & 0x20u) {
+                    // Aurora 0340 directional light (sun / moon): `pos` is a direction. Turned with
+                    // the camera (rotation only), the two game frames' world directions blended;
+                    // colour / intensity / reach blended like other lights; never a "jump".
+                    f32 db[3] = {pb[0], pb[1], pb[2]};
+                    if (mvp) rotate(mvp->ib, pb, db);
+                    f32 d[3] = {db[0], db[1], db[2]};
+                    if (la) {
+                        const f32 pa[3] = {loadBE(la), loadBE(la + 4), loadBE(la + 8)};
+                        f32 da[3] = {pa[0], pa[1], pa[2]};
+                        if (mvp) rotate(mvp->ia, pa, da);
+                        for (int c = 0; c < 3; c++) d[c] = da[c] + (db[c] - da[c]) * alpha;
+                        for (int k = 3; k < 8; k++) {
+                            const f32 va = loadBE(la + 4 * k), vb = loadBE(lb + 4 * k);
+                            if (std::isfinite(va) && std::isfinite(vb)) storeBE(out + 4 * k, va + (vb - va) * alpha);
+                        }
+                        sXlPaired++;
+                    } else {
+                        sXlNew++;
+                    }
+                    const f32 len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                    if (len > 1e-6f)
+                        for (f32& v : d) v /= len;
+                    f32 o[3] = {d[0], d[1], d[2]};
+                    if (mvp) rotate(mvp->vt, d, o);
+                    for (int c = 0; c < 3; c++) storeBE(out + 4 * c, o[c]);
+                    continue;
+                }
                 if (mvp) {
                     xform(mvp->ib, pb, wb);
                     // The room box (relative to the position, view-space axes): b's box turned with

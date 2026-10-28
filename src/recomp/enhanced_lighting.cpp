@@ -196,6 +196,16 @@ uint32_t selectLights(aurora::gfx::ExtraLight* l, uint32_t n) {
     constexpr float kSwapRatio = 1.35f;   // a shadow slot changes hands only for a 35% stronger light
     for (uint32_t i = 0; i < n; i++) {
         const auto& x = l[i];
+        if (x.flags & aurora::gfx::ExtraLightDirectional) {
+            // A directional light (the sun / moon) reaches everything: always first, never culled.
+            if (x.id != 0) {
+                auto& t = sTrack[x.id];
+                t.score = t.peak = 1e9f;
+                t.seen = sTrackTick;
+            }
+            rank.push_back({1e9f, i});
+            continue;
+        }
         if (!(x.intensity > 0.0f) || !(x.radius > 0.0f)) continue;
         const float z = -x.pos[2];  // distance in front of the camera
         if (z < -x.radius) continue;  // entirely behind the camera
@@ -359,16 +369,14 @@ bool active() { return sActive.load(std::memory_order_relaxed) && frameOn(); }
 
 uint32_t shadowLightCap() {
     const auto& l = port::settings().enhancedLighting;
-    if (!l.extraLightShadows) return 0;
+    // City Folk: the sun / moon's slot + the night lights' (0 / 2 / 4 / 8 by the preset).
     static constexpr u32 kXlLights[6] = {0, 2, 4, 8, 12, 16};
-    u32 n = kXlLights[std::clamp(l.extraShadowLights, 0, 5)];
+    u32 n = (l.sunShadows ? 1u : 0u) + (l.nightLights && l.nightLightShadows ? kXlLights[std::clamp(l.extraShadowLights, 0, 5)] : 0u);
     if (const char* v = std::getenv("CF_XL_SHADOWS")) {
         int mode = -1, lights = -1;
         std::sscanf(v, "%d,%d", &mode, &lights);
         if (lights >= 0) n = u32(lights);
         if (mode == 0) n = std::min(n, 4u);
-    } else if (l.extraShadowMode == 0) {
-        n = std::min(n, 4u);
     }
     return std::min(n, 16u);
 }
@@ -385,22 +393,24 @@ int perfPhase() { return sPerfPhase; }
 void applySettings() {
     auto& l = port::settings().enhancedLighting;
     // Presets fill in the quality fields (Custom keeps whatever was set).
+    // City Folk presets (docs/RENDERING.md "Enhanced lighting (City Folk)", "Presets"): the sun's
+    // cascade size and filter, shadow-casting night lights, shaft steps.
     switch (l.preset) {
     case port::EnhancedPreset::Low:
-        l.softShadowQuality = 0, l.volumetricQuality = 0, l.extraShadowQuality = 0;
-        l.extraShadowLights = 1, l.extraShadowMapSize = 0;
+        l.sunShadowMapSize = 0, l.sunShadowQuality = 0, l.extraShadowLights = 1, l.extraShadowMapSize = 0;
+        l.sunShaftQuality = 0, l.extraShadowQuality = 0;
         break;
     case port::EnhancedPreset::Medium:
-        l.softShadowQuality = 1, l.volumetricQuality = 1, l.extraShadowQuality = 1;
-        l.extraShadowLights = 1, l.extraShadowMapSize = 1;
+        l.sunShadowMapSize = 1, l.sunShadowQuality = 1, l.extraShadowLights = 1, l.extraShadowMapSize = 1;
+        l.sunShaftQuality = 0, l.extraShadowQuality = 1;
         break;
     case port::EnhancedPreset::High:
-        l.softShadowQuality = 2, l.volumetricQuality = 1, l.extraShadowQuality = 1;
-        l.extraShadowLights = 2, l.extraShadowMapSize = 1;
+        l.sunShadowMapSize = 1, l.sunShadowQuality = 1, l.extraShadowLights = 2, l.extraShadowMapSize = 1;
+        l.sunShaftQuality = 1, l.extraShadowQuality = 1;
         break;
     case port::EnhancedPreset::Ultra:
-        l.softShadowQuality = 3, l.volumetricQuality = 2, l.extraShadowQuality = 2;
-        l.extraShadowLights = 3, l.extraShadowMapSize = 2;
+        l.sunShadowMapSize = 2, l.sunShadowQuality = 2, l.extraShadowLights = 3, l.extraShadowMapSize = 2;
+        l.sunShaftQuality = 2, l.extraShadowQuality = 2;
         break;
     default:
         break;
@@ -498,6 +508,21 @@ void applySettings() {
             sPerfNoMap = false;
         }
     }
+    // City Folk (src/game/cf_light.cpp): no flashlight and no shadow map of the game's own; the
+    // sun / moon (a directional extra light with shadow cascades, Aurora 0340) and the night
+    // lights are extra lights, all their shadows shadow maps.
+    c.flashlightQuality = false;
+    c.realisticFlashlight = 0;
+    c.volumetric = false;
+    c.softShadows = false;
+    c.extraLights = l.sunShadows || l.sunLight || l.nightLights;
+    c.extraShadows = l.sunShadows || (l.nightLights && l.nightLightShadows);
+    if (sXlMode < 0) c.extraShadowMode = 1;
+    if (sXlOver[0] < 0) c.extraShadowLights = shadowLightCap();
+    static constexpr u32 kSunSize[3] = {512, 1024, 2048};
+    if (sXlOver[1] <= 0) c.extraShadowMapSize = kSunSize[std::clamp(l.sunShadowMapSize, 0, 2)];
+    c.extraShadowQuality = u32(std::clamp(l.sunShadowQuality, 0, 2));
+    c.lightReceivers = l.sunShadows;
     aurora_enhanced_set_config(&c);
     // CF_XL_SHADOW_LOG=1: shadow-map statistics every 120 host frames (lights, caster draws,
     // casters skipped while their pipeline compiles).
@@ -632,6 +657,34 @@ void onGhostInBeam(uint32_t actor) {
     aurora_enhanced_beam_flare(0.85f);
     static const bool sLog = std::getenv("CF_BEAM_LOG") != nullptr;  // test aid: dump frame of each flare
     if (sLog) log("[beam] flare: ghost %08X in the beam, dump frame %u", actor, now + 1);
+}
+
+namespace {
+std::array<GameLight, 64> sGameLights{};
+uint32_t sGameLightCount = 0;
+uint32_t sGameLightFrame = ~0u;
+}  // namespace
+
+void noteGameLight(const float* obj, uint32_t idMask) {
+    const u32 f = copyDispCount();
+    if (f != sGameLightFrame) {
+        sGameLightFrame = f;
+        sGameLightCount = 0;
+    }
+    if (sGameLightCount >= sGameLights.size()) return;
+    GameLight& g = sGameLights[sGameLightCount++];
+    std::memcpy(g.rgba, obj, 4);
+    std::memcpy(g.a, obj + 1, 12);
+    std::memcpy(g.k, obj + 4, 12);
+    std::memcpy(g.pos, obj + 7, 12);
+    std::memcpy(g.dir, obj + 10, 12);
+    g.idMask = idMask;
+    g.frame = f;
+}
+
+const GameLight* gameLights(uint32_t& count) {
+    count = sGameLightFrame == copyDispCount() ? sGameLightCount : 0;
+    return sGameLights.data();
 }
 
 bool worldToView(const float world[3], float view[3]) {

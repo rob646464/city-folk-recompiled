@@ -69,3 +69,7 @@ fn_802AA1A8
 # WiiConnect24 task start the save path waits on (auto names are only hookable when listed).
 fn_800D284C
 fn_80177F44
+
+# Enhanced lighting (src/game/cf_light.cpp, docs/RENDERING.md "Enhanced lighting (City Folk)"): the
+# stage draw (both ScnRoot passes + effects of the field/room scene) brackets the 3D scene.
+d_s_stageNP::fn_125_C0 us pal jp kr

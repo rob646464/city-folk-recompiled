@@ -12,6 +12,7 @@
 #include "recomp/hle.h"
 #include "recomp/interp.h"
 #include "recomp/runtime.h"
+#include "game/cf_light.h"
 
 namespace recomp {
 namespace {
@@ -24,16 +25,25 @@ u32 viewMatrixSource() { return sViewSrc; }
 
 HLE(SetCameraProjMtx__Q34nw4r3g3d8G3DStateFRCQ34nw4r3g3d6Cameraib) {
     if (const u32 data = rd32(c.r[3])) sViewSrc = data;
+    cflight::onCamera(c, rd32(c.r[3]));
     callOriginal(c, "SetCameraProjMtx__Q34nw4r3g3d8G3DStateFRCQ34nw4r3g3d6Cameraib");
 }
 
 HLE(DrawOpa__Q34nw4r3g3d7ScnRootFv) {
-    interp::TagScope t(interp::TagCat::View, c.r[3], 0, 0);
-    callOriginal(c, "DrawOpa__Q34nw4r3g3d7ScnRootFv");
+    if (!cflight::onRootDraw(c, false, true)) return;
+    {
+        interp::TagScope t(interp::TagCat::View, c.r[3], 0, 0);
+        callOriginal(c, "DrawOpa__Q34nw4r3g3d7ScnRootFv");
+    }
+    cflight::onRootDraw(c, false, false);
 }
 HLE(DrawXlu__Q34nw4r3g3d7ScnRootFv) {
-    interp::TagScope t(interp::TagCat::View, c.r[3], 0, 1);
-    callOriginal(c, "DrawXlu__Q34nw4r3g3d7ScnRootFv");
+    if (!cflight::onRootDraw(c, true, true)) return;
+    {
+        interp::TagScope t(interp::TagCat::View, c.r[3], 0, 1);
+        callOriginal(c, "DrawXlu__Q34nw4r3g3d7ScnRootFv");
+    }
+    cflight::onRootDraw(c, true, false);
 }
 
 namespace {
