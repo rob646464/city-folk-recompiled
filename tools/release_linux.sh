@@ -35,14 +35,33 @@ fi
 step "Source ($WORK, from $SRC)"
 # The Windows checkout under /mnt/c belongs to another user as far as git is concerned.
 git() { command git -c safe.directory='*' "$@"; }
+# A git worktree's .git is a file naming its git dir, as a Windows path (C:/...) for a checkout
+# made on Windows: Linux git cannot follow it, so read it and fetch from the git dirs directly.
+gitdir_of() {  # <checkout> -> its git dir (a Linux path)
+    if [ -f "$1/.git" ]; then
+        local d
+        d=$(sed -n 's/^gitdir: //p' "$1/.git" | tr -d '')
+        case "$d" in
+            [A-Za-z]:/*) d="/mnt/$(printf %s "${d%%:*}" | tr 'A-Z' 'a-z')/${d#?:/}" ;;
+            /*) ;;
+            *) d="$1/$d" ;;
+        esac
+        echo "$d"
+    else
+        echo "$1/.git"
+    fi
+}
+SRC_GIT=$(gitdir_of "$SRC")
+SHA=$(git --git-dir="$SRC_GIT" rev-parse HEAD)
 if [ ! -d "$WORK/.git" ]; then
-    git clone --no-checkout "$SRC" "$WORK"
+    git init -q "$WORK"
 fi
-git -C "$WORK" fetch --force "$SRC" HEAD
+git -C "$WORK" fetch --force "$SRC_GIT" "$SHA" || { echo "cannot fetch $SHA from $SRC_GIT" >&2; exit 1; }
 git -C "$WORK" checkout --force --detach FETCH_HEAD
 git -C "$WORK" clean -fdq
 # Aurora from this checkout's submodule (has the pinned commit; no network needed).
-git -C "$WORK" config submodule.extern/aurora.url "$SRC/extern/aurora"
+AURORA_GIT=$(gitdir_of "$SRC/extern/aurora")
+git -C "$WORK" config submodule.extern/aurora.url "$AURORA_GIT"
 git -C "$WORK" -c protocol.file.allow=always submodule update --init --recursive --force
 # --force reset Aurora to pristine: drop the applied-patches stamp so configure applies them
 # again (with an unchanged patch set it would otherwise skip them and the build fails).

@@ -70,6 +70,10 @@ PRESETS = {
     "enh": {"enhanced_lighting": {"enabled": 1}},
     "fps120": {"video": {"target_fps": 120, "match_display_refresh": "false"}},
     "msaa4": {"video": {"msaa": 4}},
+    # Performance: 2400p (resolution_scale 5 = 5 x 480p, more pixels than 4K) at 120 fps, no VSync.
+    "perf4k120": {"video": {"target_fps": 120, "match_display_refresh": "false", "vsync": "false", "resolution_scale": 5}},
+    "perf4k": {"video": {"resolution_scale": 5, "vsync": "false"}},
+    "perf120": {"video": {"target_fps": 120, "match_display_refresh": "false", "vsync": "false"}},
 }
 
 
@@ -149,6 +153,7 @@ def main():
     ap.add_argument("--no-list", action="store_true", help="no shipped list (CF_PRECACHE=0): record from nothing")
     ap.add_argument("--routes", default="")
     ap.add_argument("--presets", default="default")
+    ap.add_argument("--cache-from", help="start from a copy of this cache folder (a warm cache) instead of an empty one")
     ap.add_argument("--warm", action="store_true", help="start each run a second time with its cache (warm hold)")
     ap.add_argument("--env", action="append", default=[], help="extra VAR=value for every run")
     ap.add_argument("--file", help="ad-hoc route file (run name 'adhoc'; with --frames, fixture save)")
@@ -170,6 +175,8 @@ def main():
             cache = d / "cache"
             if cache.exists():
                 shutil.rmtree(cache)
+            if a.cache_from:
+                shutil.copytree(a.cache_from, cache)
             r = run_once(a, d, route, frames, extra, PRESETS[preset], cache, "")
             r["preset"] = preset
             results.append(r)
