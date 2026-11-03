@@ -58,6 +58,7 @@ namespace world {
 // World units per metre-ish (particle sizes, ripple cells, puddle noise).
 constexpr float kWorldScale = 20.0f;
 void endWorld();
+void onLayoutDraw();
 
 // ---- settings ([enhanced_world]) --------------------------------------------------------------
 struct Settings {
@@ -487,8 +488,18 @@ void endWorld() {
         interp::note(at, interp::Kind::PosMtx, 0xCF57F004u, AURORA_WORLD_FX_XF_FOCUS, 12);
     }
     GXWorldFxEndAurora();
-    if (sLog && game::guestFrames() % 120 == 0) {
+    if (sLog && game::guestFrames() % 120 < 2) {
         const Amounts& a = sAmt;
+        {
+            const u32 data = sMainRoot + 0xF8 + rd8(sMainRoot + 0xF4) * 0x10C;
+            std::string s;
+            char b[32];
+            for (u32 o = 0x70; o < 0xB8; o += 4) {
+                std::snprintf(b, sizeof b, " %X:%.1f", o, rdf(data + o));
+                s += b;
+            }
+            log("[wfx] camera data%s", s.c_str());
+        }
         log("[wfx] f%u root %08X water %u ground %u outdoor %d | view %.3f %.3f %.3f %.1f / %.3f %.3f %.3f %.1f / %.3f %.3f %.3f %.1f "
             "target %.1f %.1f %.1f (view %.1f %.1f %.1f) | weather %d hour %.2f date %d wet %.2f rain %.2f sparkle %.2f haze %.2f "
             "moon %.2f particles %d",
@@ -588,10 +599,10 @@ HLE(Draw1Mat1ShpDirectly__Q24nw4r3g3dFQ34nw4r3g3d6ResMatQ34nw4r3g3d6ResShpPCQ34n
     callOriginal(c, "Draw1Mat1ShpDirectly__Q24nw4r3g3dFQ34nw4r3g3d6ResMatQ34nw4r3g3d6ResShpPCQ34nw4r4math5MTX34PCQ34nw4r4math5MTX34UlPQ34nw4r3g3d16Draw1Mat1ShpSwapPQ44nw4r3g3d8G3DState8IndMtxOp");
 }
 
-// The first HUD layout after the main pass ends the world.
-HLE(Draw__Q34nw4r3lyt6LayoutFRCQ34nw4r3lyt8DrawInfo) {
-    if (world::sOn && world::sPendingEnd) world::endWorld();
-    callOriginal(c, "Draw__Q34nw4r3lyt6LayoutFRCQ34nw4r3lyt8DrawInfo");
+// cf_hud.cpp: a layout's root pane is drawn (the 2D starts): the first one after the main pass ends
+// the world (after enhanced lighting's scene end, which goes in at the same point).
+void world::onLayoutDraw() {
+    if (sOn && sPendingEnd) endWorld();
 }
 
 // dWeather_c every frame (USA / Europe / Japan / Korea).

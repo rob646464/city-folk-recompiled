@@ -84,12 +84,17 @@ int anchorFor(int depth, u32 pane, float tx) {
 
 }  // namespace
 
+namespace world {
+void onLayoutDraw();
+}
+
 HLE(Draw__Q34nw4r3lyt4PaneFRCQ34nw4r3lyt8DrawInfo) {
     const u32 pane = c.r[3];
     const int depth = sDepth;
     if (depth == 0) {
         sRootLr = c.lr;
         sRootPane = pane;
+        world::onLayoutDraw();  // cf_world.cpp: the 2D starts, the world effects end (after enhanced lighting's scene end)
     }
     const float tx = rdf32(pane + kGlbTx);
     std::optional<ws::AnchorScope> scope;

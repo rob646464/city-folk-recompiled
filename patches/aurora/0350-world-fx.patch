@@ -1,8 +1,7 @@
 diff --git a/cmake/aurora_gx.cmake b/cmake/aurora_gx.cmake
-index c3995ce..922106f 100644
 --- a/cmake/aurora_gx.cmake
 +++ b/cmake/aurora_gx.cmake
-@@ -13,6 +13,7 @@ add_library(aurora_gx STATIC
+@@ -13,6 +13,7 @@
          lib/gfx/efb_ram.cpp
          lib/gfx/efb_blend6.cpp
          lib/gfx/enhanced.cpp
@@ -12,7 +11,6 @@ index c3995ce..922106f 100644
          lib/gfx/texture_convert.cpp
 diff --git a/include/aurora/world_fx.h b/include/aurora/world_fx.h
 new file mode 100644
-index 0000000..34334c2
 --- /dev/null
 +++ b/include/aurora/world_fx.h
 @@ -0,0 +1,122 @@
@@ -139,13 +137,13 @@ index 0000000..34334c2
 +
 +#endif
 diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
-index ae8cdcd..ed30571 100644
 --- a/include/dolphin/gx/GXAurora.h
 +++ b/include/dolphin/gx/GXAurora.h
-@@ -181,6 +181,14 @@ extern "C" {
+@@ -180,6 +180,14 @@
+  * only this call, and the list itself lives in host memory (kept alive by the caller).
   */
  #define GX_AURORA_CALL_HOST_DL 0x0069
- 
++
 +/*
 + * 0350: world effects (include/aurora/world_fx.h). GX_AURORA_SET_SURFACE, u8 kind
 + * (AURORA_SURFACE_*): surface kind of the following draws. GX_AURORA_WORLD_FX_END: end of the 3D
@@ -153,12 +151,10 @@ index ae8cdcd..ed30571 100644
 + */
 +#define GX_AURORA_SET_SURFACE 0x0070
 +#define GX_AURORA_WORLD_FX_END 0x0071
-+
+ 
  #define GX2_SET_POLYGON_OFFSET 0x1000
  
- 
 diff --git a/lib/dolphin/gx/GXAurora.cpp b/lib/dolphin/gx/GXAurora.cpp
-index 7dce6bd..e22413f 100644
 --- a/lib/dolphin/gx/GXAurora.cpp
 +++ b/lib/dolphin/gx/GXAurora.cpp
 @@ -2,6 +2,7 @@
@@ -169,10 +165,11 @@ index 7dce6bd..e22413f 100644
  
  #include <algorithm>
  #include <limits>
-@@ -185,6 +186,25 @@ void GXSetDrawClassAurora(uint8_t drawClass) {
+@@ -184,6 +185,25 @@
+ }
  
  void GXSceneEndAurora(void) { GX_WRITE_AURORA(GX_AURORA_SCENE_END); }
- 
++
 +// 0350: world effects (aurora/world_fx.h).
 +void GXSetSurfaceAurora(uint8_t kind) {
 +  GX_WRITE_AURORA(GX_AURORA_SET_SURFACE);
@@ -191,12 +188,10 @@ index 7dce6bd..e22413f 100644
 +    GX_WRITE_F32(values[i]);
 +  }
 +}
-+
+ 
  void GXSetMaterialHintAurora(uint8_t hint) {
    GX_WRITE_AURORA(GX_AURORA_SET_MATERIAL_HINT);
-   GX_WRITE_U8(hint);
 diff --git a/lib/gfx/recording.cpp b/lib/gfx/recording.cpp
-index 04ea024..880033e 100644
 --- a/lib/gfx/recording.cpp
 +++ b/lib/gfx/recording.cpp
 @@ -3,6 +3,7 @@
@@ -207,7 +202,7 @@ index 04ea024..880033e 100644
  #include "frame.hpp"
  #include "resource_cache.hpp"
  
-@@ -588,6 +589,7 @@ void begin_recording(FramePacket& packet, size_t frameSlot) {
+@@ -588,6 +589,7 @@
    g_recorder.frameSlot = frameSlot;
    g_passSnapshotPools[frameSlot].used = 0;
    enhanced::begin_frame();
@@ -217,10 +212,9 @@ index 04ea024..880033e 100644
    g_recorder.suspendedEfbPass.reset();
 diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
 new file mode 100644
-index 0000000..57f42ce
 --- /dev/null
 +++ b/lib/gfx/world_fx.cpp
-@@ -0,0 +1,1121 @@
+@@ -0,0 +1,1132 @@
 +// World effects (0350): see include/aurora/world_fx.h.
 +//
 +// At GX_AURORA_WORLD_FX_END the EFB pass is sealed (push_scene_op) and, on the frame encoder:
@@ -373,7 +367,7 @@ index 0000000..57f42ce
 +  size: vec4f, vp: vec4f, proj: vec4f, projz: vec4f, dr: vec4f,
 +  view0: vec4f, view1: vec4f, view2: vec4f,
 +  focus: vec4f, refl: vec4f, p1: vec4f, hazeCol: vec4f, zenith: vec4f, horizon: vec4f,
-+  moonDir: vec4f, ambient: vec4f, part: vec4f, wind: vec4f, pass: vec4f,
++  moonDir: vec4f, ambient: vec4f, part: vec4f, wind: vec4f, pp: vec4f,
 +};
 +@group(0) @binding(0) var<uniform> u: FxU;
 +@group(0) @binding(1) var samp: sampler;
@@ -594,7 +588,7 @@ index 0000000..57f42ce
 +  let p = view_pos(px, d);
 +  let t = u.dr.w;
 +  let ws = max(u.part.z, 1e-3);
-+  let jitter = hash12(px + fract(t * 7.0) * 61.0);
++  let jitter = 0.5;
 +  let steps = i32(u.refl.y);
 +  if (u.part.w > 0.5 && view_ok()) {
 +    let m = textureLoad(tmask, vec2i(px), 0);
@@ -602,15 +596,17 @@ index 0000000..57f42ce
 +    let ground = m.a > 0.3 && m.a < 0.75;
 +    if (water && ((en & 1u) != 0u || (en & 4u) != 0u)) {
 +      let pw = view_pos(px, load_mdepth(px));
-+      var n = depth_normal(px, 1);
++      var n = up_view();
 +      let up = up_view();
 +      // the water plane: mostly its depth normal, held towards up (flat water)
-+      n = normalize(mix(up, n, 0.35));
 +      if ((en & 1u) != 0u) {
 +        // the game's own water pattern bends the reflection (luminance gradient of the mask)
-+        let lx = luma(textureLoad(tmask, vec2i(px + vec2f(2.0, 0.0)), 0).rgb) - luma(textureLoad(tmask, vec2i(px - vec2f(2.0, 0.0)), 0).rgb);
-+        let ly = luma(textureLoad(tmask, vec2i(px + vec2f(0.0, 2.0)), 0).rgb) - luma(textureLoad(tmask, vec2i(px - vec2f(0.0, 2.0)), 0).rgb);
-+        n = tangent_bend(n, vec2f(lx, ly) * 0.6 * u.refl.z);
++        let o = max(u.size.y * 0.004, 1.5);
++        let lx = luma(textureSampleLevel(tmask, samp, (px + vec2f(o, 0.0)) * u.size.zw, 0.0).rgb) -
++                 luma(textureSampleLevel(tmask, samp, (px - vec2f(o, 0.0)) * u.size.zw, 0.0).rgb);
++        let ly = luma(textureSampleLevel(tmask, samp, (px + vec2f(0.0, o)) * u.size.zw, 0.0).rgb) -
++                 luma(textureSampleLevel(tmask, samp, (px - vec2f(0.0, o)) * u.size.zw, 0.0).rgb);
++        n = tangent_bend(n, vec2f(lx, ly) * 0.35 * u.refl.z);
 +      }
 +      let wpos = world_pos(pw);
 +      if ((en & 4u) != 0u && u.p1.x > 0.0) {
@@ -641,13 +637,13 @@ index 0000000..57f42ce
 +        let base = col * mix(1.0, 0.62, wet * mix(0.55, 1.0, dirt));
 +        let up = up_view();
 +        var n = normalize(mix(depth_normal(px, 0), up, 0.6));
-+        let flat = dot(n, up);
++        let flatness = dot(n, up);
 +        var pn = up;
 +        if ((en & 4u) != 0u && u.p1.x > 0.0) {
 +          pn = tangent_bend(up, ripples(wpos.xz, t, 0.55 + 0.9 * u.p1.x, ws * 0.45) * 0.3 * min(u.p1.x * 1.5, 1.0));
 +        }
 +        let v = normalize(-p);
-+        let pud = puddle * smoothstep(0.85, 0.97, flat);
++        let pud = puddle * smoothstep(0.85, 0.97, flatness);
 +        var refl = vec3f(0.0);
 +        if (pud > 0.03) {
 +          refl = reflection(p, pn, max(steps - 4, 8), jitter, (en & 1u) != 0u);
@@ -844,7 +840,7 @@ index 0000000..57f42ce
 +@fragment fn fs_final(in: VsOut) -> @location(0) vec4f {
 +  let px = in.pos.xy;
 +  var c: vec3f;
-+  if (u.pass.x > 0.5) {
++  if (u.pp.x > 0.5) {
 +    c = blur(px, vec2f(0.0, 1.0));
 +    // diorama look: a touch more colour and contrast
 +    let l = luma(c);
@@ -1151,6 +1147,15 @@ index 0000000..57f42ce
 +  if (kind != AURORA_SURFACE_WATER && kind != AURORA_SURFACE_GROUND) {
 +    return;
 +  }
++  static const bool sMtxLog = std::getenv("AURORA_WORLD_FX_MTX_LOG") != nullptr; // debug: a surface draw's matrix
++  if (sMtxLog) {
++    static uint32_t sN = 0;
++    if (sN++ % 400 == 0) {
++      const float* m = reinterpret_cast<const float*>(&st.pnMtx[st.currentPnMtx % MaxPnMtx].pos);
++      Log.info("surface draw kind {} pnmtx {}: {} {} {} {} / {} {} {} {} / {} {} {} {}", kind, st.currentPnMtx, m[0], m[1], m[2], m[3],
++               m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
++    }
++  }
 +  if (!wants_mask(g_cfg) || g_draws.size() >= MaxSurfaceDraws || !config.colorUpdate) {
 +    return;
 +  }
@@ -1344,7 +1349,6 @@ index 0000000..57f42ce
 +}
 diff --git a/lib/gfx/world_fx.hpp b/lib/gfx/world_fx.hpp
 new file mode 100644
-index 0000000..dd16367
 --- /dev/null
 +++ b/lib/gfx/world_fx.hpp
 @@ -0,0 +1,25 @@
@@ -1374,7 +1378,6 @@ index 0000000..dd16367
 +
 +} // namespace aurora::gfx::world_fx
 diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
-index 0544d6e..d73925b 100644
 --- a/lib/gx/command_processor.cpp
 +++ b/lib/gx/command_processor.cpp
 @@ -1,4 +1,5 @@
@@ -1383,7 +1386,7 @@ index 0544d6e..d73925b 100644
  #include "command_processor.hpp"
  
  #include <optional>
-@@ -326,6 +327,7 @@ s64 aurora_payload_len(u16 subCmd, const u8* p, size_t avail) noexcept {
+@@ -326,6 +327,7 @@
      return avail >= 2 ? fixed(2 + be16(p)) : -1;
    case GX_AURORA_DEBUG_GROUP_POP:
    case GX_AURORA_SCENE_END:
@@ -1391,7 +1394,7 @@ index 0544d6e..d73925b 100644
    case GX_AURORA_REQUEST_DEPTH_SNAPSHOT:
    case GX_AURORA_END_OFFSCREEN:
      return 0;
-@@ -350,6 +352,7 @@ s64 aurora_payload_len(u16 subCmd, const u8* p, size_t avail) noexcept {
+@@ -350,6 +352,7 @@
    case GX_AURORA_SET_CULL_OVERRIDE:
    case GX_AURORA_SET_DRAW_CLASS:
    case GX_AURORA_SET_MATERIAL_HINT:
@@ -1399,7 +1402,7 @@ index 0544d6e..d73925b 100644
    case GX_AURORA_STATE_SAVE:
    case GX_AURORA_STATE_RESTORE:
    case GX_AURORA_COPY_GENERATION:
-@@ -416,7 +419,8 @@ size_t plausible_command_len(const u8* data, size_t size, size_t pos, bool& coun
+@@ -416,7 +419,8 @@
      const u32 header = be32(p);
      const u32 count = ((header >> 16) & 0xFFFF) + 1;
      const u32 addr = header & 0xFFFF;
@@ -1409,7 +1412,7 @@ index 0544d6e..d73925b 100644
      return known && avail >= 4 + size_t(count) * 4 ? 5 + size_t(count) * 4 : 0;
    }
    case GX_LOAD_INDX_A:
-@@ -1308,6 +1312,9 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
+@@ -1308,6 +1312,9 @@
        return; // debug: hidden
      }
    }
@@ -1419,7 +1422,7 @@ index 0544d6e..d73925b 100644
    if (early_z_split_cached(cache)) [[unlikely]] {
      push_early_z_split(cache, drawData);
      return;
-@@ -1804,6 +1811,12 @@ void handle_aurora(ByteReader& reader) noexcept {
+@@ -1804,6 +1811,12 @@
      if (!g_gxState.replayMask) {
        gfx::enhanced::scene_end();
      }
@@ -1433,10 +1436,9 @@ index 0544d6e..d73925b 100644
      const f32 frontOffset = reader.read<f32>();
      const f32 frontScale = reader.read<f32>();
 diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
-index d2dfcf8..622d430 100644
 --- a/lib/gx/gx.hpp
 +++ b/lib/gx/gx.hpp
-@@ -361,6 +361,8 @@ struct GXState {
+@@ -361,6 +361,8 @@
    bool twoSided = false;        // GX_AURORA_SET_CULL_OVERRIDE
    u8 drawClass = 0;             // GX_AURORA_SET_DRAW_CLASS (AURORA_DRAW_CLASS_*)
    u8 materialHint = 0;          // GX_AURORA_SET_MATERIAL_HINT (AURORA_MATERIAL_*)
@@ -1446,10 +1448,9 @@ index d2dfcf8..622d430 100644
    GXBlendFactor blendFacSrc = GX_BL_SRCALPHA;
    GXBlendFactor blendFacDst = GX_BL_INVSRCALPHA;
 diff --git a/lib/gx/regs.cpp b/lib/gx/regs.cpp
-index beb9006..5c213fb 100644
 --- a/lib/gx/regs.cpp
 +++ b/lib/gx/regs.cpp
-@@ -1069,6 +1069,13 @@ void handle_cp(u8 addr, u32 value) noexcept {
+@@ -1069,6 +1069,13 @@
  }
  
  bool copy_xf_data(u32 addr, const u8* data, u32 len, std::endian e) noexcept {
