@@ -18,7 +18,7 @@ EXE=CityFolkRecomp
 cd "$ROOT"
 # CF_DISC pointing nowhere: never the dev build, whatever a cache or checkout holds.
 cmake --preset linux-clang -B "$BUILD" -DCF_LLVM_DIR="$LLVM_BIN" -DCF_DISC=/nonexistent > /dev/null
-cmake --build "$BUILD" --target $EXE cf_libxml2_stub
+cmake --build "$BUILD" -j "${CF_BUILD_JOBS:-6}" --target $EXE cf_libxml2_stub
 
 rm -rf "${OUT:?}/$NAME"
 mkdir -p "$OUT"

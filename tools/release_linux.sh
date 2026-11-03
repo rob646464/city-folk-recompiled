@@ -40,7 +40,7 @@ git() { command git -c safe.directory='*' "$@"; }
 gitdir_of() {  # <checkout> -> its git dir (a Linux path)
     if [ -f "$1/.git" ]; then
         local d
-        d=$(sed -n 's/^gitdir: //p' "$1/.git" | tr -d '')
+        d=$(sed -n 's/^gitdir: //p' "$1/.git" | tr -d '\r')
         case "$d" in
             [A-Za-z]:/*) d="/mnt/$(printf %s "${d%%:*}" | tr 'A-Z' 'a-z')/${d#?:/}" ;;
             /*) ;;

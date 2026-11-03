@@ -18,7 +18,7 @@ EXE=CityFolkRecomp
 
 cd "$ROOT"
 cmake --preset macos-clang -DCF_LLVM_DIR="$LLVM_BIN" -DCF_DISC=/nonexistent > /dev/null
-cmake --build "$BUILD" --target $EXE
+cmake --build "$BUILD" -j "${CF_BUILD_JOBS:-6}" --target $EXE
 
 rm -rf "${OUT:?}/$NAME"
 mkdir -p "$OUT"
