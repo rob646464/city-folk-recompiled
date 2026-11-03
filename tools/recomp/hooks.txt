@@ -100,3 +100,5 @@ fn_80177F44
 # package (save letter slot, letter, item, letter id); src/recomp/distributions.cpp records which
 # distribution the town received and calls the original. USA only.
 fn_8010F194
+# Pete hands a kept Nintendo letter over (copies it into the player's mail); logged by distributions.cpp.
+fn_80104520

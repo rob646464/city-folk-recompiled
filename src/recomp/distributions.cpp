@@ -384,6 +384,7 @@ struct State {
 State sState;
 bool sStateLoaded = false;
 std::map<std::string, std::string> sLocalResult;  // original file -> KD's verdict
+u32 sPeteDelivered = 0;  // letter id Pete last handed over (this session)
 
 void loadState() {
     if (sStateLoaded) return;
@@ -956,7 +957,7 @@ HLE(fn_8010F194) {
     std::lock_guard lk(sM);
     loadState();
     auto it = sState.served.find(id);
-    recomp::log("[distrib] the game took Nintendo letter %08X (%s): Pete brings it", id,
+    recomp::log("[distrib] the game took Nintendo letter %08X (%s): Pete brings it at the next town load", id,
                 it != sState.served.end() ? kDefs[it->second].key : "not from this port");
     if (it == sState.served.end()) return;
     TownState& t = town();
@@ -964,6 +965,17 @@ HLE(fn_8010F194) {
     t.cycle[kDefs[it->second].key] = loopSlot(consoleDay(consoleNow())).cycle;
     t.lastDelivery = consoleNow();
     saveState();
+}
+
+// Pete (d_a_npc_sp_perioNP) hands the kept Nintendo letter to the player (USA fn_80104520:
+// copies the save's Nintendo-letter slot into the player's mail; r3 = 1 when it did).
+HLE(fn_80104520) {
+    const u32 save = rd32(0x8074E960u);
+    const u32 id = save ? rd32(save + 0xFC980u) : 0;
+    callOriginal(c, "fn_80104520");
+    recomp::log("[distrib] Pete handed Nintendo letter %08X to the player (result %u)", id, c.r[3]);
+    std::lock_guard lk(sM);
+    sPeteDelivered = c.r[3] ? id : sPeteDelivered;
 }
 
 void onGuestFrame(Ctx& c) {
@@ -1009,9 +1021,9 @@ void onGuestFrame(Ctx& c) {
     const bool town = save >= 0x80000000u && save < 0x94000000u;
     static u32 sFrame = 0;
     if (++sFrame % 600 == 0 && std::getenv("CF_NWC24_LOG"))
-        recomp::log("[distrib] frame %u: save %08X, town WiiConnect24 %d, task %d; game's check: state %d error %d/%d", sFrame,
-                    save, town ? rd8(save + 0x735E4u) : -1, nwc24::status().taskRegistered, s32(rd32(0x8074EBCCu)),
-                    s32(rd32(0x8074EBD0u)), s32(rd32(0x8074EBD4u)));
+        recomp::log("[distrib] frame %u: save %08X, town WiiConnect24 %d, task %d; game's check: state %d error %d/%d; "
+                    "Nintendo letter slot %08X", sFrame, save, town ? rd8(save + 0x735E4u) : -1, nwc24::status().taskRegistered,
+                    s32(rd32(0x8074EBCCu)), s32(rd32(0x8074EBD0u)), s32(rd32(0x8074EBD4u)), town ? rd32(save + 0xFC980u) : 0);
     if (const char* d = std::getenv("CF_DISTRIB_SAVE_DUMP"); d && town && sFrame == u32(std::atoi(d))) {
         std::error_code ec;
         fs::create_directories(folder(), ec);
@@ -1110,8 +1122,9 @@ bool drawMenuPage() {
                                   "then ignores Nintendo's letters. On: the port switches it on with the game's own setting\n"
                                   "(what Rover's question does), kept when you save.");
             dirty |= recomp::menu::Checkbox("Deliver while playing", &es.liveDelivery);
-            ImGui::SetItemTooltip("Runs the game's own WiiConnect24 check as soon as a letter is downloaded, so it does\n"
-                                  "not wait until you load your town again (on a Wii the game checks when the town loads).");
+            ImGui::SetItemTooltip("Runs the game's own WiiConnect24 check (the one it makes when a town is loaded) as soon as\n"
+                                  "a letter is downloaded, so the game keeps it at once. Pete hands it over when you next\n"
+                                  "load your town (save first). Off: the game picks it up at that load itself.");
         }
     }
     std::lock_guard lk(sM);

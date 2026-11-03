@@ -38,11 +38,14 @@ which we treat as data):
 
 | | North America | Europe | Japan | South Korea |
 |---|---|---|---|---|
-| distributions (items + designs) | 41 | 37 | 33 | 21 |
-| of these in the archive | 39 | 35 | 21 | 8 |
-| not in the archive | 1,000 Bells, candy (existing items) | ... | top, chocolate heart, Girl's Day updo, tokonoma, student cap, carp banner, ghost umbrella, morning glory, eggplant cow, celebration hat, red/white team hats, hagoita, emperor's cap, blossom lantern, Kintaro wig + apron, tsunokakushi, cucumber horse | flower bouquet, kimbap plate, school caps, red horned hat, samgyetang bowl, white police cap, tteok plate, red nose, colorful hanbok, Hangul T-shirt |
+| distributions (an item and its design count as one) | 52 | 47 | 52 | 17 |
+| of these in the archive | 50 | 47 (all) | 36 | 7 |
+| not in the archive | 1,000 Bells, candy (both ordinary items) | none | top, chocolate heart, Girl's Day updo, tokonoma, carp banner, ghost umbrella, morning glory, eggplant cow, red/white team hats, hagoita, emperor's cap, blossom lantern, Kintaro wig + apron, tsunokakushi, cucumber horse | flower bouquet, kimbap plate, white school cap, school cap, samgyetang bowl, colorful hanbok, Hangul T-shirt, white police cap, tteok plate, red nose |
 
-(Counts: see "Testing" for the command that prints them; the table is filled from it.)
+(Printed by `CF_DISTRIB_DESCRIBE=<n>`, "Testing". Japan's student cap / celebration hat and
+Korea's red horned hat count as in the archive through their designs only: the hat itself is
+missing, the design is there.) Every archive item carries its name in all ten languages, so with
+"Include other regions' distributions" every region gets all 71 released ones in the archive.
 
 Never distributed but in the archive (offered with "Receive now" only, never scheduled): red
 headgear, blue Pikmin, yellow Pikmin (Nintendo's unreleased items), Blue Falcon, Nintendo bench,
@@ -62,9 +65,13 @@ game (its NWC24 library, recompiled game code here) only:
 2. installs its key file `wc24pubk.mod` in its data folder (RSA-2048 modulus at 0, AES-128 key at
    0x200; the game carries both in main.dol),
 3. creates `wc24dl.vff` (a FAT volume file, 0x5A000 bytes) in its data folder,
-4. registers download tasks in `/shared2/wc24/nwc24dl.bin`: task 0 = `http://nwcs.wapp.wii.com/ruu/rvforestdl_us.enc`
-   (PAL `_eu`, JP `_jp`, KR `_kr`), task 1 = `http://nwcs.wapp.wii.com/nw/f/RUD/E.enc`, both with
-   flags 0x0A (= verify with the title's RSA key, decrypt with the title's AES key),
+4. registers download tasks in `/shared2/wc24/nwc24dl.bin` (`fn_800EA9F0`, values from tables in
+   main.dol): the distribution `http://nwcs.wapp.wii.com/ruu/rvforestdl_us.enc` (PAL `_eu`, JP
+   `_jp`, KR `_kr`) stored as **`game_data.bin`** in `wc24dl.vff`, every 720 minutes; and
+   `http://nwcs.wapp.wii.com/nw/f/RUD/E.enc` stored as **`prc_list.bin`** (the profanity list
+   update), every 1440 minutes; both with flags 0x0A (= verify with the title's RSA key, decrypt
+   with the title's AES key). The distribution task is registered only for a town whose own
+   WiiConnect24 setting is on; the profanity task for every town,
 5. later reads the downloaded file from `wc24dl.vff`, opens it as a U8 archive (`info.bin`,
    `item.bin`, `ltr<region><language>.bmg`, `design.bin`) and, when the letter id in `info.bin`
    differs from the last one the town got, keeps the letter + item for Pete (and the design for
@@ -77,13 +84,21 @@ the save's Nintendo-letter slot through `fn_8010F194`.
 
 The port implements what IOS does:
 
-- **KD** (`/dev/net/kd/request`, `/dev/net/kd/time`) and a minimal **NCD** (`/dev/net/ncd/manage`:
-  one wired connection, set up and tested): only while the feature is on. Otherwise the devices
-  stay absent, as before, and the game sees WiiConnect24 off.
-- **The System Menu's WiiConnect24 files**, created when missing and only while the feature is
-  on: `nwc24msg.cfg` + `.cbk` (registered, mail domain, Nintendo's URLs), `nwc24fl.bin`,
-  `nwc24dl.bin` (120 empty entries), `mbox/wc24send|recv.ctl` and `.mbx` (empty VFF volumes).
-  SYSCONF `NET.WCFG` = 1 while on, 0 while off.
+- **KD** (`/dev/net/kd/request`, `/dev/net/kd/time`, `nwc24_dl.cpp`) and a minimal **NCD**
+  (`/dev/net/ncd/manage`: ReadConfig 0x03 answers one wired connection, set up and tested): only
+  while the feature is on. Otherwise main's `KdDevice` (ios_devices.cpp: every request accepted,
+  WiiConnect24 off) answers and NCD stays absent, so saving works exactly as before.
+- **The System Menu's WiiConnect24 files** come from `sysconf.cpp prepareWc24` (main), on or off.
+  SYSCONF `NET.WCFG` = 1 while the feature is on, 0 while off. With it on, the game's boot check
+  (`fn_80178640`) reports WiiConnect24 available (state 1 at r13-0x2D74) instead of error 109020.
+- **The town's own setting**: a town started with WiiConnect24 off keeps it off (save +0x735E4;
+  the HUD then shows no "W" next to the clock) and the game ignores Nintendo's letters. With
+  "Turn WiiConnect24 on for my town" (default on) the port calls the game's own setter
+  `fn_80177DE0` (what Rover's question at player creation and the attic phone call; it sets the
+  flag only while the boot check said "available") once a town is in play; saved with the town.
+- **VFF**: the game's VF library formats `wc24dl.vff` itself (media byte F0, a folder `mb`) and
+  keeps long (VFAT) names, so KD writes `game_data.bin` with long-name entries and an 8.3 alias
+  (`vff.cpp`); the game's own VF code reads it back (verified).
 - **KD's download check**: every 60 s, when the game resumes KD's scheduler after using its files,
   and at once for "Receive now". For each type-3 task of the running title it asks the "server"
   (`distrib::serve`) for the URL. A WC24 file (`.enc`) goes through KD's checks exactly as on a
@@ -115,13 +130,15 @@ keeps the letter and item, and Pete delivers it. Original `.enc` files the playe
 `<data folder>/distributions/` take the full path with the signature check, so only genuine
 Nintendo files are accepted from there.
 
-Not forged, not patched: the game's code is unchanged (one observation hook, see below), the
-title key is the game's own, no signature is created or skipped for a WC24 file.
+Not forged, not patched: the game's code is unchanged (two observation hooks that call the
+originals, see below), the title key is the game's own, no signature is created, and no WC24 file
+gets past a failed check.
 
 ### The second task (`nw/f/RUD/E.enc`)
 
-Not served (no archive data): KD answers "not found", as the game expects when there is nothing.
-Nintendo's server still has `E.enc` / `P.enc` / `J.enc` / `K.enc`; what they hold is not known.
+Stored as `prc_list.bin`: the profanity list update (the game's own list is `Prc/*.bin` on the
+disc). Not served (no archive data): KD answers "not found", as when there is nothing. Nintendo's
+server still has `E.enc` / `P.enc` / `J.enc` / `K.enc`.
 
 ## 3. Schedules (F1 "Delivery")
 
@@ -135,7 +152,9 @@ cycle repeats forever:
   regions' distributions" also the others whose item has a name in the game's language (every
   archive item has all ten languages, so all of them).
 - Slots: one delivery every 7 days (default), every 14 days (both counted from Monday
-  2000-01-03), or on the 1st of every month. No two deliveries in one week.
+  2000-01-03), or on the 1st of every month. One delivery per slot: when one came in the slot
+  already (a "Receive now"), the slot's own waits for the next slot, so no two in one week (the
+  game keeps one Nintendo letter at a time).
 - Order: computed, the same for everyone (a function of the catalogue and the date only, no hand
   list, no year limit). Walking the slots from 2000: when the cycle's remaining set is empty a new
   cycle starts with all of them. In each slot: a seasonal distribution (themed for its time of
@@ -150,6 +169,10 @@ cycle repeats forever:
   came in. A slot whose distribution the town already got in this cycle (e.g. by "Receive now")
   delivers nothing; a new cycle delivers it again.
 - Letter ids: `4C` + slot number (stable per slot: the game does not take the same letter twice).
+  KD's "If-Modified-Since": the package stored last is not stored again.
+- Example (USA, weekly, from 2026-10-26): Kapp'n model, shopping cart, anniversary cake, creepy
+  crystal, golden bench, golden clock, snowman head (Dec 7), red Pikmin, golden table, golden
+  carpet, snowman vanity (Jan 4), creepy skeleton (`CF_DISTRIB_DESCRIBE=12`).
 
 **Original dates**: each distribution on its original dates in the game's region (other regions
 with the option), every year on the same month/day (default) or only in its original year
@@ -164,10 +187,21 @@ first, at most one per 7 days; a town gets a distribution once per year. Letter 
 
 **Deliver while playing** (USA, on by default): when KD has stored a package while a town is in
 play, the port starts the game's own WiiConnect24 job (`fn_801783B4`, the call player select
-makes) so the letter reaches Pete without loading the town again; once per town it also starts it
-when the game has not registered its task yet (a new town registers it only when loaded). On a
-Wii the letter would come after the next time the town is loaded. PAL/Japan/Korea: the next time
-the town is loaded (no game hooks there yet).
+makes), so the game takes the letter at once; once per town it also starts it when the game has
+not registered its distribution task yet (a town whose setting was just switched on registers it
+only at its next load). Pete then hands the letter over **when the town is next loaded** (he
+greets the player at the house on arrival; seen in the test below), so the player must save
+first. Without the option the game reads the package at that load itself (the job at player
+select runs before the town), with the same result; the option only saves one reload for a town
+whose WiiConnect24 setting was just switched on. PAL/Japan/Korea: always at the next load (no game
+hooks there yet).
+
+Pete: the letter kept in the save's Nintendo-letter slot (save +0xFC980: letter id, then the
+letter) is handed over by Pete (`d_a_npc_sp_perioNP`, "Perio" is Pete's Japanese name): on the
+next town load he waits at the player's house, says "You have a letter from Nintendo!", and his
+`fn_80104520` copies the slot into the player's letters (pockets > Letters: "From Nintendo", with
+the item as its present, "Remove Present"). The id stays in the slot: the same package read again
+gives no second letter. Hooked (USA) only to log `[distrib] Pete handed Nintendo letter ...`.
 
 Received tracking: USA through a hook on `fn_8010F194` (the game keeps a Nintendo letter; the hook
 calls the original and records the letter id's distribution for the town); other bases: when KD
@@ -175,36 +209,74 @@ stored the package.
 
 ## 4. F1 page
 
-Delivery mode, How often (In turn), Every year (Original dates), Include other regions'
-distributions, Deliver while playing (USA); status (archive files, task / key / download box,
-last check, next delivery date and item); the table of every distribution with its original
-dates per region, its state (available / available (other region) / received / not in archive /
-downloading) and "Receive now"; the folder for original `.enc` files with "Receive now" per file
-and KD's verdict. Credit line: "Distribution archive courtesy of WiiLink".
+F1 > Online > Nintendo events (next to Play together): Delivery mode, How often (In turn), Every
+year (Original dates), Include other regions' distributions, Turn WiiConnect24 on for my town and
+Deliver while playing (USA); status (archive files, task / key / download box, last check, next
+delivery date and item); the table of every distribution with its original dates per region, its
+state (available / available (other region) / received / not in archive / downloading) and
+"Receive now"; the folder for original `.enc` files with "Receive now" per file and KD's verdict.
+Credit line: "Distribution archive courtesy of WiiLink". `CF_MENU_ID_CHECK` sweep: 0 conflicts.
 
 ## 5. Files and network
 
 - Archive cache: `<data folder>/distributions/wiilink-archive/` (items, designs, letters; each
   checked against the SHA-1 pinned in `distributions_archive.inc`, from commit 402566bc of
   WiiLink24/ACDLCPicker; a changed file is not used). Downloaded from raw.githubusercontent.com,
-  only while the feature is on, once.
+  only while the feature is on, once (141 files, ~1 MB).
+- State: `<data folder>/distributions/state.ini` (town, received distributions with time and
+  cycle, last stored letter id, "Receive now" counter).
 - Original files: `<data folder>/distributions/*.enc`.
 - Nothing from the archive is in this repository.
 
 ## 6. Testing
 
 - `cf_distrib_test` (ctest `distrib`): SHA-1, AES-128-OFB (SP 800-38A), RSA modexp, VFF write /
-  read / remove on FAT12 and FAT16; `cf_distrib_test <file.enc> <wc24pubk.mod>` checks one file.
+  read / remove with long names on FAT12 and FAT16; `cf_distrib_test <file.enc> <wc24pubk.mod>`
+  checks one file.
 - `CF_DISTRIB=off|loop|original|manual` overrides the mode; `CF_NWC24_LOG=1` logs every KD / NCD
-  request, the town's WiiConnect24 flag and the task state; `CF_DISTRIB_NOW=<key>[@<s>]` presses
-  "Receive now" for a distribution once the task is registered; `CF_DISTRIB_SAVE_DUMP=<frame>`
-  dumps the save data (research).
+  request and, every 600 frames, the town's WiiConnect24 flag, the task state, the game's
+  WiiConnect24 check and the Nintendo-letter slot; `CF_DISTRIB_NOW=<key>[@<s>]` presses "Receive
+  now" once the task is registered; `CF_DISTRIB_DESCRIBE=<n>` logs the per-region counts and the
+  next n loop slots; `CF_DISTRIB_SAVE_DUMP=<frame>` dumps the save data (research).
+- Route `tools/routes/mailbox.txt` (user-town fixture): continue, walk to the mailbox, open it,
+  pockets, letters, read the first one.
+
+### Verified on the USA disc (2026-11-02, user-town fixture, scratch folders)
+
+1. **Receive now** (`CF_DISTRIB=manual CF_DISTRIB_NOW=creepy_clock`, console clock 08:50, continue
+   route, `CF_FORCE_SAVE=7000`): the town's WiiConnect24 setting was off and was switched on with
+   the game's setter; the archive (141 files) was downloaded and checked; the game registered its
+   task (`game_data.bin`), KD stored the package, the game's job took Nintendo letter `4D000001`
+   (creepy clock); the save completed (result word 1). Loading that save again: Pete waits at the
+   house, "You have a letter from Nintendo!", `fn_80104520` result 1; pockets > Letters: "From
+   Nintendo" with a present; read: the archive's letter on the Halloween stationery ("This clock
+   must be haunted... From Jack").
+2. **Original dates with the clock offset** (`mode=2`, `original_yearly=false`, clock offset to
+   2009-07-25 09:05): KD served the Dolphin model (NA 2009-07-23 to 08-03), the game took letter
+   `4F0157D9`.
+3. **In turn** (`CF_DISTRIB=loop`, 2026-10-28): the week of 2026-10-26 served the Kapp'n model
+   (slot 1399, letter `4C000577`); stored once, then "not modified".
+4. **Off** (default settings, same fixture, continue + `CF_FORCE_SAVE`): no KD/NCD of this module
+   opened, no `[nwc24]`/`[distrib]` line, no distributions folder, no network access by this
+   feature, `wc24dl.vff` byte-identical to the fixture's, no distribution task; the save completed
+   (result word 1).
 
 ## 7. Gaps
 
 - Letters in languages other than English: the archive has only the North American English text;
-  other languages of a package get the English body with a localized greeting.
-- Japanese- and Korean-only distributions mostly missing from the archive (see the table).
-- The second download (`RUD/E.enc`) is not served.
-- Received tracking and live delivery are USA-only (game hooks); other bases deliver at the next
-  town load and count a stored package as received.
+  other languages of a package get the English body with a localized greeting (French, Spanish,
+  German, Italian salutations; Japanese and Korean packages use the English greeting).
+- Japanese- and Korean-only distributions mostly missing from the archive (see the table); the
+  three Korean / Japanese hats whose design is in the archive come as the design only.
+- WiiLink's live packages and the archive are not Nintendo-signed (see "The signature"):
+  archive packages are built locally and stored without the WC24 transport step. Only genuine
+  `.enc` files from the player's folder go through the signature check (verified with the
+  preserved October 2012 package outside the game: it verifies; a WiiLink file does not).
+- The second download (`RUD/E.enc` -> `prc_list.bin`, profanity list) is not served.
+- Pete hands a letter over only at a town load; a letter taken while playing waits for the next
+  load (save first). Received tracking and live delivery are USA-only (game hooks); other bases
+  deliver at the next town load and count a stored package as received. Not tested on PAL /
+  Japan / Korea.
+- Per-town tracking uses one town key ("town"); a second town on the same install shares the
+  record (City Folk has one town per console).
+- The F1 page itself was not screenshotted (frame shots capture the game image only).
