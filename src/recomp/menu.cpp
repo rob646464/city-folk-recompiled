@@ -7,6 +7,7 @@
 #include "recomp/system.h"
 #include "recomp/game.h"
 #include "recomp/gx_bridge.h"
+#include "game/cf_region.h"
 
 #include "port/install.h"
 #include "port/options.h"
@@ -21,6 +22,7 @@
 #include "recomp/interp.h"
 #include "recomp/online.h"
 #include "recomp/pacing.h"
+#include "recomp/texture_packs.h"
 #include "recomp/ui_scale.h"
 
 #include <aurora/aurora.h>
@@ -90,6 +92,7 @@ struct Page {
 };
 constexpr Page kPages[] = {
     {"Visuals", "General"},       {"Visuals", "Rendering"},        {"Visuals", "Enhanced lighting"}, {"Visuals", "Enhanced world"},
+    {"Visuals", "Texture packs"},
     {"Sound", nullptr},           {"Controls", "Ports"},           {"Controls", "Bindings"},
     {"Controls", "Pointer"},      {"Controls", "Analog"},       {"Controls", "DSU"},             {"Enhancements", "General"},     {"Enhancements", "Gameplay"},
     {"Enhancements", "Silly"},          {"Enhancements", "Unused content"}, {"Enhancements", "Debug"}, {"Game", nullptr},
@@ -1663,6 +1666,8 @@ void gameplayTab() {
     ImGui::SeparatorText("Seasons and weather");
     sDirty |= recomp::calendar::drawHemisphereMenu();  // src/game/cf_calendar.cpp
     sDirty |= recomp::calendar::drawWeatherMenu();     // src/game/cf_weather.cpp
+    // Content from other regions (src/game/cf_region.cpp).
+    sDirty |= recomp::region::menuSection();
 }
 
 // Debug: the game's debug entries (src/game).
@@ -1877,6 +1882,7 @@ void draw() {
     click::frame();
     recomp::wiimote::hostFrame();  // mouse cursor over the game (pointer from the mouse)
     scriptedSettings();
+    recomp::texpacks::hostFrame();
     recomp::gx::applyAccuracySettings();
     recomp::enh::applySettings();
     recomp::crt::update();
@@ -1945,6 +1951,10 @@ void draw() {
                     }
                     if (ImGui::BeginTabItem("Enhanced world", nullptr, envTab("Enhanced world"))) {
                         sDirty |= recomp::world::drawMenu();  // src/game/cf_world.cpp
+                        ImGui::EndTabItem();
+                    }
+                    if (ImGui::BeginTabItem("Texture packs", nullptr, envTab("Texture packs"))) {
+                        sDirty |= recomp::texpacks::drawMenu();  // src/recomp/texture_packs.cpp
                         ImGui::EndTabItem();
                     }
                     ImGui::EndTabBar();
