@@ -221,6 +221,10 @@ void runAction(Ctx& c, const std::string& a) {
         friends::requestFriend(id);
         return;
     }
+    if (a == "removefriends") {  // F1 "Remove" on every friend (the game's roster follows)
+        for (auto& f : friends::list()) friends::remove(f.code);
+        return;
+    }
     if (a == "acceptfriends" || a == "friends") {
         for (auto& f : friends::list()) {
             std::printf("[online-test] friend %s %s state %d pid %u\n", f.name.c_str(), f.code.c_str(), int(f.state), f.pid);
@@ -393,6 +397,32 @@ static void rosterSync(Ctx& c) {
     friends::setMyGameInfo(myGameInfo(save));
     // The game registers friends only while offline (online system state <= 1).
     if (const u32 sys = rd32(VA(0x8074E7B8)); sys >= 0x80000000u && sys < 0x93F00000u && rd32(sys + 0x385C) > 1) return;
+    // Friends removed or blocked in F1 leave the game's roster the way its roster menu deletes
+    // one (cf_RosterDeleteOffline: later entries move up), one per pass.
+    static const u32 fnDel = guestSymbol("cf_RosterDeleteOffline");
+    const auto current = friends::list();
+    for (u32 pid : friends::pendingRosterRemovals()) {
+        bool again = false;  // a friend again since: its entry stays
+        for (auto& fr : current) again |= fr.pid == pid && fr.state == friends::State::Friend;
+        int slot = -1;
+        if (again) {
+            friends::rosterRemovalDone(pid);
+            continue;
+        }
+        for (int i = 0; i < 32 && slot < 0; i++) {
+            const u32 e = save + 0x44 + 12u * u32(i);
+            const u32 type = (rd32(e) >> 11) & 3;
+            if ((type == 2 || type == 3) && rd32(e + 4) == pid) slot = i;
+        }
+        if (slot < 0 || !fnDel) {
+            friends::rosterRemovalDone(pid);
+            continue;
+        }
+        const u32 ok = gu::call(c, fnDel, {u32(slot)});
+        std::printf("[online] profile id %u removed from the game roster (slot %d): %s\n", pid, slot, ok ? "done" : "refused");
+        if (ok) friends::rosterRemovalDone(pid);
+        return;
+    }
     auto fl = friends::list();
     bool any = false;
     for (auto& fr : fl) any |= fr.state == friends::State::Friend;

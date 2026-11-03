@@ -2,6 +2,7 @@
 // User settings, edited in the in-game overlay menu (F1) and saved to
 // %APPDATA%\Animal Crossing City Folk Recompiled\settings.ini. Read them wherever they apply;
 // changes take effect immediately unless noted.
+#include <functional>
 #include <iosfwd>
 #include <map>
 #include <string>
@@ -441,6 +442,18 @@ std::string settingsPath();
 // Sets one ini key of the table (as if read from settings.ini, then sanitized); false when the
 // key is unknown. Not saved. Used by the CF_SETTINGS_AT test aid (menu.cpp).
 bool setSetting(const std::string& section, const std::string& key, const std::string& value);
+
+// Settings as ini text (what saveSettings writes), and applying ini text (as if read from
+// settings.ini) to the keys `want(section, key)` accepts; no file is touched.
+std::string settingsText();
+void applySettingsText(const std::string& text, const std::function<bool(const std::string&, const std::string&)>& want);
+// Temporary override (online visits, docs/ONLINE.md "Settings while visiting"): the keys `synced`
+// accepts take their values from `text` (the host's) until endSettingsOverride() puts this
+// player's own values back. While active, saveSettings writes this player's own values for those
+// keys, so settings.ini never holds the host's.
+void beginSettingsOverride(const std::string& text, const std::function<bool(const std::string&, const std::string&)>& synced);
+void endSettingsOverride();
+bool settingsOverridden();
 
 // Ini sections owned by another module (e.g. controller bindings, src/recomp/controls.cpp).
 // reset() runs before every load, load() gets each key the table above does not know,

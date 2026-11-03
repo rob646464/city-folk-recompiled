@@ -6206,3 +6206,4 @@ dol 802224A0 IOS_Open2 map RUUE01:manual:hash -
 dol 80222724 IOS_Close2 map RUUE01:manual:hash -
 dol 801019F4 cf_SaveData map RUUE01:manual:hash -
 dol 8017BF88 cf_RosterRegisterOffline map RUUE01:manual:hash -
+dol 8017C0B4 cf_RosterDeleteOffline map RUUE01:manual:hash -

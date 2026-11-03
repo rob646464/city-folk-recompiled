@@ -105,10 +105,13 @@ bool validPd(u32 pd) { return pd >= 0x90000000u && pd < 0x94000000u; }
 // menu (host thread).
 std::mutex sMutex;
 std::map<std::string, int>& choices() { return port::settings().gameplay.skinTone; }
+std::map<std::string, int> sRemote;  // other players' tones during an online visit (not saved)
 int fixedFor(const std::string& key) {
     std::lock_guard lk(sMutex);
     const auto it = choices().find(key);
-    return it == choices().end() ? 0 : it->second;
+    if (it != choices().end()) return it->second;
+    const auto r = sRemote.find(key);
+    return r == sRemote.end() ? 0 : r->second;
 }
 
 // What the menu shows: the player being played (player number 0).
@@ -211,6 +214,13 @@ static void readSwatches(Ctx& c) {
     if (logOn())
         log("[skin] swatches %06X %06X %06X %06X %06X %06X %06X %06X", sSwatch[0], sSwatch[1], sSwatch[2], sSwatch[3],
             sSwatch[4], sSwatch[5], sSwatch[6], sSwatch[7]);
+}
+
+void skinSetRemote(const std::map<std::string, int>& tones) {
+    std::lock_guard lk(sMutex);
+    sRemote.clear();
+    for (const auto& [k, v] : tones)
+        if (v >= 1 && v <= 8 && k.size() <= 16) sRemote[k] = v;
 }
 
 void skinOnFrame(Ctx& c) {

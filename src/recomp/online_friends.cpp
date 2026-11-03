@@ -17,6 +17,7 @@
 #include "recomp/online_net.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -40,6 +41,7 @@ bool sLoaded = false;
 u8 sPub[32];
 std::vector<Friend> sFriends;
 std::vector<u8> sMyInfo;
+std::vector<u32> sRemoved;  // profile ids to take out of the game's roster (removed / blocked in F1)
 
 struct MemberState {
     u8 pub[32] = {};
@@ -80,6 +82,7 @@ void save() {
     for (auto& f : sFriends) out << stateName(f.state) << " " << oc::hex(f.pub, 32) << " " << f.name << "\n";
     for (auto& f : sFriends)
         if (f.gameInfo.size() == kGameInfoSize) out << "info " << oc::hex(f.pub, 32) << " " << oc::hex(f.gameInfo.data(), f.gameInfo.size()) << "\n";
+    for (u32 pid : sRemoved) out << "removed " << pid << "\n";
 }
 
 std::vector<u8> unhex(const std::string& hx) {
@@ -102,6 +105,11 @@ void load() {
         std::string name;
         std::getline(ls, name);
         while (!name.empty() && name[0] == ' ') name.erase(name.begin());
+        if (st == "removed") {
+            const u32 pid = u32(std::strtoul(hx.c_str(), nullptr, 10));
+            if (pid) sRemoved.push_back(pid);
+            continue;
+        }
         if (hx.size() != 64) continue;
         if (st == "info") {
             const auto key = unhex(hx);
@@ -442,6 +450,7 @@ void decline(const std::string& code) {
 void block(const std::string& code) {
     std::lock_guard<std::recursive_mutex> g(sMutex);
     if (Friend* f = byCode(code)) {
+        if (f->state == State::Friend) sRemoved.push_back(f->pid);
         f->state = State::Blocked;
         save();
     }
@@ -450,9 +459,24 @@ void block(const std::string& code) {
 void remove(const std::string& code) {
     std::lock_guard<std::recursive_mutex> g(sMutex);
     if (Friend* f = byCode(code)) {
+        if (f->state == State::Friend) sRemoved.push_back(f->pid);
         sFriends.erase(sFriends.begin() + (f - sFriends.data()));
         save();
     }
+}
+
+std::vector<uint32_t> pendingRosterRemovals() {
+    std::lock_guard<std::recursive_mutex> g(sMutex);
+    load();
+    return sRemoved;
+}
+
+void rosterRemovalDone(uint32_t pid) {
+    std::lock_guard<std::recursive_mutex> g(sMutex);
+    for (auto it = sRemoved.begin(); it != sRemoved.end();)
+        it = *it == pid ? sRemoved.erase(it) : std::next(it);
+    // A friend again (re-added before the game got to remove it) keeps its entry.
+    save();
 }
 
 }  // namespace recomp::online::friends

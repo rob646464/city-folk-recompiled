@@ -25,6 +25,7 @@
 #include "recomp/hle.h"
 #include "recomp/online.h"
 #include "recomp/online_net.h"
+#include "recomp/online_sync.h"
 
 #include <algorithm>
 #include <chrono>
@@ -50,6 +51,7 @@ constexpr int kMaxFriendPids = 64;
 enum : u8 {
     M_STATUS = 1, M_JOIN_REQ, M_JOIN_OK, M_JOIN_NG, M_NODES, M_LEAVE, M_DATA, M_UDATA, M_PING, M_PONG,
     M_CLOSE, M_JOIN_CANCEL,
+    M_SETTINGS,  // settings while visiting (online_sync.cpp): text blob
 };
 
 double now() {
@@ -245,6 +247,16 @@ void send(u8 to, u8 type, const W& w, bool reliable = true) {
     net::session().sendApp(to, type, w.b.data(), w.b.size(), reliable);
 }
 
+void sendBlob(u8 to, const std::string& text) {
+    net::session().sendApp(to, M_SETTINGS, reinterpret_cast<const u8*>(text.data()), text.size(), true);
+}
+
+std::string memberName(u8 id) {
+    for (auto& m : net::session().members())
+        if (m.id == id) return m.name;
+    return std::string();
+}
+
 void sendStatus(u8 to = net::kBroadcast) {
     W w;
     const u8 num = d.role == MRole::Server ? u8(d.nodes.size()) : 0;
@@ -331,6 +343,7 @@ void closed(Ctx& c, int error, bool isLocal, bool isServer, u8 aid, int index) {
 }
 
 void endMatchLocal() {
+    online::sync::matchEnded();
     d.nodes.clear();
     d.role = MRole::None;
     d.suspended = false;
@@ -354,6 +367,7 @@ void dropNode(Ctx& c, u8 aid, bool isLocal) {
         endMatchLocal();
         return;
     }
+    online::sync::memberLeft(n->member);
     d.nodes.erase(std::remove_if(d.nodes.begin(), d.nodes.end(), [&](const Node& x) { return x.aid == aid; }), d.nodes.end());
     if (d.role == MRole::Server) {
         W w;
@@ -390,6 +404,7 @@ void onJoinRequest(Ctx& c, u8 from, R& r) {
     u8 aid = 1;
     while (nodeByAid(aid)) aid++;
     d.nodes.push_back({aid, from, pid});
+    sendBlob(from, online::sync::hostBlob());  // before JOIN_OK: in effect when the visit starts
     W ok;
     ok.u8_(aid);
     writeNodes(ok);
@@ -487,6 +502,7 @@ void handle(Ctx& c, const net::AppMsg& m) {
             d.nodes = list;
             d.role = MRole::Client;
             setOwnStatus(kStScCl);
+            sendBlob(d.serverMember, online::sync::toneBlob());
             const Node* sv = nodeByAid(0);
             const int idx = d.serverIndex >= 0 ? d.serverIndex : friendIndexOf(sv ? sv->pid : 0);
             if (log()) std::printf("[dwc] joined the match of member %u as aid %u (%zu nodes)\n", m.from, d.myAid, list.size());
@@ -535,6 +551,12 @@ void handle(Ctx& c, const net::AppMsg& m) {
         break;
     case M_JOIN_CANCEL:
         break;
+    case M_SETTINGS: {
+        const bool fromServer = (d.role == MRole::Joining || d.role == MRole::Client) && m.from == d.serverMember;
+        if (!fromServer && d.role != MRole::Server) return;  // a host takes visitors' tones
+        online::sync::onBlob(m.from, std::string(m.data.begin(), m.data.end()), fromServer, memberName(m.from));
+        break;
+    }
     case M_DATA:
     case M_UDATA: {
         const u8 src = r.u8_();
@@ -692,6 +714,7 @@ void process(Ctx& c) {
 }
 
 void resetAll() {
+    online::sync::matchEnded();  // a visit never outlives DWC (shutdown, a new login)
     const u32 s1 = d.gStatusStr, s2 = d.gUserData;  // hleAlloc memory is never freed: keep it
     d = Dwc{};
     d.gStatusStr = s1;

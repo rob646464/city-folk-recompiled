@@ -48,6 +48,10 @@ void accept(const std::string& code);
 void decline(const std::string& code);
 void block(const std::string& code);
 void remove(const std::string& code);
+// Friends removed or blocked in F1 whose entry the game's roster still has to lose (kept in
+// friends.txt until done; online.cpp takes them out when a town save is loaded and offline).
+std::vector<uint32_t> pendingRosterRemovals();
+void rosterRemovalDone(uint32_t pid);
 
 // Pending incoming requests for notices (code, name).
 std::vector<Friend> incoming();
