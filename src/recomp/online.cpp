@@ -240,6 +240,20 @@ void runAction(Ctx& c, const std::string& a) {
         const u32 valid = save && check ? gu::call(c, check, {save + 4}) : 0;
         std::printf("[online-test] save %08X user data %s\n", save, valid ? "valid" : "missing: creating it as the game does");
         if (save && !valid) gu::call(c, 0x8011A918, {save});
+    } else if (a == "authid") {
+        // The save's user data gets the authentic login id a first WFC connection gives (as
+        // online_dwc.cpp's login writes it), so Copper does not first issue a friend code.
+        const u32 save = gu::call(c, 0x80101894);
+        static const u32 clr = guestSymbol("DWC_ClearDirtyFlag");
+        if (save && clr) {
+            const u32 u = save + 4, pid = profileId();
+            wr32(u + 0x10, ((((rd32(u + 0x10) >> 11) & ~3u) | 1u) << 11));
+            wr32(u + 0x14, pid ^ 0x5A5A0000u);
+            wr32(u + 0x18, pid);
+            wr32(u + 0x1C, pid);
+            gu::call(c, clr, {u});
+            std::printf("[online-test] save user data: authentic login id, profile id %u\n", pid);
+        }
     } else if (a == "setup") {
         gu::call(c, 0x800DCBC4);  // online system setup (Copper calls it before connecting)
     } else if (a == "diag") {
