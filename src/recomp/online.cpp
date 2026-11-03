@@ -294,29 +294,6 @@ void runAction(Ctx& c, const std::string& a) {
         return;
     } else if (a == "disconnect") {
         std::printf("[online-test] disconnect -> %u\n", gu::call(c, VA(0x800DCE44)));
-    } else if (a.rfind("friend:", 0) == 0) {
-        // friend:<slot>:<pid or @file>: registers a friend in the save's DWC friend list, as the
-        // game's roster does with a friend code (type 3 profile entry here).
-        const size_t c2 = a.find(':', 7);
-        const int slot = std::atoi(a.c_str() + 7);
-        std::string v = c2 == std::string::npos ? "" : a.substr(c2 + 1);
-        u32 pid = 0;
-        if (!v.empty() && v[0] == '@') {
-            std::ifstream in(v.substr(1));
-            in >> pid;
-        } else {
-            pid = u32(std::strtoul(v.c_str(), nullptr, 10));
-        }
-        const u32 save = gu::call(c, VA(0x80101894));
-        if (!save || !pid || slot < 0 || slot >= 32) {
-            std::printf("[online-test] friend: no save data / pid\n");
-            return;
-        }
-        const u32 e = save + 0x44 + 12u * u32(slot);  // friend list = save+0x44 (user data = save+4)
-        wr32(e, 3u << 11);
-        wr32(e + 4, pid);
-        wr32(e + 8, 0);
-        std::printf("[online-test] friend slot %d = pid %u (save %08X)\n", slot, pid, save);
     }
     // The online system's state (+0x385C: 0 none, 1 set up, 3 connecting, 5 hosting, 6 visiting).
     if (const u32 sys = rd32(VA(0x8074E7B8)); sys >= 0x80000000u && sys < 0x93F00000u) std::printf("[online-test] online system state %u\n", rd32(sys + 0x385C));
