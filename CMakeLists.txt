@@ -79,13 +79,21 @@ target_include_directories(cf_distrib_test PRIVATE src)
 add_test(NAME distrib COMMAND cf_distrib_test)
 
 # Online room transport (src/recomp/online_net.*, docs/ONLINE.md): host + members over loopback UDP.
-add_executable(cf_online_test tools/tests/online_net_test.cpp src/recomp/online_net.cpp
+add_executable(cf_online_test tools/tests/online_net_test.cpp tools/relay/cf_relay.cpp src/recomp/online_net.cpp
     src/recomp/online_nat.cpp src/recomp/online_crypto.cpp src/recomp/online_ed25519.cpp)
 target_include_directories(cf_online_test PRIVATE src)
+target_compile_definitions(cf_online_test PRIVATE CF_RELAY_AS_LIB)
 if (WIN32)
     target_link_libraries(cf_online_test PRIVATE ws2_32 iphlpapi bcrypt)
 endif ()
 add_test(NAME online_net COMMAND cf_online_test)
+# The optional self-hosted relay (docs/ONLINE.md "Relay"): rooms behind unreachable routers, letters.
+add_executable(cf_relay tools/relay/cf_relay.cpp src/recomp/online_net.cpp src/recomp/online_nat.cpp
+    src/recomp/online_crypto.cpp src/recomp/online_ed25519.cpp)
+target_include_directories(cf_relay PRIVATE src)
+if (WIN32)
+    target_link_libraries(cf_relay PRIVATE ws2_32 iphlpapi bcrypt)
+endif ()
 
 # Runtime shared by both executables: memory/CPU helpers, scheduler, HLE SDK, frame driver,
 # audio, menu, and the game-specific parts in src/game. module_rt.cpp belongs to the game

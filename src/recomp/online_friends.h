@@ -17,7 +17,9 @@ struct Friend {
     uint8_t pub[32] = {};
     uint32_t pid = 0;  // the DWC profile id the key gives (the game's friend code)
     State state = State::Friend;
-    std::vector<uint8_t> gameInfo;  // the friend's own roster entry (0x78 bytes, kGameInfoSize) or empty
+    std::vector<uint8_t> gameInfo;
+    uint8_t xpub[32] = {};  // its X25519 letters key (proved with its Ed25519 key)
+    bool haveX = false;  // the friend's own roster entry (0x78 bytes, kGameInfoSize) or empty
 };
 
 // The game's roster entry for this player (save friend info, 0x78 bytes: names, town; built by
@@ -52,6 +54,10 @@ bool friendByWiiNumber(uint64_t number, uint8_t pubOut[32]);
 // Wii numbers (letters, docs/ONLINE.md "Letters"): 16 decimal digits from the key.
 uint64_t wiiNumberOf(const uint8_t pub[32]);
 uint64_t myWiiNumber();
+// Letters through a relay: a friend's X25519 key, and the key two friends share for their letters
+// (HMAC("cf-letter", X25519(mine, theirs))).
+bool friendXPub(const uint8_t pub[32], uint8_t out[32]);
+void letterKey(const uint8_t theirX[32], uint8_t out[32]);
 void accept(const std::string& code);
 void decline(const std::string& code);
 void block(const std::string& code);

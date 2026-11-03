@@ -432,6 +432,44 @@ with the roster menu's own delete (`cf_RosterDeleteOffline`, fn_8017C3C0: later 
 Verified with `CF_ONLINE_TEST=24000:removefriends` after a visit: `profile id ... removed from
 the game roster (slot 0): done`.
 
+## 10c. The optional self-hosted relay (tools/relay/cf_relay.cpp)
+
+Nobody has to run a server; a friend group that wants one runs `cf_relay [--port 29912]
+[--mail-dir <folder>]` on a machine everyone can reach (a VPS, a home server with the port
+forwarded) and enters its address in F1 > Online "Relay (optional)" (`[online] relay`,
+CF_ONLINE_RELAY for tests).
+- **Rooms**: a host with a relay registers its room there under a random 8-byte room id every 10 s
+  and adds a relay endpoint to its room code (family 0x54: relay IPv4 + port + room id), next to
+  its direct endpoints; joiners try all routes at once. Through the relay the members have
+  virtual addresses (100::/64 discard prefix, the relay's peer id in the last four bytes), so the
+  room transport above is unchanged: its sealed packets are wrapped in `CFRL` TO_HOST / TO_PEER
+  datagrams and the relay only forwards them between that room's host and its joiners (it cannot
+  read them; it only knows room ids and addresses). Limits: 256 rooms, 16 joiners per room,
+  600 datagrams/s per address, rooms expire 60 s after their host stops registering.
+- **Letters**: a letter whose friend is not in a room with us goes to the relay (TCP, same port):
+  sealed for the pair (ChaCha20 + HMAC with the key HMAC("cf-letter", X25519(own letters key,
+  friend's letters key)); the letters keys travel in IDENT and are covered by the Ed25519 proof)
+  and signed with the sender's Ed25519 key. The recipient's game fetches its letters every two
+  minutes after proving its key to the relay (challenge, Ed25519 signature), checks that the
+  sender is a friend and the signature, opens it and deletes it there; a letter that arrives by
+  both routes is taken once (letter id). 64 letters per recipient, 256 KB each, 30 days.
+- Test (2026-11-03): `cf_online_test` joins a room through an in-process relay with a code that
+  has only the relay route and sends 50 KB; two instances made friends (letters keys exchanged),
+  Alice queued a letter while Bob was not running (`CF_ONLINE_TEST=<f>:mailtest`: a 64-byte test
+  letter, not a game letter) -> `left at the relay`; Bob started later -> `received`, the relay's
+  mailbox empty again.
+
+## 10b. USB keyboard chat (src/recomp/ios_devices.cpp)
+
+City Folk takes chat text from a USB keyboard (its KBD library over IOS `/dev/usb/kbd`). With
+F1 > Online "USB keyboard" (`[online] usb_keyboard`, off by default) the device opens and the PC
+keyboard is that keyboard: the module's async ioctl 0 gets 16-byte messages (public IOS
+interface): `{u32 type: 0 attached, 1 detached, 2 keys; u32 keyboard id; u8 modifiers (HID bits);
+u8 0; u8 keys[6] (HID usages)}`. The host thread polls the SDL keyboard state each frame
+(`ios::usbKeyboardPoll`, SDL scancodes are HID usages) and queues a message on every change.
+Off: as before (the open fails: no keyboard). Keys bound to the Wii Remote act on both, so play
+with a controller while typing.
+
 ## 11. Status and what is left
 
 Done (branch online-1): the DWC-level HLE (51 named DWC functions + IOS_Open2/IOS_Close2 the USB

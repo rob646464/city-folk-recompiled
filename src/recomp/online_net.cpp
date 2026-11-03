@@ -382,6 +382,12 @@ struct Session::Impl {
     double stunSent = -100;
     int stunTries = 0;
     Addr publicAddr;
+    // Optional self-hosted relay (docs/ONLINE.md "Relay", tools/relay/cf_relay.cpp): members reached
+    // through it have virtual addresses (100::/64 discard prefix, peer id in the last 4 bytes).
+    Addr relay;
+    u8 relayRoom[8] = {};
+    double relayRegAt = -100;
+    bool relayOk = false;
     bool mapped = false;
     u8 probeTok[8] = {};
     double probeSent = -100;
@@ -390,8 +396,42 @@ struct Session::Impl {
     u16 mappedPort = 0;
 
     // ---- helpers (lock held) ----
+    static bool isVirtual(const Addr& a, u32* peer = nullptr) {
+        if (a.family() != AF_INET6) return false;
+        const u8* ip = reinterpret_cast<const u8*>(&reinterpret_cast<const sockaddr_in6*>(&a.ss)->sin6_addr);
+        if (ip[0] != 0x01 || ip[1] != 0x00) return false;
+        for (int i = 2; i < 12; i++)
+            if (ip[i]) return false;
+        if (peer) *peer = u32(ip[12]) << 24 | u32(ip[13]) << 16 | u32(ip[14]) << 8 | ip[15];
+        return true;
+    }
+    static Addr virtualAddr(u32 peer) {
+        u8 ip[16] = {0x01, 0x00};
+        ip[12] = u8(peer >> 24);
+        ip[13] = u8(peer >> 16);
+        ip[14] = u8(peer >> 8);
+        ip[15] = u8(peer);
+        return makeV6(ip, 1);
+    }
+    std::vector<u8> relayHead(u8 type) const {
+        std::vector<u8> b = {'C', 'F', 'R', 'L', 1, type};
+        b.insert(b.end(), relayRoom, relayRoom + 8);
+        return b;
+    }
+
     void sendRaw(const Addr& to, const std::vector<u8>& b) {
         if (s == kInvalid) return;
+        u32 peer = 0;
+        if (isVirtual(to, &peer)) {  // through the relay
+            if (!relay.valid()) return;
+            std::vector<u8> w = relayHead(role == Role::Host ? 5 : 3);
+            if (role == Role::Host)
+                for (int i = 3; i >= 0; i--) w.push_back(u8(peer >> (8 * i)));
+            w.insert(w.end(), b.begin(), b.end());
+            const Addr ra = relay.forSocket(sfam);
+            sendto(s, reinterpret_cast<const char*>(w.data()), int(w.size()), 0, reinterpret_cast<const sockaddr*>(&ra.ss), ra.len);
+            return;
+        }
         const Addr a = to.forSocket(sfam);
         sendto(s, reinterpret_cast<const char*>(b.data()), int(b.size()), 0, reinterpret_cast<const sockaddr*>(&a.ss), a.len);
     }
@@ -960,6 +1000,19 @@ struct Session::Impl {
             }
             return;
         }
+        if (n >= 14 && relay.valid() && from == relay.normalized() && std::memcmp(p, "CFRL", 4) == 0 && p[4] == 1 &&
+            std::memcmp(p + 6, relayRoom, 8) == 0) {
+            if (p[5] == 2) {  // REG_OK
+                if (!relayOk) std::printf("[online] relay %s: room registered\n", relay.text().c_str());
+                relayOk = true;
+            } else if (p[5] == 4 && role == Role::Host && n >= 18) {  // FROM_PEER
+                const u32 peer = u32(p[14]) << 24 | u32(p[15]) << 16 | u32(p[16]) << 8 | p[17];
+                onDatagram(virtualAddr(peer), p + 18, n - 18);
+            } else if (p[5] == 6 && role != Role::Host) {  // FROM_HOST
+                onDatagram(virtualAddr(0), p + 14, n - 14);
+            }
+            return;
+        }
         if (p[0] != 'C' || p[1] != 'F' || p[2] != kProto) return;
         R r(p + 4, n - 4);
         switch (p[3]) {
@@ -1073,6 +1126,18 @@ struct Session::Impl {
                         addEp(makeV6(la.v6bytes, port));
                         break;
                     }
+        }
+        if (relay.valid() && relay.normalized().family() == AF_INET) {  // the relay route last (tried in parallel)
+            Endpoint e;
+            e.family = kRelayFamily;
+            const u32 v = relay.normalized().v4();
+            e.addr[0] = u8(v >> 24);
+            e.addr[1] = u8(v >> 16);
+            e.addr[2] = u8(v >> 8);
+            e.addr[3] = u8(v);
+            std::memcpy(e.addr + 4, relayRoom, 8);
+            e.port = relay.normalized().port();
+            eps.push_back(e);
         }
         codeEps = eps;
         code = encodeCode(secret, eps);
@@ -1214,6 +1279,12 @@ struct Session::Impl {
                 i++;
             }
             pend.erase(std::remove_if(pend.begin(), pend.end(), [&](const PendingJoin& p) { return t - p.t > 30; }), pend.end());
+            if (relay.valid() && t - relayRegAt > (relayOk ? 10.0 : 1.0)) {
+                const std::vector<u8> w = relayHead(1);
+                const Addr ra = relay.forSocket(sfam);
+                sendto(s, reinterpret_cast<const char*>(w.data()), int(w.size()), 0, reinterpret_cast<const sockaddr*>(&ra.ss), ra.len);
+                relayRegAt = t;
+            }
             if (opt.lanVisible && t - lastBeacon > 2.0) {
                 sendBeacon();
                 lastBeacon = t;
@@ -1311,6 +1382,9 @@ struct Session::Impl {
     }
 
     void resetRoom() {
+        relay = Addr{};
+        relayOk = false;
+        relayRegAt = -100;
         gen++;
         kickedPids.clear();
         kickedAddrs.clear();
@@ -1417,6 +1491,17 @@ bool Session::host(const HostOptions& o, std::string* err) {
     oc::randomBytes(d.stunTx, 12);
     d.hasPw = !o.password.empty();
     if (d.hasPw) oc::pbkdf2Sha256(o.password.data(), o.password.size(), d.salt, 16, kPbkdfIterations, d.pwKey, 32);
+    if (!o.relay.empty() && !sTestMode) {
+        if (resolve(o.relay, kRelayPort, &d.relay) && d.relay.normalized().family() == AF_INET) {
+            oc::randomBytes(d.relayRoom, 8);
+            std::printf("[online] relay %s for this room\n", d.relay.text().c_str());
+        } else {
+            d.relay = Addr{};
+            std::printf("[online] relay %s: not found (only IPv4 relays)\n", o.relay.c_str());
+        }
+    } else if (!o.relay.empty() && sTestMode && resolve(o.relay, kRelayPort, &d.relay)) {
+        oc::randomBytes(d.relayRoom, 8);
+    }
     if (o.lanVisible) d.openLanSender();
     if (const u32 lanIp = sTestMode ? 0x7F000001u : nat::defaultLanV4()) d.lanEp = makeV4(lanIp, d.port).text();
     d.rebuildCode();
@@ -1463,10 +1548,22 @@ bool Session::joinCode(const std::string& code, const std::string& password, std
         return false;
     }
     std::vector<Addr> addrs;
-    for (auto& e : eps) addrs.push_back(e.family == 4 ? makeV4(u32(e.addr[0]) << 24 | u32(e.addr[1]) << 16 | u32(e.addr[2]) << 8 | e.addr[3], e.port)
-                                                      : makeV6(e.addr, e.port));
+    Addr relay;
+    u8 relayRoom[8] = {};
+    for (auto& e : eps) {
+        if (e.family == kRelayFamily) {
+            relay = makeV4(u32(e.addr[0]) << 24 | u32(e.addr[1]) << 16 | u32(e.addr[2]) << 8 | e.addr[3], e.port);
+            std::memcpy(relayRoom, e.addr + 4, 8);
+            addrs.push_back(Impl::virtualAddr(0));
+            continue;
+        }
+        addrs.push_back(e.family == 4 ? makeV4(u32(e.addr[0]) << 24 | u32(e.addr[1]) << 16 | u32(e.addr[2]) << 8 | e.addr[3], e.port)
+                                      : makeV6(e.addr, e.port));
+    }
     std::lock_guard<std::recursive_mutex> g(d_->m);
     if (!d_->startJoin(addrs, false, password, err)) return false;
+    d_->relay = relay;
+    std::memcpy(d_->relayRoom, relayRoom, 8);
     std::memcpy(d_->secret, secret, 10);
     std::printf("[online] joining with a room code (%zu endpoints)\n", addrs.size());
     return true;
@@ -1696,7 +1793,7 @@ std::string encodeCode(const u8 secret[10], const std::vector<Endpoint>& eps) {
     for (size_t i = 0; i < eps.size() && i < 4; i++) {
         const auto& e = eps[i];
         b.push_back(e.family);
-        b.insert(b.end(), e.addr, e.addr + (e.family == 4 ? 4 : 16));
+        b.insert(b.end(), e.addr, e.addr + (e.family == 4 ? 4 : e.family == kRelayFamily ? 12 : 16));
         b.push_back(u8(e.port >> 8));
         b.push_back(u8(e.port));
     }
@@ -1760,7 +1857,7 @@ bool decodeCode(const std::string& code, u8 secret[10], std::vector<Endpoint>& e
         if (i >= b.size()) return false;
         Endpoint e;
         e.family = b[i++];
-        const size_t al = e.family == 4 ? 4 : e.family == 6 ? 16 : 0;
+        const size_t al = e.family == 4 ? 4 : e.family == 6 ? 16 : e.family == kRelayFamily ? 12 : 0;
         if (!al || i + al + 2 > b.size()) return false;
         std::memcpy(e.addr, b.data() + i, al);
         i += al;

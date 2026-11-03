@@ -24,5 +24,7 @@ struct Counts {
     int outbox = 0, inbox = 0;
 };
 Counts counts();
+// Test aid (CF_ONLINE_TEST=<f>:mailtest): a 64-byte dummy letter to every friend (not a game letter).
+int queueTestLetter();
 
 }  // namespace recomp::online::mail

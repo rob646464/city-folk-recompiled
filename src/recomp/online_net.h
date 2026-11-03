@@ -45,6 +45,7 @@ struct HostOptions {
     bool allowDirect = true;   // accept joiners that know only IP:port (no room code)
     bool lanVisible = true;    // LAN beacons
     bool portMapping = true;   // UPnP-IGD / NAT-PMP mapping + STUN public address
+    std::string relay;         // optional self-hosted relay "host[:port]" (tools/relay/cf_relay.cpp)
 };
 
 enum class State { Off, Hosting, Connecting, WaitingForHost, Joined, Failed };
@@ -138,6 +139,8 @@ private:
 Session& session();
 
 // Room codes: [version/flags][secret 10][endpoints...] in Crockford base32, dash-grouped.
+constexpr u8 kRelayFamily = 0x54;   // room code endpoint through a relay: IPv4 + room id[8]
+constexpr u16 kRelayPort = 29912;
 struct Endpoint {
     u8 family = 4;   // 4 or 6
     u8 addr[16] = {};

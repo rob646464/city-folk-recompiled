@@ -40,6 +40,7 @@ enum : u8 { F_IDENT = 0x40, F_PROVE = 0x41, F_REQ = 0x42, F_ACCEPT = 0x43, F_DEC
 std::recursive_mutex sMutex;
 bool sLoaded = false;
 u8 sPub[32];
+u8 sXPriv[32], sXPub[32];  // X25519 key for letters through a relay (sealed per friend pair)
 std::vector<Friend> sFriends;
 std::vector<u8> sMyInfo;
 std::vector<u32> sRemoved;  // profile ids to take out of the game's roster (removed / blocked in F1)
@@ -49,6 +50,8 @@ struct MemberState {
     bool havePub = false, verified = false;
     u8 myNonce[16] = {};   // we sent; they sign it
     std::string name;
+    u8 xpub[32] = {};
+    bool haveX = false;
     bool identSent = false;
     bool infoSent = false;
     std::vector<u8> info;  // their INFO (applied once proved and a friend)
@@ -84,6 +87,8 @@ void save() {
     for (auto& f : sFriends)
         if (f.gameInfo.size() == kGameInfoSize) out << "info " << oc::hex(f.pub, 32) << " " << oc::hex(f.gameInfo.data(), f.gameInfo.size()) << "\n";
     for (u32 pid : sRemoved) out << "removed " << pid << "\n";
+    for (auto& f : sFriends)
+        if (f.haveX) out << "xkey " << oc::hex(f.pub, 32) << " " << oc::hex(f.xpub, 32) << "\n";
 }
 
 std::vector<u8> unhex(const std::string& hx) {
@@ -96,6 +101,11 @@ void load() {
     if (sLoaded) return;
     sLoaded = true;
     oc::ed25519PublicKey(online::identitySeed(), sPub);
+    oc::hmacSha256(online::identitySeed(), 32, "cf-x25519", 9, sXPriv);
+    sXPriv[0] &= 248;
+    sXPriv[31] = u8((sXPriv[31] & 127) | 64);
+    static const u8 kBase[32] = {9};
+    oc::x25519(sXPriv, kBase, sXPub);
     std::ifstream in(listPath());
     std::string line;
     while (std::getline(in, line)) {
@@ -112,6 +122,17 @@ void load() {
             continue;
         }
         if (hx.size() != 64) continue;
+        if (st == "xkey") {
+            const auto key = unhex(hx);
+            while (!name.empty() && (name.back() == '\r' || name.back() == ' ')) name.pop_back();
+            const auto x = unhex(name);
+            for (auto& f : sFriends)
+                if (x.size() == 32 && std::memcmp(f.pub, key.data(), 32) == 0) {
+                    std::memcpy(f.xpub, x.data(), 32);
+                    f.haveX = true;
+                }
+            continue;
+        }
         if (st == "info") {
             const auto key = unhex(hx);
             while (!name.empty() && (name.back() == '\r' || name.back() == ' ')) name.pop_back();
@@ -151,6 +172,7 @@ void sendIdent(u8 to, MemberState& m) {
     const std::string n = online::playerName();
     b.push_back(u8(std::min<size_t>(n.size(), 32)));
     b.insert(b.end(), n.begin(), n.begin() + std::min<size_t>(n.size(), 32));
+    b.insert(b.end(), sXPub, sXPub + 32);  // letters key (covered by the proof)
     send(to, F_IDENT, b);
     m.identSent = true;
 }
@@ -172,6 +194,11 @@ u32 memberPid(u8 id) {
 void applyInfo(MemberState& ms) {
     if (!ms.verified || ms.info.size() != kGameInfoSize) return;
     Friend* f = byPub(ms.pub);
+    if (f && ms.haveX && !f->haveX) {
+        std::memcpy(f->xpub, ms.xpub, 32);
+        f->haveX = true;
+        save();
+    }
     if (!f || f->state != State::Friend || f->gameInfo == ms.info) return;
     f->gameInfo = ms.info;
     save();
@@ -195,10 +222,13 @@ void onMessage(const net::AppMsg& m) {
         ms.verified = false;
         const size_t nl = std::min<size_t>(d[48], d.size() - 49);
         ms.name = cleanName(d.data() + 49, nl);
-        // Prove our key: sign their nonce.
+        ms.haveX = d.size() >= 49 + nl + 32;
+        if (ms.haveX) std::memcpy(ms.xpub, d.data() + 49 + nl, 32);
+        // Prove our key (and our letters key): sign their nonce.
         std::vector<u8> msg = {'c', 'f', '-', 'p', 'r', 'o', 'v', 'e'};
         msg.insert(msg.end(), d.data() + 32, d.data() + 48);
         msg.insert(msg.end(), sPub, sPub + 32);
+        msg.insert(msg.end(), sXPub, sXPub + 32);
         u8 sig[64];
         oc::ed25519Sign(online::identitySeed(), msg.data(), msg.size(), sig);
         send(m.from, F_PROVE, std::vector<u8>(sig, sig + 64));
@@ -210,6 +240,7 @@ void onMessage(const net::AppMsg& m) {
         std::vector<u8> msg = {'c', 'f', '-', 'p', 'r', 'o', 'v', 'e'};
         msg.insert(msg.end(), ms.myNonce, ms.myNonce + 16);
         msg.insert(msg.end(), ms.pub, ms.pub + 32);
+        if (ms.haveX) msg.insert(msg.end(), ms.xpub, ms.xpub + 32);
         ms.verified = oc::ed25519Verify(ms.pub, msg.data(), msg.size(), d.data());
         const u32 claimed = memberPid(m.from);
         if (ms.verified && claimed && claimed != pidOf(ms.pub)) {
@@ -218,10 +249,17 @@ void onMessage(const net::AppMsg& m) {
         }
         if (ms.verified) {
             if (Friend* f = byPub(ms.pub)) {
+                bool changed = false;
                 if (f->name != ms.name && !ms.name.empty()) {
                     f->name = ms.name;
-                    save();
+                    changed = true;
                 }
+                if (ms.haveX && (!f->haveX || std::memcmp(f->xpub, ms.xpub, 32) != 0)) {
+                    std::memcpy(f->xpub, ms.xpub, 32);
+                    f->haveX = true;
+                    changed = true;
+                }
+                if (changed) save();
             }
         }
         if (online::logOn()) std::printf("[friends] member %u (%s) key %s\n", m.from, ms.name.c_str(), ms.verified ? "proved" : "NOT proved");
@@ -245,6 +283,7 @@ void onMessage(const net::AppMsg& m) {
             nf.code = codeOf(nf.pub);
             nf.pid = pidOf(nf.pub);
             nf.state = State::RequestReceived;
+            if (ms.haveX) std::memcpy(nf.xpub, ms.xpub, 32), nf.haveX = true;
             sFriends.push_back(nf);
             notice(ms.name + " sent you a friend request (F1 > Online > Friends)");
         }
@@ -338,6 +377,7 @@ void tick() {
     load();
     auto& s = net::session();
     if (!s.active()) {
+        mail::tick();  // starts the relay worker (letters while not in a room)
         sMembers.clear();
         return;
     }
@@ -402,6 +442,7 @@ void requestFriend(uint8_t memberId) {
         nf.code = codeOf(nf.pub);
         nf.pid = pidOf(nf.pub);
         nf.state = State::RequestSent;
+        if (ms.haveX) std::memcpy(nf.xpub, ms.xpub, 32), nf.haveX = true;
         sFriends.push_back(nf);
         const std::string n = online::playerName();
         send(memberId, F_REQ, std::vector<u8>(n.begin(), n.end()));
@@ -449,6 +490,23 @@ uint64_t wiiNumberOf(const uint8_t pub[32]) {
 }
 
 uint64_t myWiiNumber() { return wiiNumberOf(myPublicKey()); }
+
+bool friendXPub(const uint8_t pub[32], uint8_t out[32]) {
+    std::lock_guard<std::recursive_mutex> g(sMutex);
+    load();
+    const Friend* f = byPub(pub);
+    if (!f || !f->haveX || f->state != State::Friend) return false;
+    std::memcpy(out, f->xpub, 32);
+    return true;
+}
+
+void letterKey(const uint8_t theirX[32], uint8_t out[32]) {
+    std::lock_guard<std::recursive_mutex> g(sMutex);
+    load();
+    u8 shared[32];
+    oc::x25519(sXPriv, theirX, shared);
+    oc::hmacSha256(shared, 32, "cf-letter", 9, out);
+}
 
 bool inRoom(const std::string& code) {
     std::lock_guard<std::recursive_mutex> g(sMutex);

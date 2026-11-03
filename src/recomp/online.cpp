@@ -8,13 +8,17 @@
 #include "recomp/game.h"
 #include "recomp/guest_util.h"
 #include "recomp/hle.h"
+#include "recomp/ios.h"
+#include "recomp/ui_scale.h"
 #include "recomp/menu.h"
 #include "recomp/online_crypto.h"
 #include "recomp/version.h"
 #include "recomp/online_ed25519.h"
 #include "recomp/online_friends.h"
+#include "recomp/online_mail.h"
 #include "recomp/online_net.h"
 
+#include <SDL3/SDL.h>
 #include <imgui.h>
 
 #include <algorithm>
@@ -102,6 +106,7 @@ net::HostOptions hostOptions(const std::string& password) {
     h.allowDirect = o.allowDirect;
     h.lanVisible = o.lanVisible;
     h.portMapping = o.portMapping;
+    h.relay = envOr("CF_ONLINE_RELAY") ? envOr("CF_ONLINE_RELAY") : o.relay;
     return h;
 }
 
@@ -219,6 +224,10 @@ void runAction(Ctx& c, const std::string& a) {
         const u8 id = u8(std::atoi(a.c_str() + 10));
         std::printf("[online-test] member %u relation %d, code %s\n", id, int(friends::relation(id)), friends::memberCode(id).c_str());
         friends::requestFriend(id);
+        return;
+    }
+    if (a == "mailtest") {
+        std::printf("[online-test] %d test letters queued\n", mail::queueTestLetter());
         return;
     }
     if (a == "removefriends") {  // F1 "Remove" on every friend (the game's roster follows)
@@ -528,6 +537,14 @@ void onGuestFrame(Ctx& c) {
 void drawOverlay() {
     watchRoom();
     friends::tick();
+    {
+        int n = 0;
+        const bool* keys = SDL_GetKeyboardState(&n);
+        static std::vector<u8> sc;
+        sc.assign(size_t(n), 0);
+        for (int i = 0; i < n && keys; i++) sc[size_t(i)] = keys[i] ? 1 : 0;
+        ios::usbKeyboardPoll(port::settings().online.usbKeyboard, sc.data(), n);
+    }
     const auto snap = net::session().snapshot();
     const auto freq = friends::incoming();
     const bool showReq = !snap.pending.empty() || !freq.empty();
@@ -734,6 +751,18 @@ bool drawTab() {
         ImGui::SetItemTooltip("Asks your router to forward the UDP port to this PC while you host, and finds\n"
                               "your internet address (STUN, a public service). Without it only players on your\n"
                               "network (or a VPN such as Tailscale, ZeroTier, Hamachi) can join.");
+        {
+            char rb[128];
+            std::snprintf(rb, sizeof rb, "%s", o.relay.c_str());
+            ImGui::SetNextItemWidth(220.0f * ui::scale());
+            if (ImGui::InputTextWithHint("Relay (optional)", "host:29912", rb, sizeof rb)) {
+                o.relay = rb;
+                dirty = true;
+            }
+            ImGui::SetItemTooltip("A relay that your group runs (tools: cf_relay). Joiners whose packets cannot reach\n"
+                                  "you directly come in through it, and friends' letters wait there while you are\n"
+                                  "offline. Room traffic stays end-to-end encrypted; the relay only forwards it.");
+        }
         dirty |= menu::Checkbox("Show on the local network", &o.lanVisible);
         dirty |= menu::Checkbox("Allow direct connections (IP:port, no code)", &o.allowDirect);
         ImGui::SetItemTooltip("For port forwarding / VPN setups: joiners that know only your address may join.\n"
@@ -793,6 +822,10 @@ bool drawTab() {
     }
     friendsSection();
     dirty |= menu::Checkbox("Room notices over the game", &o.notices);
+    dirty |= menu::Checkbox("USB keyboard (PC keyboard for chat)", &o.usbKeyboard);
+    ImGui::SetItemTooltip("The game sees your PC keyboard as a Wii USB keyboard: type chat messages while online. "
+                          "Keys you also use for the Wii Remote act on both, so play with a controller while typing. "
+                          "Turning it on takes effect when the game next looks for a keyboard (at the latest after a restart).");
     return dirty;
 }
 

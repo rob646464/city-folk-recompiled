@@ -334,6 +334,8 @@ std::vector<Field> fields() {
         flag("online", "port_mapping", sSettings.online.portMapping),
         str("online", "last_direct", sSettings.online.lastDirect),
         flag("online", "notices", sSettings.online.notices),
+        flag("online", "usb_keyboard", sSettings.online.usbKeyboard),
+        str("online", "relay", sSettings.online.relay),
     };
 }
 

@@ -411,6 +411,8 @@ struct OnlineSettings {
     bool portMapping = true;    // UPnP / NAT-PMP mapping on the router + public address via STUN
     std::string lastDirect;     // last "Direct connect" address
     bool notices = true;        // room events as notices over the game
+    std::string relay;          // optional self-hosted relay "host[:port]" (tools/relay/cf_relay.cpp)
+    bool usbKeyboard = false;   // the PC keyboard is the Wii USB keyboard (chat); applies when the game opens it
 };
 
 struct Settings {
