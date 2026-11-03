@@ -17,12 +17,55 @@ CityFolkRecomp.exe        runtime + recompiler + setup UI (+ the function tables
 llvm/bin/clang.exe        bundled compiler (from CF_LLVM_DIR, default: the LLVM that built the exe)
 llvm/bin/lld-link.exe     bundled linker
 llvm/LLVM-LICENSE.TXT     Apache-2.0 WITH LLVM-exception (packaging/LLVM-LICENSE.TXT)
-pipelines.bin             shader/pipeline precache list, when one is recorded (data/pipelines.bin; none yet)
+pipelines.bin             shader/pipeline precache list (data/pipelines.bin; docs/RENDERING.md "Pipeline precache")
+README.txt                player notes (packaging/<platform>/README.txt)
 ```
 
 The LLVM binaries are copied at install time, never committed. Toolchain lookup order:
 `<exe dir>/llvm/bin`, `CF_LLVM_DIR`, the LLVM that built the exe (dev builds, `CF_DEV_LLVM_DIR`),
 then `PATH`.
+
+Linux adds `CityFolkRecompiled.sh` (launcher: portable-mode check, `last_run.log` /
+`previous_run.log` in the data folder, exit status), `llvm/bin/clang` + `llvm/bin/ld.lld` (the real
+binaries behind the release's symlinks) and `llvm/lib/libxml2.so.2` (a stub: the official lld links
+libxml2 only for lld-link manifests; packaging/linux/libxml2_stub.c). macOS: `llvm/bin/ld64.lld`.
+
+## Packages and releases (CI)
+
+Same pipeline as LM (LM .github/workflows/build.yml, tools/release_windows.ps1, docs/LINUX.md,
+docs/MACOS.md), with City Folk's names:
+
+- **GitHub Actions** (`.github/workflows/build.yml`): on pushes to `main`, `ci/**` (push any branch
+  as `ci/<name>` to have it built) and `perf-ci`, on tags `v*`, pull requests and
+  `workflow_dispatch` (works once the file is on main). Three jobs build only `CityFolkRecomp`
+  (no disc: `CF_DISC=/nonexistent`, the cfrecomp dev build is skipped) and upload
+  `CityFolkRecompiled-<version>-windows-x64.zip` / `-linux-x86_64.tar.gz` / `-macos-arm64.tar.gz`
+  as artifacts (version = `project(cfport ... VERSION)` in CMakeLists.txt). Windows bundles the
+  runner's LLVM and checks the package (exe, pipelines.bin, README, clang, lld-link) and that
+  `CityFolkRecomp.exe --check-disc` loads and refuses a missing disc (exit 3). Linux (Ubuntu
+  24.04) and macOS (macos-26, Apple silicon, unsigned) bundle the official LLVM 23.1.4 release
+  (sha256-pinned, cached).
+- `tools/package_linux.sh <LLVM bin> [out]`: configure `linux-clang`, build, `cmake --install
+  --strip`, file checks, glibc/libstdc++ versions and NEEDED libraries of the exe, clang and ld.lld;
+  **fails** on any symbol newer than GLIBC_2.34 and on names the exe both exports and imports (a
+  glibc shim reaching itself through the PLT loops forever: LM issues #2/#11, hypotf); module
+  smoke test (the bundled clang/ld.lld build a freestanding module with setup's flags,
+  `cf_module_init` loads via ctypes); .tar.gz + .zip. The exe needs only libc/libm/libgcc_s plus
+  libsqlite3, libzstd and libz from the system (libstdc++ is static).
+- `tools/package_macos.sh <LLVM bin> [out]`: the same for macOS: only /System and /usr/lib
+  libraries, valid ad-hoc signatures, module smoke test (dylib).
+- `tools/release_linux.sh <version> [out]` (WSL or Linux): clean clone of HEAD in `~/cf-release`,
+  apt packages, an LLVM-*-Linux-X64 found under ~ or /opt (or `CF_LINUX_LLVM`), package_linux.sh,
+  copies `CityFolkRecompiled-<version>-linux-x86_64.*` out.
+- `tools/release_windows.ps1 [-SkipLinux] [-SkipMac] [-DryRun] [-MacCheckOnly]`: builds and
+  packages Windows, Linux through WSL, fetches the macOS artifact GitHub Actions built from the same
+  commit (`gh run list --commit`), fills `packaging/release_notes/v<version>.md` (download table:
+  the updater's checksum fallback) and publishes release `v<version>` on
+  rob646464/city-folk-recompiled with `gh`. **`-DryRun`** does everything up to the release
+  (packages and notes in `out/`, placeholder notes when the file is missing) but never pushes,
+  starts a workflow, tags or publishes; it prints the `gh release create` command instead.
+
+No releases or tags exist yet; the repository is private (the updater reports "not public yet").
 
 ## Discs
 
@@ -146,7 +189,7 @@ The repository is private for now: the unauthenticated check gets HTTP 404, repo
 published release was found (the project's releases are not public yet)." in F1 > Game and as an
 `[update] check failed` log line; nothing else happens and the game runs normally. The startup
 check runs only in a release folder (`llvm/bin/clang` next to the program; `pipelines.bin` is not
-required, City Folk has none yet) and not with `CF_UPDATE_CHECK=0`. Staging in `<install>/upd`,
+required) and not with `CF_UPDATE_CHECK=0`. Staging in `<install>/upd`,
 `.old` renames, rollback, cleanup and the portable-mode rules are LM's (LM docs/SETUP.md
 "Updates", "Long paths").
 

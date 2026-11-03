@@ -1,0 +1,20 @@
+# Precache / performance route (tools/pipelines/verify.py), saved town CF_FIXTURE=user-town:
+# from the house door west to Nook's Cranny, in (A at the door), Tom Nook's greeting, a walk
+# around the shop, out again. Verified 2026-10-28 (the door is entered with A, not by walking).
+include continue_any.txt
+after link d_bgo_drawNP 2
++1400:STICKDOWN*30
++40:STICKLEFT+B*186
++190:STICKRIGHT*10
++14:STICKUP*80
++90:A
++40:A ~3
+after link d_bgi_drawNP 2
++150:A
++50:A ~5
++60:STICKLEFT*90
++110:STICKUP*60
++80:STICKRIGHT*200
++220:STICKDOWN*60
++80:STICKLEFT*100
++120:STICKDOWN*250

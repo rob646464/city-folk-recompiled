@@ -1,0 +1,15 @@
+# Precache / performance route (tools/pipelines/verify.py): the saved town (CF_FIXTURE=user-town)
+# from the house door: a walk/run around (south past the pond, west, north, east), the HUD map and
+# back. Only shows the town (reaches no place), so it fits other clocks and weather too.
+include continue_any.txt
+after link d_bgo_drawNP 2
++1400:STICKDOWN*180
++200:STICKLEFT+B*200
++220:STICKUP+B*200
++220:STICKRIGHT+B*300
++320:STICKDOWN+B*150
++170:STICKLEFT*100
++120:@0.578/0.82
++20:A
++200:B
++60:@off

@@ -1,0 +1,13 @@
+# Precache / performance route (tools/pipelines/verify.py), saved town CF_FIXTURE=user-town:
+# into the player's house (walk up into the door), around the room, out again. Verified 2026-10-28.
+include continue_any.txt
+after link d_bgo_drawNP 2
++1400:STICKUP*90
+after link d_bgi_drawNP 2
++200:STICKUP*120
++150:STICKLEFT*80
++100:STICKRIGHT*160
++180:STICKDOWN*250
+after link d_bgo_drawNP 3
++200:STICKRIGHT+B*200
++220:STICKDOWN+B*150
