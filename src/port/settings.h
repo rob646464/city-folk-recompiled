@@ -31,7 +31,7 @@ struct VideoSettings {
     bool vsync = true;          // applied at next launch
     int msaa = 1;               // 1, 2, 4, 8; applied at next launch
     bool hudKeep4x3 = true;     // keep 2D/HUD at 4:3 (centered) in widescreen
-    bool pal60 = false;         // PAL game only: 59.94 Hz retrace (PAL60) instead of 50 Hz (game speed unchanged)
+    // (No PAL refresh option: the European game's 50/60 Hz is the console's EuRGB60 setting, sys::settings().)
     // Interpolated presentation on a variable refresh rate display (G-SYNC / FreeSync): 0 auto
     // (detected from the display's refresh timing), 1 on, 2 off (frame.cpp, docs/INTERPOLATION.md).
     int vrr = 0;
@@ -298,6 +298,32 @@ struct EnhancedLightingSettings {
     bool ssao = true;
     float ssaoIntensity = 0.4f;        // 0..2
     float ssaoRadius = 60.0f;          // world units
+
+    // ---- City Folk (src/game/cf_light.cpp, docs/RENDERING.md "Enhanced lighting (City Folk)") ----
+    // Sun and moon: soft shadow maps from a directional light that follows the game clock.
+    bool sunShadows = true;
+    int sunDirection = 0;              // 0 time of day (real sun path), 1 the game's own key light
+    float sunShadowStrength = 0.6f;    // 0..1: how much a full shadow darkens (day; the moon's is weaker)
+    float sunShadowDistance = 3500.0f; // world units of view depth with shadows (a town acre is 640)
+    float sunShadowSoftness = 1.0f;    // 0..3: penumbra (the light's apparent size)
+    int sunShadowMapSize = 1;          // 0..2: 512 / 1024 / 2048 texels per cascade (preset)
+    int sunShadowQuality = 1;          // 0..2: filter taps 8 / 12 / 20 (preset)
+    bool sunLight = true;              // warm sunlight added on sun-facing surfaces (shadowed)
+    float sunLightIntensity = 0.3f;    // 0..1
+    int blobShadows = 1;               // the game's round blob shadows: 0 keep, 1 fade under real shadows, 2 hide
+    bool indoorShadows = true;         // rooms: shadows from the room's main light
+    // Time of day: golden hour, blue dusk, cool moonlight, from the game clock (and the weather).
+    bool timeOfDay = true;
+    float timeOfDayStrength = 1.0f;    // 0..2
+    bool timeOfDayWeather = true;      // overcast / rain / snow flatten the light
+    // Night lights: windows, lamps, shop interiors, fireflies, fireworks light their surroundings.
+    bool nightLights = true;
+    float nightLightIntensity = 1.0f;  // 0..3
+    bool nightLightShadows = true;     // the strongest night lights cast shadows
+    // Sun shafts: light scattered in the air, cut by the shadows of trees and houses.
+    bool sunShafts = true;
+    float sunShaftIntensity = 1.0f;    // 0..3
+    int sunShaftQuality = 1;           // 0..2: march steps 12 / 20 / 32 (preset)
 };
 
 // Second batch of restored unused content (src/recomp/unused2.*, docs/UNUSED_CONTENT.md
@@ -361,6 +387,17 @@ struct InterfaceSettings {
     bool startHint = true;  // "Press F1 for options" notice for the first seconds of play (menu.cpp)
 };
 
+// Nintendo event distributions (F1 > Online > Nintendo events; src/recomp/distributions.cpp,
+// docs/DISTRIBUTIONS.md). Off by default: nothing is downloaded and WiiConnect24 stays off.
+struct NintendoEventSettings {
+    int mode = 0;               // 0 off, 1 loop (every distribution in turn), 2 original dates, 3 only when I choose
+    int loopPeriod = 0;         // loop: 0 every week, 1 every 2 weeks, 2 every month
+    bool originalYearly = true; // original dates: every year (month/day); false = only in the original years
+    bool otherRegions = false;  // include other regions' distributions
+    bool liveDelivery = true;   // USA: run the game's own WiiConnect24 check while playing
+    bool townWc24 = true;       // USA: turn the town's own WiiConnect24 setting on (the game's setter) when it is off
+};
+
 // Online play between players of this port (F1 > Online; src/recomp/online.cpp, docs/ONLINE.md).
 // Room passwords are never saved.
 struct OnlineSettings {
@@ -390,6 +427,7 @@ struct Settings {
     SillyWorldSettings sillyWorld;
     SillyLuigiSettings sillyLuigi;
     UpdateSettings updates;
+    NintendoEventSettings events;
     OnlineSettings online;
 };
 

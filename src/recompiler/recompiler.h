@@ -42,6 +42,11 @@ struct Input {
     std::string hooks;              // tools/recomp/hooks.txt contents
     // Optional (non-US bases): "ADDR NAME TU" per line (LM's tools/recomp/gen_version_map.py).
     std::string versionMap;
+    // Non-USA versions: config/<id>/us_map.txt ("<addr> <USA addr> <method> <USA name>") and
+    // rels_us_map.txt ("<module> <offset> <USA offset> <method>"). hooks.txt lines tagged "all"
+    // name USA functions; these maps find them in this version (docs/SETUP.md "Version-aware code").
+    std::string usMap;
+    std::string relUsMap;
     std::vector<RelInput> rels;     // REL modules to translate with the DOL
 };
 

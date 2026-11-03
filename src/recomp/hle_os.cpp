@@ -322,7 +322,7 @@ bool traceMq() {
 
 HLE(OSSendMessage) {
     const u32 mq = c.r[3], msg = c.r[4], flags = c.r[5];
-    if (traceMq() && mq != 0x803A3608) log("[mq] send %08X msg %08X flags %u (lr %08X) used %u", mq, msg, flags, c.lr, rd32(mq + 0x1C));
+    if (traceMq()) log("[mq] send %08X msg %08X flags %u (lr %08X) used %u", mq, msg, flags, c.lr, rd32(mq + 0x1C));
     for (;;) {
         const u32 count = rd32(mq + 0x14), used = rd32(mq + 0x1C);
         if (used < count) break;
@@ -360,7 +360,7 @@ HLE(OSJamMessage) {
 
 HLE(OSReceiveMessage) {
     const u32 mq = c.r[3], out = c.r[4], flags = c.r[5];
-    if (traceMq() && mq != 0x803A3608) log("[mq] recv %08X flags %u (lr %08X) used %u", mq, flags, c.lr, rd32(mq + 0x1C));
+    if (traceMq()) log("[mq] recv %08X flags %u (lr %08X) used %u", mq, flags, c.lr, rd32(mq + 0x1C));
     while (rd32(mq + 0x1C) == 0) {
         if (!(flags & 1)) {
             c.r[3] = 0;

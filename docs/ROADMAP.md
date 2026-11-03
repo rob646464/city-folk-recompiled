@@ -50,6 +50,14 @@ Engine work for the Wii: docs/WII.md. This file tracks the phases and the user's
   keyboard chat, friends system with automatic roster entries, letters between friends
   (WiiConnect24 replacement), NAT hole punching, optional self-hosted relay. docs/ONLINE.md.
 
+- **Nintendo event distributions** (user decision 2026-10-27: WiiLink's archive, with their
+  permission). Done on branch distrib-1: F1 > Online > Nintendo events (off by default; "In
+  turn" weekly / 2-weekly / monthly loop as the main mode, original dates, only when I choose,
+  "Receive now" per distribution, other regions), delivered through the game's own WiiConnect24
+  path (KD/NCD HLE, wc24dl.vff) to Pete. Next: letters in the other languages (archive is English
+  only), the missing Japanese/Korean distributions if another archive has them, PAL/Japan/Korea
+  checks. docs/DISTRIBUTIONS.md.
+
 ## Ideas to look at later
 - Texture packs (Aurora has Dolphin-compatible replacement; the RUUE01HD project recreates
   City Folk textures).

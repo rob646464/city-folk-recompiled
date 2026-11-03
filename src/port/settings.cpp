@@ -84,7 +84,6 @@ std::vector<Field> fields() {
         flag("video", "vsync", v.vsync),
         num("video", "msaa", v.msaa),
         flag("video", "hud_keep_4x3", v.hudKeep4x3),
-        flag("video", "pal60", v.pal60),
         num("video", "vrr", v.vrr),
         flag("rendering", "integer_tev", r.integerTev),
         flag("rendering", "efb_color_depth", r.efbColorDepth),
@@ -163,6 +162,26 @@ std::vector<Field> fields() {
         flag("enhanced_lighting", "ssao", l.ssao),
         num("enhanced_lighting", "ssao_intensity", l.ssaoIntensity),
         num("enhanced_lighting", "ssao_radius", l.ssaoRadius),
+        flag("enhanced_lighting", "sun_shadows", l.sunShadows),
+        num("enhanced_lighting", "sun_direction", l.sunDirection),
+        num("enhanced_lighting", "sun_shadow_strength", l.sunShadowStrength),
+        num("enhanced_lighting", "sun_shadow_distance", l.sunShadowDistance),
+        num("enhanced_lighting", "sun_shadow_softness", l.sunShadowSoftness),
+        num("enhanced_lighting", "sun_shadow_map_size", l.sunShadowMapSize),
+        num("enhanced_lighting", "sun_shadow_quality", l.sunShadowQuality),
+        flag("enhanced_lighting", "sun_light", l.sunLight),
+        num("enhanced_lighting", "sun_light_intensity", l.sunLightIntensity),
+        num("enhanced_lighting", "blob_shadows", l.blobShadows),
+        flag("enhanced_lighting", "indoor_shadows", l.indoorShadows),
+        flag("enhanced_lighting", "time_of_day", l.timeOfDay),
+        num("enhanced_lighting", "time_of_day_strength", l.timeOfDayStrength),
+        flag("enhanced_lighting", "time_of_day_weather", l.timeOfDayWeather),
+        flag("enhanced_lighting", "night_lights", l.nightLights),
+        num("enhanced_lighting", "night_light_intensity", l.nightLightIntensity),
+        flag("enhanced_lighting", "night_light_shadows", l.nightLightShadows),
+        flag("enhanced_lighting", "sun_shafts", l.sunShafts),
+        num("enhanced_lighting", "sun_shaft_intensity", l.sunShaftIntensity),
+        num("enhanced_lighting", "sun_shaft_quality", l.sunShaftQuality),
         flag("crt", "enabled", c.enabled),
         enm("crt", "preset", c.preset),
         enm("crt", "scanlines", c.scanlines),
@@ -299,6 +318,12 @@ std::vector<Field> fields() {
         rgb("silly_luigi", "poltergust_color", sSettings.sillyLuigi.colorRgb[kSillyPoltergust]),
         flag("updates", "check_at_startup", sSettings.updates.checkAtStartup),
         str("updates", "skip_version", sSettings.updates.skipVersion),
+        num("nintendo_events", "mode", sSettings.events.mode),
+        num("nintendo_events", "loop_period", sSettings.events.loopPeriod),
+        flag("nintendo_events", "original_yearly", sSettings.events.originalYearly),
+        flag("nintendo_events", "other_regions", sSettings.events.otherRegions),
+        flag("nintendo_events", "live_delivery", sSettings.events.liveDelivery),
+        flag("nintendo_events", "town_wc24", sSettings.events.townWc24),
         str("online", "player_name", sSettings.online.playerName),
         str("online", "room_name", sSettings.online.roomName),
         num("online", "port", sSettings.online.port),
@@ -333,6 +358,8 @@ void sanitize() {
     clampTo(sSettings.online.port, 1024, 65535);
     if (sSettings.online.playerName.size() > 24) sSettings.online.playerName.resize(24);
     clampTo(v.targetFps, kMinFps, kMaxFps);
+    clampTo(sSettings.events.mode, 0, 3);
+    clampTo(sSettings.events.loopPeriod, 0, 2);
     clampEnum(v.aspect, AspectMode::Ultra32x9, AspectMode::Auto);
     clampTo(v.resolutionScale, 0, 8);
     clampTo(v.fovScale, 0.75f, 1.5f);

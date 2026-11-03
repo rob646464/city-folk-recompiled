@@ -255,7 +255,7 @@ std::string moduleKey(const Disc& disc) {
     // The version's function tables (its modules.txt holds the SHA-1 of every REL, which
     // Disc::open checked), the hooks and the module's own sources.
     const embedded::Tables& t = embedded::tables(disc.version());
-    std::vector<std::string_view> parts{t.symbols, t.splits, t.modules, embedded::hooks(),
+    std::vector<std::string_view> parts{t.symbols, t.splits, t.modules, t.usMap, t.relUsMap, embedded::hooks(),
                                         embedded::ctxHeader(), embedded::moduleAbiHeader(), embedded::moduleRt(),
                                         embedded::recompilerSource()};
     for (const auto& [name, map] : t.relMaps) {
@@ -378,6 +378,8 @@ bool buildModule(const Disc& disc, const Progress& progress, std::string& error)
     in.symbols = std::string(tables.symbols);
     in.splits = std::string(tables.splits);
     in.hooks = std::string(embedded::hooks());
+    in.usMap = std::string(tables.usMap);
+    in.relUsMap = std::string(tables.relUsMap);
     // The REL modules (files/rels, checked against modules.txt by Disc::open), each with the map
     // of its config/<id>/rels (docs/RECOMPILER.md "REL modules").
     for (const auto& [name, data] : disc.rels()) {

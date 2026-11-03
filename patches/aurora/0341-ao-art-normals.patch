@@ -1,0 +1,33 @@
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+index 9990d2e..5465819 100644
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -761,6 +761,12 @@ fn ao_normal(nt: vec4f, mp: vec2f, p: vec3f) -> vec3f {
+     let l = dot(n, n);
+     n = select(v, n * inverseSqrt(max(l, 1e-12)), l > 1e-6);
+     if (dot(n, v) < -0.25) { n = -n; } // back face of a two-sided surface
++    // 0340: art normals (City Folk lights its backdrops and foliage with normals bent far from the
++    // geometry, e.g. a vertical tree wall with upward normals): where the vertex normal is more
++    // than ~60 degrees off a reliable geometric normal, the geometry's is used (the wall greyed
++    // out from its own ground-facing horizon otherwise).
++    let g = mask_normal(mp, p);
++    if (g.w > 0.5 && dot(n, g.xyz) < 0.5) { n = g.xyz; }
+   } else {
+     // (w = 0 marks a one-pixel ledge; its one-sided normal is still far better than the view
+     // vector, which made the edge rows of rugs and steps a dashed dark line)
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index 4b3a312..b65eb41 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1048,7 +1048,10 @@ fn enh_dir_light(b: u32, p: vec3f, n: vec3f, ghost: bool, frag: vec2f, flags: u3
+   }
+   // Surfaces turned away from the light are in their own shadow (a soft terminator).
+   let wrapw = max(enh_ld(b + 16u), 0.02);
+-  let away = (1.0 - smoothstep(-wrapw, wrapw * 0.5, nl)) * clamp(enh_ld(b + 15u), 0.0, 1.0);
++  // (only within the shadow distance, fading out with the shadows: backdrops far away keep their look)
++  let maxd = max(enh_ld(b + 3u), 1.0);
++  let near = 1.0 - smoothstep(maxd * 0.7, maxd, -p.z);
++  let away = (1.0 - smoothstep(-wrapw, wrapw * 0.5, nl)) * clamp(enh_ld(b + 15u), 0.0, 1.0) * near;
+   let s = select(max(sh, away), sh * 0.5, ghost);
+   let tint = vec3f(enh_ld(b + 12u), enh_ld(b + 13u), enh_ld(b + 14u));
+   enh_dir_tint = enh_dir_tint * mix(vec3f(1.0), clamp(tint, vec3f(0.0), vec3f(1.0)), s);

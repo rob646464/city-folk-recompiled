@@ -405,7 +405,7 @@ HLE(SetupSoundPlayer__Q34nw4r3snd18SoundArchivePlayerFPCQ34nw4r3snd12SoundArchiv
 // game always mixes in stereo. With F1 > Sound > Output 5.1 / 7.1 (discrete) hooks.txt patch 30
 // skips that call, so the game keeps mixing in DPL2 and the surround buses exist for the extra
 // speakers (docs/AUDIO.md "Surround output"); every other choice leaves the game's behaviour.
-// The switch is set here, before the game's call. (USA address.)
+// The switch is set here, before the game's call (patch 30 is tagged "all": every version).
 HLE(SCGetSoundMode) {
     callOriginal(c, "SCGetSoundMode");
     const auto out = port::settings().audio.output;

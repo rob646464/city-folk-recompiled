@@ -1,0 +1,12 @@
+# Continue a saved town, insensitive to load timing: the pointer points away, so A always takes the
+# highlighted (first) choice of Rover's questions ("Yeah!", then the first saved player), and A is
+# pressed every 40 frames until 5200 ("Preparing saved data" ends anywhere from frame 3550 to past
+# 4000, depending on machine load). With the user-town fixture (CF_FIXTURE=user-town) the player
+# then stands at the door of their house. Time town actions from the arrival:
+#   after link d_bgo_drawNP 2      (#1 = the title's town, #2 = arrival in the saved town)
+#   +1400:...                      (past the last A of this file)
+# continue.txt's pointer clicks depend on when each choice box appears, so it can end in another
+# dialogue branch on a busy PC. Verified 2026-10-28.
+1000:@off
+1300:A
++40:A ~97

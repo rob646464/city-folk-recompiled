@@ -20,6 +20,7 @@
 #include "recomp/controls.h"
 #include "recomp/game.h"
 #include "recomp/menu.h"
+#include "recomp/menu_nav.h"
 #include "recomp/runtime.h"
 #include "recomp/ui_scale.h"
 #include "recomp/widescreen.h"
@@ -63,7 +64,13 @@ struct RemoteConfig {
     Connect connect = Connect::Auto;  // Auto: connected while a device drives the port
     bool nunchuk = true;
     u8 pointer = kPtrStick;           // PointerBits
+    // Snap pointer to menu items (menu_nav.h). Auto: while the mouse does not place the pointer.
+    menunav::Mode snap = menunav::Mode::Auto;
 };
+
+const char* snapKey(menunav::Mode m) {
+    return m == menunav::Mode::On ? "on" : m == menunav::Mode::Off ? "off" : "auto";
+}
 
 struct Config {
     std::array<RemoteConfig, kRemotes> remotes;
@@ -72,6 +79,7 @@ struct Config {
     float gyroSensitivity = 3.0f; // half-screens per radian
     bool gyroInvertX = false, gyroInvertY = false;
     bool hideCursor = true;       // hide the OS cursor over the game while the mouse points
+    float pointerTimeout = 3.0f;  // s without pointer movement until the pointer leaves the screen (0: never)
     float distance = 2.0f;        // reported distance from the sensor bar (m)
     Config() { remotes[0].pointer = kPtrMouse | kPtrStick; }
 };
@@ -119,6 +127,7 @@ void loadKey(const std::string& section, const std::string& key, const std::stri
         if (k == "connect") rc.connect = value == "on" ? Connect::Always : value == "off" ? Connect::Never : Connect::Auto;
         else if (k == "extension") rc.nunchuk = value != "none";
         else if (k == "pointer") rc.pointer = parsePointer(value);
+        else if (k == "snap") rc.snap = value == "on" ? menunav::Mode::On : value == "off" ? menunav::Mode::Off : menunav::Mode::Auto;
         return;
     }
     if (key == "pointer_stick_speed") sCfg.stickSpeed = parseFloat(value, 0.2f, 5.0f, sCfg.stickSpeed);
@@ -127,6 +136,7 @@ void loadKey(const std::string& section, const std::string& key, const std::stri
     else if (key == "gyro_invert_x") sCfg.gyroInvertX = on;
     else if (key == "gyro_invert_y") sCfg.gyroInvertY = on;
     else if (key == "hide_cursor") sCfg.hideCursor = on;
+    else if (key == "pointer_timeout") sCfg.pointerTimeout = parseFloat(value, 0.0f, 30.0f, sCfg.pointerTimeout);
     else if (key == "distance") sCfg.distance = parseFloat(value, 0.5f, 5.0f, sCfg.distance);
 }
 
@@ -137,7 +147,8 @@ void saveConfig(std::ostream& out) {
         const auto& rc = sCfg.remotes[i];
         out << "remote" << i + 1 << "_connect=" << connectKey(rc.connect) << '\n'
             << "remote" << i + 1 << "_extension=" << (rc.nunchuk ? "nunchuk" : "none") << '\n'
-            << "remote" << i + 1 << "_pointer=" << pointerKey(rc.pointer) << '\n';
+            << "remote" << i + 1 << "_pointer=" << pointerKey(rc.pointer) << '\n'
+            << "remote" << i + 1 << "_snap=" << snapKey(rc.snap) << '\n';
     }
     out << "pointer_stick_speed=" << sCfg.stickSpeed << '\n'
         << "pointer_stick_absolute=" << (sCfg.stickAbsolute ? "true" : "false") << '\n'
@@ -145,6 +156,7 @@ void saveConfig(std::ostream& out) {
         << "gyro_invert_x=" << (sCfg.gyroInvertX ? "true" : "false") << '\n'
         << "gyro_invert_y=" << (sCfg.gyroInvertY ? "true" : "false") << '\n'
         << "hide_cursor=" << (sCfg.hideCursor ? "true" : "false") << '\n'
+        << "pointer_timeout=" << sCfg.pointerTimeout << '\n'
         << "distance=" << sCfg.distance << '\n';
 }
 
@@ -228,7 +240,7 @@ std::vector<ScriptItem> parseScript(const std::string& script) {
                 {"A", kBtnA}, {"B", kBtnB}, {"1", kBtn1}, {"2", kBtn2}, {"X", kBtn1}, {"Y", kBtn2},
                 {"PLUS", kBtnPlus}, {"START", kBtnPlus}, {"MINUS", kBtnMinus}, {"HOME", kBtnHome},
                 {"UP", kBtnUp}, {"DOWN", kBtnDown}, {"LEFT", kBtnLeft}, {"RIGHT", kBtnRight},
-                {"C", kBtnC}, {"Z", kBtnZ}, {"SHAKE", kBtnShake}, {"NSHAKE", kBtnShakeNunchuk}};
+                {"C", kBtnC}, {"Z", kBtnZ}, {"SHAKE", kBtnShake}, {"NSHAKE", kBtnShakeNunchuk}, {"RECENTER", kBtnRecenter}};
             for (const auto& [name, bit] : kNames)
                 if (b == name) p.buttons |= bit;
             if (b.rfind("STICK=", 0) == 0) {  // STICK=x/y: Nunchuk stick at any position (-1..1, up +)
@@ -295,6 +307,10 @@ struct PortState {
     SDL_Gamepad* gyroPad = nullptr;
     bool scriptPointer = false, scriptOff = false;
     float scriptX = 0, scriptY = 0;
+    const ScriptItem* scriptItem = nullptr;  // the scripted pointer position applied last
+    bool snapped = false;       // the menu snap placed the pointer this sample
+    double lastMove = 0;        // when the pointer last moved (or a pointer screen was up): timeout
+    bool timedOut = false;
     State lastState;            // for the input test (menu)
 };
 std::array<PortState, kRemotes> sPort;
@@ -311,6 +327,22 @@ void poll() {
     PADStatus st[PAD_MAX_CONTROLLERS] = {};
     readHostPads(st);  // device assignment, bindings, menu suppression
     for (int i = 0; i < kRemotes; i++) sDriven[i] = controls::remoteInputs(u32(i), sInputs[i]);
+    bool snap = false;
+    {
+        std::lock_guard lk(sMutex);
+        for (const auto& rc : sCfg.remotes) snap |= rc.snap != menunav::Mode::Off;
+    }
+    menunav::setWanted(snap);
+}
+
+// The pointer timeout in seconds (0: never). Test runs (--input) keep the pointer, so existing
+// routes behave as before; CF_POINTER_TIMEOUT=<s> sets it for any run (also scripted ones).
+const char* const sTimeoutEnv = std::getenv("CF_POINTER_TIMEOUT");
+const bool sTimeoutLog = sTimeoutEnv != nullptr || std::getenv("CF_WPAD_LOG") != nullptr;
+
+float pointerTimeout(const Config& cfg) {
+    if (sTimeoutEnv && *sTimeoutEnv) return std::max(0.0f, float(std::atof(sTimeoutEnv)));
+    return script().empty() ? cfg.pointerTimeout : 0.0f;
 }
 
 class EmulatedSource final : public Source {
@@ -343,25 +375,35 @@ public:
         if (!ps.initialized) {
             ps.initialized = true;
             ps.px = ps.py = 0;
+            ps.lastMove = now;
         }
 
         // Script (test runs): buttons and stick add to the bound inputs; a scripted pointer
         // position stays until the next one.
+        bool pointerMoved = false;  // a free pointer device (or a scripted position) moved it
         if (!script().empty()) {
             const u32 clk = scriptClock();
+            const ScriptItem* latest = nullptr;
+            u32 latestStart = 0;
             for (const auto& p : script()) {
                 u32 start = 0;
                 if (p.port != chan || !itemStart(p, start) || clk < start) continue;
-                if (p.pointer) {  // the latest started pointer item wins and persists
-                    ps.scriptPointer = true;
-                    ps.scriptOff = p.pointerOff;
-                    ps.scriptX = p.px;
-                    ps.scriptY = p.py;
+                if (p.pointer && (!latest || start >= latestStart)) {  // the latest started pointer item wins and persists
+                    latest = &p;
+                    latestStart = start;
                 }
                 if (clk >= start + p.frames) continue;
                 buttons |= p.buttons;
                 if (p.sx) sx = p.sx;
                 if (p.sy) sy = p.sy;
+            }
+            if (latest && latest != ps.scriptItem) {
+                ps.scriptItem = latest;
+                ps.scriptPointer = true;
+                ps.scriptOff = latest->pointerOff;
+                ps.scriptX = latest->px;
+                ps.scriptY = latest->py;
+                pointerMoved = true;
             }
         }
 
@@ -376,6 +418,7 @@ public:
                 if (m.seq != ps.mouseSeq) {
                     ps.mouseSeq = m.seq;
                     ps.last = PortState::MouseDev;
+                    pointerMoved = true;
                 }
                 if (ps.last == PortState::MouseDev) {
                     mouseToPointer(m, ps.px, ps.py);
@@ -385,13 +428,16 @@ public:
             if (rc.pointer & kPtrStick) {
                 const float m = std::sqrt(ptrX * ptrX + ptrY * ptrY);
                 if (cfg.stickAbsolute) {
-                    if (m > 0.02f || ps.last == PortState::StickDev) {
+                    if (m > 0.02f) pointerMoved = true;
+                    // While the snap holds the pointer on an item, a centred stick does not take it back.
+                    if (m > 0.02f || (ps.last == PortState::StickDev && !ps.snapped)) {
                         ps.last = PortState::StickDev;
                         ps.px = ptrX;
                         ps.py = -ptrY;
                         ps.valid = true;
                     }
                 } else if (m > 0.02f) {
+                    pointerMoved = true;
                     ps.last = PortState::StickDev;
                     // Speed grows with the square of the tilt: fine aim near the centre.
                     ps.px += float(ptrX * m * cfg.stickSpeed * dt);
@@ -413,6 +459,7 @@ public:
                     const float yaw = rate[1] * (cfg.gyroInvertX ? -1.0f : 1.0f);
                     const float pitch = rate[0] * (cfg.gyroInvertY ? -1.0f : 1.0f);
                     if (std::fabs(yaw) + std::fabs(pitch) > 0.03f) {
+                        pointerMoved = true;
                         ps.last = PortState::GyroDev;
                         ps.px -= float(yaw * cfg.gyroSensitivity * dt);
                         ps.py -= float(pitch * cfg.gyroSensitivity * dt);
@@ -420,9 +467,40 @@ public:
                     }
                 }
             }
+            // Snap pointer to menu items (menu_nav.h): on a pointer-driven screen the D-pad and
+            // the Nunchuk stick move the pointer between the screen's items.
+            {
+                menunav::Input ni;
+                ni.mode = rc.snap;
+                ni.mouseDrives = ps.last == PortState::MouseDev && !ps.scriptPointer;
+                ni.pointerMoved = pointerMoved;
+                ni.buttons = buttons;
+                ni.stickX = sx;
+                ni.stickY = sy;
+                ni.px = ps.scriptPointer ? ps.scriptX : ps.px;
+                ni.py = ps.scriptPointer ? ps.scriptY : ps.py;
+                ni.now = now;
+                const menunav::Output no = menunav::apply(chan, ni);
+                buttons = no.buttons;
+                sx = no.stickX;
+                sy = no.stickY;
+                ps.snapped = no.setPointer;
+                if (no.setPointer) {
+                    ps.px = no.px;
+                    ps.py = no.py;
+                    ps.valid = true;
+                    if (ps.last == PortState::MouseDev || ps.last == PortState::None) ps.last = PortState::StickDev;
+                    if (ps.scriptPointer) {
+                        ps.scriptOff = false;
+                        ps.scriptX = no.px;
+                        ps.scriptY = no.py;
+                    }
+                }
+            }
             if (buttons & kBtnRecenter) {
                 ps.px = ps.py = 0;
                 ps.valid = true;
+                pointerMoved = true;
             }
             if (ps.last != PortState::MouseDev) {
                 ps.px = std::clamp(ps.px, -1.0f, 1.0f);
@@ -438,6 +516,19 @@ public:
             if (rc.pointer && ps.last == PortState::None && rc.pointer != kPtrMouse) st.pointerValid = true;  // centred
             st.px = ps.px;
             st.py = ps.py;
+        }
+        {
+            // Pointer timeout: a pointer left alone goes off the screen, as a Remote put down or
+            // pointed away does, so the field controls are the pointer-less ones. Never while
+            // a pointer screen is up (it needs the pointer); moving it brings it back where it was.
+            const float timeout = pointerTimeout(cfg);
+            if (pointerMoved || ps.snapped || menuOpen || menunav::menuUp()) ps.lastMove = now;
+            const bool out = timeout > 0 && st.pointerValid && now - ps.lastMove > timeout;
+            if (out != ps.timedOut) {
+                ps.timedOut = out;
+                if (sTimeoutLog) log("[wiimote] remote %d: pointer %s", chan + 1, out ? "timed out (hidden)" : "back");
+            }
+            if (out) st.pointerValid = false;
         }
 
         // Motion: at rest, or swung back and forth (about 7 Hz, +-2.5 g) while a shake input is held.
@@ -488,6 +579,7 @@ void sample(int chan, State& out) {
     if (chan < 0 || chan >= kRemotes) return;
     const double now = double(timeBase()) / kTimerClock;
     sourceFor(chan).read(chan, now, out);
+    menunav::notePointer(chan, out.connected && out.pointerValid, out.px, out.py);
     {
         std::lock_guard lk(sStateMutex);
         State& last = sPort[chan].lastState;
@@ -649,10 +741,45 @@ bool drawPointerTab() {
     std::lock_guard lk(sMutex);
     ImGui::TextWrapped("How the Wii Remote's pointer and motion are emulated. Each Remote's pointer devices are "
                        "chosen in the Ports tab.");
+    ImGui::SeparatorText("Snap pointer to menu items");
+    ImGui::TextWrapped("Play menus with a normal controller: while a pointer screen is up (pockets, map, shops, "
+                       "dialogue choices, keyboards, ...), the D-pad or the left stick moves the pointer from item to "
+                       "item and A clicks. The right stick still moves the pointer freely.");
+    for (int i = 0; i < kRemotes; i++) {
+        static const char* kSnap[] = {"Auto", "On", "Off"};
+        auto& rc = sCfg.remotes[i];
+        int si = rc.snap == menunav::Mode::On ? 1 : rc.snap == menunav::Mode::Off ? 2 : 0;
+        char label[48];
+        std::snprintf(label, sizeof label, "Wii Remote %d##snap%d", i + 1, i);
+        ImGui::SetNextItemWidth(140 * recomp::ui::scale());
+        if (ImGui::Combo(label, &si, kSnap, 3)) {
+            rc.snap = si == 1 ? menunav::Mode::On : si == 2 ? menunav::Mode::Off : menunav::Mode::Auto;
+            changed = true;
+        }
+        ImGui::SetItemTooltip("Auto: snaps while the pointer is not placed by the mouse (a controller's D-pad, left\n"
+                              "stick, right stick or gyro). Moving the mouse turns it off until a controller moves\n"
+                              "the pointer again, so playing with a mouse stays as on a Wii. On: also with the mouse.\n"
+                              "Off: the original pointer-only menus; the D-pad and stick always reach the game.\n"
+                              "On a menu the D-pad / left stick do not reach the game; in the field they keep\n"
+                              "walking and changing tools: \"Recenter pointer\" (right stick press) puts the pointer\n"
+                              "on the toolbar there (D-pad left/right, A to open, B to leave).");
+    }
     ImGui::SeparatorText("Mouse");
     changed |= recomp::menu::Checkbox("Hide the mouse cursor over the game", &sCfg.hideCursor);
     ImGui::SetItemTooltip("The game draws its own pointer (the hand); the system cursor is hidden while it\n"
                           "points with the mouse. Shown again over this menu.");
+    ImGui::SeparatorText("Pointer timeout");
+    {
+        const float k = recomp::ui::scale();
+        ImGui::SetNextItemWidth(200 * k);
+        changed |= recomp::menu::SliderFloat("Hide the pointer after", &sCfg.pointerTimeout, 0.0f, 30.0f,
+                                             sCfg.pointerTimeout <= 0 ? "Never" : "%.0f s", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SetItemTooltip("The pointer leaves the screen after this many seconds without moving (mouse, right\n"
+                              "stick or gyro), as when a Wii Remote is pointed away: the game then uses its\n"
+                              "controls without the pointer. Moving the pointer brings it back where it was.\n"
+                              "Pointer screens (pockets, map, shops, dialogue choices) keep it. 0 = never (the\n"
+                              "pointer stays until the mouse leaves the window). Real Wii Remotes are not affected.");
+    }
     ImGui::SeparatorText("Right stick");
     changed |= recomp::menu::SliderFloat("Pointer speed", &sCfg.stickSpeed, 0.2f, 5.0f, "%.1f", ImGuiSliderFlags_AlwaysClamp);
     ImGui::SetItemTooltip("How fast a fully tilted right stick moves the pointer (half the screen per second at 1).");
