@@ -431,6 +431,7 @@ void prepareWc24() {
                     (unsigned long long)(id / 100000000 % 10000), (unsigned long long)(id / 10000 % 10000),
                     (unsigned long long)(id % 10000));
     }
+    recomp::online::writeWiiFriends();  // the F1 friends as confirmed Wii friends (letters to other towns)
 }
 
 }  // namespace

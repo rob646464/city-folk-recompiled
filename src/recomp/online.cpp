@@ -16,6 +16,7 @@
 #include "recomp/online_ed25519.h"
 #include "recomp/online_friends.h"
 #include "recomp/online_mail.h"
+#include "recomp/online_email.h"
 #include "recomp/online_net.h"
 
 #include <SDL3/SDL.h>
@@ -226,6 +227,10 @@ void runAction(Ctx& c, const std::string& a) {
         friends::requestFriend(id);
         return;
     }
+    if (a == "mailself") {
+        email::sendTestLetter();
+        return;
+    }
     if (a == "mailtest") {
         std::printf("[online-test] %d test letters queued\n", mail::queueTestLetter());
         return;
@@ -336,6 +341,50 @@ u64 wiiNumber() {
     return friends::myWiiNumber();
 }
 
+// nwc24fl.bin (layout from the NWC24 library's reads: GetCachedFLHeader / iReadFriendInfoRaw /
+// fn_8040E23C): 0x00 "WcFl", 0x04 version 2, 0x08 entries (100), 0x40 Wii numbers u64[100],
+// 0x360 entries 0x140 each: +0 type (1 Wii), +4 status (2 confirmed: City Folk's fn_800E98C0
+// takes only those), +8 name (12 UTF-16 units).
+void writeWiiFriends() {
+    ensureIdentity();
+    std::vector<u8> b(32864, 0);
+    auto be32 = [&](size_t o, u32 v) {
+        b[o] = u8(v >> 24);
+        b[o + 1] = u8(v >> 16);
+        b[o + 2] = u8(v >> 8);
+        b[o + 3] = u8(v);
+    };
+    std::memcpy(b.data(), "WcFl", 4);
+    be32(4, 2);
+    be32(8, 100);
+    int n = 0;
+    for (const auto& f : friends::list()) {
+        if (f.state != friends::State::Friend || n >= 100) continue;
+        const u64 id = friends::wiiNumberOf(f.pub);
+        be32(0x40 + 8 * size_t(n), u32(id >> 32));
+        be32(0x44 + 8 * size_t(n), u32(id));
+        const size_t e = 0x360 + 0x140 * size_t(n);
+        be32(e, 1);
+        be32(e + 4, 2);
+        // The game's own name for that player (its roster entry, +0x0A UTF-16) when known, else the F1 name.
+        if (f.gameInfo.size() == friends::kGameInfoSize)
+            std::memcpy(b.data() + e + 8, f.gameInfo.data() + 0x0A, 0x12);
+        else
+            for (size_t i = 0; i < f.name.size() && i < 11; i++) b[e + 8 + 2 * i + 1] = u8(f.name[i]);
+        n++;
+    }
+    const auto p = ios::hostPath("/shared2/wc24/nwc24fl.bin");
+    {
+        std::ifstream in(p, std::ios::binary);
+        const std::vector<u8> cur((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (cur == b) return;
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(p.parent_path(), ec);
+    std::ofstream(p, std::ios::binary | std::ios::trunc).write(reinterpret_cast<const char*>(b.data()), std::streamsize(b.size()));
+    std::printf("[online] Wii friend list: %d F1 friends as confirmed Wii friends\n", n);
+}
+
 u64 friendKey() { return sFriendKey; }
 
 const u8* identitySeed() {
@@ -412,6 +461,16 @@ static void rosterSync(Ctx& c) {
     const u32 save = gu::call(c, fnSave);
     if (!save || !gu::call(c, fnCheck, {save + 4})) return;
     friends::setMyGameInfo(myGameInfo(save));
+    {
+        std::string sig;
+        for (auto& fr : friends::list())
+            if (fr.state == friends::State::Friend) sig += fr.code + fr.name;
+        static std::string last;
+        if (sig != last) {
+            last = sig;
+            writeWiiFriends();
+        }
+    }
     // The game registers friends only while offline (online system state <= 1).
     if (const u32 sys = rd32(VA(0x8074E7B8)); sys >= 0x80000000u && sys < 0x93F00000u && rd32(sys + 0x385C) > 1) return;
     // Friends removed or blocked in F1 leave the game's roster the way its roster menu deletes
@@ -476,7 +535,7 @@ static void rosterSync(Ctx& c) {
         if (slot >= 0) {
             std::memcpy(hostp(buf), hostp(save + 0x44 + 12u * u32(slot)), 12);
         } else {
-            wr32(buf, 3u << 11);
+            wr32(buf, (3u | 4u) << 11);  // GS profile id entry, buddy (an F1 friendship is mutual)
             wr32(buf + 4, fr.pid);
             wr32(buf + 8, 0);
         }
@@ -524,9 +583,31 @@ static void giveItems(Ctx& c) {
     }
 }
 
+// CF_TOWN_FLAG=<frame>:<n>,... (test aid): sets progress flag n of the save with the game's own
+// setter fn_80116634(save, n) (save + 0x735C3 bits; getter fn_801165F4). Research.
+static void townFlags(Ctx& c) {
+    static const char* env = std::getenv("CF_TOWN_FLAG");
+    if (!env) return;
+    const u32 f = recomp::game::guestFrames();
+    for (const char* p = env; *p;) {
+        char* e = nullptr;
+        const u32 at = u32(std::strtoul(p, &e, 10));
+        if (*e != ':') break;
+        const u32 n = u32(std::strtoul(e + 1, &e, 16));
+        if (at == f) {
+            const u32 save = gu::call(c, VA(0x80101894));
+            if (save) gu::call(c, VA(0x80116634), {save, n});
+            std::printf("[online-test] frame %u: town flag %X set\n", f, n);
+        }
+        if (*e != ',') break;
+        p = e + 1;
+    }
+}
+
 void onGuestFrame(Ctx& c) {
     if (!sEnvDone) envStart();
     giveItems(c);
+    townFlags(c);
     rosterSync(c);
     if (sJoinPending) tryJoinFromEnv();
     if (!sCodeFile.empty() && envOr("CF_ONLINE_HOST")) {
@@ -571,6 +652,7 @@ void onGuestFrame(Ctx& c) {
 
 void drawOverlay() {
     watchRoom();
+    email::tick();
     friends::tick();
     {
         int n = 0;
@@ -876,6 +958,7 @@ bool drawTab() {
                            "use a VPN (Tailscale, ZeroTier, Hamachi) and enter the host's VPN address.");
     }
     friendsSection();
+    dirty |= email::drawSection();
     dirty |= menu::Checkbox("Room notices over the game", &o.notices);
     dirty |= menu::Checkbox("USB keyboard (PC keyboard for chat)", &o.usbKeyboard);
     ImGui::SetItemTooltip("The game sees your PC keyboard as a Wii USB keyboard: type chat messages while online. "

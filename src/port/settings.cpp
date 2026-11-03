@@ -336,6 +336,13 @@ std::vector<Field> fields() {
         flag("online", "notices", sSettings.online.notices),
         flag("online", "usb_keyboard", sSettings.online.usbKeyboard),
         str("online", "relay", sSettings.online.relay),
+        flag("online", "email_on", sSettings.online.emailOn),
+        str("online", "email_address", sSettings.online.emailAddress),
+        str("online", "email_preset", sSettings.online.emailPreset),
+        str("online", "email_imap_host", sSettings.online.emailImapHost),
+        num("online", "email_imap_port", sSettings.online.emailImapPort),
+        str("online", "email_smtp_host", sSettings.online.emailSmtpHost),
+        num("online", "email_smtp_port", sSettings.online.emailSmtpPort),
     };
 }
 

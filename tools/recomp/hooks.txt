@@ -84,3 +84,9 @@ fn_80104520
 # Enhanced lighting (src/game/cf_light.cpp, docs/RENDERING.md "Enhanced lighting (City Folk)"): the
 # stage draw (both ScnRoot passes + effects of the field/room scene) brackets the 3D scene.
 d_s_stageNP::fn_125_C0 all
+
+# Online letters research (src/recomp/online_mail.cpp CF_MAIL_PROBE): Pelly's post office checks.
+fn_80177D78
+fn_801165F4
+fn_80178580
+fn_80013F1C

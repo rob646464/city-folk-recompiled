@@ -23,6 +23,7 @@
 #include "recomp/online_crypto.h"
 #include "recomp/online_friends.h"
 #include "recomp/online_net.h"
+#include "recomp/online_nat.h"
 #include "recomp/online_ed25519.h"
 #include "recomp/online_sock.h"
 #include "port/settings.h"
@@ -43,6 +44,7 @@ namespace recomp::online::mail {
 namespace {
 
 namespace net = ::online::net;
+namespace nat = ::online::nat;
 namespace oc = ::onlinecrypto;
 namespace fs = std::filesystem;
 
@@ -285,7 +287,8 @@ bool openFrom(const u8 from[32], const std::vector<u8>& blob, Letter& l) {
     const size_t sealedLen = blob.size() - 64;
     if (!oc::ed25519Verify(from, blob.data(), sealedLen, blob.data() + sealedLen)) return false;
     u8 theirX[32];
-    if (!friends::friendXPub(from, theirX)) return false;
+    if (std::memcmp(from, friends::myPublicKey(), 32) == 0) std::memcpy(theirX, friends::myXPub(), 32);
+    else if (!friends::friendXPub(from, theirX)) return false;
     u8 key[32];
     friends::letterKey(theirX, key);
     const oc::SealKey k = oc::deriveSealKey(key, "letter");
@@ -301,6 +304,204 @@ bool openFrom(const u8 from[32], const std::vector<u8>& blob, Letter& l) {
 
 void takeIn(Letter&& l, const u8 from[32]);
 
+
+// ---- B: the letters link (delivery whenever both games are running) ----
+// A UDP socket on port 29913 (+1.. if taken), mapped on the router with UPnP / NAT-PMP when
+// "Map the port" is on. Its addresses (LAN, the router's public one) go to friends in rooms
+// (friends ENDPOINTS). A letter for a friend who is not in a room with us is sealed for the pair
+// (sealFor) and sent to the friend's last known addresses in chunks, again every 20 s until the
+// friend's game acknowledges it. Datagrams: "CFML" 1 type
+//   1 CHUNK  from[32] id[8] index(u16) count(u16) bytes...   (<= 1000 bytes of the blob each)
+//   2 ACK    from[32] id[8]                                   (the receiver's key)
+// Only blobs from friends that open and verify are taken; one sender may have 4 letters being
+// reassembled at a time.
+constexpr u16 kLinkPort = 29913;
+constexpr size_t kChunk = 1000;
+sk::Socket sLink = sk::kInvalid;
+u16 sLinkPort = 0;
+struct Partial {
+    u8 from[32];
+    u16 count = 0;
+    std::map<u16, std::vector<u8>> parts;
+    double t = 0;
+};
+std::map<u64, Partial> sPartials;
+std::map<u64, double> sLinkSent;  // letter id -> last send time
+
+std::vector<sk::Addr> parseEps(const std::string& s) {
+    std::vector<sk::Addr> v;
+    size_t a = 0;
+    while (a < s.size()) {
+        size_t b = s.find(';', a);
+        if (b == std::string::npos) b = s.size();
+        sk::Addr x;
+        if (b > a && sk::resolve(s.substr(a, b - a), kLinkPort, &x)) v.push_back(x.normalized());
+        a = b + 1;
+    }
+    return v;
+}
+
+void linkSend(const sk::Addr& to, const std::vector<u8>& b) {
+    const sk::Addr a = to.forSocket(AF_INET);
+    sendto(sLink, reinterpret_cast<const char*>(b.data()), int(b.size()), 0, reinterpret_cast<const sockaddr*>(&a.ss), a.len);
+}
+
+void linkSendLetter(const Letter& l) {
+    u8 theirX[32];
+    if (!friends::friendXPub(l.peer, theirX)) return;
+    const auto eps = parseEps(friends::friendEndpoints(l.peer));
+    if (eps.empty()) return;
+    const auto blob = sealFor(l, l.peer, theirX);
+    const u16 count = u16((blob.size() + kChunk - 1) / kChunk);
+    for (u16 i = 0; i < count; i++) {
+        std::vector<u8> d = {'C', 'F', 'M', 'L', 1, 1};
+        d.insert(d.end(), friends::myPublicKey(), friends::myPublicKey() + 32);
+        put64(d, l.id);
+        d.push_back(u8(i >> 8));
+        d.push_back(u8(i));
+        d.push_back(u8(count >> 8));
+        d.push_back(u8(count));
+        const size_t at = size_t(i) * kChunk;
+        d.insert(d.end(), blob.begin() + long(at), blob.begin() + long(std::min(blob.size(), at + kChunk)));
+        for (auto& e : eps) linkSend(e, d);
+    }
+    if (online::logOn()) std::printf("[mail] letter %016llx sent over the letters link (%u chunks)\n", (unsigned long long)l.id, count);
+}
+
+void linkReceive(const sk::Addr& from, const u8* p, size_t n) {
+    if (n < 6 + 32 + 8 || std::memcmp(p, "CFML", 4) != 0 || p[4] != 1) return;
+    const u8* key = p + 6;
+    u64 id = 0;
+    for (int i = 0; i < 8; i++) id = id << 8 | p[38 + i];
+    if (p[5] == 2) {  // ACK from the recipient
+        std::lock_guard<std::mutex> g(sMutex);
+        auto it = sOut.find(id);
+        if (it == sOut.end() || std::memcmp(it->second.peer, key, 32) != 0) return;
+        std::printf("[mail] letter %016llx delivered over the letters link\n", (unsigned long long)id);
+        unstore(true, id);
+        sOut.erase(it);
+        return;
+    }
+    if (p[5] != 1 || n < 50 || !friends::isFriend(key)) return;
+    const u16 idx = u16(p[46] << 8 | p[47]), count = u16(p[48] << 8 | p[49]);
+    if (count == 0 || count > 300 || idx >= count) return;
+    Partial* pt;
+    {
+        int fromSame = 0;
+        for (auto& [k, v] : sPartials) fromSame += std::memcmp(v.from, key, 32) == 0;
+        auto it = sPartials.find(id);
+        if (it == sPartials.end()) {
+            if (fromSame >= 4) return;
+            it = sPartials.emplace(id, Partial{}).first;
+            std::memcpy(it->second.from, key, 32);
+            it->second.count = count;
+        }
+        pt = &it->second;
+    }
+    pt->t = secs();
+    pt->parts[idx].assign(p + 50, p + n);
+    std::vector<u8> ack = {'C', 'F', 'M', 'L', 1, 2};
+    ack.insert(ack.end(), friends::myPublicKey(), friends::myPublicKey() + 32);
+    put64(ack, id);
+    if (pt->parts.size() < pt->count) return;
+    std::vector<u8> blob;
+    for (auto& [i, d] : pt->parts) blob.insert(blob.end(), d.begin(), d.end());
+    u8 fromKey[32];
+    std::memcpy(fromKey, pt->from, 32);
+    sPartials.erase(id);
+    Letter l;
+    if (!openFrom(fromKey, blob, l) || l.id != id) {
+        std::printf("[mail] a letters-link letter did not open: dropped\n");
+        return;
+    }
+    takeIn(std::move(l), fromKey);
+    linkSend(from, ack);
+}
+
+void linkThread() {
+    double lastMap = -1e9, lastPass = -1e9;
+    std::vector<u8> buf(2048);
+    while (true) {
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(sLink, &fds);
+        timeval tv{1, 0};
+        if (select(int(sLink + 1), &fds, nullptr, nullptr, &tv) > 0) {
+            sockaddr_storage f{};
+            socklen_t fl = sizeof f;
+            const int n = int(recvfrom(sLink, reinterpret_cast<char*>(buf.data()), int(buf.size()), 0, reinterpret_cast<sockaddr*>(&f), &fl));
+            if (n > 0) {
+                sk::Addr a;
+                std::memcpy(&a.ss, &f, fl);
+                a.len = fl;
+                linkReceive(a.normalized(), buf.data(), size_t(n));
+            }
+        }
+        const double t = secs();
+        for (auto it = sPartials.begin(); it != sPartials.end();) it = t - it->second.t > 60 ? sPartials.erase(it) : std::next(it);
+        if (t - lastMap > 3600) {  // addresses for friends (and the router mapping, renewed hourly)
+            lastMap = t;
+            std::string eps;
+            if (const u32 lan = nat::defaultLanV4()) eps = sk::makeV4(lan, sLinkPort).ipText() + ":" + std::to_string(sLinkPort);
+            if (port::settings().online.portMapping && !std::getenv("CF_ONLINE_NO_UPNP")) {
+                const nat::MapResult r = nat::mapPort(sLinkPort, nat::defaultLanV4());
+                if (r.ok && r.externalIp != "?") eps += ";" + r.externalIp + ":" + std::to_string(r.externalPort ? r.externalPort : sLinkPort);
+            }
+            friends::setMyEndpoints(eps);
+            if (online::logOn()) std::printf("[mail] letters link on UDP %u: %s\n", sLinkPort, eps.c_str());
+        }
+        if (t - lastPass < 20) continue;
+        lastPass = t;
+        std::vector<Letter> out;
+        {
+            std::lock_guard<std::mutex> g(sMutex);
+            load();
+            for (auto& [id, l] : sOut) out.push_back(l);
+        }
+        for (auto& l : out)
+            if (friends::memberOf(l.peer) == 0xFF) linkSendLetter(l);  // in a room: the room carries it
+    }
+}
+
+void ensureLink() {
+    static bool started = false;
+    if (started) return;
+    started = true;
+    sk::startup();
+    // The port friends know: the one this install used last (kept in <data>/online/link_port.txt),
+    // so another game on the same PC taking 29913 first does not move it.
+    const fs::path pf = port::dataDir() / "online" / "link_port.txt";
+    u16 last = 0;
+    {
+        std::ifstream in(pf);
+        int v = 0;
+        if (in >> v && v > 1024 && v < 65536) last = u16(v);
+    }
+    std::vector<u16> tries;
+    if (last) tries.push_back(last);
+    for (u16 p = kLinkPort; p < kLinkPort + 6; p++)
+        if (p != last) tries.push_back(p);
+    for (u16 p : tries) {
+        if (sLink != sk::kInvalid) break;
+        sk::Socket u = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_port = htons(p);
+        if (bind(u, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0) {
+            sLink = u;
+            sLinkPort = p;
+        } else {
+            sk::closeSocket(u);
+        }
+    }
+    if (sLink == sk::kInvalid) return;
+    if (sLinkPort != last) {
+        std::error_code ec;
+        fs::create_directories(pf.parent_path(), ec);
+        std::ofstream(pf) << sLinkPort << "\n";
+    }
+    std::thread(linkThread).detach();
+}
 }  // namespace
 
 namespace {
@@ -351,6 +552,7 @@ void onRoomMessage(uint8_t from, uint8_t type, const std::vector<uint8_t>& data,
 }
 
 void tick() {
+    if (!friends::list().empty()) ensureLink();
     std::lock_guard<std::mutex> g(sMutex);
     load();
     auto& s = net::session();
@@ -363,6 +565,64 @@ void tick() {
         l.lastSent = secs();
         if (logOn()) std::printf("[mail] letter %016llx sent to member %u\n", (unsigned long long)id, m);
     }
+}
+
+std::vector<Sealed> sealedOutbox() {
+    std::vector<Letter> out;
+    {
+        std::lock_guard<std::mutex> g(sMutex);
+        load();
+        for (auto& [id, l] : sOut) out.push_back(l);
+    }
+    std::vector<Sealed> v;
+    for (auto& l : out) {
+        u8 theirX[32];
+        if (!friends::friendXPub(l.peer, theirX)) continue;
+        Sealed sl;
+        sl.id = l.id;
+        std::memcpy(sl.peer, l.peer, 32);
+        sl.blob = sealFor(l, l.peer, theirX);
+        v.push_back(std::move(sl));
+    }
+    return v;
+}
+
+void sentByEmail(uint64_t id) {
+    std::lock_guard<std::mutex> g(sMutex);
+    if (!sOut.erase(id)) return;
+    unstore(true, id);
+    std::printf("[mail] letter %016llx sent by email\n", (unsigned long long)id);
+}
+
+Import importSealed(const uint8_t from[32], const std::vector<uint8_t>& blob) {
+    const bool self = std::memcmp(from, friends::myPublicKey(), 32) == 0;
+    if (!self && !friends::isFriend(from)) return Import::NotFromAFriend;
+    Letter l;
+    if (!openFrom(from, blob, l)) return Import::Broken;
+    if (self) return Import::Self;
+    {
+        std::lock_guard<std::mutex> g(sMutex);
+        load();
+        if (sIn.count(l.id) || sSeen.count(l.id)) return Import::Duplicate;
+    }
+    takeIn(std::move(l), from);
+    return Import::Taken;
+}
+
+Sealed sealTestForSelf() {
+    Letter l;
+    l.id = newId();
+    std::memcpy(l.peer, friends::myPublicKey(), 32);
+    l.senderWii = friends::myWiiNumber();
+    Attachment a;
+    a.type = 0x30000;
+    a.data.assign(16, 0x54);
+    l.att.push_back(a);
+    Sealed sl;
+    sl.id = l.id;
+    std::memcpy(sl.peer, l.peer, 32);
+    sl.blob = sealFor(l, l.peer, friends::myXPub());
+    return sl;
 }
 
 int queueTestLetter() {
@@ -406,6 +666,19 @@ u64 rd64(u32 a) { return u64(rd32(a)) << 32 | rd32(a + 4); }
 }  // namespace
 
 // Wii numbers of F1 friends are valid recipients (their check digits are not the NWC24 ones).
+// Research aid (CF_MAIL_PROBE=1): results of the predicates Pelly's post office menu asks.
+#define CF_PROBE(fn)                                                                                     \
+    HLE(fn) {                                                                                            \
+        const u32 a3 = c.r[3], a4 = c.r[4];                                                              \
+        callOriginal(c, #fn);                                                                            \
+        static const bool on = std::getenv("CF_MAIL_PROBE") != nullptr;                                  \
+        if (on) std::printf("[mail-probe] %s(%08X, %08X) -> %d\n", #fn, a3, a4, int(c.r[3]));           \
+    }
+CF_PROBE(fn_80177D78)
+CF_PROBE(fn_801165F4)
+CF_PROBE(fn_80178580)
+CF_PROBE(fn_80013F1C)
+
 HLE(NWC24CheckUserId) {
     const u64 id = u64(c.r[3]) << 32 | c.r[4];
     u8 pub[32];

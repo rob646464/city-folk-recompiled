@@ -24,6 +24,20 @@ struct Counts {
     int outbox = 0, inbox = 0;
 };
 Counts counts();
+// For the email path (online_email.cpp): outbox letters sealed for their friend (only friends whose
+// letters key is known), sent letters leave the outbox; a sealed letter from an email is taken in
+// when it opens and is a friend's (self: a test letter, reported only).
+struct Sealed {
+    uint64_t id = 0;
+    uint8_t peer[32] = {};
+    std::vector<uint8_t> blob;
+};
+std::vector<Sealed> sealedOutbox();
+void sentByEmail(uint64_t id);
+enum class Import { Taken, Duplicate, Self, NotFromAFriend, Broken };
+Import importSealed(const uint8_t from[32], const std::vector<uint8_t>& blob);
+Sealed sealTestForSelf();
+
 // Test aid (CF_ONLINE_TEST=<f>:mailtest): a 64-byte dummy letter to every friend (not a game letter).
 int queueTestLetter();
 

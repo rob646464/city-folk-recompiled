@@ -19,7 +19,9 @@ struct Friend {
     State state = State::Friend;
     std::vector<uint8_t> gameInfo;
     uint8_t xpub[32] = {};  // its X25519 letters key (proved with its Ed25519 key)
-    bool haveX = false;  // the friend's own roster entry (0x78 bytes, kGameInfoSize) or empty
+    bool haveX = false;
+    std::string email;      // its own mail address ("Always online mail"), learned in a room
+    std::string endpoints;  // its letters link "ip:port;..." (learned in a room)  // the friend's own roster entry (0x78 bytes, kGameInfoSize) or empty
 };
 
 // The game's roster entry for this player (save friend info, 0x78 bytes: names, town; built by
@@ -56,8 +58,15 @@ uint64_t wiiNumberOf(const uint8_t pub[32]);
 uint64_t myWiiNumber();
 // Letters through a relay: a friend's X25519 key, and the key two friends share for their letters
 // (HMAC("cf-letter", X25519(mine, theirs))).
+// Letters link (online_mail.cpp): this game's addresses, sent to friends in a room; a friend's.
+void setMyEndpoints(const std::string& eps);
+std::string friendEndpoints(const uint8_t pub[32]);
 bool friendXPub(const uint8_t pub[32], uint8_t out[32]);
 void letterKey(const uint8_t theirX[32], uint8_t out[32]);
+const uint8_t* myXPub();
+// Friends' email addresses (online email letters): exchanged in rooms when email is on.
+std::string friendEmail(const uint8_t pub[32]);
+void setMyEmail(const std::string& address);
 void accept(const std::string& code);
 void decline(const std::string& code);
 void block(const std::string& code);

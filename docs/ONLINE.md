@@ -327,12 +327,37 @@ WiiConnect24 letters.
     presets for the common providers (app passwords with 2-step verification; Microsoft personal
     accounts not supported, OAuth only). Fixed subject tag, a short human-readable body, the letter
     as attachment; imported only when signed by a known friend's key; poll at start-up and every
-    few minutes on a background thread; "Send test letter to myself". Being built; tested against
-    a local IMAP/SMTP test server.
+    few minutes on a background thread; "Send test letter to myself".
+    Implementation (src/recomp/online_email.cpp, online_tls.cpp): subject "[City Folk letter] from
+    <player>", body "This is a letter from <player>, sent by Animal Crossing: City Folk
+    Recompiled", attachment letter.cfl = "CFEM" 1 | from key | to key | the letter sealed for the
+    pair and signed. In: UID SEARCH on that subject, BODY.PEEK[] (stays unread), only an attachment
+    addressed to us from a friend's key that opens is taken; then UID MOVE to "City Folk" (created)
+    when the server has MOVE, else the UID is remembered locally; any other mail is never touched.
+    TLS: SChannel on Windows (system chain + host name checks), implicit TLS on 993/465, STARTTLS on
+    143/587 (refused if not offered). Password: Windows Credential Manager ("CityFolkRecompiled/
+    mail/<address>"); on other systems this build stores nothing and says so (Keychain /
+    libsecret and the TLS there: to do). Friends' addresses: room message EMAIL 0x49 (friends only),
+    kept in friends.txt. F1 > Online "Letters while your friend is away".
+    Tested 2026-11-03 against tools/tests/cf_mail_test_server (in-memory SMTP+IMAP, SChannel TLS
+    with a self-signed CN=localhost certificate; test-only trust override CF_MAIL_TEST_CERT_SHA256,
+    environment only): STARTTLS and implicit TLS (CF_MAIL_TEST_IMPLICIT) both send, fetch, import
+    and move the mail; without the override the self-signed certificate is refused ("not
+    trusted"), with a wrong pin too. Two instances: addresses exchanged in a room, Alice's letter
+    sent while Bob was not running, Bob's game took it in at its next start. Not testable here: a
+    host-name mismatch on a trusted certificate (would need our certificate in the Windows root
+    store) and real providers (the user will try one). Test aids CF_MAIL_PASSWORD, CF_MAIL_ON,
+    CF_MAIL_POLL_S, CF_ONLINE_TEST=<f>:mailself / mailtest (a 64-byte test letter, not a game one).
   - **B. "Deliver whenever both games are running"** (default without email): friends' games
     connect in the background whenever both are open and swap outbox letters. Limits: both games
     must run at the same time, and it needs automatic port opening (UPnP / NAT-PMP) or an earlier
-    direct connection; otherwise letters wait until the next visit. Being built.
+    direct connection; otherwise letters wait until the next visit.
+    Implementation (online_mail.cpp): UDP letters link on port 29913 (the install keeps the port it
+    used last, link_port.txt), UPnP / NAT-PMP mapped when "Map the port" is on; its addresses (LAN
+    + router public) go to friends in rooms (ENDPOINTS 0x48). An outbox letter for a friend not in
+    a room with us is sealed for the pair and sent in 1000-byte chunks every 20 s until the
+    friend's game acknowledges it; only proved friends' letters that open are taken. Tested
+    2026-11-03 with two instances on one PC: delivered and acknowledged.
   With email on, both run; a letter id is taken in once.
 ## 10a. Settings while visiting (src/recomp/online_sync.cpp)
 

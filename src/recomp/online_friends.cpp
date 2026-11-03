@@ -35,7 +35,7 @@ namespace oc = ::onlinecrypto;
 using u8 = uint8_t;
 using u32 = uint32_t;
 
-enum : u8 { F_IDENT = 0x40, F_PROVE = 0x41, F_REQ = 0x42, F_ACCEPT = 0x43, F_DECLINE = 0x44, F_INFO = 0x45 };
+enum : u8 { F_IDENT = 0x40, F_PROVE = 0x41, F_REQ = 0x42, F_ACCEPT = 0x43, F_DECLINE = 0x44, F_INFO = 0x45, F_ENDPOINTS = 0x48, F_EMAIL = 0x49 };
 
 std::recursive_mutex sMutex;
 bool sLoaded = false;
@@ -43,6 +43,8 @@ u8 sPub[32];
 u8 sXPriv[32], sXPub[32];  // X25519 key for letters through a relay (sealed per friend pair)
 std::vector<Friend> sFriends;
 std::vector<u8> sMyInfo;
+std::string sMyEndpoints;
+std::string sMyEmail;  // own address while "Always online mail" is on (sent to friends in rooms)  // "ip:port;ip:port" of this game's letters link (online_mail.cpp)
 std::vector<u32> sRemoved;  // profile ids to take out of the game's roster (removed / blocked in F1)
 
 struct MemberState {
@@ -54,6 +56,7 @@ struct MemberState {
     bool haveX = false;
     bool identSent = false;
     bool infoSent = false;
+    std::string epSent, emailSent;
     std::vector<u8> info;  // their INFO (applied once proved and a friend)
     double lastReq = -100;
     int reqCount = 0;
@@ -87,6 +90,10 @@ void save() {
     for (auto& f : sFriends)
         if (f.gameInfo.size() == kGameInfoSize) out << "info " << oc::hex(f.pub, 32) << " " << oc::hex(f.gameInfo.data(), f.gameInfo.size()) << "\n";
     for (u32 pid : sRemoved) out << "removed " << pid << "\n";
+    for (auto& f : sFriends)
+        if (!f.email.empty()) out << "email " << oc::hex(f.pub, 32) << " " << f.email << "\n";
+    for (auto& f : sFriends)
+        if (!f.endpoints.empty()) out << "ep " << oc::hex(f.pub, 32) << " " << f.endpoints << "\n";
     for (auto& f : sFriends)
         if (f.haveX) out << "xkey " << oc::hex(f.pub, 32) << " " << oc::hex(f.xpub, 32) << "\n";
 }
@@ -122,6 +129,20 @@ void load() {
             continue;
         }
         if (hx.size() != 64) continue;
+        if (st == "email") {
+            const auto key = unhex(hx);
+            while (!name.empty() && (name.back() == '\r' || name.back() == ' ')) name.pop_back();
+            for (auto& f : sFriends)
+                if (std::memcmp(f.pub, key.data(), 32) == 0) f.email = name.substr(0, 120);
+            continue;
+        }
+        if (st == "ep") {
+            const auto key = unhex(hx);
+            while (!name.empty() && (name.back() == '\r' || name.back() == ' ')) name.pop_back();
+            for (auto& f : sFriends)
+                if (std::memcmp(f.pub, key.data(), 32) == 0) f.endpoints = name.substr(0, 200);
+            continue;
+        }
         if (st == "xkey") {
             const auto key = unhex(hx);
             while (!name.empty() && (name.back() == '\r' || name.back() == ' ')) name.pop_back();
@@ -305,6 +326,33 @@ void onMessage(const net::AppMsg& m) {
     case 0x47:
         mail::onRoomMessage(m.from, m.type, d, ms.verified ? ms.pub : nullptr);
         break;
+    case F_EMAIL: {  // a friend's own mail address (only kept for friends; empty = it turned mail off)
+        Friend* f = ms.verified ? byPub(ms.pub) : nullptr;
+        if (!f || f->state != State::Friend || d.size() > 120) return;
+        std::string e;
+        for (u8 ch : d)
+            if (ch > 0x20 && ch < 0x7F && ch != '<' && ch != '>' && ch != '"') e += char(ch);
+        if (!e.empty() && (e.find('@') == std::string::npos || e.find('@') == 0)) return;
+        if (e != f->email) {
+            f->email = e;
+            save();
+            if (online::logOn()) std::printf("[friends] %s's mail address %s\n", f->name.c_str(), e.empty() ? "(none)" : "known");
+        }
+        break;
+    }
+    case F_ENDPOINTS: {  // a friend's letters link addresses (only kept for friends)
+        Friend* f = ms.verified ? byPub(ms.pub) : nullptr;
+        if (!f || f->state != State::Friend || d.size() > 200) return;
+        std::string e;
+        for (u8 ch : d)
+            if ((ch >= '0' && ch <= '9') || ch == '.' || ch == ':' || ch == ';' || ch == '[' || ch == ']' || (ch >= 'a' && ch <= 'f')) e += char(ch);
+        if (e != f->endpoints) {
+            f->endpoints = e;
+            save();
+            if (online::logOn()) std::printf("[friends] %s's letters link: %s\n", f->name.c_str(), e.c_str());
+        }
+        break;
+    }
     case F_INFO: {
         if (d.size() != kGameInfoSize) return;
         ms.info = d;
@@ -394,6 +442,20 @@ void tick() {
         auto& st = sMembers[m.id];
         if (!st.identSent) sendIdent(m.id, st);
         if (!st.infoSent) sendInfo(m.id, st);
+        if (st.verified && st.emailSent != sMyEmail) {
+            const Friend* f = byPub(st.pub);
+            if (f && f->state == State::Friend) {
+                send(m.id, F_EMAIL, std::vector<u8>(sMyEmail.begin(), sMyEmail.end()));
+                st.emailSent = sMyEmail;
+            }
+        }
+        if (st.verified && !sMyEndpoints.empty() && st.epSent != sMyEndpoints) {
+            const Friend* f = byPub(st.pub);
+            if (f && f->state == State::Friend) {
+                send(m.id, F_ENDPOINTS, std::vector<u8>(sMyEndpoints.begin(), sMyEndpoints.end()));
+                st.epSent = sMyEndpoints;
+            }
+        }
     }
     net::AppMsg msg;
     int budget = 64;
@@ -491,6 +553,30 @@ uint64_t wiiNumberOf(const uint8_t pub[32]) {
 
 uint64_t myWiiNumber() { return wiiNumberOf(myPublicKey()); }
 
+void setMyEmail(const std::string& address) {
+    std::lock_guard<std::recursive_mutex> g(sMutex);
+    sMyEmail = address;
+}
+
+std::string friendEmail(const uint8_t pub[32]) {
+    std::lock_guard<std::recursive_mutex> g(sMutex);
+    load();
+    const Friend* f = byPub(pub);
+    return f && f->state == State::Friend ? f->email : std::string();
+}
+
+void setMyEndpoints(const std::string& eps) {
+    std::lock_guard<std::recursive_mutex> g(sMutex);
+    sMyEndpoints = eps;
+}
+
+std::string friendEndpoints(const uint8_t pub[32]) {
+    std::lock_guard<std::recursive_mutex> g(sMutex);
+    load();
+    const Friend* f = byPub(pub);
+    return f && f->state == State::Friend ? f->endpoints : std::string();
+}
+
 bool friendXPub(const uint8_t pub[32], uint8_t out[32]) {
     std::lock_guard<std::recursive_mutex> g(sMutex);
     load();
@@ -498,6 +584,12 @@ bool friendXPub(const uint8_t pub[32], uint8_t out[32]) {
     if (!f || !f->haveX || f->state != State::Friend) return false;
     std::memcpy(out, f->xpub, 32);
     return true;
+}
+
+const uint8_t* myXPub() {
+    std::lock_guard<std::recursive_mutex> g(sMutex);
+    load();
+    return sXPub;
 }
 
 void letterKey(const uint8_t theirX[32], uint8_t out[32]) {

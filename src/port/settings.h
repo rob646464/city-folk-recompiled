@@ -411,6 +411,11 @@ struct OnlineSettings {
     bool portMapping = true;    // UPnP / NAT-PMP mapping on the router + public address via STUN
     std::string lastDirect;     // last "Direct connect" address
     bool notices = true;        // room events as notices over the game
+    // "Always online mail" (online_email.cpp): own account only; the password is in the OS credential store.
+    bool emailOn = false;
+    std::string emailAddress, emailPreset;
+    std::string emailImapHost, emailSmtpHost;
+    int emailImapPort = 993, emailSmtpPort = 465;
     std::string relay;          // optional self-hosted relay "host[:port]" (tools/relay/cf_relay.cpp)
     bool usbKeyboard = false;   // the PC keyboard is the Wii USB keyboard (chat); applies when the game opens it
 };
