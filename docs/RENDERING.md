@@ -32,7 +32,7 @@ stream: frames are byte-identical to the game's.
 
 | Option | Default (when on) | What it does |
 |---|---|---|
-| Water reflections | on, strength 0.8, medium (24 steps), ripple distortion 1 | rivers, ponds, the sea reflect the scene (screen-space march) and the sky + moon where the ray leaves the picture; the game's own water pattern bends it |
+| Water reflections | on, strength 0.6, medium (24 steps), ripple distortion 1 | rivers, ponds, the sea reflect the scene (screen-space march) and the sky + moon where the ray leaves the picture; the game's own water pattern bends it |
 | Wet ground in rain | on | while it rains (weather state 3/4): bare ground and paths darken, puddles (world-anchored noise, mostly on soil, not on grass) reflect lamps / houses / sky; dries over ~4 minutes after |
 | Rain ripples | on | expanding rings on water and puddles while it rains |
 | Snow sparkle | on | glints on bright snow-covered ground, snow cover dates (Dec 11 - Feb 24) in daylight with the sun out |
@@ -57,10 +57,19 @@ stream: frames are byte-identical to the game's.
   flower / house materials). The city's plaza materials are not classified yet (not reached by a
   route).
 - **Camera**: the main ScnRoot's current camera (u8 [root + 0xF4], CameraData at root + 0xF8 +
-  0x10C n: world -> view MTX34 first, camera target at + 0x8C) goes into Aurora's application XF
-  memory (0x0700 view, 0x070C view x translate(target)) as plain XF loads noted for interpolation
-  as position matrices (tag scope 0xCF57F000), so in-between frames get the in-between camera; the
-  projection is the main view's own (Hor+ included), taken by Aurora from the classified draws.
+  0x10C n; its world -> view MTX34 comes first; the camera position / target fields there are 0 in
+  City Folk) goes into Aurora's application XF memory (0x0700) as a plain XF load noted for
+  interpolation as a position matrix (tag scope 0xCF57F000), so in-between frames get the
+  in-between camera. **The town is z-up** in g3d's world: the camera's up row leans to +z and its
+  forward to -z (e.g. rows (1,0,0) (0,0.73,0.68) (0,-0.68,0.73)); the acres' model matrices are the
+  view x a translation, the "rolling log" curve is a small rotation about x per acre (seen 7 deg).
+  The port picks the world's up axis per frame among the six axes (the one the camera's up points
+  along and its forward away from, with hysteresis) and sends view x B, B rotating that axis to +y,
+  so the effects' "world" is always y-up. The projection is the main view's own (Hor+ included),
+  taken by Aurora from the surface draws (the sky dome has its own depth range). The focus point
+  (particle volume, haze start, effect scale: "one metre" = 1/8 of the view height there, about 20
+  units in the town at the default zoom, focus ~390 units away) is the scene depth under the view's
+  centre column at 56 % of its height, read on the GPU, so no player position is needed.
 - **Aurora 0350** (`lib/gfx/world_fx.cpp`, `include/aurora/world_fx.h`): at the scene end the
   classified water/ground draws are re-rendered into a surface mask (their own GX shader, no
   blending, destination alpha = kind; water writes its depth, since the scene depth under
@@ -77,13 +86,62 @@ stream: frames are byte-identical to the game's.
   clear sky. Outdoors = the frame drew water or ground.
 - **Interpolation**: effect time is host time at each replayed scene end and the camera is blended,
   so ripples, sparkle and particles move smoothly at any presented rate; nothing in the effects is
-  keyed to the game's 60 Hz.
+  keyed to the game's 60 Hz. Checked at 120 fps with `CF_INTERP_TEST=2` + `CF_FRAME_DUMP`: the
+  in-between frames carry the effects (leaves at their in-between positions), no interpolation
+  warnings. Frame dumps / EFB copies after the scene end include the effects.
+- **FIFO order**: the game writes immediate-mode vertices through the write-gather pipe and the HLE
+  closes such a draw lazily at the next GX call; host code that writes Aurora commands from a game
+  hook must close it first (`gx::endPendingDraw()`), or its command lands inside the open draw
+  ("GXEnd: vertex data not evenly divisible" thousands of times, a corrupted draw). cf_world.cpp does;
+  any other hook that emits GX*Aurora calls (enhanced lighting's draw class) should too.
+- **Screen-space limits**: the town camera looks down at ~43 deg, so a reflected ray from a pond
+  rises off the top of the picture within a few steps; most of what a pond reflects is the sky
+  (fallback: zenith / horizon by hour and weather, soft clouds, the moon at night). Scene hits are
+  the near banks and whatever stands on the far side of the water (`AURORA_WORLD_FX_SHOW=8` shows
+  why each ray ends). A planar reflection (re-rendering the world mirrored) would add off-screen
+  trees and houses; not done.
+
+### Cost (RTX 3090 Ti, rain in the town with every option on incl. tilt-shift; other agents' game
+instances were running on the same GPU, so these are upper bounds)
+
+| Pass | 2x (1621x912, ~1080p) | 4x (3243x1824, ~4K) |
+|---|---|---|
+| surface mask (re-render of 24 water/ground draws) + mask depth | 0.20 ms | 0.43-0.67 ms |
+| surfaces (reflections, wet ground, ripples, sparkle, haze) | 0.28 ms | 2.6-2.9 ms (4.4 before trimming the puddle march and the sheen's clouds) |
+| particles (350 leaves) | 0.06 ms | 0.05 ms |
+| tilt-shift (horizontal pass) | 0.07 ms | 0.3-1.0 ms |
+| final (grade + vertical tilt-shift) | 0.05 ms | 0.7-1.0 ms |
+
+Water reflections alone are the mask + the water pixels' march; grade-only is the final pass.
+`AURORA_GPU_PROFILE=<s>` lists every "World FX ..." pass.
+
+### Screenshots (agent scratch, not in the repo)
+
+A/B pairs of one frozen moment (`CF_WFX_AB=1 CF_WFX_FREEZE=1`, left off / right on), from the
+user-town fixture at the pond by the house: day (Oct 27 10:00), rain (`CF_WEATHER_FAKE=rain`:
+wet ground, puddles, ripples, haze, leaves), snow (Jan 15 11:00: sparkle, snowflakes), night
+(22:00), cherry blossom petals (Apr 3), the three grades, tilt-shift.
+
+### Open
+
+- The sea and rivers were not reached by a route (only the pond by the house); the city's plaza
+  materials are not classified (no route to the city yet).
+- Rain streaks are drawn since render-3's Aurora 0304 (not on main yet); the rain ripples /
+  puddles here do not depend on it.
+- The surface-mask pipeline variants are compiled on first use (a few per scene), not precached.
+- PAL / Japan / Korea: the hooks are by name (g3d, lyt) or mapped (dWeather_c), not run.
+- Planar reflections for off-screen objects; moon phases.
 
 ### Test aids
 
 `CF_WFX=1` (on for one run), `CF_WFX_SET="key=value;..."` (`[enhanced_world]` keys, e.g.
 `grade=1;tilt_shift=1`), `CF_WFX_FREEZE=1` (effect time fixed, deterministic shots), `CF_WFX_AB=1`
 (effects on odd guest frames only: consecutive shots compare with / without), `CF_WFX_LOG=1`
-(camera, weather and amounts every 120 frames), `CF_WFX_MAT_LOG=1`, `AURORA_WORLD_FX_LOG=1`.
+(camera, weather and amounts every 120 frames), `CF_WFX_MAT_LOG=1`, `AURORA_WORLD_FX_LOG=1`
+(camera / projection / draws at the scene end), `AURORA_WORLD_FX_MTX_LOG=1` (a surface draw's
+matrix), `AURORA_WORLD_FX_SHOW=<n>` debug views: 1 surface mask, 2 depth / focus row, 3 mask alpha +
+wetness, 4 ground branch, 5 reflection hit share / weight, 6 focus distance / scale, 7 raw depth,
+8 why each water ray's march ends. `CF_WFX_SET` takes `;` or `,` between keys (`,` inside
+run.ps1's -Env).
 Weather and season: `CF_WEATHER_FAKE=rain|heavyrain|snow|clear`, `CF_CLOCK_START` (docs/CALENDAR.md,
 tools/routes/run.ps1).

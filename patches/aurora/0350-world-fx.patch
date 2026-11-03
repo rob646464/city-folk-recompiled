@@ -13,7 +13,7 @@ diff --git a/include/aurora/world_fx.h b/include/aurora/world_fx.h
 new file mode 100644
 --- /dev/null
 +++ b/include/aurora/world_fx.h
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,123 @@
 +#ifndef AURORA_WORLD_FX_H
 +#define AURORA_WORLD_FX_H
 +
@@ -30,10 +30,11 @@ new file mode 100644
 +//    depth); every surface kind other than NONE also makes the draw's projection the camera of the
 +//    effects;
 +//  - loads its camera into the application XF memory (GXLoadAppXfAurora, XF 0x0700-0x07FF, plain
-+//    XF loads that frame interpolation can blend like matrices): AURORA_WORLD_FX_XF_VIEW = the
-+//    world -> view matrix (3x4, row-major), AURORA_WORLD_FX_XF_FOCUS = view x translate(focus),
-+//    i.e. its translation column is the view-space point the effects centre on (player / camera
-+//    target: tilt-shift focus row, particle volume);
++//    XF loads that frame interpolation can blend like matrices): AURORA_WORLD_FX_XF_VIEW = a
++//    world -> view matrix (3x4, row-major) of a world frame whose +y is up (a game with another up
++//    axis rotates it in); the point the effects centre on (tilt-shift row, particle volume, haze
++//    start) and their scale ("a metre" = 1/8 of the view height there) come from the scene depth
++//    under the view's centre column at 56 % of its height;
 +//  - marks the end of the 3D scene with GXWorldFxEndAurora (after the world, before the HUD).
 +// Everything time- and weather-dependent is in the configuration (set from any thread).
 +
@@ -51,7 +52,6 @@ new file mode 100644
 +#define AURORA_SURFACE_WORLD 3  // any other draw of the main 3D view (camera capture only)
 +
 +#define AURORA_WORLD_FX_XF_VIEW 0x0700u
-+#define AURORA_WORLD_FX_XF_FOCUS 0x070Cu
 +#define AURORA_APP_XF_BASE 0x0700u
 +#define AURORA_APP_XF_WORDS 256u
 +
@@ -95,6 +95,7 @@ new file mode 100644
 +  float skyHorizon[3];
 +  float moonDir[3];   // world-space direction to the moon (normalized)
 +  float moon;         // 0..1 glint of the moon in reflections (night)
++  float clouds;       // 0..1 cloud cover of the reflected sky
 +  float ambient[3];   // light level of the particles (0..1 per channel)
 +
 +  // Tilt-shift ("diorama"): blur above and below the focus row.
@@ -109,8 +110,8 @@ new file mode 100644
 +  // Particles drawn on top of the world (AURORA_WORLD_FX_PARTICLES_*).
 +  uint32_t particles;
 +  float particleDensity; // 0..2
-+  float wind[2];         // world-space horizontal drift (units per second)
-+  float worldScale;      // world units per metre-ish: scales particle size, ripple cells, puddles
++  float wind[2];         // horizontal drift (effect metres per second, world x / z)
++  float worldScale;      // unused (the scale comes from the focus distance)
 +
 +  bool freezeTime;       // test aid: effect time fixed (deterministic shots)
 +} AuroraWorldFxConfig;
@@ -214,7 +215,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
 new file mode 100644
 --- /dev/null
 +++ b/lib/gfx/world_fx.cpp
-@@ -0,0 +1,1132 @@
+@@ -0,0 +1,1218 @@
 +// World effects (0350): see include/aurora/world_fx.h.
 +//
 +// At GX_AURORA_WORLD_FX_END the EFB pass is sealed (push_scene_op) and, on the frame encoder:
@@ -299,6 +300,7 @@ new file mode 100644
 +  Viewport vp{};
 +};
 +Camera g_camera;
++bool g_cameraFromSurface = false;
 +
 +constexpr wgpu::TextureFormat MaskFormat = wgpu::TextureFormat::RGBA8Unorm;
 +constexpr wgpu::TextureFormat WorkFormat = wgpu::TextureFormat::RGBA16Float;
@@ -450,6 +452,17 @@ new file mode 100644
 +}
 +fn up_view() -> vec3f { return normalize(view_rot(vec3f(0.0, 1.0, 0.0))); }
 +fn view_ok() -> bool { return dot(u.view0.xyz, u.view0.xyz) > 0.25; }
++// The point the effects centre on: the scene under the view's centre column, a little below the
++// middle (where the player stands in a third-person view); far / empty -> 1500 units along that ray.
++fn focus_v() -> vec3f {
++  let px = vec2f(u.vp.x + u.vp.z * 0.5, u.vp.y + u.vp.w * 0.56);
++  let p = view_pos(px, load_depth(px));
++  let dir = normalize(view_pos(px, mix(u.dr.x, u.dr.y, 0.5)));
++  if (!(p.z < -1.0) || p.z < -8000.0) { return dir * 1500.0; }
++  return p;
++}
++// "One metre" for the effects: an eighth of the view height at the focus distance.
++fn wscale(f: vec3f) -> f32 { return max(2.0 * (-f.z) / max(abs(u.proj.y), 1e-3) / 8.0, 1e-3); }
 +
 +// Normal of the surface at px from a depth source (0 scene, 1 mask), the side with the smaller step.
 +fn depth_normal(px: vec2f, src: i32) -> vec3f {
@@ -477,10 +490,17 @@ new file mode 100644
 +}
 +
 +// --- sky ---
-+fn sky_color(rv: vec3f) -> vec3f {
++fn sky_color(rv: vec3f, clouds: bool) -> vec3f {
 +  let rw = normalize(world_dir(rv));
 +  let h = clamp(rw.y, -0.2, 1.0);
 +  var c = mix(u.horizon.xyz, u.zenith.xyz, smoothstep(-0.05, 0.65, h));
++  // soft clouds (cloud cover in focus.x), drifting slowly
++  if (clouds && u.focus.x > 0.0) {
++    let cp = rw.xz / max(rw.y + 0.15, 0.1) * 1.6 + vec2f(u.dr.w * 0.004, u.dr.w * 0.0015);
++    let cl = smoothstep(0.45, 0.8, fbm(cp) * (0.6 + 0.6 * u.focus.x));
++    let cc = mix(vec3f(luma(u.horizon.xyz)) * 1.15 + 0.05, u.horizon.xyz, 0.3);
++    c = mix(c, cc, cl * u.focus.x * smoothstep(-0.05, 0.25, h));
++  }
 +  if (u.zenith.w > 0.0) {
 +    let md = normalize(u.moonDir.xyz);
 +    let m = max(dot(rw, md), 0.0);
@@ -531,10 +551,33 @@ new file mode 100644
 +  }
 +  return vec4f(0.0);
 +}
++fn ssr_why(p: vec3f, r: vec3f, steps: i32) -> vec4f {
++  let dist = max(-p.z, 1.0);
++  let maxLen = dist * 1.6;
++  var stepLen = maxLen / f32(steps);
++  var t = stepLen * 0.65;
++  var minDiff = 1e9;
++  for (var i = 0; i < steps; i++) {
++    let q = p + r * t;
++    if (q.z > -1.0) { return vec4f(0.25, f32(i) / f32(steps), 0.0, 1.0); }
++    let s = project(q);
++    if (s.x < u.vp.x || s.y < u.vp.y || s.x >= u.vp.x + u.vp.z || s.y >= u.vp.y + u.vp.w) {
++      return vec4f(0.5, f32(i) / f32(steps), clamp(minDiff / 100.0 * 0.5 + 0.5, 0.0, 1.0), 1.0);
++    }
++    let sp = view_pos(s.xy, load_depth(s.xy));
++    let diff = sp.z - q.z;
++    if (abs(diff) < abs(minDiff)) { minDiff = diff; }
++    let thick = max(stepLen * 1.5, 0.04 * dist);
++    if (diff > 0.0 && diff < thick) { return vec4f(1.0, f32(i) / f32(steps), 0.0, 1.0); }
++    t += stepLen;
++    stepLen *= 1.06;
++  }
++  return vec4f(0.75, 1.0, clamp(minDiff / 100.0 * 0.5 + 0.5, 0.0, 1.0), 1.0);
++}
 +fn reflection(p: vec3f, n: vec3f, steps: i32, jitter: f32, march: bool) -> vec3f {
 +  let v = normalize(p);
 +  let r = reflect(v, n);
-+  let sky = sky_color(r);
++  let sky = sky_color(r, true);
 +  if (!march) { return sky; }
 +  let h = ssr(p + n * (0.002 * max(-p.z, 1.0)), r, steps, jitter);
 +  return mix(sky, h.rgb, h.a);
@@ -587,7 +630,8 @@ new file mode 100644
 +  let d = load_depth(px);
 +  let p = view_pos(px, d);
 +  let t = u.dr.w;
-+  let ws = max(u.part.z, 1e-3);
++  let fv = focus_v();
++  let ws = wscale(fv);
 +  let jitter = 0.5;
 +  let steps = i32(u.refl.y);
 +  if (u.part.w > 0.5 && view_ok()) {
@@ -616,25 +660,36 @@ new file mode 100644
 +        let refl = reflection(pw, n, steps, jitter, true);
 +        let v = normalize(-pw);
 +        let f = schlick(dot(v, n), 0.04);
-+        var k = u.refl.x * (0.3 + 0.7 * f);
-+        // less over foam / highlights drawn on top of the water
-+        k *= 1.0 - clamp((luma(col) - luma(m.rgb)) * 2.5, 0.0, 0.8);
-+        col = mix(col, refl, clamp(k, 0.0, 0.85));
++        let k = u.refl.x * (0.35 + 0.65 * f);
++        if (u.pp.y > 4.5) { // debug view 5: scene hit share of the reflection, its weight, normal tilt
++          if (u.pp.y > 7.5) { // 8: why the march ends (r: 0.25 behind camera, 0.5 off screen, 0.75 no hit, 1 hit; g: step; b: closest miss)
++            return ssr_why(pw + n * (0.002 * max(-pw.z, 1.0)), reflect(-v, n), steps);
++          }
++          let h = ssr(pw + n * (0.002 * max(-pw.z, 1.0)), reflect(-v, n), steps, jitter);
++          return vec4f(h.a, k, 1.0 - dot(n, up_view()), 1.0);
++        }
++        // the reflection replaces part of the water's own colour, keeping its tint
++        let tint = m.rgb / max(luma(m.rgb), 0.05);
++        let r2 = mix(refl, refl * clamp(tint, vec3f(0.0), vec3f(2.0)), 0.35);
++        col = mix(col, r2, clamp(k, 0.0, 0.85));
 +      } else {
 +        // ripples without reflections: a light sheen on the rings
 +        let v = normalize(-pw);
-+        col += sky_color(reflect(-v, n)) * 0.12 * (1.0 - dot(n, up));
++        col += sky_color(reflect(-v, n), false) * 0.12 * (1.0 - dot(n, up));
 +      }
 +    } else if (ground) {
 +      let wet = select(0.0, u.refl.w, (en & 2u) != 0u);
 +      let wpos = world_pos(p);
++      if (u.pp.y > 3.5) { return vec4f(1.0, wet, fract(wpos.x / (ws * 4.0)), 1.0); } // debug view 4: ground branch
 +      if (wet > 0.001) {
 +        let green = clamp((col.g - max(col.r, col.b)) * 5.0, 0.0, 1.0);
 +        let dirt = 1.0 - green;
-+        let nz = fbm(wpos.xz / (ws * 2.6));
-+        let thr = 1.0 - wet * 0.55;
-+        let puddle = smoothstep(thr, thr + 0.07, nz) * mix(0.25, 1.0, dirt) * smoothstep(0.15, 0.5, wet);
-+        let base = col * mix(1.0, 0.62, wet * mix(0.55, 1.0, dirt));
++        // puddles: world-anchored noise, a few distinct pools with crisp edges
++        let nz = fbm(wpos.xz / (ws * 1.8) + vec2f(3.1, 7.7));
++        let thr = 1.0 - wet * 0.36;
++        let puddle = smoothstep(thr, thr + 0.025, nz) * mix(0.25, 1.0, dirt) * smoothstep(0.2, 0.6, wet);
++        let dk = wet * mix(0.5, 1.0, dirt);
++        let base = mix(col, pow(col, vec3f(1.25)) * 0.86, dk);
 +        let up = up_view();
 +        var n = normalize(mix(depth_normal(px, 0), up, 0.6));
 +        let flatness = dot(n, up);
@@ -646,12 +701,12 @@ new file mode 100644
 +        let pud = puddle * smoothstep(0.85, 0.97, flatness);
 +        var refl = vec3f(0.0);
 +        if (pud > 0.03) {
-+          refl = reflection(p, pn, max(steps - 4, 8), jitter, (en & 1u) != 0u);
++          refl = reflection(p, pn, max(steps / 2, 8), jitter, (en & 1u) != 0u);
 +        } else {
-+          refl = sky_color(reflect(-v, n));
++          refl = sky_color(reflect(-v, n), false);
 +        }
 +        let f = schlick(dot(v, select(n, pn, pud > 0.03)), 0.03);
-+        let k = pud * (0.25 + 0.75 * f) * 0.85 + (1.0 - pud) * wet * f * 0.5;
++        let k = pud * (0.35 + 0.65 * f) * 0.85 + (1.0 - pud) * wet * f * 0.5;
 +        col = mix(base, refl, clamp(k, 0.0, 0.9));
 +      }
 +      let sp = u.p1.y;
@@ -670,15 +725,17 @@ new file mode 100644
 +          let vdir = normalize(world_dir(normalize(p)));
 +          let vq = floor(vdir.xz * 9.0 + vec2f(h * 13.0));
 +          let tw = hash12(id * 0.37 + vq + floor(t * 1.5 + h * 7.0) * 0.11);
-+          let on = step(0.955, h) * step(0.5, tw);
++          let on = step(0.94, h) * step(0.5, tw);
 +          let glint = on * (smoothstep(1.6, 0.0, dpx) + 0.35 * smoothstep(3.5, 0.0, dpx));
-+          col += vec3f(1.0, 0.98, 0.92) * glint * snow * sp * 1.4;
++          let tintSel = hash12(id + 9.1);
++          let gc = select(select(vec3f(1.0, 1.0, 1.0), vec3f(0.75, 0.92, 1.0), tintSel > 0.6), vec3f(1.0, 0.93, 0.72), tintSel > 0.85);
++          col = col * (1.0 - 0.07 * snow * sp) + gc * glint * snow * sp * 1.4;
 +        }
 +      }
 +    }
 +  }
 +  if ((en & 16u) != 0u && u.p1.z > 0.0) {
-+    let fd = max(length(u.focus.xyz), 1.0);
++    let fd = max(length(fv), 1.0);
 +    let dist = length(p);
 +    let start = fd * u.p1.w;
 +    var f = u.p1.z * (1.0 - exp(-max(dist - start, 0.0) / (fd * 2.2)));
@@ -700,12 +757,13 @@ new file mode 100644
 +@vertex fn vs_particles(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> PartOut {
 +  var o: PartOut;
 +  let kind = u32(u.part.x);
-+  let ws = u.part.z;
++  let fvv = focus_v();
++  let ws = wscale(fvv);
 +  let t = u.dr.w;
 +  let h = hash31(f32(ii) * 1.618 + 0.37);
 +  let h2 = hash31(f32(ii) * 2.718 + 4.1);
 +  // world-space box around the focus point (wrapped, so particles stay around the player)
-+  let fw = world_pos(u.focus.xyz);
++  let fw = world_pos(fvv);
 +  let box = vec3f(46.0, 22.0, 46.0) * ws;
 +  var fall = 0.55;
 +  var sway = 0.6;
@@ -715,8 +773,8 @@ new file mode 100644
 +  fall *= (0.75 + 0.5 * h2.x);
 +  let ph = h2.y * 6.2832;
 +  var pos = vec3f(h.x, 0.0, h.z) * box;
-+  pos.x += u.wind.x * t + sin(t * (0.6 + h.y) + ph) * sway * ws;
-+  pos.z += u.wind.y * t + cos(t * (0.5 + h.x * 0.7) + ph) * sway * ws * 0.7;
++  pos.x += u.wind.x * ws * t + sin(t * (0.6 + h.y) + ph) * sway * ws;
++  pos.z += u.wind.y * ws * t + cos(t * (0.5 + h.x * 0.7) + ph) * sway * ws * 0.7;
 +  let rel = pos - fw;
 +  let wrapped = (fract(rel.xz / box.xz + 0.5) - 0.5) * box.xz;
 +  let y = fw.y - 3.0 * ws + fract(h.y - t * fall * ws / box.y) * box.y;
@@ -780,7 +838,7 @@ new file mode 100644
 +  }
 +  // depth test against the scene (soft)
 +  let sz = view_pos(in.pos.xy, load_depth(in.pos.xy)).z;
-+  let ws = max(u.part.z, 1e-3);
++  let ws = wscale(focus_v());
 +  let vis = clamp((in.vz - sz) / (0.4 * ws), 0.0, 1.0);
 +  a *= in.color.a * vis;
 +  var c = in.color.rgb;
@@ -802,21 +860,22 @@ new file mode 100644
 +  } else if (mode == 2u) {
 +    // soft film: lower contrast, lifted blacks, muted colour, cool shadows / warm highlights
 +    let l = luma(c);
-+    c = mix(vec3f(l), c, 0.85);
-+    c = c * 0.9 + 0.06;
-+    c = mix(c * vec3f(0.96, 1.0, 1.05), c * vec3f(1.04, 1.0, 0.94), smoothstep(0.2, 0.8, l));
-+    c = c / (c + 0.12) * 1.12; // gentle shoulder
++    c = mix(vec3f(l), c, 0.82);
++    c = clamp(c, vec3f(0.0), vec3f(1.0));
++    c = mix(c, c * c * (3.0 - 2.0 * c), 0.25); // gentle S-curve...
++    c = c * 0.88 + 0.055;                       // ...in a lower contrast range (lifted blacks, soft whites)
++    c = mix(c * vec3f(0.97, 1.0, 1.04), c * vec3f(1.04, 1.0, 0.95), smoothstep(0.2, 0.8, l));
 +  } else if (mode == 3u) {
 +    // vivid
 +    let l = luma(c);
 +    let sat = max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
-+    c = mix(vec3f(l), c, 1.3 + 0.2 * (1.0 - sat));
-+    c = (c - 0.5) * 1.08 + 0.5;
++    c = mix(vec3f(l), c, 1.2 + 0.15 * (1.0 - sat));
++    c = (c - 0.5) * 1.06 + 0.5;
 +  }
 +  return mix(cin, clamp(c, vec3f(0.0), vec3f(1.0)), s);
 +}
 +fn tilt_radius(y: f32) -> f32 {
-+  let fy = select(0.55, u.wind.w / u.size.y, u.wind.w > 0.0);
++  let fy = select((u.vp.y + 0.56 * u.vp.w) * u.size.w, u.wind.w / u.size.y, u.wind.w > 0.0);
 +  let dy = abs(y * u.size.w - fy);
 +  return u.hazeCol.w * 0.009 * u.size.y * smoothstep(u.horizon.w, u.horizon.w + 0.28, dy);
 +}
@@ -839,6 +898,21 @@ new file mode 100644
 +}
 +@fragment fn fs_final(in: VsOut) -> @location(0) vec4f {
 +  let px = in.pos.xy;
++  if (u.pp.y > 5.5 && u.pp.y < 7.5) { // 6: focus z, scale, this pixel's z; 7: raw depth (x1000, 1-d x1000), mask depth x1000
++    let d = load_depth(px);
++    if (u.pp.y > 6.5) { return vec4f(d * 1000.0, (1.0 - d) * 1000.0, textureLoad(tmask, vec2i(px), 0).a, 1.0); }
++    let f = focus_v();
++    return vec4f(-f.z / 4000.0, wscale(f) / 200.0, -view_pos(px, d).z / 4000.0, 1.0);
++  }
++  if (u.pp.y > 0.5 && u.pp.y < 3.5) { // debug views (AURORA_WORLD_FX_SHOW): 1 mask, 2 focus distance / scale
++    if (u.pp.y > 2.5) { // 3: mask alpha, wetness, enables bit 1, view ok
++      return vec4f(textureLoad(tmask, vec2i(px), 0).a, u.refl.w, select(0.0, 1.0, (u32(u.wind.z) & 2u) != 0u), 1.0);
++    }
++    if (u.pp.y < 1.5) { return vec4f(textureLoad(tmask, vec2i(px), 0).rgb * 0.5 + vec3f(textureLoad(tmask, vec2i(px), 0).a * 0.5), 1.0); }
++    let f = focus_v();
++    let d = abs(view_pos(px, load_depth(px)).z) / max(-f.z, 1.0);
++    return vec4f(fract(d * 4.0), wscale(f) / 200.0, select(0.0, 1.0, abs(px.y - (u.vp.y + 0.56 * u.vp.w)) < 2.0), 1.0);
++  }
 +  var c: vec3f;
 +  if (u.pp.x > 0.5) {
 +    c = blur(px, vec2f(0.0, 1.0));
@@ -1114,7 +1188,7 @@ new file mode 100644
 +  const uint32_t x1 = uint32_t(std::clamp(std::ceil(vp.left + vp.width), 0.f, float(t.width)));
 +  const uint32_t y1 = uint32_t(std::clamp(std::ceil(vp.top + vp.height), 0.f, float(t.height)));
 +  pass.SetScissorRect(x0, y0, x1 > x0 ? x1 - x0 : 0, y1 > y0 ? y1 - y0 : 0);
-+  pass.SetBindGroup(0, bind(job.finalU, {}, {}, finalSrc, {}, {}));
++  pass.SetBindGroup(0, bind(job.finalU, {}, maskView, finalSrc, g_gpu.depth.view, {}));
 +  pass.Draw(3);
 +  pass.End();
 +  g_statPasses.fetch_add(1, std::memory_order_relaxed);
@@ -1137,6 +1211,13 @@ new file mode 100644
 +  if (st.projType != GX_PERSPECTIVE) {
 +    return;
 +  }
++  // The camera: the projection of the surface draws (the world proper; the sky dome and other
++  // world draws may use their own depth range), any world draw until the first surface draw.
++  const bool surface = kind == AURORA_SURFACE_WATER || kind == AURORA_SURFACE_GROUND;
++  if (g_cameraFromSurface && !surface) {
++    return;
++  }
++  g_cameraFromSurface = g_cameraFromSurface || surface;
 +  const auto& p = st.proj;
 +  g_camera = {
 +      .valid = true,
@@ -1151,7 +1232,7 @@ new file mode 100644
 +  if (sMtxLog) {
 +    static uint32_t sN = 0;
 +    if (sN++ % 400 == 0) {
-+      const float* m = reinterpret_cast<const float*>(&st.pnMtx[st.currentPnMtx % MaxPnMtx].pos);
++      const float* m = reinterpret_cast<const float*>(&st.pnMtx[st.currentPnMtx % gx::MaxPnMtx].pos);
 +      Log.info("surface draw kind {} pnmtx {}: {} {} {} {} / {} {} {} {} / {} {} {} {}", kind, st.currentPnMtx, m[0], m[1], m[2], m[3],
 +               m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
 +    }
@@ -1190,6 +1271,7 @@ new file mode 100644
 +void begin_frame() noexcept {
 +  g_draws.clear();
 +  g_camera.valid = false;
++  g_cameraFromSurface = false;
 +}
 +
 +void scene_end() noexcept {
@@ -1200,6 +1282,7 @@ new file mode 100644
 +    ~Reset() {
 +      g_draws.clear();
 +      g_camera.valid = false;
++  g_cameraFromSurface = false;
 +    }
 +  } reset;
 +  if (!c.enabled || !g_camera.valid) {
@@ -1243,13 +1326,10 @@ new file mode 100644
 +  u.dr[2] = gx::UseReversedZ ? 1.f : 0.f;
 +  u.dr[3] = c.freezeTime ? 100.f : time_now();
 +  const float* xv = st.appXf.data() + (AURORA_WORLD_FX_XF_VIEW - AURORA_APP_XF_BASE);
-+  const float* xf = st.appXf.data() + (AURORA_WORLD_FX_XF_FOCUS - AURORA_APP_XF_BASE);
 +  std::memcpy(u.view, xv, sizeof(u.view));
-+  u.focus[0] = xf[3];
-+  u.focus[1] = xf[7];
-+  u.focus[2] = xf[11];
 +  const bool viewValid = xv[0] * xv[0] + xv[1] * xv[1] + xv[2] * xv[2] > 0.25f;
 +  u.focus[3] = viewValid ? 1.f : 0.f;
++  u.focus[0] = std::clamp(c.clouds, 0.f, 1.f);
 +  const uint32_t q = std::min(c.reflectionQuality, 2u);
 +  u.refl[0] = std::clamp(c.reflectionStrength, 0.f, 1.5f);
 +  u.refl[1] = q == 0 ? 16.f : q == 1 ? 24.f : 40.f;
@@ -1290,12 +1370,12 @@ new file mode 100644
 +  u.wind[2] = float(en);
 +  // the focus row (tilt-shift) in target pixels
 +  u.wind[3] = 0.f;
-+  if (viewValid && u.focus[2] < -1.f) {
-+    const float w = -u.focus[2];
-+    const float ny = (u.proj[1] * u.focus[1] + u.proj[3] * u.focus[2] + u.projz[3]) / w;
-+    u.wind[3] = std::clamp(vp.top + (0.5f - ny * 0.5f) * vp.height, 0.f, float(size.y));
-+  }
 +  job.tilt = c.tiltShift && c.tiltStrength > 0.f;
++  static const int sShowAll = [] {
++    const char* v = std::getenv("AURORA_WORLD_FX_SHOW");
++    return v ? std::atoi(v) : 0;
++  }();
++  u.pass[1] = float(sShowAll);
 +  job.base = push_uniform(reinterpret_cast<const uint8_t*>(&u), sizeof(u));
 +  if (job.tilt) {
 +    FxUniform pu = u;
@@ -1304,15 +1384,22 @@ new file mode 100644
 +  }
 +  FxUniform fu = u;
 +  fu.pass[0] = job.tilt ? 1.f : 0.f;
++  static const int sShow = [] {
++    const char* v = std::getenv("AURORA_WORLD_FX_SHOW");
++    return v ? std::atoi(v) : 0;
++  }();
++  fu.pass[1] = float(sShow);
 +  job.finalU = push_uniform(reinterpret_cast<const uint8_t*>(&fu), sizeof(fu));
 +  static const bool sLog = std::getenv("AURORA_WORLD_FX_LOG") != nullptr;
 +  if (sLog) {
 +    static uint32_t sLogged = 0;
 +    if (sLogged++ % 120 == 0) {
++      Log.info("camera p00 {} p11 {} p02 {} p12 {} A {} B {} dr {} {} en {} wet {}", u.proj[0], u.proj[1], u.proj[2], u.proj[3],
++               u.projz[0], u.projz[1], u.dr[0], u.dr[1], u.wind[2], u.refl[3]);
 +      Log.info("scene end: {} surface draws, mask {}, particles {}, tilt {}, vp {} {} {} {}, view {} {} {} / {} {} {} / {} {} {}, "
 +               "focus {} {} {} (row {})",
 +               job.draws.size(), job.mask, job.particles, job.tilt, vp.left, vp.top, vp.width, vp.height, xv[0], xv[1], xv[2],
-+               xv[4], xv[5], xv[6], xv[8], xv[9], xv[10], u.focus[0], u.focus[1], u.focus[2], u.wind[3]);
++               xv[4], xv[5], xv[6], xv[8], xv[9], xv[10], 0.f, 0.f, 0.f, u.wind[3]);
 +    }
 +  }
 +  push_scene_op([job = std::move(job)](const wgpu::CommandEncoder& cmd, const ScenePassTargets& t) { encode(cmd, t, job); });

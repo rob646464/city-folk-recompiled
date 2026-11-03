@@ -11,12 +11,13 @@
 //    data + s32 [data + 8]) of the frame's FIRST ScnRoot pass gets a surface kind
 //    (GXSetSurfaceAurora): water for the river / pond / sea materials, ground for walkable ground,
 //    world for everything else (the effects' camera);
-//  - the world effects end (GXWorldFxEndAurora) goes in before the first layout after that pass
-//    (or the second ScnRoot pass), with the main camera loaded into the application XF memory
-//    (the ScnRoot's current camera: index u8 [root + 0xF4], CameraData at root + 0xF8 + 0x10C n,
-//    whose first member is the world -> view matrix; the camera target at + 0x8C). Both XF loads
-//    are noted for frame interpolation like model matrices, so the in-between frames get the
-//    in-between camera.
+//  - the world effects end (GXWorldFxEndAurora) goes in at the first layout root pane after that
+//    pass (cf_hud.cpp, after enhanced lighting's scene end) or at the second ScnRoot pass, with the
+//    main camera loaded into the application XF memory (the ScnRoot's current camera: index u8
+//    [root + 0xF4], CameraData at root + 0xF8 + 0x10C n, whose first member is the world -> view
+//    matrix), rotated so the world's up axis (+z in the town) is +y. The XF load is noted for frame
+//    interpolation like a model matrix, so the in-between frames get the in-between camera.
+//  - every Aurora write first closes the game's lazily ended immediate-mode draw (gx::endPendingDraw).
 // Weather (dWeather_c, per-frame fn_801C92F0: current hourly state at +0x5884, next at +0x5888;
 // docs/CALENDAR.md), season (the game clock + the hemisphere option) and the hour drive the
 // amounts in the configuration.
@@ -30,6 +31,7 @@
 
 #include "port/settings.h"
 #include "recomp/game.h"
+#include "recomp/gx_bridge.h"
 #include "recomp/hle.h"
 #include "recomp/interp.h"
 #include "recomp/menu.h"
@@ -64,7 +66,7 @@ void onLayoutDraw();
 struct Settings {
     bool enabled = false;
     bool reflections = true;
-    float reflectionStrength = 0.8f;  // 0..1.5
+    float reflectionStrength = 0.6f;  // 0..1.5
     int reflectionQuality = 1;        // 0 low, 1 medium, 2 high
     float rippleDistortion = 1.0f;    // 0..2
     bool wetGround = true;
@@ -153,7 +155,7 @@ Settings current() {
         std::string all = e;
         size_t pos = 0;
         while (pos < all.size()) {
-            const size_t semi = all.find(';', pos);
+            const size_t semi = all.find_first_of(";,", pos);
             const std::string kv = all.substr(pos, semi - pos);
             if (const size_t eq = kv.find('='); eq != std::string::npos) setKey(s, kv.substr(0, eq), kv.substr(eq + 1));
             if (semi == std::string::npos) break;
@@ -250,6 +252,7 @@ u8 kindFor(u32 resMatPtr) {
 
 void emitKind(u8 k) {
     if (k == sKind) return;
+    gx::endPendingDraw();  // (the game's last immediate-mode draw is closed lazily: not inside it)
     GXSetSurfaceAurora(k);
     sKind = k;
 }
@@ -312,7 +315,7 @@ void skyAt(float h, Rgb& zen, Rgb& hor, float& night) {
 int monthDay(int mon, int day) { return mon * 100 + day; }  // mon 0-11
 
 struct Amounts {
-    float wetness = 0, rain = 0, sparkle = 0, haze = 0, moon = 0;
+    float wetness = 0, rain = 0, sparkle = 0, haze = 0, moon = 0, clouds = 0;
     Rgb zen{}, hor{}, hazeCol{}, ambient{1, 1, 1};
     int particles = 0;
     float hour = 12;
@@ -368,12 +371,13 @@ void updateAmounts(bool outdoor) {
     a.zen = mixc(a.zen, ogN, overcast * 0.85f);
     a.hor = mixc(a.hor, ogN, overcast * 0.7f);
     a.moon = night * (1.0f - overcast);
+    a.clouds = st == 0 ? 0.3f : st == 1 ? 0.6f : 0.95f;
     // snow sparkle: snow cover (Dec 11 - Feb 24, as the game's terms 19-21) in daylight with the sun out
     const bool snowCover = a.md >= monthDay(11, 11) || a.md <= monthDay(1, 24);
     const float sun = sstep(6.5f, 8.0f, a.hour) * (1.0f - sstep(16.0f, 17.5f, a.hour));
     a.sparkle = snowCover ? sun * (st == 0 ? 1.0f : st == 1 ? 0.6f : st == 2 ? 0.2f : 0.0f) : 0.0f;
     // haze on grey days (and a trace at dawn / dusk)
-    const float hz = st == 2 ? 0.22f : st == 3 ? 0.35f : st == 4 ? 0.5f : st == 5 ? 0.4f : st == 6 ? 0.55f : 0.0f;
+    const float hz = st == 2 ? 0.18f : st == 3 ? 0.25f : st == 4 ? 0.38f : st == 5 ? 0.3f : st == 6 ? 0.42f : 0.0f;
     const float twilight = (sstep(4.5f, 6.0f, a.hour) * (1.0f - sstep(6.5f, 8.0f, a.hour))) +
                            (sstep(16.5f, 18.0f, a.hour) * (1.0f - sstep(19.0f, 20.5f, a.hour)));
     a.haze = std::max(hz, 0.08f * twilight);
@@ -413,6 +417,7 @@ void applyConfig(const Settings& s, bool outdoor, bool on) {
         c.skyZenith[0] = a.zen.r, c.skyZenith[1] = a.zen.g, c.skyZenith[2] = a.zen.b;
         c.skyHorizon[0] = a.hor.r, c.skyHorizon[1] = a.hor.g, c.skyHorizon[2] = a.hor.b;
         c.moon = a.moon;
+        c.clouds = a.clouds;
         c.moonDir[0] = 0.0f, c.moonDir[1] = 0.45f, c.moonDir[2] = -0.89f;
         c.ambient[0] = a.ambient.r, c.ambient[1] = a.ambient.g, c.ambient[2] = a.ambient.b;
         c.tiltShift = s.tiltShift;
@@ -422,7 +427,7 @@ void applyConfig(const Settings& s, bool outdoor, bool on) {
         c.gradeStrength = s.gradeStrength;
         c.particles = s.particles ? u32(a.particles) : 0u;
         c.particleDensity = s.particleDensity;
-        c.wind[0] = 0.35f * kWorldScale, c.wind[1] = 0.12f * kWorldScale;
+        c.wind[0] = 0.35f, c.wind[1] = 0.12f;
         c.worldScale = kWorldScale;
         c.freezeTime = envFlag("CF_WFX_FREEZE");
     }
@@ -462,6 +467,7 @@ void onScnRoot(u32 root, bool xlu, bool begin) {
 }
 
 void endWorld() {
+    gx::endPendingDraw();
     if (!sPendingEnd) return;
     sPendingEnd = false;
     const Settings s = current();
@@ -475,18 +481,42 @@ void endWorld() {
         GXWorldFxEndAurora();
         return;
     }
-    float vf[12];
-    std::memcpy(vf, view, sizeof(vf));
-    for (int r = 0; r < 3; r++) vf[r * 4 + 3] = view[r * 4] * target[0] + view[r * 4 + 1] * target[1] + view[r * 4 + 2] * target[2] + view[r * 4 + 3];
+    // The world's up axis: the town is z-up in g3d's world (the camera's up row leans to +z and its
+    // forward to -z there); picked per frame among the six axes as the one the camera's up vector
+    // points along and its forward away from (with some hysteresis), then rotated to +y.
+    static int sAxis = 2;  // 0..5: +x -x +y -y +z -z
+    {
+        float best = -1e9f, cur = 0.0f;
+        int bi = sAxis;
+        for (int a = 0; a < 6; a++) {
+            const int k = a / 2;
+            const float sg = (a & 1) ? -1.0f : 1.0f;
+            const float sc = sg * view[4 + k] + sg * view[8 + k];  // up . a - forward . a (forward = -row 2)
+            if (a == sAxis) cur = sc;
+            if (sc > best) best = sc, bi = a;
+        }
+        if (best > cur + 0.3f) sAxis = bi;
+    }
+    float e1[3] = {0, 0, 0};
+    e1[sAxis / 2] = (sAxis & 1) ? -1.0f : 1.0f;
+    float e0[3] = {sAxis / 2 == 0 ? 0.0f : 1.0f, sAxis / 2 == 0 ? 1.0f : 0.0f, 0.0f};
+    const float e2[3] = {e0[1] * e1[2] - e0[2] * e1[1], e0[2] * e1[0] - e0[0] * e1[2], e0[0] * e1[1] - e0[1] * e1[0]};
+    float w[12];
+    for (int r = 0; r < 3; r++) {
+        const float* row = view + r * 4;
+        w[r * 4 + 0] = row[0] * e0[0] + row[1] * e0[1] + row[2] * e0[2];
+        w[r * 4 + 1] = row[0] * e1[0] + row[1] * e1[1] + row[2] * e1[2];
+        w[r * 4 + 2] = row[0] * e2[0] + row[1] * e2[1] + row[2] * e2[2];
+        w[r * 4 + 3] = row[3];
+    }
     {
         interp::TagScope tag(interp::TagCat::Object, 0xCF57F000u, 0x57F0u, 0);
-        u32 at = interp::mark();
-        GXLoadAppXfAurora(AURORA_WORLD_FX_XF_VIEW, view, 12);
+        const u32 at = interp::mark();
+        GXLoadAppXfAurora(AURORA_WORLD_FX_XF_VIEW, w, 12);
         interp::note(at, interp::Kind::PosMtx, 0xCF57F000u, AURORA_WORLD_FX_XF_VIEW, 12);
-        at = interp::mark();
-        GXLoadAppXfAurora(AURORA_WORLD_FX_XF_FOCUS, vf, 12);
-        interp::note(at, interp::Kind::PosMtx, 0xCF57F004u, AURORA_WORLD_FX_XF_FOCUS, 12);
     }
+    const float* vf = view;  // (log below)
+    (void)target;
     GXWorldFxEndAurora();
     if (sLog && game::guestFrames() % 120 < 2) {
         const Amounts& a = sAmt;
