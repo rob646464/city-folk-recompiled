@@ -161,7 +161,8 @@ SkyLight skyLight(const Clock& k) {
     lerp3(kNoon, kGold, golden, base);
     if (!useSun) std::memcpy(base, kMoon, sizeof base);
     for (int c = 0; c < 3; c++) l.tint[c] = 1.0f - strength * (1.0f - base[c] * 0.72f);
-    l.away = 0.75f;
+    static const float sAway = std::getenv("CF_SUN_AWAY") ? float(std::atof(std::getenv("CF_SUN_AWAY"))) : 0.75f;  // test aid
+    l.away = sAway;
     l.tanSize = (useSun ? 0.012f : 0.02f) * std::clamp(s.sunShadowSoftness, 0.0f, 3.0f) * (1.0f + 2.0f * (1.0f - wx));
     // Added light: warm sunlight on sun-facing sides, golden near sunrise / sunset; faint cool moonlight.
     static const float kSunNoon[3] = {1.0f, 0.96f, 0.88f}, kSunGold[3] = {1.0f, 0.66f, 0.36f}, kMoonCol[3] = {0.55f, 0.66f, 1.0f};
@@ -230,7 +231,7 @@ void onCamera(Ctx& c, u32 data) {
             submitSky();
             enh::beginScene();
         } else if (sSceneOpen) {
-            enh::setCasterPass(data != sMainCam);
+            // (ScnRoot::DrawOpa loads all 32 cameras up front: the last one set is not the current one)
         }
     }
     if (logNow())
