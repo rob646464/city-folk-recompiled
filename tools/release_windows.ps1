@@ -150,7 +150,7 @@ try {
     if (Test-Path $notesSrc) {
         $notesTemplate = Get-Content -Raw -Encoding UTF8 $notesSrc
     } elseif ($DryRun) {
-        Write-Host "No $notesSrc: the dry run uses a placeholder." -ForegroundColor Yellow
+        Write-Host "No ${notesSrc}: the dry run uses a placeholder." -ForegroundColor Yellow
         $notesTemplate = "# $product $version`n`n(release notes placeholder)`n`n{{LINUX_NOTE}}{{MAC_NOTE}}`n| File | Platform | SHA-256 |`n|---|---|---|`n{{DOWNLOAD_ROWS}}`n"
     } else {
         throw "release notes $notesSrc missing"
