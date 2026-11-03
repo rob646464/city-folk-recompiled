@@ -223,8 +223,32 @@ player walks. Alone they do not take the D-pad / stick (tools, view, walking sta
 "Recenter pointer" enters the toolbar (pointer onto the slot nearest it, the toolbar slides up),
 D-pad left / right moves along it, A opens (pockets, map, ...), B or Recenter leaves it (the pointer
 goes back where it was; that B does not reach the game), moving the pointer freely leaves it too.
-The game's own shortcuts stay: + opens the town map; - opens nothing in the field with the Nunchuk
-(tried) so the bag slot of the toolbar is the way to the pockets (Recenter, left, A).
+The game's own shortcuts need nothing new: - opens the pockets, + the town map (both tried in the
+field, Nunchuk style; gamepad Back / Start), B closes them.
+
+**Screens drawn but not hit-tested** (1b): the pockets record their slot panes' centres once when
+they open (d_menu_itemNP calls the same pane walk with a REL test function at setup) and test
+those stored positions, so they are found through the layouts drawn each frame instead
+(cf_hud.cpp's Pane::Draw hook calls `cf::navLayoutDrawn` for every root pane: visible Bounding
+panes named `B*`, the text box `B_msgWin` left out since A advances text wherever the pointer is).
+Items the game hit-tests this frame are "tested"; while any tested non-HUD item is up only tested
+items are navigable, so a choice box over the pockets ("Drop / Quit") is modal like in the game.
+
+Verified (USA, fixture `user-town` and the new-game route, scripted D-pad presses and screenshots):
+- Dialogue choices: Rover's "Yeah! / DS Suitcase / ..." chosen with D-pad down (lands on the choice
+  nearest the pointer), up, A.
+- Town map (+): resident list up/down, left into the house markers, down along the markers, the
+  scroll button (the list scrolls while the pointer rests on it), down onto the toolbar, B closes.
+- Pockets (-): slot to slot across the rows, down onto the toolbar, A on an item opens "Drop / Quit",
+  D-pad down -> Quit, A; B closes.
+- HUD toolbar in the field: Recenter -> nearest slot (toolbar slides up with its label), left /
+  right along the slots, A on the bag opens the pockets, B leaves (pointer back); the Nunchuk stick
+  walks the player afterwards (not taken in the field).
+- Name keyboard (new game): keys, "More" (symbol page), "Confirm" reached; "@", "=", "m" typed.
+- Mouse unchanged: with Auto the first mouse movement switches snapping off (not run with a real
+  mouse in a scripted test: the scripted pointer counts as a free move, not as the mouse).
+Not tried yet: shops / catalog / museum, the letter writing screen, the design editor, the HOME
+Menu (hooked, unverified), PAL / Japan / Korea (the hooks are USA-only: hooks.txt lines untagged).
 
 Direction search: candidates beyond the selected item's middle in the pressed direction (8 ways with
 the stick), cost = gap along + 0.25 x centre distance along + 3 x gap across + 0.35 x centre
@@ -241,7 +265,7 @@ source with its scale and items, every 30 frames).
 
 - `--input` drives the Remotes: items `<time>:<tokens>[*<frames>]`, `P2:`..`P4:` for other Remotes.
   Tokens: `A B 1 2 PLUS MINUS HOME UP DOWN LEFT RIGHT C Z SHAKE NSHAKE STICKUP STICKDOWN STICKLEFT
-  STICKRIGHT` (`START`/`X`/`Y` = `PLUS`/`1`/`2`), `STICK=x/y` = Nunchuk stick at any position
+  STICKRIGHT RECENTER` (`START`/`X`/`Y` = `PLUS`/`1`/`2`), `STICK=x/y` = Nunchuk stick at any position
   (-1..1, up = +y), `@x/y` = pointer at KPAD position (stays until the next one), `@off` = pointing
   away. Time in retraces, or in guest frames with `CF_INPUT_CLOCK=frames` (matches `CF_SHOT` frame
   numbers). A time `+N` = N after the previous item's start; `~N` after an item repeats it N times
