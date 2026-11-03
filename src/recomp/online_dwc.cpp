@@ -58,6 +58,12 @@ double now() {
     return duration<double>(steady_clock::now() - t0).count();
 }
 
+// Wall-clock seconds within the hour, for comparing two instances' logs.
+double wall() {
+    using namespace std::chrono;
+    return double(duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count() % 3600000) / 1000.0;
+}
+
 struct Peer {  // a room member's DWC state (from its STATUS)
     u8 member = 0;
     u32 pid = 0;
@@ -106,11 +112,17 @@ struct Dwc {
     bool suspended = false;
     u32 closedCb = 0, closedParam = 0;
     // transport
+    bool sendBusy[8] = {};  // a reliable send whose send callback has not run yet
     u32 sendCb = 0, sendParam = 0, recvCb = 0, recvParam = 0, recvToCb = 0, recvToParam = 0, pingCb = 0, pingParam = 0;
     struct RecvBuf {
         u32 buf = 0, size = 0;
     } recvBuf[8];
     std::deque<std::function<void(Ctx&)>> later;  // callbacks for the next ProcessFriendsMatch
+    struct Delayed {
+        int ticks;  // ProcessFriendsMatch calls to wait
+        std::function<void(Ctx&)> f;
+    };
+    std::vector<Delayed> delayed;
     // errors
     int lastError = 0, lastCode = 0;
     bool roomLostReported = false;
@@ -123,6 +135,18 @@ std::mutex sUiMutex;
 std::string sUiStatus = "Not connected";
 
 bool log() { return online::logOn(); }
+
+// First bytes of a message, hex, for the logs.
+std::string hexHead(const u8* p, size_t n) {
+    std::string s;
+    for (size_t i = 0; i < n && i < 24; i++) {
+        char b[4];
+        std::snprintf(b, sizeof b, "%02X", p[i]);
+        s += b;
+    }
+    if (n > 24) s += "...";
+    return s;
+}
 
 void setUi(const std::string& s) {
     std::lock_guard<std::mutex> g(sUiMutex);
@@ -466,8 +490,18 @@ void handle(Ctx& c, const net::AppMsg& m) {
             const Node* sv = nodeByAid(0);
             const int idx = d.serverIndex >= 0 ? d.serverIndex : friendIndexOf(sv ? sv->pid : 0);
             if (log()) std::printf("[dwc] joined the match of member %u as aid %u (%zu nodes)\n", m.from, d.myAid, list.size());
-            if (d.newClientCb) call(c, d.newClientCb, {u32(idx), d.newClientParam});
-            matched(c, 0, false, true, false, idx);
+            // The joining client gets only its matched callback; the new-client callback is for
+            // the members already in the match when someone else connects (server, onNodes).
+            // In DWC the client has its AID some frames before the matched callback (the
+            // connection to the server takes a while); the game copies DWC_GetMyAID into its
+            // online object once per frame (+0x366E) and its connect handler (fn_800D43D8)
+            // ignores the AID equal to that copy. Calling back in the same frame left the copy at
+            // 0 = the server's AID, so the visitor never greeted the host and the visit stalled at
+            // "Submitting an inquiry". Deliver the callback a few frames later.
+            const int sidx = idx;
+            d.delayed.push_back({4, [sidx](Ctx& cc) {
+                                     if (d.role == MRole::Client) matched(cc, 0, false, true, false, sidx);
+                                 }});
         }
         break;
     case M_JOIN_NG:
@@ -522,8 +556,8 @@ void handle(Ctx& c, const net::AppMsg& m) {
         if (log()) {
             static int n = 0;
             if (n++ < 40 || n % 100 == 0)
-                std::printf("[dwc] receive #%d from aid %u: %zu bytes (%s), first %08X\n", n, src, len,
-                            m.type == M_DATA ? "reliable" : "unreliable", len >= 4 ? rd32(rb.buf) : 0);
+                std::printf("[dwc] %.3f receive #%d from aid %u: %zu bytes (%s): %s\n", wall(), n, src, len,
+                            m.type == M_DATA ? "reliable" : "unreliable", hexHead(p, len).c_str());
         }
         call(c, d.recvCb, {src, rb.buf, u32(len), d.recvParam});
         break;
@@ -642,6 +676,18 @@ void process(Ctx& c) {
         auto f = std::move(d.later.front());
         d.later.pop_front();
         f(c);
+    }
+    if (!d.delayed.empty()) {
+        std::vector<Dwc::Delayed> due;
+        for (auto it = d.delayed.begin(); it != d.delayed.end();) {
+            if (--it->ticks <= 0) {
+                due.push_back(std::move(*it));
+                it = d.delayed.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (auto& x : due) x.f(c);
     }
 }
 
@@ -990,12 +1036,16 @@ HLE(DWC_SetRecvBuffer) {
 HLE(DWC_IsSendableReliable) {
     const u8 aid = u8(c.r[3]);
     Node* n = nodeByAid(aid);
-    c.r[3] = n && aid != d.myAid && net::session().queuedBytes(n->member) < 64 * 1024 ? 1 : 0;
+    // As in DWC, one reliable send per connection at a time: not sendable until the previous one
+    // has been handed to the transport (its send callback). The game's send queue (fn_800E89C0)
+    // re-sends its head entry every frame while this says yes and the callback has not come;
+    // the duplicates broke its per-connection sequence numbers (fn_800D3654: error 8).
+    c.r[3] = n && aid != d.myAid && aid < 8 && !d.sendBusy[aid] && net::session().queuedBytes(n->member) < 64 * 1024 ? 1 : 0;
 }
 
 static bool sendData(u8 aid, u32 buf, u32 size, bool reliable) {
     Node* n = nodeByAid(aid);
-    if (!n || aid == d.myAid || size > (reliable ? 64u * 1024 : u32(net::kMaxUnreliable - 8))) return false;
+    if (!n || aid == d.myAid || size > (reliable ? u32(net::kMaxAppMessage - 16) : u32(net::kMaxUnreliable - 8))) return false;
     std::vector<u8> b;
     b.reserve(size + 1);
     b.push_back(d.myAid);
@@ -1006,16 +1056,20 @@ static bool sendData(u8 aid, u32 buf, u32 size, bool reliable) {
 HLE(DWC_SendReliable) {
     const u8 aid = u8(c.r[3]);
     const u32 buf = c.r[4], size = c.r[5];
-    const bool ok = sendData(aid, buf, size, true);
+    const bool ok = aid < 8 && !d.sendBusy[aid] && sendData(aid, buf, size, true);
     if (log()) {
         static int n = 0;
         if (n++ < 40 || n % 100 == 0)
-            std::printf("[dwc] SendReliable #%d to aid %u: %u bytes, first %08X%s\n", n, aid, size, size >= 4 ? rd32(buf) : 0,
+            std::printf("[dwc] %.3f SendReliable #%d to aid %u: %u bytes: %s%s\n", wall(), n, aid, size, hexHead(hostp(buf), size).c_str(),
                         ok ? "" : " (refused)");
     }
-    if (ok && d.sendCb) {
+    if (ok) {
+        d.sendBusy[aid] = true;
         const u32 cb = d.sendCb, param = d.sendParam;
-        d.later.push_back([cb, param, size, aid](Ctx& cc) { call(cc, cb, {size, aid, param}); });
+        d.later.push_back([cb, param, size, aid](Ctx& cc) {
+            d.sendBusy[aid] = false;
+            if (cb) call(cc, cb, {size, aid, param});
+        });
     }
     c.r[3] = ok ? 1 : 0;
 }
