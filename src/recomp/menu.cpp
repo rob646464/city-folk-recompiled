@@ -17,6 +17,7 @@
 #include "recomp/controls.h"
 #include "recomp/wiimote.h"
 #include "recomp/crt.h"
+#include "recomp/distributions.h"
 #include "recomp/enhanced_lighting.h"
 #include "recomp/frame.h"
 #include "recomp/interp.h"
@@ -45,6 +46,9 @@
 
 namespace recomp {
 u32 copyDispCount();  // hle_gx.cpp
+namespace world {
+bool drawMenu();  // src/game/cf_world.cpp (F1 > Visuals > Enhanced world)
+}
 }
 
 namespace recomp::menu {
@@ -88,10 +92,11 @@ struct Page {
     const char* sub;
 };
 constexpr Page kPages[] = {
-    {"Visuals", "General"},       {"Visuals", "Rendering"},        {"Visuals", "Enhanced lighting"}, {"Visuals", "Texture packs"},
+    {"Visuals", "General"},       {"Visuals", "Rendering"},        {"Visuals", "Enhanced lighting"}, {"Visuals", "Enhanced world"},
+    {"Visuals", "Texture packs"},
     {"Sound", nullptr},           {"Controls", "Ports"},           {"Controls", "Bindings"},
     {"Controls", "Pointer"},      {"Controls", "Analog"},       {"Controls", "DSU"},             {"Enhancements", "General"},     {"Enhancements", "Gameplay"},
-    {"Enhancements", "Silly"},          {"Enhancements", "Unused content"}, {"Enhancements", "Debug"}, {"Game", nullptr},
+    {"Enhancements", "Silly"},          {"Enhancements", "Unused content"}, {"Enhancements", "Debug"}, {"Game", nullptr}, {"Online", "Play together"}, {"Online", "Nintendo events"},
 };
 constexpr int kPageCount = int(sizeof(kPages) / sizeof(kPages[0]));
 constexpr float kXs[] = {0.05f, 0.3f, 0.6f, 0.88f};
@@ -1406,19 +1411,8 @@ void visualsTab() {
             pending("next launch");
         }
     }
-    {
-        // The European game paces its frames with a timer, so 50 Hz does not change its speed;
-        // it is the console's PAL video timing (VI retrace and its callbacks).
-        Gate g(port::palBaseFeature());
-        int hz = v.pal60 ? 1 : 0;
-        static const char* kRates[] = {"50 Hz (original PAL)", "60 Hz (PAL60)"};
-        if (ImGui::Combo("PAL refresh rate", &hz, kRates, 2)) {
-            v.pal60 = hz == 1;
-            sDirty = true;
-        }
-        ImGui::SetItemTooltip("European game only: the console's video timing, 50 Hz PAL or 60 Hz PAL60. The game\n"
-                              "paces itself with a timer, so its speed is the same either way.");
-    }
+    // (The European game's 50 / 60 Hz is the console's EuRGB60 setting, F1 > Game > Console: the
+    // VI rate follows the TV mode the game configures, hle_vi.cpp.)
 
     ImGui::SeparatorText("CRT filter");
     sDirty |= recomp::crt::drawMenu();
@@ -1640,7 +1634,7 @@ void scriptedSettings() {
             std::printf("[settings] frame %u: %s.%s=%s%s\n", now, it->section.c_str(), it->key.c_str(),
                         it->value.c_str(), ok ? "" : " (unknown key)");
             std::fflush(stdout);
-            if (ok && it->section == "video") applyWindowSettings();  // resolution scale etc. take effect
+            if (ok && it->section == "video") applyWindowSettings();  // (resolution scale: applied like the F1 slider)
             it = sChanges.erase(it);
         } else {
             ++it;
@@ -1788,6 +1782,10 @@ void draw() {
                         enhancedLightingTab();
                         ImGui::EndTabItem();
                     }
+                    if (ImGui::BeginTabItem("Enhanced world", nullptr, envTab("Enhanced world"))) {
+                        sDirty |= recomp::world::drawMenu();  // src/game/cf_world.cpp
+                        ImGui::EndTabItem();
+                    }
                     if (ImGui::BeginTabItem("Texture packs", nullptr, envTab("Texture packs"))) {
                         sDirty |= recomp::texpacks::drawMenu();  // src/recomp/texture_packs.cpp
                         ImGui::EndTabItem();
@@ -1813,7 +1811,17 @@ void draw() {
                 ImGui::EndTabItem();
             }
             if (tab("Online")) {
-                sDirty |= recomp::online::drawTab();
+                if (ImGui::BeginTabBar("##online")) {
+                    if (ImGui::BeginTabItem("Play together", nullptr, envTab("Play together"))) {
+                        sDirty |= recomp::online::drawTab();
+                        ImGui::EndTabItem();
+                    }
+                    if (ImGui::BeginTabItem("Nintendo events", nullptr, envTab("Nintendo events"))) {
+                        sDirty |= recomp::distrib::drawMenuPage();  // docs/DISTRIBUTIONS.md
+                        ImGui::EndTabItem();
+                    }
+                    ImGui::EndTabBar();
+                }
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar();

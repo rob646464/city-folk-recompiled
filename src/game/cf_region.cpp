@@ -31,6 +31,7 @@
 #include "recomp/hle.h"
 #include "recomp/menu.h"
 #include "recomp/runtime.h"
+#include "recomp/version.h"
 
 #include "port/disc_folder.h"
 #include "port/settings.h"
@@ -212,24 +213,14 @@ struct Addrs {
     u32 shopFn;     // Nook's seasonal item choice (US fn_801456B4); region getter calls at +0x398.. +0x444
     u32 letterFn;   // event letter templates by region (US fn_800D2084, MAIL_ETC_MotherEvent); getter at +0x20
 };
-// USA RUUE01 / Europe RUUP01 / Japan RUUJ01 / Korea RUUK01 rev 1 (config/<id>/us_map.txt).
-constexpr Addrs kAddrUS{0x8046EEF0, 0x8010DD60, 0x801456B4, 0x800D2084};
-constexpr Addrs kAddrPAL{0x8046EEF0, 0x8010DA10, 0x80145364, 0x800D21E4};
-constexpr Addrs kAddrJPN{0x8046EE30, 0x8010D950, 0x801452A4, 0x800D233C};
-constexpr Addrs kAddrKOR{0x80478870, 0x8010D80C, 0x80145214, 0x800D20EC};
 constexpr u32 kTownLangOffset = 0x735C2;
 constexpr int kTableSize = 47;
 
+// USA addresses, mapped to the running version by VA() (recomp/version.h; the table is identical
+// on every disc, only its address moves).
 const Addrs* addrs() {
-    static const Addrs* a = [] () -> const Addrs* {
-        const char* id = g_module ? g_module->gameId : "";
-        if (!std::strcmp(id, "RUUE01")) return &kAddrUS;
-        if (!std::strcmp(id, "RUUP01")) return &kAddrPAL;
-        if (!std::strcmp(id, "RUUJ01")) return &kAddrJPN;
-        if (!std::strcmp(id, "RUUK01")) return &kAddrKOR;
-        return nullptr;
-    }();
-    return a;
+    static const Addrs a{VA(0x8046EEF0), VA(0x8010DD60), VA(0x801456B4), VA(0x800D2084)};
+    return a.table ? &a : nullptr;
 }
 
 u32 record(int index) { return addrs()->table + 12 * u32(index); }
@@ -379,24 +370,12 @@ void getterHook(Ctx& c, const char* orig) {
 }  // namespace
 
 HLE(fn_801069D0) { getterHook(c, "fn_801069D0"); }
-HLE(fn_80106B30) { getterHook(c, "fn_80106B30"); }
-HLE(fn_80106B64) { getterHook(c, "fn_80106B64"); }
-HLE(fn_80106A50) { getterHook(c, "fn_80106A50"); }
 
-// USA, Europe, Japan, Korea (hooks.txt): fn_80089890 "event runs on date", fn_800895E0 Mother's Day,
+// Every version by the USA names (hooks.txt "all"): fn_80089890 "event runs on date", fn_800895E0 Mother's Day,
 // fn_800897B0 Father's Day.
 HLE(fn_80089890) { eventHook(c, "fn_80089890"); }
-HLE(fn_800898B0) { eventHook(c, "fn_800898B0"); }
-HLE(fn_80089818) { eventHook(c, "fn_80089818"); }
 HLE(fn_800895E0) { parentsHook(c, "fn_800895E0"); }
-HLE(fn_80089600) { parentsHook(c, "fn_80089600"); }
-HLE(fn_80089568) { parentsHook(c, "fn_80089568"); }
 HLE(fn_800897B0) { parentsHook(c, "fn_800897B0"); }
-HLE(fn_800897D0) { parentsHook(c, "fn_800897D0"); }
-HLE(fn_80089738) { parentsHook(c, "fn_80089738"); }
-HLE(fn_8008986C) { eventHook(c, "fn_8008986C"); }
-HLE(fn_800895BC) { parentsHook(c, "fn_800895BC"); }
-HLE(fn_8008978C) { parentsHook(c, "fn_8008978C"); }
 
 // ---- Villager houses -------------------------------------------------------------------------
 //
@@ -595,9 +574,6 @@ void townRegionHook(Ctx& c, const char* orig) {
 }
 }  // namespace
 HLE(fn_80169890) { townRegionHook(c, "fn_80169890"); }
-HLE(fn_80169540) { townRegionHook(c, "fn_80169540"); }
-HLE(fn_80169480) { townRegionHook(c, "fn_80169480"); }
-HLE(fn_80169418) { townRegionHook(c, "fn_80169418"); }
 
 // ---- Test aids -------------------------------------------------------------------------------
 
@@ -695,11 +671,11 @@ void actorAids(u32 frame) {
         for (const ActorHit& h : hits)
             log("[actor] f%u module %u %08X id %X pos %.1f %.1f %.1f", frame, h.module, h.addr, rd32(h.addr),
                 rdf32(h.addr + 0x64), rdf32(h.addr + 0x68), rdf32(h.addr + 0x6C));
-        // Today's event list (fn_80089D3C, USA 0x805855E8: 10 x {event, active}).
-        if (addrs() == &kAddrUS) {
+        // Today's event list (fn_80089D3C, USA 0x805855E8 via VA: 10 x {event, active}).
+        if (addrs()) {
             std::string s;
             for (u32 i = 0; i < 10; i++)
-                if (rd32(0x805855E8 + 8 * i + 4)) s += " " + std::to_string(rd32(0x805855E8 + 8 * i));
+                if (rd32(VA(0x805855E8) + 8 * i + 4)) s += " " + std::to_string(rd32(VA(0x805855E8) + 8 * i));
             log("[actor] f%u today's events:%s", frame, s.empty() ? " none" : s.c_str());
         }
     }

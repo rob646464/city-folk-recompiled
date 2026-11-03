@@ -325,7 +325,7 @@ void onCamera(Ctx& c, u32 data) {
     // cameras, identity views of other layers). The enhanced scene begins there (the lights are
     // in this frame's view space), and only draws under the main camera are class WORLD.
     if (sInStage && sPass == 1) {
-        if (sBeginPending) {
+        if (sBeginPending && c.r[5] != 0) {  // r5: the current camera (ScnRoot +0xF4), see cf_tags.cpp
             sBeginPending = false;
             sMainCam = data;
             for (int k = 0; k < 12; k++) sView[k] = rdf32(data + 4 * k);

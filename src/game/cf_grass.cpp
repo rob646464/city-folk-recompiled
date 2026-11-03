@@ -1,7 +1,7 @@
 // Grass wear (F1 > Enhancements > Gameplay "Grass wear"; docs/FEATURES.md "Grass wear").
 //
-// What the game does (USA rev 1 addresses; PAL/Japan through config/<id>/us_map.txt, all "hash"
-// matches, so the offsets inside the functions are the same):
+// What the game does (USA rev 1 addresses; the other versions through VA(), recomp/version.h; the
+// field offsets below are the same in all four, checked with gen_version_map.py field):
 // - The grass manager is a static object (fn_800A835C returns it: USA 0x80591C00). Its +0x58 is a
 //   128 x 128 one-byte-per-tile "tiled array" (fn_802B6338 init, fn_802B637C get, fn_802B63CC set;
 //   8 x 4 blocks like an I8 texture, buffer pointer at +0x7C = manager + 0x80) holding the health of
@@ -42,6 +42,7 @@
 #include "recomp/hle.h"
 #include "recomp/menu.h"
 #include "recomp/runtime.h"
+#include "recomp/version.h"
 
 #include <imgui.h>
 
@@ -55,21 +56,18 @@
 namespace recomp::cf {
 namespace {
 
-// Per-version addresses (USA / PAL / Japan rev 1).
+// USA addresses, mapped to the running version (recomp/version.h).
 struct GrassAddrs {
-    u32 mgr;               // grass manager singleton (fn_800A835C)
-    u32 genRet;            // return address in fn_8008D658 (town generation) of its fn_8008D6B4 call
-    u32 setTile;           // fn_800A7C84
-    const char* stepFn;    // fn_8008D6B4 (each version's own name: PAL/Japan use their own tables)
-    const char* regrowFn;  // fn_800A7F9C
+    u32 mgr;      // grass manager singleton (fn_800A835C)
+    u32 genRet;   // return address in fn_8008D658 (town generation) of its fn_8008D6B4 call
+    u32 setTile;  // fn_800A7C84
 };
 const GrassAddrs& addrs() {
-    static const GrassAddrs kUs{0x80591C00, 0x8008D698, 0x800A7C84, "fn_8008D6B4", "fn_800A7F9C"};
-    static const GrassAddrs kPal{0x80594880, 0x8008D6B8, 0x800A7CA4, "fn_8008D6D4", "fn_800A7FBC"};
-    static const GrassAddrs kJp{0x80596080, 0x8008D620, 0x800A7C0C, "fn_8008D63C", "fn_800A7F24"};
-    const char v = g_module && g_module->gameId ? g_module->gameId[3] : 'E';
-    return v == 'P' ? kPal : v == 'J' ? kJp : kUs;
+    static const GrassAddrs a{VA(0x80591C00), VA(0x8008D698), VA(0x800A7C84)};
+    return a;
 }
+constexpr const char* kStepFn = "fn_8008D6B4";    // hooks.txt "all": the USA name on every version
+constexpr const char* kRegrowFn = "fn_800A7F9C";
 
 constexpr u32 kTexObj = 0x58, kTexBuf = 0x7C, kSide = 128;
 constexpr float kTileSize = 32.0f;
@@ -155,7 +153,7 @@ static void stepWear(Ctx& c) {
     const bool generation = c.lr == addrs().genRet;
     const int m = mode();
     if (generation || (m == 0 && !logOn() && !std::getenv("CF_GRASS_WEAR_X"))) {
-        callOriginal(c, addrs().stepFn);
+        callOriginal(c, kStepFn);
         return;
     }
     const u32 pos = c.r[4];
@@ -170,7 +168,7 @@ static void stepWear(Ctx& c) {
     const u32 f = game::guestFrames();
     const int before = logOn() ? tile(tx, ty) : 0;
     if (m == 0) {
-        callOriginal(c, addrs().stepFn);
+        callOriginal(c, kStepFn);
         log("[grass] f%u step %u,%u amount %d speed %.2f: original (%d -> %d)", f, tx, ty, amount, speed, before,
             tile(tx, ty));
         return;
@@ -187,7 +185,7 @@ static void stepWear(Ctx& c) {
         const s32 half = (amount + 1) / 2;
         c.r[5] = u32(half);
         if (tx < kSide && ty < kSide) markWornToday(tx, ty);
-        callOriginal(c, addrs().stepFn);
+        callOriginal(c, kStepFn);
         if (logOn())
             log("[grass] f%u step %u,%u amount %d -> %d speed %.2f: new leaf: running (%d -> %d)", f, tx, ty, amount,
                 half, speed, before, tile(tx, ty));
@@ -201,7 +199,7 @@ static void regrow(Ctx& c) {
     int bare0 = 0, bare1 = 0;
     const long long s0 = logOn() ? grassSum(bare0) : 0;
     const u32 r3 = c.r[3], r4 = c.r[4], r5 = c.r[5], r6 = c.r[6], lr = c.lr;
-    callOriginal(c, addrs().regrowFn);
+    callOriginal(c, kRegrowFn);
     if (mode() == 1) {
         // New Leaf style: a second regrowth pass the same day.
         c.r[3] = r3;
@@ -209,7 +207,7 @@ static void regrow(Ctx& c) {
         c.r[5] = r5;
         c.r[6] = r6;
         c.lr = lr;
-        callOriginal(c, addrs().regrowFn);
+        callOriginal(c, kRegrowFn);
     }
     if (logOn()) {
         const long long s1 = grassSum(bare1);
@@ -218,8 +216,7 @@ static void regrow(Ctx& c) {
     }
 }
 
-static HleReg sStepUs("fn_8008D6B4", &stepWear), sStepPal("fn_8008D6D4", &stepWear), sStepJp("fn_8008D63C", &stepWear);
-static HleReg sRegrowUs("fn_800A7F9C", &regrow), sRegrowPal("fn_800A7FBC", &regrow), sRegrowJp("fn_800A7F24", &regrow);
+static HleReg sStep("fn_8008D6B4", &stepWear), sRegrow("fn_800A7F9C", &regrow);
 
 // Test aid CF_GRASS_MAP=<dir>,<frame>[,<frame>...]: the town's 80 x 80 tile health (acres 1..5)
 // as <dir>/grass_<frame>.pgm (one pixel per tile, 0 black = bare .. 255 white = full grass).

@@ -17,11 +17,15 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace recomp {
 namespace {
 
 namespace folder = port::discfolder;
+// Per command block: the generation of its latest async read (DVDCancel drops older completions).
+// Guest threads and the interrupts that complete reads run one at a time.
+std::unordered_map<u32, u32> sReadGen;
 
 // A destination the game may fill with file data: MEM1 above the OS globals (0x80003100), the
 // host window above MEM1 (ctx.h), or MEM2 below the IOS area. A failed game heap allocation
@@ -236,10 +240,37 @@ HLE(DVDReadAsyncPrio) {
     wr32(guest + 0x0C, 1);  // busy until the completion interrupt
     wr32(guest + 0x38, cb);
     wr32(guest + 0x20, u32(result));
-    sched::postIrqAfter(readLatency(c.r[5]), [guest, cb, result](Ctx& ic) {
+    const u32 gen = ++sReadGen[guest];
+    sched::postIrqAfter(readLatency(c.r[5]), [guest, cb, result, gen](Ctx& ic) {
+        if (sReadGen[guest] != gen) return;  // cancelled (DVDCancel) or reissued
         wr32(guest + 0x0C, 0);
         if (cb) guestCall(ic, cb, u32(result), guest);
     });
+    c.r[3] = 1;
+}
+
+// DVDCancel(block) / DVDCancelAsync(block, cb) (nw4r::ut::DvdLockedFileStream::Cancel: a sound
+// stream stopped while its read is in flight; first seen on the Korean disc in Rover's bus scene,
+// any version can do it): a read still in flight ends at once with
+// DVD_RESULT_CANCELED (-3) to its callback, as the SDK's cancel does; its completion interrupt then
+// does nothing. The data has already been copied (the host read is immediate), which a cancelled
+// read may leave in the buffer on a console too.
+namespace {
+void cancelRead(Ctx& c, u32 block) {
+    if (rd32(block + 0x0C) == 0) return;  // idle or done
+    ++sReadGen[block];
+    wr32(block + 0x0C, 10);  // DVD_STATE_CANCELED
+    if (const u32 cb = rd32(block + 0x38)) guestCall(c, cb, u32(-3), block);
+}
+}  // namespace
+HLE(DVDCancel) {
+    cancelRead(c, c.r[3]);
+    c.r[3] = 0;
+}
+HLE(DVDCancelAsync) {
+    const u32 block = c.r[3], cb = c.r[4];
+    cancelRead(c, block);
+    if (cb) guestCall(c, cb, 0, block);
     c.r[3] = 1;
 }
 

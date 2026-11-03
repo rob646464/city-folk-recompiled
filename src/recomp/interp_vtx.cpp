@@ -520,6 +520,7 @@ void vtxDisplayList(u32 guestAddr, const u8* data, u32 size) {
     sBoxAny = false;
     sSlotAny = 0;
     parse(data, size, false);
+    detail::claimForLastDraw();  // the list's own colour writes belong to this draw
     sBoxOn = false;
     if (sBoxAny) {
         const f32 c[3] = {0.5f * (sBoxLo[0] + sBoxHi[0]), 0.5f * (sBoxLo[1] + sBoxHi[1]), 0.5f * (sBoxLo[2] + sBoxHi[2])};
@@ -588,7 +589,7 @@ void vtxEndTape(u8* tape, u32 size, std::vector<std::vector<u8>>& keep, u64& sna
     sSnapOf.clear();
     if (sUnparsed || sDlCpWrites || sStreamMtxLoads || sStreamIndexedLoads) {
         static u32 logged = 0;
-        if (logged++ < 20)
+        if (logged++ < 20 || logged % 1800 == 0)
             log("[interp] vertex scan: %u unparsed streams (%u with Aurora commands), %u CP layout writes, %u matrix "
                 "loads and %u indexed loads in lists/raw writes (last bad op %X)",
                 sUnparsed, sAuroraInDl, sDlCpWrites, sStreamMtxLoads, sStreamIndexedLoads, sBadOp);

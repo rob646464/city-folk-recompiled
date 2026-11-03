@@ -73,6 +73,10 @@ add_executable(cf_wiimote_hid_test tools/tests/wiimote_hid_test.cpp src/recomp/w
 target_include_directories(cf_wiimote_hid_test PRIVATE src)
 enable_testing()
 add_test(NAME wiimote_hid COMMAND cf_wiimote_hid_test)
+# Nintendo events: WC24 crypto (SHA-1, AES-OFB, RSA) and VFF volumes (docs/DISTRIBUTIONS.md "Testing").
+add_executable(cf_distrib_test tools/tests/distrib_test.cpp src/recomp/wc24_crypto.cpp src/recomp/vff.cpp)
+target_include_directories(cf_distrib_test PRIVATE src)
+add_test(NAME distrib COMMAND cf_distrib_test)
 
 # Online room transport (src/recomp/online_net.*, docs/ONLINE.md): host + members over loopback UDP.
 add_executable(cf_online_test tools/tests/online_net_test.cpp src/recomp/online_net.cpp
@@ -99,7 +103,7 @@ function(cf_runtime_target tgt)
     target_compile_definitions(${tgt} PRIVATE TARGET_PC=1)
     target_link_libraries(${tgt} PRIVATE aurora::main aurora::core aurora::gx aurora::vi aurora::pad
         aurora::si aurora::os aurora::dvd aurora::card)
-    # Shipped shader/pipeline precache list (none recorded for City Folk yet).
+    # Shipped shader/pipeline precache list (docs/RENDERING.md "Pipeline precache").
     if (EXISTS ${CMAKE_SOURCE_DIR}/data/pipelines.bin)
         add_custom_command(TARGET ${tgt} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/data/pipelines.bin $<TARGET_FILE_DIR:${tgt}>)
@@ -149,6 +153,9 @@ set(_embed_deps)
 foreach (_id RUUE01 RUUP01 RUUJ01 RUUK01)
     list(APPEND CF_EMBEDDED_FILES kSymbols_${_id}=config/${_id}/symbols.txt kSplits_${_id}=config/${_id}/splits.txt
         kModules_${_id}=config/${_id}/modules.txt)
+    if (NOT _id STREQUAL "RUUE01")
+        list(APPEND CF_EMBEDDED_FILES kUsMap_${_id}=config/${_id}/us_map.txt kRelUsMap_${_id}=config/${_id}/rels_us_map.txt)
+    endif ()
     # The REL maps: one embedded blob of the whole folder (cfembed's folder mode).
     file(GLOB _embed_rel_maps CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/config/${_id}/rels/*.txt)
     list(APPEND _embed_deps ${_embed_rel_maps})
@@ -179,16 +186,53 @@ if (EXISTS ${_cxx_dir}/clang${CMAKE_EXECUTABLE_SUFFIX} AND EXISTS ${_cxx_dir}/${
     target_compile_definitions(CityFolkRecomp PRIVATE "CF_DEV_LLVM_DIR=\"${_cxx_dir}\"")
 endif ()
 
-set(CF_LLVM_DIR "${_cxx_dir}" CACHE PATH "LLVM bin directory whose clang and lld-link (Windows) / ld.lld (Linux) are bundled on install")
+# Packages (docs/SETUP.md "Packages"; CI: .github/workflows/build.yml): CF_LLVM_DIR (an LLVM bin
+# directory) supplies the bundled clang and lld-link / ld.lld / ld64.lld.
+set(CF_LLVM_DIR "${_cxx_dir}" CACHE PATH "LLVM bin directory whose clang and lld-link (Windows) / ld.lld (Linux) / ld64.lld (macOS) are bundled on install")
 install(TARGETS CityFolkRecomp RUNTIME DESTINATION .)
 install(FILES data/pipelines.bin DESTINATION . OPTIONAL)
 install(FILES packaging/LLVM-LICENSE.TXT DESTINATION llvm)
 if (WIN32)
+    install(FILES packaging/windows/README.txt DESTINATION .)
     install(CODE "
         file(GLOB _dlls \"$<TARGET_FILE_DIR:CityFolkRecomp>/*.dll\")
         file(INSTALL \${_dlls} DESTINATION \"\${CMAKE_INSTALL_PREFIX}\")")
     install(PROGRAMS ${CF_LLVM_DIR}/clang${CMAKE_EXECUTABLE_SUFFIX} ${CF_LLVM_DIR}/lld-link${CMAKE_EXECUTABLE_SUFFIX}
         DESTINATION llvm/bin OPTIONAL)
+else ()
+    # Linux / macOS: clang and the linker are usually symlinks (clang -> clang-23, ld.lld -> lld);
+    # copy the real binaries under the names setup looks for (lld picks its flavour from its
+    # name). Use a self-contained LLVM (the official release archive), not a distribution's clang
+    # that needs libLLVM/libclang-cpp next to it.
+    install(CODE "
+        foreach (_name clang ${CF_MODULE_LINKER})
+            set(_from \"${CF_LLVM_DIR}/\${_name}\")
+            if (NOT EXISTS \"\${_from}\")
+                message(WARNING \"CF_LLVM_DIR has no \${_name}; the package will lack the bundled compiler\")
+                continue()
+            endif ()
+            file(REAL_PATH \"\${_from}\" _real)
+            file(MAKE_DIRECTORY \"\${CMAKE_INSTALL_PREFIX}/llvm/bin\")
+            file(COPY_FILE \"\${_real}\" \"\${CMAKE_INSTALL_PREFIX}/llvm/bin/\${_name}\")
+            file(CHMOD \"\${CMAKE_INSTALL_PREFIX}/llvm/bin/\${_name}\" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                 GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+            message(STATUS \"Bundled \${_real} as llvm/bin/\${_name}\")
+        endforeach ()")
+endif ()
+if (APPLE)
+    install(FILES packaging/macos/README.txt DESTINATION .)
+elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # The official LLVM lld needs libxml2.so.2 (only for lld-link manifests): ship a stub in
+    # llvm/lib, found through lld's RUNPATH $ORIGIN/../lib (packaging/linux/libxml2_stub.c).
+    add_library(cf_libxml2_stub SHARED packaging/linux/libxml2_stub.c)
+    set_target_properties(cf_libxml2_stub PROPERTIES OUTPUT_NAME xml2 SOVERSION 2
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/libxml2_stub)
+    target_link_options(cf_libxml2_stub PRIVATE
+        -Wl,--version-script=${CMAKE_SOURCE_DIR}/packaging/linux/libxml2_stub.map)
+    add_dependencies(CityFolkRecomp cf_libxml2_stub)
+    install(FILES $<TARGET_FILE:cf_libxml2_stub> DESTINATION llvm/lib)
+    install(PROGRAMS packaging/linux/CityFolkRecompiled.sh DESTINATION .)
+    install(FILES packaging/linux/README.txt DESTINATION .)
 endif ()
 
 # cfrecomp: developer build with the game recompiled at build time and linked in statically
@@ -208,6 +252,11 @@ if (EXISTS ${CF_DOL})
     if (EXISTS ${CF_CONFIG_DIR}/splits.txt)
         list(APPEND _recomp_cfg --splits ${CF_CONFIG_DIR}/splits.txt)
         list(APPEND _recomp_deps ${CF_CONFIG_DIR}/splits.txt)
+    endif ()
+    # Non-USA versions: the USA maps for hooks.txt "all" entries (docs/SETUP.md "Version-aware code").
+    if (EXISTS ${CF_CONFIG_DIR}/us_map.txt)
+        list(APPEND _recomp_cfg --us-map ${CF_CONFIG_DIR}/us_map.txt --rel-us-map ${CF_CONFIG_DIR}/rels_us_map.txt)
+        list(APPEND _recomp_deps ${CF_CONFIG_DIR}/us_map.txt ${CF_CONFIG_DIR}/rels_us_map.txt)
     endif ()
     if (_rel_files)
         list(APPEND _recomp_cfg --rels ${CF_RELS} --rel-maps ${CF_CONFIG_DIR}/rels)

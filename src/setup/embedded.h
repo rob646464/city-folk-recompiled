@@ -14,6 +14,8 @@ struct Tables {
     std::string_view modules;  // modules.txt (REL list: id, name, SHA-1, sections)
     // rels/<module>.txt: (module file stem, map) pairs.
     std::vector<std::pair<std::string_view, std::string_view>> relMaps;
+    // Non-USA versions: us_map.txt / rels_us_map.txt (hooks.txt "all" entries); empty for USA.
+    std::string_view usMap, relUsMap;
 };
 const Tables& tables(port::GameVersion v);
 

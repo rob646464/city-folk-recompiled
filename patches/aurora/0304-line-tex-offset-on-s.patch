@@ -1,0 +1,43 @@
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -990,6 +990,11 @@
+                    dbg_color(st.colorRegs[1]), dbg_color(st.colorRegs[2]), dbg_color(st.colorRegs[3]),
+                    dbg_color(st.kcolors[0]), dbg_color(st.kcolors[1]), dbg_color(st.kcolors[2]),
+                    dbg_color(st.kcolors[3]));
++  if (sc.lineMode != 0)
++    s += fmt::format("\n  line width={}/6 point={}/6 texofs line={} point={} halfaspect={} tc0 lineofs={} pointofs={}",
++                     st.lineWidth, st.pointSize, underlying(st.lineTexOffset), underlying(st.pointTexOffset),
++                     st.lineHalfAspect ? 1 : 0, st.texCoordScales[0].lineOffset ? 1 : 0,
++                     st.texCoordScales[0].pointOffset ? 1 : 0);
+   for (u32 i = 0; i < 2 && i < st.numChans; ++i) {
+     const auto& c = sc.colorChannels[i];
+     const auto& a = sc.colorChannels[i + GX_ALPHA0];
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -2153,10 +2153,13 @@
+           "\n    }}",
+           i);
+     } else if (config.lineMode != 0) {
+-      // GX_LINES / GX_LINESTRIP: offset one axis for perpendicular side
++      // GX_LINES / GX_LINESTRIP: the far side of the line's width gets the offset on S (the line
++      // runs along T: City Folk's rain streaks send (0,0)-(0,1) per line with a GX_TO_ONE offset,
++      // so S spans its 8-texel-wide streak texture across the width; offsetting T left S at the
++      // clamped transparent edge column and every streak drew with alpha 0).
+       vtxXfrAttrs += fmt::format(
+           "\n    if ((ubuf.line_texcoord_mask & (1u << {0})) != 0u && (vidx & 1u) != 0u) {{"
+-          "\n        tc{0}_proj.y += ubuf.line_tex_offset;"
++          "\n        tc{0}_proj.x += ubuf.line_tex_offset;"
+           "\n    }}",
+           i);
+     }
+@@ -2648,6 +2651,10 @@
+   std::string fragmentOutput;
+   std::string_view fragmentOutputType = "@location(0) vec4f"sv;
+   std::string fragmentReturn = "\n    return prev;"s;
++  // AURORA_LINE_DEBUG=1 (test aid): line and point draws come out opaque red.
++  static const bool sLineDebug = std::getenv("AURORA_LINE_DEBUG") != nullptr;
++  const bool lineDebug = sLineDebug && config.lineMode != 0;
++  if (lineDebug) fragmentReturn = "\n    return vec4f(1.0, 0.0, 0.0, 1.0);"s;
+   if (normalAttachment != UINT32_MAX) {
+     fragmentOutput = fmt::format(
+         "\nstruct FragmentOutput {{\n"

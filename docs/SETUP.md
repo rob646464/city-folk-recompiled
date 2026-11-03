@@ -17,12 +17,55 @@ CityFolkRecomp.exe        runtime + recompiler + setup UI (+ the function tables
 llvm/bin/clang.exe        bundled compiler (from CF_LLVM_DIR, default: the LLVM that built the exe)
 llvm/bin/lld-link.exe     bundled linker
 llvm/LLVM-LICENSE.TXT     Apache-2.0 WITH LLVM-exception (packaging/LLVM-LICENSE.TXT)
-pipelines.bin             shader/pipeline precache list, when one is recorded (data/pipelines.bin; none yet)
+pipelines.bin             shader/pipeline precache list (data/pipelines.bin; docs/RENDERING.md "Pipeline precache")
+README.txt                player notes (packaging/<platform>/README.txt)
 ```
 
 The LLVM binaries are copied at install time, never committed. Toolchain lookup order:
 `<exe dir>/llvm/bin`, `CF_LLVM_DIR`, the LLVM that built the exe (dev builds, `CF_DEV_LLVM_DIR`),
 then `PATH`.
+
+Linux adds `CityFolkRecompiled.sh` (launcher: portable-mode check, `last_run.log` /
+`previous_run.log` in the data folder, exit status), `llvm/bin/clang` + `llvm/bin/ld.lld` (the real
+binaries behind the release's symlinks) and `llvm/lib/libxml2.so.2` (a stub: the official lld links
+libxml2 only for lld-link manifests; packaging/linux/libxml2_stub.c). macOS: `llvm/bin/ld64.lld`.
+
+## Packages and releases (CI)
+
+Same pipeline as LM (LM .github/workflows/build.yml, tools/release_windows.ps1, docs/LINUX.md,
+docs/MACOS.md), with City Folk's names:
+
+- **GitHub Actions** (`.github/workflows/build.yml`): on pushes to `main`, `ci/**` (push any branch
+  as `ci/<name>` to have it built) and `perf-ci`, on tags `v*`, pull requests and
+  `workflow_dispatch` (works once the file is on main). Three jobs build only `CityFolkRecomp`
+  (no disc: `CF_DISC=/nonexistent`, the cfrecomp dev build is skipped) and upload
+  `CityFolkRecompiled-<version>-windows-x64.zip` / `-linux-x86_64.tar.gz` / `-macos-arm64.tar.gz`
+  as artifacts (version = `project(cfport ... VERSION)` in CMakeLists.txt). Windows bundles the
+  runner's LLVM and checks the package (exe, pipelines.bin, README, clang, lld-link) and that
+  `CityFolkRecomp.exe --check-disc` loads and refuses a missing disc (exit 3). Linux (Ubuntu
+  24.04) and macOS (macos-26, Apple silicon, unsigned) bundle the official LLVM 23.1.4 release
+  (sha256-pinned, cached).
+- `tools/package_linux.sh <LLVM bin> [out]`: configure `linux-clang`, build, `cmake --install
+  --strip`, file checks, glibc/libstdc++ versions and NEEDED libraries of the exe, clang and ld.lld;
+  **fails** on any symbol newer than GLIBC_2.34 and on names the exe both exports and imports (a
+  glibc shim reaching itself through the PLT loops forever: LM issues #2/#11, hypotf); module
+  smoke test (the bundled clang/ld.lld build a freestanding module with setup's flags,
+  `cf_module_init` loads via ctypes); .tar.gz + .zip. The exe needs only libc/libm/libgcc_s plus
+  libsqlite3, libzstd and libz from the system (libstdc++ is static).
+- `tools/package_macos.sh <LLVM bin> [out]`: the same for macOS: only /System and /usr/lib
+  libraries, valid ad-hoc signatures, module smoke test (dylib).
+- `tools/release_linux.sh <version> [out]` (WSL or Linux): clean clone of HEAD in `~/cf-release`,
+  apt packages, an LLVM-*-Linux-X64 found under ~ or /opt (or `CF_LINUX_LLVM`), package_linux.sh,
+  copies `CityFolkRecompiled-<version>-linux-x86_64.*` out.
+- `tools/release_windows.ps1 [-SkipLinux] [-SkipMac] [-DryRun] [-MacCheckOnly]`: builds and
+  packages Windows, Linux through WSL, fetches the macOS artifact GitHub Actions built from the same
+  commit (`gh run list --commit`), fills `packaging/release_notes/v<version>.md` (download table:
+  the updater's checksum fallback) and publishes release `v<version>` on
+  rob646464/city-folk-recompiled with `gh`. **`-DryRun`** does everything up to the release
+  (packages and notes in `out/`, placeholder notes when the file is missing) but never pushes,
+  starts a workflow, tags or publishes; it prints the `gh release create` command instead.
+
+No releases or tags exist yet; the repository is private (the updater reports "not public yet").
 
 ## Discs
 
@@ -146,7 +189,7 @@ The repository is private for now: the unauthenticated check gets HTTP 404, repo
 published release was found (the project's releases are not public yet)." in F1 > Game and as an
 `[update] check failed` log line; nothing else happens and the game runs normally. The startup
 check runs only in a release folder (`llvm/bin/clang` next to the program; `pipelines.bin` is not
-required, City Folk has none yet) and not with `CF_UPDATE_CHECK=0`. Staging in `<install>/upd`,
+required) and not with `CF_UPDATE_CHECK=0`. Staging in `<install>/upd`,
 `.old` renames, rollback, cleanup and the portable-mode rules are LM's (LM docs/SETUP.md
 "Updates", "Long paths").
 
@@ -196,15 +239,91 @@ What is still USA- or LM-shaped (not fixed here, none of it stops the boot):
   fields per frame, an in-range one would mistime interpolation), `presentOnCopy()` is forced for
   PAL (City Folk switches to presenting at GXCopyDisp on every version anyway), and
   `HLE(palfn_80007844)` is LM's (never bound in City Folk). Owner: VI/interpolation.
+- The European game runs at 60 Hz (EuRGB60, F1 > Game > Console, `[system] eurgb60`, default on)
+  or 50 Hz with it off; the VI rate follows the TV mode the game configures (branch render-3, docs/WII.md
+  "Rendering status (branch render-3)"): 59.5 presents/s by default, 50 retraces/s with it off.
 - The European game runs at 50 Hz unless the console's EuRGB60 is on (`[system] eurgb60`, default
   off, as a new European Wii): 49 presents/s measured vs 59 for USA/Japan. A default of 60 Hz for
   PAL may be what players expect.
-- Debug-only USA addresses from LM: the message-queue trace filter (`hle_os.cpp`, 0x803A3608), the
-  watchdog's queue dump (`sched.cpp`), `CF_IND_PATTERN` (`hle_gx.cpp`). Wrong addresses on every
-  City Folk version, harmless.
-- `tools/recomp/hooks.txt` has no City Folk entries yet; a REL hook written against USA offsets
-  needs a `pal`/`jp`/`kr` line with the offsets from `config/<id>/rels_us_map.txt`. The surround
-  patch 30 (USA address) has no PAL/Japan/Korea line yet.
+- Debug-only LM addresses (the message-queue trace filter and the watchdog's queue dump at LM's
+  0x803A3608) were removed on branch parity-1.
+
+## Version-aware code
+
+Host code (src/game/, the City Folk hooks in src/recomp/) is written against the USA game
+(RUUE01 rev 1) and runs on all four versions through two mechanisms (branch parity-1, after LM's
+`version.h`):
+
+- **Hooks by USA name, `all` tag** (`tools/recomp/hooks.txt`): `fn_8016D40C all` hooks the USA
+  function and, on the other versions, the function `config/<id>/us_map.txt` matches to it; the
+  recompiler renames that function to the USA name in the version's build (a function of the
+  version that already had the name gets a `_<id>` suffix), so one `HLE(fn_8016D40C)` and
+  `callOriginal(c, "fn_8016D40C")` serve every version. REL functions: `<module>::fn_<id>_<USA
+  offset> all` (rels_us_map.txt). Patches: `patch <id> <USA address> <word> all`, mapped into the
+  hash-matched function at the same offset. A build fails when an `all` entry matches nothing.
+  The inputs (`--us-map`/`--rel-us-map` of cfrecompile, embedded `kUsMap_<id>`/`kRelUsMap_<id>`
+  for setup) are part of the module key. Entries without `all` keep the old meaning (a `pal` /
+  `jp` / `kr` line names that version's own function). Named SDK/NW4R/DWC functions already have
+  the same name everywhere (every HLE / hook name checked in all four symbols.txt).
+- **`VA(0x...)` for USA guest addresses** (`src/recomp/version.h`): functions host code calls,
+  return addresses it compares, static objects it reads. `tools/recomp/gen_version_map.py` scans
+  src/ for `VA(...)` and writes `src/recomp/version_addrs.inc` (USA, PAL, Japan, Korea): code
+  addresses through the matched function + offset (hash match, or the same instruction at that
+  offset), data addresses decoded from every matched place the USA code builds them (lis+addi /
+  load / store, r13/r2 small data; the vote is printed). It exits non-zero on an address it cannot
+  map; re-run it after adding a `VA(...)`. `VOFF(us, pal, jp, kr)` is there for struct offsets
+  that differ (none so far).
+- **Struct offsets are checked, not mapped** (the matcher masks load/store displacements):
+  `gen_version_map.py diff <USA functions...>` lists the instructions of matched functions that
+  differ other than in addresses, `reldiff <module> <offsets...>` the same for REL functions,
+  `field <function> <offset>...` the instructions using one displacement. Checked identical in all
+  four apart from addresses: the grass manager and tile functions, the player-data/tan/palette
+  functions, d_a_playerNP's skin/face/setup/step functions, the calendar/weather lookups, the save
+  and WiiConnect24 entry points, Random, the surround call site, NW4R snd (Voice/Channel/
+  SeqTrack/StrmPlayer/WsdPlayer callbacks, InitParam, AttachSoundPlayer, GetBasicPlayer,
+  SetupSoundPlayer, __AXGetPBs), lyt Pane::Draw/LoadMtx/CalculateMtx, g3d SetCameraProjMtx, the
+  online-system entry points and most DWC functions. One difference found: an address operand in
+  fn_800A7F9C (Japan/Korea; not a field the port reads).
+- Dev builds of the other versions: `toolsuild.ps1 -Game RUUP01|RUUJ01|RUUK01 -Disc "<that
+  disc>"` (build folder `build/windows-clang-<id>`), runs with `tools
+outes
+un.ps1 -Build
+  windows-clang-<id> -Disc ...` (`-Settings "[audio]|output=3"` writes settings read at boot).
+- **The USA save loads on every version**: the `user-town` fixture with its title folder renamed
+  (`52555545` -> `52555550` / `5255554a` / `5255554b`, passed as `CF_FIXTURE=<folder>
+and`) is
+  "Preparing saved data" -> the town on PAL, Japan and Korea (the clock shows 27/10 on PAL, the
+  Korean title shows the saved town). Continue routes per version: Korea's choice boxes sit further
+  right ("좋아!" at `@0.44/0.14`, the player's name at `@0.56/0.33`); PAL and Japan take the USA
+  positions.
+
+### Per-version status (2026-11-02, branch parity-1)
+
+One run per version: saved town (above), CF_RNG_SEED, south hemisphere, fake weather, skin tone
+forced to 8 at frame 5300, grass wear x10 while walking/running, forced save at 6200, CF_REGION=all,
+discrete 5.1 output, CF_AUDIO_LOG, CF_LYT_LOG (logs and shots in build/runs/feat-<ver>).
+
+| Feature (how checked) | USA | PAL | Japan | Korea |
+|---|---|---|---|---|
+| Boot, title, continue into the saved town | yes | yes (50 Hz) | yes | yes |
+| Hemisphere (`[cal]` lookups moved to April) | yes | yes | yes | yes |
+| Real-time weather hook (`[weather]` fake answers; rain, since April is not snow season) | yes | yes | yes | yes |
+| Skin tone (palettes read, player rebound to tone 8, shots) | yes | yes | yes | yes |
+| Grass wear (`[grass]` step wear on the player's tiles) | yes | yes | yes | yes |
+| Save path (CF_FORCE_SAVE: write request -> result 1, /tmp safe copy) | yes | yes | yes | yes |
+| CF_RNG_SEED (boot seed at the mapped return address) | yes | yes | yes | yes |
+| Surround: patch 30 keeps DPL2 (`AXSetMode(2)`) | yes | yes | yes | yes |
+| Volume sliders: voices classified by sound player | yes | yes | yes | yes |
+| HUD anchoring: the clock / memo / camera panes found by name | yes | yes | yes | yes |
+| Region content: events of other regions (`[region] event`) | yes | yes | yes | yes |
+| Region getter per call site (Nook's stock, letters) | not reached | not reached | not reached | not reached |
+| Interpolation tags, Wii Remote HLE, NAND/IOS, DWC HLE | by SDK/NW4R name, same code (pointer + Nunchuk routes drove all four) | | | |
+| Online test actions (CF_ONLINE_TEST steps, state logs) | VA, not run here | VA, not run | VA, not run | VA, not run |
+
+Not checked here: a new game into town on PAL/Japan/Korea (the town-name / name keyboards differ:
+JP kana, KR Hangul; the PAL route's language choice is not scripted), the
+New Leaf grass mode and the real Open-Meteo lookup per version (same code paths as above), online
+play between versions. Nothing found that cannot work on a version.
 
 ## Korea
 

@@ -27,7 +27,7 @@ bool readFile(const std::filesystem::path& path, std::string& out) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string dol, symbols, splits, hooks, versionMap, outDir, rels, relMaps, version = "RUUE01";
+    std::string dol, symbols, splits, hooks, versionMap, usMap, relUsMap, outDir, rels, relMaps, version = "RUUE01";
     for (int i = 1; i + 1 < argc; i += 2) {
         const std::string k = argv[i], v = argv[i + 1];
         if (k == "--dol") dol = v;
@@ -35,6 +35,8 @@ int main(int argc, char** argv) {
         else if (k == "--splits") splits = v;
         else if (k == "--hooks") hooks = v;
         else if (k == "--version-map") versionMap = v;
+        else if (k == "--us-map") usMap = v;
+        else if (k == "--rel-us-map") relUsMap = v;
         else if (k == "--version") version = v;
         else if (k == "--rels") rels = v;
         else if (k == "--rel-maps") relMaps = v;
@@ -54,7 +56,8 @@ int main(int argc, char** argv) {
     std::string dolText;
     if (!readFile(dol, dolText) || (!symbols.empty() && std::filesystem::exists(symbols) && !readFile(symbols, in.symbols)) ||
         (!splits.empty() && !readFile(splits, in.splits)) || (!hooks.empty() && !readFile(hooks, in.hooks)) ||
-        (!versionMap.empty() && !readFile(versionMap, in.versionMap))) {
+        (!versionMap.empty() && !readFile(versionMap, in.versionMap)) || (!usMap.empty() && !readFile(usMap, in.usMap)) ||
+        (!relUsMap.empty() && !readFile(relUsMap, in.relUsMap))) {
         std::fprintf(stderr, "cfrecompile: could not read an input file\n");
         return 1;
     }

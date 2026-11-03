@@ -1,8 +1,8 @@
 // Skin tone of the player being played (F1 > Enhancements > Gameplay "Skin tone"; docs/FEATURES.md
 // "Skin tone").
 //
-// What the game does (USA rev 1; PAL/Japan: same code, addresses from config/<id>/us_map.txt and
-// rels_us_map.txt):
+// What the game does (USA rev 1; the other versions: same code, addresses through VA(), d_a_playerNP
+// offsets identical in all four, fields checked with tools/recomp/gen_version_map.py diff/reldiff):
 // - Player data ("pd") of save slot s: save + 0x20 + s * 0x86C0 (fn_8013B33C; save base from
 //   fn_8010E308). fn_801017B8(i) returns the pd of player number i: the player manager at USA
 //   0x805D26C0 keeps the save slot of each player number at +0x34 + 4i (fn_80100454; 7 = none,
@@ -36,6 +36,7 @@
 #include "recomp/hle.h"
 #include "recomp/menu.h"
 #include "recomp/runtime.h"
+#include "recomp/version.h"
 
 #include <imgui.h>
 
@@ -52,24 +53,21 @@ namespace recomp::cf {
 namespace {
 
 constexpr u32 kPlayerModule = 80;  // d_a_playerNP
-// d_a_playerNP .text offsets (the same in all three versions: rels_us_map.txt "hash").
+// d_a_playerNP .text offsets (the same in all four versions: rels_us_map.txt "hash").
 constexpr u32 kSkinIndexFn = 0x2080, kFaceIndexFn = 0x20D0, kSetupFn = 0x29E0C;
 constexpr u32 kActorFace = 0x2218, kActorSkin = 0x221C, kActorPlayerNo = 0x2240;
 constexpr u32 kPdTan = 0x83F8, kPdTown = 0x7EC2, kPdPlayer = 0x7ED8;
 
 struct SkinAddrs {
-    u32 playerMgr;     // slot of each player number at +0x34
-    u32 playerData;    // fn_801017B8(player number) -> pd
-    u32 pltt;          // fn_800B9718(&size, index) -> palette file
-    const char* tanFn; // fn_80137D34
+    u32 playerMgr;   // slot of each player number at +0x34
+    u32 playerData;  // fn_801017B8(player number) -> pd
+    u32 pltt;        // fn_800B9718(&size, index) -> palette file
 };
-const SkinAddrs& addrs() {
-    static const SkinAddrs kUs{0x805D26C0, 0x801017B8, 0x800B9718, "fn_80137D34"};
-    static const SkinAddrs kPal{0x805D5340, 0x80101918, 0x800B9738, "fn_801379E4"};
-    static const SkinAddrs kJp{0x805D6B40, 0x8010194C, 0x800B96A0, "fn_80137924"};
-    const char v = g_module && g_module->gameId ? g_module->gameId[3] : 'E';
-    return v == 'P' ? kPal : v == 'J' ? kJp : kUs;
+const SkinAddrs& addrs() {  // USA addresses, mapped to the running version (recomp/version.h)
+    static const SkinAddrs a{VA(0x805D26C0), VA(0x801017B8), VA(0x800B9718)};
+    return a;
 }
+constexpr const char* kTanFn = "fn_80137D34";  // hooks.txt "all"
 
 bool logOn() {
     static const bool on = std::getenv("CF_SKIN_LOG") != nullptr;
@@ -159,14 +157,14 @@ static void tanUpdate(Ctx& c) {
     const u32 pd = c.r[3];
     const bool fixed = validPd(pd) && fixedFor(keyOf(pd)) != 0;
     const u8 before = validPd(pd) ? u8(rd8(pd + kPdTan)) : 0;
-    callOriginal(c, addrs().tanFn);
+    callOriginal(c, kTanFn);
     if (!validPd(pd)) return;
     if (fixed) wr8(pd + kPdTan, before);
     if (logOn())
         log("[skin] f%u tan update pd %08X (%s): %u -> %u%s", game::guestFrames(), pd, keyOf(pd).c_str(), before,
             rd8(pd + kPdTan), fixed ? " (fixed tone: kept)" : "");
 }
-static HleReg sTanUs("fn_80137D34", &tanUpdate), sTanPal("fn_801379E4", &tanUpdate), sTanJp("fn_80137924", &tanUpdate);
+static HleReg sTan("fn_80137D34", &tanUpdate);
 
 // The menu's swatches: the main colour of each skin palette file (RGB5A3), read once through
 // the game's palette loader.

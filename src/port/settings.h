@@ -31,7 +31,7 @@ struct VideoSettings {
     bool vsync = true;          // applied at next launch
     int msaa = 1;               // 1, 2, 4, 8; applied at next launch
     bool hudKeep4x3 = true;     // keep 2D/HUD at 4:3 (centered) in widescreen
-    bool pal60 = false;         // PAL game only: 59.94 Hz retrace (PAL60) instead of 50 Hz (game speed unchanged)
+    // (No PAL refresh option: the European game's 50/60 Hz is the console's EuRGB60 setting, sys::settings().)
     // Interpolated presentation on a variable refresh rate display (G-SYNC / FreeSync): 0 auto
     // (detected from the display's refresh timing), 1 on, 2 off (frame.cpp, docs/INTERPOLATION.md).
     int vrr = 0;
@@ -387,6 +387,17 @@ struct InterfaceSettings {
     bool startHint = true;  // "Press F1 for options" notice for the first seconds of play (menu.cpp)
 };
 
+// Nintendo event distributions (F1 > Online > Nintendo events; src/recomp/distributions.cpp,
+// docs/DISTRIBUTIONS.md). Off by default: nothing is downloaded and WiiConnect24 stays off.
+struct NintendoEventSettings {
+    int mode = 0;               // 0 off, 1 loop (every distribution in turn), 2 original dates, 3 only when I choose
+    int loopPeriod = 0;         // loop: 0 every week, 1 every 2 weeks, 2 every month
+    bool originalYearly = true; // original dates: every year (month/day); false = only in the original years
+    bool otherRegions = false;  // include other regions' distributions
+    bool liveDelivery = true;   // USA: run the game's own WiiConnect24 check while playing
+    bool townWc24 = true;       // USA: turn the town's own WiiConnect24 setting on (the game's setter) when it is off
+};
+
 // Online play between players of this port (F1 > Online; src/recomp/online.cpp, docs/ONLINE.md).
 // Room passwords are never saved.
 struct OnlineSettings {
@@ -416,6 +427,7 @@ struct Settings {
     SillyWorldSettings sillyWorld;
     SillyLuigiSettings sillyLuigi;
     UpdateSettings updates;
+    NintendoEventSettings events;
     OnlineSettings online;
 };
 

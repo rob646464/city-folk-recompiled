@@ -5,12 +5,15 @@
 #include "recomp/hle.h"
 #include "recomp/runtime.h"
 #include "recomp/sched.h"
+#include "recomp/version.h"
 
 #include <cstdio>
 #include <cstdlib>
 
 #include "game/cf_features.h"
 #include "game/cf_region.h"
+
+#include "recomp/distributions.h"
 
 #include <atomic>
 #include <cmath>
@@ -40,7 +43,7 @@ static void forceSaveOnFrame(Ctx& c, u32 frame) {
     }();
     static const bool logAll = std::getenv("CF_SAVE_LOG") != nullptr;  // result word changes, any time
     if (!at && !logAll) return;
-    constexpr u32 kResultWord = 0x8074B010;  // r13 - 0x6930
+    const u32 kResultWord = VA(0x8074B010);  // r13 - 0x6930 (USA)
     static u32 last = ~0u;
     if (logAll) {
         const u32 r = rd32(kResultWord);
@@ -51,7 +54,7 @@ static void forceSaveOnFrame(Ctx& c, u32 frame) {
     if (frame == at) {
         log("[save] CF_FORCE_SAVE: calling the save write request (fn_800D2780) at frame %u, result word %d", frame,
             s32(rd32(kResultWord)));
-        guestCall(c, 0x800D2780);
+        guestCall(c, VA(0x800D2780));
     }
     if (frame >= at) {
         const u32 r = rd32(kResultWord);
@@ -74,12 +77,12 @@ static void forceWc24OnFrame(Ctx& c, u32 frame) {
     if (!at || frame < at) return;
     static s32 last = 0x7FFFFFFF;
     static bool done = false;
-    if (frame == at) log("[save] CF_FORCE_WC24: fn_801782FC -> %d at frame %u", s32(guestCall(c, 0x801782FC)), frame);
+    if (frame == at) log("[save] CF_FORCE_WC24: fn_801782FC -> %d at frame %u", s32(guestCall(c, VA(0x801782FC))), frame);
     if (done) return;
-    const s32 st = s32(guestCall(c, 0x80178498));
+    const s32 st = s32(guestCall(c, VA(0x80178498)));
     if (st != last) {
         log("[save] WiiConnect24 step status %d at frame %u (task result %d, NWC24 error %d)", st, frame,
-            s32(rd32(0x8074B800)), s32(rd32(0x805BEBC0 + 0x418)));
+            s32(rd32(VA(0x8074B800))), s32(rd32(VA(0x805BEBC0) + 0x418)));
         last = st;
     }
     if (st >= 0) done = true;
@@ -92,6 +95,7 @@ bool onGuestFrame(Ctx& c) {
     region::onGuestFrame(frame);  // cf_region.cpp test aids
     cf::grassOnFrame(c);  // cf_grass.cpp, cf_skin.cpp (docs/FEATURES.md)
     cf::skinOnFrame(c);
+    distrib::onGuestFrame(c);  // Nintendo events (docs/DISTRIBUTIONS.md)
     online::onGuestFrame(c);  // CF_ONLINE_* test aids (online.cpp)
     return cf::devOnGuestFrame(c);  // CF_FF fast-forward and other test aids (cf_devaids.cpp)
 }
@@ -110,7 +114,7 @@ u32 guestFrames() { return sFrames.load(std::memory_order_relaxed); }
 // So the game's random choices (town layout, villagers) stop depending on load times and thread
 // timing. Off (no variable): both functions do exactly what the game's do.
 namespace rng {
-constexpr u32 kMainRng = 0x8074F290;
+inline u32 mainRng() { return VA(0x8074F290); }
 const char* const kEnv = std::getenv("CF_RNG_SEED");
 const u32 kSeed = kEnv ? u32(std::strtoul(kEnv, nullptr, 16)) : 0;
 std::mutex sMutex;
@@ -141,17 +145,17 @@ HLE(fn_802AA1A0) {  // Random::setSeed(this, seed)
         std::lock_guard lk(rng::sMutex);
         const u32 thread = sched::currentGuest();
         const u32 n = ++rng::sCalls[u64(thread) << 32 | c.lr];
-        if (c.lr == 0x8016C0A0) {
+        if (c.lr == VA(0x8016C0A0)) {
             v = rng::kSeed;  // the boot seed of the main generator
             rng::sBootThread = thread;
-        } else if (c.r[3] != rng::kMainRng) {
+        } else if (c.r[3] != rng::mainRng()) {
             v = rng::mix(rng::kSeed ^ rng::mix(c.lr ^ rng::mix(thread)) ^ (n * 0x9E3779B9u));
             const u32 reset = rng::mix(v ^ 0x5BD1E995u);
             if (u32* s = rng::stream(thread)) *s = reset;
-            else wr32(rng::kMainRng, reset);
+            else wr32(rng::mainRng(), reset);
         }
         static const bool verbose = std::getenv("CF_RNG_LOG") != nullptr;
-        if (verbose || c.lr == 0x8016C0A0) {
+        if (verbose || c.lr == VA(0x8016C0A0)) {
             const u64 secs = u64(double(timeBase()) / kTimerClock) % 86400;
             log("[rng] setSeed %08X from lr %08X (#%u): %08X -> %08X (CF_RNG_SEED) thread %08X frame %u clock %02u:%02u:%02u",
                 c.r[3], c.lr, n, c.r[4], v, thread, guestFrames(), u32(secs / 3600), u32(secs / 60 % 60), u32(secs % 60));
@@ -175,13 +179,13 @@ HLE(fn_802AA1A8) {
         if (const char* e = std::getenv("CF_RNG_DRAWS")) std::sscanf(e, "%u,%u", &w.first, &w.second);
         return w;
     }();
-    if (obj == rng::kMainRng && drawWindow.first <= drawWindow.second) {
+    if (obj == rng::mainRng() && drawWindow.first <= drawWindow.second) {
         const u32 f = guestFrames();
         if (f >= drawWindow.first && f <= drawWindow.second)
             log("[rng] draw frame %u thread %08X lr %08X caller %08X", f, sched::currentGuest(), c.lr,
-                c.lr == 0x802AA208 ? rd32(c.r[1] + 0x14) : 0);
+                c.lr == VA(0x802AA208) ? rd32(c.r[1] + 0x14) : 0);
     }
-    if (rng::kEnv && obj == rng::kMainRng && rng::sBootThread) {
+    if (rng::kEnv && obj == rng::mainRng() && rng::sBootThread) {
         std::lock_guard lk(rng::sMutex);
         if (u32* s = rng::stream(sched::currentGuest())) {
             *s = rngStep(*s);
