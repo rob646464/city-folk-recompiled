@@ -27,6 +27,7 @@
 #include "game/cf_features.h"
 #include "recomp/game.h"
 #include "recomp/hle.h"
+#include "recomp/version.h"
 #include "recomp/menu_nav.h"
 #include "recomp/runtime.h"
 
@@ -42,12 +43,12 @@
 namespace recomp {
 namespace {
 
-// USA rev 1 addresses.
-constexpr u32 kHitTestPane = 0x80007878;   // the 'B' pane test of the walk
-constexpr u32 kListGetNext = 0x8022A514;   // nw4r::ut::List_GetNext
-constexpr u32 kGuiContain = 0x803158DC;    // game gui::PaneComponent::contain
-constexpr u32 kHbmListGetNth = 0x802DF948; // nw4hbm::ut::List_GetNth (HOME Menu)
-constexpr u32 kBoundingVtable = 0x805231B0; // nw4r::lyt::Bounding
+// USA rev 1 addresses, mapped to the running version by VA() (src/recomp/version.h).
+#define kHitTestPane VA(0x80007878)   // the 'B' pane test of the walk
+#define kListGetNext VA(0x8022A514)   // nw4r::ut::List_GetNext
+#define kGuiContain VA(0x803158DC)    // game gui::PaneComponent::contain
+#define kHbmListGetNth VA(0x802DF948) // nw4hbm::ut::List_GetNth (HOME Menu)
+#define kBoundingVtable VA(0x805231B0) // nw4r::lyt::Bounding
 
 const bool sDump = [] {
     const char* v = std::getenv("CF_NAV_DUMP");

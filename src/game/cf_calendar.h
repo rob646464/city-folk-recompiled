@@ -16,8 +16,4 @@ void seasonDate(int& month, int& day, bool leapYear = false);
 bool drawHemisphereMenu();
 bool drawWeatherMenu();
 
-// Per-version address of a hooked function by its USA address (USA / PAL / Japan rev 1 tables,
-// all matched by hash: config/<id>/us_map.txt).
-u32 versionAddr(u32 usa);
-
 }  // namespace recomp::calendar

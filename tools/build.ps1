@@ -4,7 +4,11 @@ param(
     [string]$Preset = "windows-clang",
     [switch]$Configure,
     [string]$Target = "",
-    [string]$Disc = ""  # sets CF_DISC (extracted disc folder or image) when configuring
+    [string]$Disc = "",  # sets CF_DISC (extracted disc folder or image) when configuring
+    # Developer build of another version (RUUP01 / RUUJ01 / RUUK01; docs/SETUP.md "Version-aware
+    # code"): its own build folder build/<preset>-<id>, CF_GAME_ID=<id>, -Disc that version's disc
+    # (needed the first time).
+    [string]$Game = ""
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -25,6 +29,19 @@ foreach ($p in @("$env:ProgramFiles\CMake\bin", "$env:LOCALAPPDATA\Microsoft\Win
 
 Push-Location $root
 try {
+    if ($Game) {
+        $dir = "build/$Preset-$Game"
+        if ($Configure -or $Disc -or -not (Test-Path "$dir/build.ninja")) {
+            if (-not $Disc -and -not (Test-Path "$dir/CMakeCache.txt")) { throw "-Game needs -Disc the first time" }
+            $cfg = @("--preset", $Preset, "-B", $dir, "-DCF_GAME_ID=$Game")
+            if ($Disc) { $cfg += "-DCF_DISC=$($Disc -replace '\\', '/')" }
+            cmake @cfg
+            if ($LASTEXITCODE) { throw "configure failed" }
+        }
+        if ($Target) { cmake --build $dir --target $Target } else { cmake --build $dir --target cfrecomp }
+        if ($LASTEXITCODE) { throw "build failed" }
+        return
+    }
     if ($Configure -or $Disc -or -not (Test-Path "build/$Preset/build.ninja")) {
         if ($Disc) { cmake --preset $Preset "-DCF_DISC=$($Disc -replace '\\', '/')" } else { cmake --preset $Preset }
         if ($LASTEXITCODE) { throw "configure failed" }

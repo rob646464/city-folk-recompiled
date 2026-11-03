@@ -10,6 +10,7 @@
 #include "recomp/hle.h"
 #include "recomp/menu.h"
 #include "recomp/online_crypto.h"
+#include "recomp/version.h"
 #include "recomp/online_ed25519.h"
 #include "recomp/online_friends.h"
 #include "recomp/online_net.h"
@@ -227,44 +228,40 @@ void runAction(Ctx& c, const std::string& a) {
         }
         return;
     }
-    if (port::dol::version() != port::dol::Version::RUUE01) {
-        std::printf("[online-test] actions use USA addresses: skipped\n");
-        return;
-    }
     if (a == "userdata") {
         // DWC user data of the save (save+4; friend list save+0x44): created by the game with the save file
         // (fn_8011A874 -> fn_8011A918 -> DWC_CreateUserData); a new town that was never saved
         // has none yet, and the online system refuses to start without it.
-        const u32 save = gu::call(c, 0x80101894);
+        const u32 save = gu::call(c, VA(0x80101894));
         static const u32 check = guestSymbol("DWC_CheckUserData");
         const u32 valid = save && check ? gu::call(c, check, {save + 4}) : 0;
         std::printf("[online-test] save %08X user data %s\n", save, valid ? "valid" : "missing: creating it as the game does");
-        if (save && !valid) gu::call(c, 0x8011A918, {save});
+        if (save && !valid) gu::call(c, VA(0x8011A918), {save});
     } else if (a == "setup") {
-        gu::call(c, 0x800DCBC4);  // online system setup (Copper calls it before connecting)
+        gu::call(c, VA(0x800DCBC4));  // online system setup (Copper calls it before connecting)
     } else if (a == "diag") {
         // Why fn_800E4ECC (start) refuses: its conditions one by one.
-        const u32 sys = rd32(0x8074E7B8);
-        const u32 scene = gu::call(c, 0x80106AAC);
+        const u32 sys = rd32(VA(0x8074E7B8));
+        const u32 scene = gu::call(c, VA(0x80106AAC));
         std::printf("[online-test] diag: scene +0x65=%u +8=%u; sys 3649=%u 3664=%u 3670=%u 385c=%u; SC item 0x14 bit=%u; "
                     "user data %08X check=%u\n",
                     rd8(scene + 0x65), rd32(scene + 8), rd8(sys + 0x3649), rd32(sys + 0x3664), rd8(sys + 0x3670),
-                    rd32(sys + 0x385C), gu::call(c, 0x803ADAE4), rd32(sys + 0x383C), gu::call(c, 0x800E593C, {rd32(sys + 0x383C)}));
+                    rd32(sys + 0x385C), gu::call(c, VA(0x803ADAE4)), rd32(sys + 0x383C), gu::call(c, VA(0x800E593C), {rd32(sys + 0x383C)}));
     } else if (a == "start") {
-        std::printf("[online-test] start -> %u\n", gu::call(c, 0x800E4ECC, {rd32(0x8074E7B8)}));
+        std::printf("[online-test] start -> %u\n", gu::call(c, VA(0x800E4ECC), {rd32(VA(0x8074E7B8))}));
     } else if (a == "connect") {
-        std::printf("[online-test] connect -> %u\n", gu::call(c, 0x800DCBC8));
+        std::printf("[online-test] connect -> %u\n", gu::call(c, VA(0x800DCBC8)));
     } else if (a == "host") {
-        std::printf("[online-test] open gate -> %u\n", gu::call(c, 0x800DCC54));
+        std::printf("[online-test] open gate -> %u\n", gu::call(c, VA(0x800DCC54)));
     } else if (a.rfind("visit:", 0) == 0) {
         // Copper calls this every frame until it returns 1 (connected), then the trip starts.
         static int tries = 0;
-        const u32 r = gu::call(c, 0x800DCCEC, {u32(std::atoi(a.c_str() + 6))});
+        const u32 r = gu::call(c, VA(0x800DCCEC), {u32(std::atoi(a.c_str() + 6))});
         if (r || tries % 60 == 0) std::printf("[online-test] visit -> %u (try %d)\n", r, tries);
         if (!r && ++tries < 3600) sRepeat.push_back({recomp::game::guestFrames() + 1, a});
         return;
     } else if (a == "disconnect") {
-        std::printf("[online-test] disconnect -> %u\n", gu::call(c, 0x800DCE44));
+        std::printf("[online-test] disconnect -> %u\n", gu::call(c, VA(0x800DCE44)));
     } else if (a.rfind("friend:", 0) == 0) {
         // friend:<slot>:<pid or @file>: registers a friend in the save's DWC friend list, as the
         // game's roster does with a friend code (type 3 profile entry here).
@@ -278,7 +275,7 @@ void runAction(Ctx& c, const std::string& a) {
         } else {
             pid = u32(std::strtoul(v.c_str(), nullptr, 10));
         }
-        const u32 save = gu::call(c, 0x80101894);
+        const u32 save = gu::call(c, VA(0x80101894));
         if (!save || !pid || slot < 0 || slot >= 32) {
             std::printf("[online-test] friend: no save data / pid\n");
             return;
@@ -290,7 +287,7 @@ void runAction(Ctx& c, const std::string& a) {
         std::printf("[online-test] friend slot %d = pid %u (save %08X)\n", slot, pid, save);
     }
     // The online system's state (+0x385C: 0 none, 1 set up, 3 connecting, 5 hosting, 6 visiting).
-    if (const u32 sys = rd32(0x8074E7B8); sys >= 0x80000000u && sys < 0x93F00000u) std::printf("[online-test] online system state %u\n", rd32(sys + 0x385C));
+    if (const u32 sys = rd32(VA(0x8074E7B8)); sys >= 0x80000000u && sys < 0x93F00000u) std::printf("[online-test] online system state %u\n", rd32(sys + 0x385C));
 }
 
 }  // namespace
@@ -339,10 +336,10 @@ void onGuestFrame(Ctx& c) {
         }
     }
     const u32 f = recomp::game::guestFrames();
-    if (logOn() && port::dol::version() == port::dol::Version::RUUE01) {
+    if (logOn()) {
         // The online system's and the network thread's states (USA addresses) on change.
         static u32 lastSys = ~0u, lastThr = ~0u;
-        const u32 sys = rd32(0x8074E7B8), thr = rd32(0x8074E7CC);
+        const u32 sys = rd32(VA(0x8074E7B8)), thr = rd32(VA(0x8074E7CC));
         auto ok = [](u32 a) { return a >= 0x80000000u && a < 0x93F00000u; };
         const u32 s1 = ok(sys) ? rd32(sys + 0x385C) : 0xFFFF, s2 = ok(thr) ? rd32(thr + 0x368) : 0xFFFF;
         if (s1 != lastSys || s2 != lastThr) {
@@ -360,9 +357,9 @@ void onGuestFrame(Ctx& c) {
     for (auto& r : sRepeat) sSteps.push_back(r);
     sRepeat.clear();
     // The game's own session state while connected (online system +0x3664: 3 = in a session).
-    if (logOn() && port::dol::version() == port::dol::Version::RUUE01) {
+    if (logOn()) {
         static u32 last = ~0u;
-        const u32 sys = rd32(0x8074E7B8);
+        const u32 sys = rd32(VA(0x8074E7B8));
         if (sys >= 0x80000000u && sys < 0x93F00000u && rd32(sys + 0x3664) != last) {
             last = rd32(sys + 0x3664);
             std::printf("[online] frame %u: online system session state (+0x3664) %u\n", f, last);
