@@ -18,4 +18,8 @@ void grassMenu(bool& dirty);
 void skinOnFrame(Ctx& c);
 void skinMenu(bool& dirty);
 
+// cf_menu_nav.cpp: a layout's root pane is drawn (cf_hud.cpp): its Bounding panes become items
+// for "Snap pointer to menu items" (screens that hit-test with positions they stored, e.g. pockets).
+void navLayoutDrawn(Ctx& c, u32 rootPane);
+
 }  // namespace recomp::cf

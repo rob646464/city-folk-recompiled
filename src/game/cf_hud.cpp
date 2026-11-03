@@ -13,6 +13,7 @@
 //
 // Test aid CF_LYT_LOG=<first>,<last>: every visible pane drawn in those guest frames (depth,
 // name, position, the caller of the layout's root draw).
+#include "game/cf_features.h"
 #include "recomp/game.h"
 #include "recomp/hle.h"
 #include "recomp/interp.h"
@@ -90,6 +91,7 @@ HLE(Draw__Q34nw4r3lyt4PaneFRCQ34nw4r3lyt8DrawInfo) {
     if (depth == 0) {
         sRootLr = c.lr;
         sRootPane = pane;
+        cf::navLayoutDrawn(c, pane);  // menu items for the pointer snap (cf_menu_nav.cpp)
     }
     const float tx = rdf32(pane + kGlbTx);
     std::optional<ws::AnchorScope> scope;
