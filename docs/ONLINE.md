@@ -224,7 +224,9 @@ lan_visible, port_mapping, last_direct, notices); passwords are never saved.
   install's profile id.
 - `CF_ONLINE_TEST=<frame>:<action>;...` (game thread). USA only: `userdata` (creates the save's
   DWC user data the way the game does when it writes the save, if missing: a never-saved new town
-  has none and the online system refuses to start), `setup` (`fn_800DCBC4`, Copper calls it first),
+  has none and the online system refuses to start), `authid` (the save's user data gets the
+  authentic login id a first WFC connection gives, so Copper skips issuing a friend code),
+  `setup` (`fn_800DCBC4`, Copper calls it first),
   `connect`, `host` (open the gate), `visit:<friend index>` (polled every frame until it returns 1,
   as Copper does), `disconnect`, `diag` (the start conditions), `start`, and
   `friend:<slot>:<pid>|@<file>` (a profile-id entry in the save's friend list at save+0x44, as
@@ -250,6 +252,22 @@ Two-instance runs (2026-10-27/28, this PC, scratch APPDATA/NAND/cache per instan
 - F1 friends between two instances at the title: keys proved both ways, `addfriend:0` ->
   "Bob sent you a friend request" on the host -> accepted -> "Alice accepted your friend request",
   both `friends.txt` list each other as friends.
+- Roster entries (2026-11-02, `user-town` host + `user-town2` visitor, the user's two towns): after
+  the F1 request/accept each game gets the other in its own roster ("friend Bob (profile id ...)
+  -> game roster slot 0: registered"), and a forced save afterwards completes (result word 1).
+- The real gate flow (2026-11-02): the town gate is at the same place in both towns; walking into
+  its entrance (`CF_TELEPORT=<f>:1790,84,664`, then the stick up, with running) loads the
+  gatehouse (Copper = module 66 actor 0x75, Booker = 67 / 0x76, around (320,304) / (192,304)).
+  Talking to Copper (pointer off: `@off`, A) gives his menu "I wanna go out! / Invite guests! /
+  Friend code! / Where am I? / Oh, nothing." Through our DWC HLE: "I wanna go out!" -> "Nintendo
+  WFC." -> (no friend code yet) "would you like to be issued a friend code?" -> Yes -> saving ->
+  "Now connecting to Nintendo WFC" -> the game logs in (our profile id becomes its friend code,
+  e.g. 3141-4534-8795), updates its friend statuses and shuts DWC down again, exactly as with
+  WFC; with the code already in the save (test step `authid`) both instances get to "Go to which
+  town?" (empty while nobody hosts). Selecting "Invite guests!" by script is still open (the
+  Remote D-pad and the stick do not move the highlight; the pointer has to hover the line).
+  Route timing: loading a save takes a CPU-load-dependent number of frames, so the scripts must
+  be anchored to module links (`after link d_a_npc_sp_gatekeeper_aNP`), not absolute frames.
 
 ## 10. Friends and mail (friends done; roster, presence and mail are design)
 
