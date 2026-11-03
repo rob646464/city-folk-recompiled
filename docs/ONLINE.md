@@ -352,6 +352,64 @@ WiiConnect24 letters.
   but nothing guarantees it). A self-hostable mailbox server (any friend group can run one, the
   F1 setting names it) would make offline delivery dependable; optional, later.
 
+## 10a. Settings while visiting (src/recomp/online_sync.cpp)
+
+User request: a visitor's game uses the HOST's settings for everything that shapes the shared town
+or could make the two games disagree; at home its own settings are back exactly as they were.
+- **Exchange**: the host sends a versioned ini blob (`cfsync 1`, then `[section]` / `key=value`
+  lines as settings.ini has them) right before it accepts the visitor into the match (room
+  message M_SETTINGS, before JOIN_OK, so it is in effect before the game loads the town). The
+  visitor answers with its own `[skin_tone]` lines. Unknown keys of a newer format are ignored.
+- **Override**: `port::beginSettingsOverride` applies the synced keys in memory; `saveSettings`
+  keeps writing the player's own values for them (settings.ini never holds the host's, so a quit
+  or crash mid-visit loses nothing). `endSettingsOverride` puts the own values back when the
+  match ends for any reason: back home, the connection or the room dropped, DWC shut down or
+  logged in again. Changes made during the visit to non-synced options stay.
+- **F1**: while visiting, the synced options (Enhancements > Gameplay: grass wear, hemisphere,
+  real-time weather, region content; Online > Nintendo events) are greyed out under "Using
+  <host>'s settings while visiting"; the skin tone stays editable.
+- **Skin tones**: each player's chosen tone is its own (never synced); the tones travel with the
+  blobs and the other game shows them on that player (cf_skin remote tones, in memory only;
+  the player's own choices win). The host gets every visitor's tone.
+
+| Setting (ini section / key) | While visiting | Why |
+|---|---|---|
+| `[calendar] hemisphere` | host | seasons, events, fish/bugs of the town |
+| `[region]` events, flags, autumn moon, parents' days, villager houses | host | what the town holds and celebrates |
+| `[region] title_screen` | own | title logo only |
+| `[weather]` real_time, place, lat/lon, country | host | the town's weather comes from the host's place (not the visitor's location) |
+| `[gameplay] grass_wear` | host | the ground of the town |
+| `[skin_tone]` | own (shown on the other game) | user rule |
+| `[nintendo_events]` mode, loop period, yearly, other regions | host | event schedule of the town |
+| `[nintendo_events]` live delivery, town WiiConnect24 | own | the player's own save and mailbox |
+| `[system]` clock offset, language, sensor bar, nickname, ... | own | each console keeps its own clock, as on Wii; the game uses the host's town time for the visit |
+| `[video]`, `[rendering]`, `[enhanced_lighting]`, `[enhanced_world]`, `[crt]`, `[texture_packs]` | own | presentation only |
+| `[audio]`, `[controls]`, `[wiimote]`, `[wiimote_hid]`, `[dsu]`, `[interface]`, `[updates]`, `[online]` | own | local |
+| Luigi's Mansion leftovers in the shared table (`[enhancements]`, `[debug]`, other `[gameplay]` keys, `[silly_*]`, `[unused2]`, `[ghost_lights]`, `[world_lights]`) | own | not used by City Folk |
+
+Test (2026-11-03, verified): host settings.ini `grass_wear=1`, `hemisphere=south`, tone 3 for its
+player (F177-8AA5); visitor `grass_wear=2`, `north`, tone 7 (A056-DB16). The visitor logs
+`[sync] visiting Alice: using the host's world settings (1 tones)` with the host's lines
+(CF_ONLINE_LOG=1); both games draw the visitor with palette 6 and the host with palette 2
+(CF_SKIN_LOG=1: the visitor's player data is the copy at USA 0x805D2720, player number 1); the
+visitor walks back into the gatehouse, talks to Copper, goes home: `[sync] visit over: own
+settings back` with `grass_wear=2` / `north`, and its settings.ini never changed.
+
+Saves: the visitor's game saves when it leaves for the trip ("Saving...", result word 1) and
+again when it is home (result words 0 -> 1 after the return), with the DWC layer shut down.
+
+Menu navigation in Copper's online screens (F1 > Controls "Snap pointer to menu items", Auto):
+works with the D-pad: his choices are 'B_msg' panes, the town list (d_menu_friend03NP) is found
+as drawn panes (B_msg_00 row, B_scrlBtn arrows, B_cmnBtnA_00 Quit / _02 Confirm). The first
+press lands on the item nearest the pointer, the next ones move: DOWN (row), A (pick), DOWN,
+DOWN (Quit), RIGHT (Confirm), A visits. The list slides in for a few frames after it opens.
+
+Removing (or blocking) a friend in F1 queues its profile id (`removed <pid>` in friends.txt);
+when a town save is loaded and the game is offline, rosterSync takes it out of the game's roster
+with the roster menu's own delete (`cf_RosterDeleteOffline`, fn_8017C3C0: later entries move up).
+Verified with `CF_ONLINE_TEST=24000:removefriends` after a visit: `profile id ... removed from
+the game roster (slot 0): done`.
+
 ## 11. Status and what is left
 
 Done (branch online-1): the DWC-level HLE (51 named DWC functions + IOS_Open2/IOS_Close2 the USB
