@@ -42,6 +42,8 @@ std::string memberCode(uint8_t memberId);
 void requestFriend(uint8_t memberId);
 
 std::vector<Friend> list();
+// The friend is in the room now with a proved key (its INFO may still be on its way).
+bool inRoom(const std::string& code);
 void accept(const std::string& code);
 void decline(const std::string& code);
 void block(const std::string& code);

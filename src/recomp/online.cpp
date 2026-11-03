@@ -394,6 +394,8 @@ static void rosterSync(Ctx& c) {
     const u32 save = gu::call(c, fnSave);
     if (!save || !gu::call(c, fnCheck, {save + 4})) return;
     friends::setMyGameInfo(myGameInfo(save));
+    // The game registers friends only while offline (online system state <= 1).
+    if (const u32 sys = rd32(0x8074E7B8); sys >= 0x80000000u && sys < 0x93F00000u && rd32(sys + 0x385C) > 1) return;
     auto fl = friends::list();
     bool any = false;
     for (auto& fr : fl) any |= fr.state == friends::State::Friend;
@@ -413,6 +415,9 @@ static void rosterSync(Ctx& c) {
         const bool haveInfo = fr.gameInfo.size() == friends::kGameInfoSize;
         std::vector<u8> gi;
         if (haveInfo) gi = cleanGameInfo(fr.gameInfo);
+        // A friend in the room sends its entry right after proving its key: wait for it, so the
+        // roster gets the names at once.
+        if (slot < 0 && !haveInfo && friends::inRoom(fr.code)) continue;
         if (slot >= 0) {
             // Registered: refresh the names once the friend's own entry is known.
             const u32 cur = save + 0x1C8 + u32(friends::kGameInfoSize) * u32(slot);

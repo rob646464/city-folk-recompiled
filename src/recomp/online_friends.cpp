@@ -403,6 +403,12 @@ std::vector<Friend> list() {
     return sFriends;
 }
 
+bool inRoom(const std::string& code) {
+    std::lock_guard<std::recursive_mutex> g(sMutex);
+    const Friend* f = byCode(code);
+    return f && memberOfPub(f->pub) != 0xFF;
+}
+
 std::vector<Friend> incoming() {
     std::lock_guard<std::recursive_mutex> g(sMutex);
     load();

@@ -264,10 +264,31 @@ Two-instance runs (2026-10-27/28, this PC, scratch APPDATA/NAND/cache per instan
   "Now connecting to Nintendo WFC" -> the game logs in (our profile id becomes its friend code,
   e.g. 3141-4534-8795), updates its friend statuses and shuts DWC down again, exactly as with
   WFC; with the code already in the save (test step `authid`) both instances get to "Go to which
-  town?" (empty while nobody hosts). Selecting "Invite guests!" by script is still open (the
-  Remote D-pad and the stick do not move the highlight; the pointer has to hover the line).
+  town?" (empty while nobody hosts). The Remote D-pad and the stick do not move a menu
+  highlight: the pointer has to hover the line (and stay there through the A press).
   Route timing: loading a save takes a CPU-load-dependent number of frames, so the scripts must
-  be anchored to module links (`after link d_a_npc_sp_gatekeeper_aNP`), not absolute frames.
+  be anchored to module links (`after link d_a_npc_sp_gatekeeper_aNP`, the town list
+  `after link d_menu_friend03NP`), not absolute frames.
+- **The visit works end to end (2026-11-03)**: host `user-town` ("Frunch") picks "Invite guests!"
+  -> "Nintendo WFC." (SetupGameServer, the gate opens, online state 5); the visitor `user-town2`
+  picks "I wanna go out!" -> "Nintendo WFC.", Copper lists "Rob64 Frunch" with 1/4 players,
+  pointer + A on the row, Confirm -> "Submitting an inquiry to rob64..." -> the protocol below
+  runs -> saving -> the visitor walks out of Frunch's gate, both games show both players.
+  The game's own visit protocol over DWC reliable data (2-byte header: 0x80 | bits 5-6 | 0x10 =
+  control | type, then a per-connection sequence byte; fn_800D4260 receive, fn_800D6070 send,
+  fn_800D3654 sequence check): hello (type 0) / reply (type 1) both ways, a few control messages,
+  the visitor's player data (type 5, 34542 bytes), the host's town data (type 7, 5 x 92162 +
+  17455 bytes), then the in-play messages (types 0xD..0xF, 12-180 bytes). What it took:
+  (1) friends' roster entries with names (INFO, section 10) - an entry without names is listed
+  blank and cannot be picked; (2) the joining client's matched callback a few frames after its
+  AID is set (the game copies DWC_GetMyAID into +0x366E once per frame and its connect handler
+  fn_800D43D8 skips the AID equal to that copy; same-frame = still 0 = the server, so the visitor
+  never greeted the host); (3) no new-client callback on the joining client; (4) one reliable
+  send per connection until its send callback, as in DWC; (5) reliable messages up to the
+  transport's 256 KB. Logs: `[dwc] <wall s> SendReliable / receive` with the first bytes.
+  Scripts: scratch gate_host.txt / gate_vis2.txt (continue.txt, teleport to the gate, walk in,
+  Copper, pointer hovers); the host's A presses must stop once the gate is open (more A cancels
+  hosting).
 
 ## 10. Friends and mail (friends done; roster, presence and mail are design)
 
@@ -286,11 +307,16 @@ WiiConnect24 letters.
   session per member, none from blocked keys. Friends in `<data>/online/friends.txt` (state, key,
   name). Codes can be shown/copied; typing a code for a friend met elsewhere needs presence
   (below).
-- **The game's roster**: F1 friends are written into the save's DWC friend list as buddy profile
-  entries **through the game's own registration path** (the call the roster menu makes after a
-  code is typed: `d_menu_friend03NP`/`friend08NP` -> `fn_800E5A04` DWC_CreateFriendKeyToken and
-  the name fields of the roster entry, to be traced), never by editing other save fields; friends
-  removed in F1 are removed in the game with `DWC_DeleteBuddyFriendData`. Then both can visit each
+- **The game's roster (done)**: F1 friends go into the game's roster through its own
+  registration call `cf_RosterRegisterOffline(slot, friendData, info)` (fn_8017C294; only while
+  the game is offline, online system state <= 1), friend data = GS profile id entry. The friend
+  info (0x78 bytes, save+0x1C8 per slot) is the one the friend's own game sends (room message
+  INFO 0x45): +0x08 player (u16 id, 9 UTF-16 units, kind 0x0A) = its save+0x7ED8, +0x1E town
+  (kind 0x02) = save+0x7EC2, +0x36 0x42 bytes = save+0x10C8 (the fields fn_800AC160 builds the
+  DWC status data from), names terminated and kinds forced on receipt. Registration waits for
+  the INFO while the friend is in the room; an entry registered without it is updated later.
+  Kept in friends.txt (`info <key> <hex>`). To do: removal from the game when removed in F1
+  (`DWC_DeleteBuddyFriendData`). Then both can visit each
   other directly when online (presence below), and rooms stay for quick sessions.
 - **Presence without a room**: each friend publishes its current endpoint (signed, encrypted to
   each friend) where friends look: the BitTorrent mainline DHT (BEP 44 mutable item keyed by a
