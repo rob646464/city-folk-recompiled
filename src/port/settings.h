@@ -303,7 +303,7 @@ struct EnhancedLightingSettings {
     // Sun and moon: soft shadow maps from a directional light that follows the game clock.
     bool sunShadows = true;
     int sunDirection = 0;              // 0 time of day (real sun path), 1 the game's own key light
-    float sunShadowStrength = 0.5f;    // 0..1: how much a full shadow darkens (day; the moon's is weaker)
+    float sunShadowStrength = 0.6f;    // 0..1: how much a full shadow darkens (day; the moon's is weaker)
     float sunShadowDistance = 3500.0f; // world units of view depth with shadows (a town acre is 640)
     float sunShadowSoftness = 1.0f;    // 0..3: penumbra (the light's apparent size)
     int sunShadowMapSize = 1;          // 0..2: 512 / 1024 / 2048 texels per cascade (preset)

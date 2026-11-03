@@ -112,7 +112,46 @@ struct SkyLight {
     float away;        // turned-away surfaces count as shadowed
     float tanSize;     // angular radius (softness)
     bool on;
+    // Time-of-day look (Aurora 0342 grade, 0343 shafts)
+    float gain[3], lift[3], saturation, contrast, shafts;
 };
+
+// The time-of-day grade by the sun's elevation (degrees): noon, golden hour, blue dusk, moonlit
+// night, blended; overcast pulls toward a flat, slightly grey look. `k` scales the deviation
+// from neutral (F1 strength).
+void timeOfDayLook(float sunEl, float wx, float k, SkyLight& l) {
+    struct Key {
+        float gain[3], lift[3], sat, con;
+    };
+    static constexpr Key kNoon = {{1.00f, 1.00f, 0.99f}, {0.0f, 0.0f, 0.0f}, 1.05f, 1.03f};
+    static constexpr Key kGold = {{1.10f, 0.97f, 0.82f}, {0.025f, 0.01f, 0.0f}, 1.14f, 1.06f};
+    static constexpr Key kDusk = {{0.86f, 0.88f, 1.07f}, {0.0f, 0.008f, 0.035f}, 0.96f, 1.02f};
+    static constexpr Key kNight = {{0.80f, 0.88f, 1.08f}, {0.0f, 0.004f, 0.025f}, 0.86f, 1.06f};
+    static constexpr Key kGrey = {{0.97f, 0.98f, 1.00f}, {0.02f, 0.02f, 0.025f}, 0.88f, 0.95f};
+    // weights: night below -10, dusk -10..-1, golden -1..15, noon above 25
+    const float wNight = 1.0f - sstep(-12.0f, -6.0f, sunEl);
+    const float wDusk = sstep(-12.0f, -6.0f, sunEl) * (1.0f - sstep(-2.0f, 2.0f, sunEl));
+    const float wGold = sstep(-2.0f, 2.0f, sunEl) * (1.0f - sstep(10.0f, 25.0f, sunEl));
+    const float wNoon = sstep(10.0f, 25.0f, sunEl);
+    Key m{};
+    const Key* keys[4] = {&kNight, &kDusk, &kGold, &kNoon};
+    const float w[4] = {wNight, wDusk, wGold, wNoon};
+    const float ws = std::max(w[0] + w[1] + w[2] + w[3], 1e-4f);
+    for (int i = 0; i < 4; i++) {
+        const float f = w[i] / ws;
+        for (int c = 0; c < 3; c++) m.gain[c] += keys[i]->gain[c] * f, m.lift[c] += keys[i]->lift[c] * f;
+        m.sat += keys[i]->sat * f, m.con += keys[i]->con * f;
+    }
+    // Clouds: toward the grey look by day (night stays night).
+    const float grey = (1.0f - wx) * (1.0f - wNight) * 0.85f;
+    for (int c = 0; c < 3; c++) m.gain[c] = lerpf(m.gain[c], kGrey.gain[c], grey), m.lift[c] = lerpf(m.lift[c], kGrey.lift[c], grey);
+    m.sat = lerpf(m.sat, kGrey.sat, grey), m.con = lerpf(m.con, kGrey.con, grey);
+    for (int c = 0; c < 3; c++) l.gain[c] = 1.0f + (m.gain[c] - 1.0f) * k, l.lift[c] = m.lift[c] * k;
+    l.saturation = 1.0f + (m.sat - 1.0f) * k;
+    l.contrast = 1.0f + (m.con - 1.0f) * k;
+    // Shafts: strongest with a low sun, faint at noon, a little under the moon, none in rain.
+    l.shafts = (0.35f * wNoon + 1.0f * wGold + 0.15f * wNight) * wx * wx;
+}
 int sWeather = 0;      // the town's weather state this hour (cf_weather: 0 clear .. 6 heavy snow)
 u32 sWeatherFrame = 0;
 
@@ -149,7 +188,7 @@ SkyLight skyLight(const Clock& k) {
     // Weather: clouds soften and weaken the shadows; rain / snow almost remove them.
     float wx = 1.0f;
     if (s.timeOfDayWeather) {
-        static constexpr float kWx[7] = {1.0f, 0.75f, 0.3f, 0.12f, 0.06f, 0.15f, 0.08f};
+        static constexpr float kWx[7] = {1.0f, 0.85f, 0.3f, 0.12f, 0.06f, 0.15f, 0.08f};
         wx = kWx[std::clamp(sWeather, 0, 6)];
     }
     const float strength = std::clamp(s.sunShadowStrength, 0.0f, 1.0f) * (useSun ? day : night * 0.6f) * wx;
@@ -160,7 +199,7 @@ SkyLight skyLight(const Clock& k) {
     float base[3];
     lerp3(kNoon, kGold, golden, base);
     if (!useSun) std::memcpy(base, kMoon, sizeof base);
-    for (int c = 0; c < 3; c++) l.tint[c] = 1.0f - strength * (1.0f - base[c] * 0.72f);
+    for (int c = 0; c < 3; c++) l.tint[c] = 1.0f - strength * (1.0f - base[c] * 0.6f);
     static const float sAway = std::getenv("CF_SUN_AWAY") ? float(std::atof(std::getenv("CF_SUN_AWAY"))) : 0.75f;  // test aid
     l.away = sAway;
     l.tanSize = (useSun ? 0.012f : 0.02f) * std::clamp(s.sunShadowSoftness, 0.0f, 3.0f) * (1.0f + 2.0f * (1.0f - wx));
@@ -170,12 +209,12 @@ SkyLight skyLight(const Clock& k) {
     else std::memcpy(l.color, kMoonCol, sizeof l.color);
     l.intensity = s.sunLight ? std::clamp(s.sunLightIntensity, 0.0f, 1.0f) * (useSun ? day * (0.6f + 0.4f * golden) : night * 0.35f) * wx : 0.0f;
     l.on = strength > 0.002f || l.intensity > 0.002f;
+    timeOfDayLook(sunEl, wx, std::clamp(s.timeOfDayStrength, 0.0f, 2.0f), l);
     return l;
 }
 
 void submitSky() {
     const auto& s = port::settings().enhancedLighting;
-    if (!sViewValid || !(s.sunShadows || s.sunLight)) return;
     static Clock sClock;
     static u32 sClockFrame = ~0u;
     if (copyDispCount() / 30 != sClockFrame) {  // twice a second
@@ -183,10 +222,52 @@ void submitSky() {
         sClock = readClock();
     }
     if (!sClock.valid) return;
-    const SkyLight sky = skyLight(sClock);
-    if (!sky.on) return;
+    SkyLight sky = skyLight(sClock);
+    // Indoors (the room background module d_bgi_drawNP is linked, the outdoor one d_bgo_drawNP
+    // is not): no sun, no time-of-day grade; with "Indoor shadows" the room's own key light casts
+    // softer, lighter shadows.
+    const bool indoor = relBase(107, 1) != 0 && relBase(108, 1) == 0;
+    static bool sWasIndoor = false;
+    if (indoor != sWasIndoor) log("[sky] f%u %s", copyDispCount(), indoor ? "indoors" : "outdoors");
+    sWasIndoor = indoor;
+    if (indoor) {
+        static const float kOne[3] = {1, 1, 1}, kZero[3] = {0, 0, 0};
+        enh::setGrade(kOne, kZero, 1.0f, 1.0f);
+        enh::setShafts(0.0f);
+        if (!s.indoorShadows) return;
+        const float k = std::clamp(s.sunShadowStrength, 0.0f, 1.0f) * 0.6f;
+        for (int c = 0; c < 3; c++) sky.tint[c] = 1.0f - k * (1.0f - (c == 2 ? 0.8f : 0.72f));
+        sky.intensity = 0.0f;
+        sky.tanSize = 0.03f * std::clamp(s.sunShadowSoftness, 0.0f, 3.0f);
+        sky.on = true;
+    } else {
+        enh::setGrade(sky.gain, sky.lift, sky.saturation, sky.contrast);
+        enh::setShafts(sky.shafts * std::clamp(s.sunShaftIntensity, 0.0f, 3.0f) * 0.5f);
+    }
+    if (!sViewValid || !(s.sunShadows || s.sunLight) || !sky.on) return;
     aurora::gfx::ExtraLight l{};
-    for (int r = 0; r < 3; r++) l.pos[r] = sView[r * 4] * sky.dir[0] + sView[r * 4 + 1] * sky.dir[1] + sView[r * 4 + 2] * sky.dir[2];
+    if (indoor || s.sunDirection == 1) {
+        // The game's own key light (GX_LIGHT0 of the first light set loaded, view space as
+        // loaded: a GX directional light is a point ~10^6 units away).
+        uint32_t n = 0;
+        const enh::GameLight* gl = enh::gameLights(n);
+        bool found = false;
+        for (uint32_t i = 0; i < n && !found; i++) {
+            const auto& g = gl[i];
+            const float len = std::sqrt(g.pos[0] * g.pos[0] + g.pos[1] * g.pos[1] + g.pos[2] * g.pos[2]);
+            if (g.idMask == 1 && (g.rgba[0] | g.rgba[1] | g.rgba[2]) != 0 && len > 1e4f) {
+                for (int r = 0; r < 3; r++) l.pos[r] = g.pos[r] / len;
+                found = true;
+            }
+        }
+        if (!found) return;
+    } else {
+        // The camera data's rotation turns view -> world as the models are drawn (measured: the
+        // ground's normals in the depth pre-pass are world up through the TRANSPOSE of camera 0's
+        // 3x3; through the matrix itself they came out mirrored about the view's x axis, and the
+        // house front lay in its own shadow). So world -> view is the transpose here.
+        for (int r = 0; r < 3; r++) l.pos[r] = sView[r] * sky.dir[0] + sView[4 + r] * sky.dir[1] + sView[8 + r] * sky.dir[2];
+    }
     std::memcpy(l.color, sky.color, sizeof l.color);
     l.intensity = sky.intensity;
     l.radius = std::clamp(s.sunShadowDistance, 500.0f, 20000.0f);

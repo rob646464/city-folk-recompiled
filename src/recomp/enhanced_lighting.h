@@ -67,6 +67,11 @@ uint32_t shadowLightCap();
 // (EnThought message 2). The first one after a pause makes the beam flare, as the light stuns it.
 void onGhostInBeam(uint32_t actor);
 
+// Time-of-day look of this game frame (cf_light.cpp; Aurora 0342 grade, 0343 shafts): applied with
+// the next applySettings. gain/lift per channel, saturation/contrast 1 = unchanged; shafts =
+// sun-shaft brightness (0 off).
+void setGrade(const float gain[3], const float lift[3], float saturation, float contrast);
+void setShafts(float intensity);
 // A GX light object was loaded (GXLoadLightObjImm HLE, guest thread): Aurora's GXLightObj layout
 // (color u32, a0 a1 a2 k0 k1 k2, pos xyz, dir xyz; view space as loaded), light id mask.
 void noteGameLight(const float* obj, uint32_t idMask);

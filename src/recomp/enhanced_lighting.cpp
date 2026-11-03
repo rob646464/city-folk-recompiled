@@ -98,7 +98,27 @@ void addTestLights() {
 
 }  // namespace
 
+// Time-of-day look (setGrade / setShafts, guest thread) for applySettings (host thread).
+struct Look {
+    bool valid = false;
+    float gain[3] = {1, 1, 1}, lift[3] = {0, 0, 0};
+    float saturation = 1, contrast = 1, shafts = 0;
+};
+std::mutex sLookMutex;
+Look sLook;
+
 namespace enh {
+void setGrade(const float gain[3], const float lift[3], float saturation, float contrast) {
+    std::lock_guard lk(sLookMutex);
+    sLook.valid = true;
+    for (int k = 0; k < 3; k++) sLook.gain[k] = gain[k], sLook.lift[k] = lift[k];
+    sLook.saturation = saturation;
+    sLook.contrast = contrast;
+}
+void setShafts(float intensity) {
+    std::lock_guard lk(sLookMutex);
+    sLook.shafts = intensity;
+}
 bool worldToView(const float world[3], float view[3]);
 // Realistic flashlight level in effect (setting, or the CF_REALISTIC_FLASHLIGHT=<0..3> override).
 int realisticLevel() {
@@ -523,6 +543,17 @@ void applySettings() {
     if (sXlOver[1] <= 0) c.extraShadowMapSize = kSunSize[std::clamp(l.sunShadowMapSize, 0, 2)];
     c.extraShadowQuality = u32(std::clamp(l.sunShadowQuality, 0, 2));
     c.lightReceivers = l.sunShadows;
+    {
+        std::lock_guard lk(sLookMutex);
+        c.grade = l.timeOfDay && sLook.valid;
+        for (int k = 0; k < 3; k++) c.gradeGain[k] = sLook.gain[k], c.gradeLift[k] = sLook.lift[k];
+        c.gradeSaturation = sLook.saturation;
+        c.gradeContrast = sLook.contrast;
+        c.shafts = l.sunShadows && l.sunShafts && sLook.shafts > 0.0f;
+        c.shaftIntensity = sLook.shafts;
+    }
+    static constexpr u32 kShaftSteps[3] = {12, 20, 32};
+    c.shaftSteps = kShaftSteps[std::clamp(l.sunShaftQuality, 0, 2)];
     aurora_enhanced_set_config(&c);
     // CF_XL_SHADOW_LOG=1: shadow-map statistics every 120 host frames (lights, caster draws,
     // casters skipped while their pipeline compiles).
@@ -663,11 +694,14 @@ namespace {
 std::array<GameLight, 64> sGameLights{};
 uint32_t sGameLightCount = 0;
 uint32_t sGameLightFrame = ~0u;
+std::array<GameLight, 64> sPrevLights{};
+uint32_t sPrevCount = 0;
 }  // namespace
 
 void noteGameLight(const float* obj, uint32_t idMask) {
     const u32 f = copyDispCount();
     if (f != sGameLightFrame) {
+        if (sGameLightCount) sPrevLights = sGameLights, sPrevCount = sGameLightCount;
         sGameLightFrame = f;
         sGameLightCount = 0;
     }
@@ -683,8 +717,12 @@ void noteGameLight(const float* obj, uint32_t idMask) {
 }
 
 const GameLight* gameLights(uint32_t& count) {
-    count = sGameLightFrame == copyDispCount() ? sGameLightCount : 0;
-    return sGameLights.data();
+    if (sGameLightFrame == copyDispCount() && sGameLightCount) {
+        count = sGameLightCount;
+        return sGameLights.data();
+    }
+    count = sPrevCount;  // (early in a frame: the previous frame's)
+    return sPrevLights.data();
 }
 
 bool worldToView(const float world[3], float view[3]) {
