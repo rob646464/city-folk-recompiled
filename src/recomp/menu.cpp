@@ -1640,6 +1640,7 @@ void scriptedSettings() {
             std::printf("[settings] frame %u: %s.%s=%s%s\n", now, it->section.c_str(), it->key.c_str(),
                         it->value.c_str(), ok ? "" : " (unknown key)");
             std::fflush(stdout);
+            if (ok && it->section == "video") applyWindowSettings();  // resolution scale etc. take effect
             it = sChanges.erase(it);
         } else {
             ++it;

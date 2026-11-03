@@ -13,5 +13,5 @@ bool onRootDraw(Ctx& c, bool xlu, bool begin);
 // G3DState::SetCameraProjMtx (cf_tags.cpp): camera data (MTX34 view, then the projection).
 void onCamera(Ctx& c, u32 cameraData);
 // G3dProc of a g3d scene model (cf_tags.cpp): night-light sources by model name.
-void onModel(Ctx& c, u32 scnObj);
+bool onModel(Ctx& c, u32 scnObj);  // false: do not draw (blob shadows hidden)
 }  // namespace recomp::cflight
