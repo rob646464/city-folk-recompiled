@@ -79,6 +79,7 @@ struct Config {
     float gyroSensitivity = 3.0f; // half-screens per radian
     bool gyroInvertX = false, gyroInvertY = false;
     bool hideCursor = true;       // hide the OS cursor over the game while the mouse points
+    float pointerTimeout = 3.0f;  // s without pointer movement until the pointer leaves the screen (0: never)
     float distance = 2.0f;        // reported distance from the sensor bar (m)
     Config() { remotes[0].pointer = kPtrMouse | kPtrStick; }
 };
@@ -135,6 +136,7 @@ void loadKey(const std::string& section, const std::string& key, const std::stri
     else if (key == "gyro_invert_x") sCfg.gyroInvertX = on;
     else if (key == "gyro_invert_y") sCfg.gyroInvertY = on;
     else if (key == "hide_cursor") sCfg.hideCursor = on;
+    else if (key == "pointer_timeout") sCfg.pointerTimeout = parseFloat(value, 0.0f, 30.0f, sCfg.pointerTimeout);
     else if (key == "distance") sCfg.distance = parseFloat(value, 0.5f, 5.0f, sCfg.distance);
 }
 
@@ -154,6 +156,7 @@ void saveConfig(std::ostream& out) {
         << "gyro_invert_x=" << (sCfg.gyroInvertX ? "true" : "false") << '\n'
         << "gyro_invert_y=" << (sCfg.gyroInvertY ? "true" : "false") << '\n'
         << "hide_cursor=" << (sCfg.hideCursor ? "true" : "false") << '\n'
+        << "pointer_timeout=" << sCfg.pointerTimeout << '\n'
         << "distance=" << sCfg.distance << '\n';
 }
 
@@ -306,6 +309,8 @@ struct PortState {
     float scriptX = 0, scriptY = 0;
     const ScriptItem* scriptItem = nullptr;  // the scripted pointer position applied last
     bool snapped = false;       // the menu snap placed the pointer this sample
+    double lastMove = 0;        // when the pointer last moved (or a pointer screen was up): timeout
+    bool timedOut = false;
     State lastState;            // for the input test (menu)
 };
 std::array<PortState, kRemotes> sPort;
@@ -328,6 +333,16 @@ void poll() {
         for (const auto& rc : sCfg.remotes) snap |= rc.snap != menunav::Mode::Off;
     }
     menunav::setWanted(snap);
+}
+
+// The pointer timeout in seconds (0: never). Test runs (--input) keep the pointer, so existing
+// routes behave as before; CF_POINTER_TIMEOUT=<s> sets it for any run (also scripted ones).
+const char* const sTimeoutEnv = std::getenv("CF_POINTER_TIMEOUT");
+const bool sTimeoutLog = sTimeoutEnv != nullptr || std::getenv("CF_WPAD_LOG") != nullptr;
+
+float pointerTimeout(const Config& cfg) {
+    if (sTimeoutEnv && *sTimeoutEnv) return std::max(0.0f, float(std::atof(sTimeoutEnv)));
+    return script().empty() ? cfg.pointerTimeout : 0.0f;
 }
 
 class EmulatedSource final : public Source {
@@ -360,6 +375,7 @@ public:
         if (!ps.initialized) {
             ps.initialized = true;
             ps.px = ps.py = 0;
+            ps.lastMove = now;
         }
 
         // Script (test runs): buttons and stick add to the bound inputs; a scripted pointer
@@ -484,6 +500,7 @@ public:
             if (buttons & kBtnRecenter) {
                 ps.px = ps.py = 0;
                 ps.valid = true;
+                pointerMoved = true;
             }
             if (ps.last != PortState::MouseDev) {
                 ps.px = std::clamp(ps.px, -1.0f, 1.0f);
@@ -499,6 +516,19 @@ public:
             if (rc.pointer && ps.last == PortState::None && rc.pointer != kPtrMouse) st.pointerValid = true;  // centred
             st.px = ps.px;
             st.py = ps.py;
+        }
+        {
+            // Pointer timeout: a pointer left alone goes off the screen, as a Remote put down or
+            // pointed away does, so the field controls are the pointer-less ones. Never while
+            // a pointer screen is up (it needs the pointer); moving it brings it back where it was.
+            const float timeout = pointerTimeout(cfg);
+            if (pointerMoved || ps.snapped || menuOpen || menunav::menuUp()) ps.lastMove = now;
+            const bool out = timeout > 0 && st.pointerValid && now - ps.lastMove > timeout;
+            if (out != ps.timedOut) {
+                ps.timedOut = out;
+                if (sTimeoutLog) log("[wiimote] remote %d: pointer %s", chan + 1, out ? "timed out (hidden)" : "back");
+            }
+            if (out) st.pointerValid = false;
         }
 
         // Motion: at rest, or swung back and forth (about 7 Hz, +-2.5 g) while a shake input is held.
@@ -738,6 +768,18 @@ bool drawPointerTab() {
     changed |= recomp::menu::Checkbox("Hide the mouse cursor over the game", &sCfg.hideCursor);
     ImGui::SetItemTooltip("The game draws its own pointer (the hand); the system cursor is hidden while it\n"
                           "points with the mouse. Shown again over this menu.");
+    ImGui::SeparatorText("Pointer timeout");
+    {
+        const float k = recomp::ui::scale();
+        ImGui::SetNextItemWidth(200 * k);
+        changed |= recomp::menu::SliderFloat("Hide the pointer after", &sCfg.pointerTimeout, 0.0f, 30.0f,
+                                             sCfg.pointerTimeout <= 0 ? "Never" : "%.0f s", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SetItemTooltip("The pointer leaves the screen after this many seconds without moving (mouse, right\n"
+                              "stick or gyro), as when a Wii Remote is pointed away: the game then uses its\n"
+                              "controls without the pointer. Moving the pointer brings it back where it was.\n"
+                              "Pointer screens (pockets, map, shops, dialogue choices) keep it. 0 = never (the\n"
+                              "pointer stays until the mouse leaves the window). Real Wii Remotes are not affected.");
+    }
     ImGui::SeparatorText("Right stick");
     changed |= recomp::menu::SliderFloat("Pointer speed", &sCfg.stickSpeed, 0.2f, 5.0f, "%.1f", ImGuiSliderFlags_AlwaysClamp);
     ImGui::SetItemTooltip("How fast a fully tilted right stick moves the pointer (half the screen per second at 1).");

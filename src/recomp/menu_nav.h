@@ -40,6 +40,9 @@ void onFrame();
 // The pointer the game was given for a Remote most recently (KPAD units). False: pointing off
 // the screen / never sampled.
 bool lastPointer(int chan, float& x, float& y);
+// True while the game shows a pointer screen (pockets, map, shops, dialogue choices, ...): items
+// other than the field toolbar were reported in the last few frames.
+bool menuUp();
 
 // A layout-coordinate scale pair as the game converts the pointer for one hit test:
 // layout = (x * sx, y * sy). Calibrated from the point the game tested and the pointer it had.

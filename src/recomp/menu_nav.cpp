@@ -197,6 +197,14 @@ bool lastPointer(int chan, float& x, float& y) {
     return true;
 }
 
+bool menuUp() {
+    std::lock_guard lk(sMutex);
+    rotate(game::guestFrames());
+    if (sPublishedFrame + 3 < game::guestFrames()) return false;
+    Box b;
+    return std::any_of(sPublished.begin(), sPublished.end(), [&](const Item& it) { return !it.hud && visibleBox(it, b); });
+}
+
 bool calibrate(Scale& s, int chan, float qx, float qy) {
     float kx, ky;
     if (std::fabs(qx) >= 999.0f || !lastPointer(chan, kx, ky)) return false;

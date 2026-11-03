@@ -173,7 +173,25 @@ Defaults: Wii Remote 1 = Remote + Nunchuk from keyboard + mouse and the first ga
 Settings: `[controls]`, `[controls.keyboard]`, `[controls.pad.<guid>]` (bindings) and `[wiimote]`
 (`remote<N>_connect=auto|on|off`, `remote<N>_extension=nunchuk|none`,
 `remote<N>_pointer=mouse+stick|...|none`, `remote<N>_snap=auto|on|off`, `pointer_stick_speed`,
-`pointer_stick_absolute`, `gyro_sensitivity`, `gyro_invert_x/y`, `hide_cursor`, `distance`).
+`pointer_stick_absolute`, `gyro_sensitivity`, `gyro_invert_x/y`, `hide_cursor`, `pointer_timeout`,
+`distance`).
+
+## Pointer timeout
+
+F1 > Controls > Pointer > "Hide the pointer after" (`pointer_timeout`, seconds, default 3, 0 =
+never). The emulated Remote's pointer (mouse, right stick, gyro) goes off the screen after that long
+without moving, like a Remote put down or pointed away, so the game switches to its pointer-less
+field controls (no hand, no pointer toolbar). Moving the pointer brings it back where it was; the
+Recenter input and the menu snap count as moves. It never times out while a pointer screen is up
+(`menunav::menuUp()`: items other than the field toolbar reported in the last frames: pockets, map,
+shops, dialogue choices) or the F1 menu is open. Real Wii Remotes are not affected (they point
+where they are held). Implemented in `wiimote.cpp` (EmulatedSource::read).
+
+Test runs with `--input` keep the pointer (timeout off, so existing routes are unchanged);
+`CF_POINTER_TIMEOUT=<s>` sets it for any run, scripted pointer positions included, and logs
+`[wiimote] remote N: pointer timed out (hidden)` / `pointer back` (also with `CF_WPAD_LOG=1`).
+Checked in the user-town fixture: Rover's choice boxes keep the pointer, in town the hand and the
+toolbar go 3 s after the last scripted move and come back with the next one.
 
 ## Snap pointer to menu items
 
