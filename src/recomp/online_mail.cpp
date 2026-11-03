@@ -194,10 +194,9 @@ u32 gameIdOf(u64 letterId) {
     return g;
 }
 
-// ---- letters through the relay (tools/relay/cf_relay.cpp, TCP) ----
-// A letter for a friend who is not in a room with us goes to the relay after a minute: sealed for
-// the pair (friends::letterKey: X25519 of the two letters keys), signed with our Ed25519 key. Our
-// own letters are fetched from it every two minutes (after proving our key) and deleted there.
+// ---- sealed letters for paths outside a room (email: online_email.cpp) ----
+// Sealed for the friend pair (friends::letterKey: X25519 of the two letters keys), signed with our
+// Ed25519 key; only a friend's signed letters open.
 namespace sk = ::online::sock;
 std::set<u64> sSeen;  // letter ids already taken in (direct and relay copies of one letter)
 bool sWake = false;
@@ -302,100 +301,6 @@ bool openFrom(const u8 from[32], const std::vector<u8>& blob, Letter& l) {
 
 void takeIn(Letter&& l, const u8 from[32]);
 
-void relayPass() {
-    const std::string name = relayName();
-    if (name.empty()) return;
-    // 1. Letters for friends who are away.
-    std::vector<Letter> out;
-    {
-        std::lock_guard<std::mutex> g(sMutex);
-        load();
-        for (auto& [id, l] : sOut) out.push_back(l);
-    }
-    // (the friends lock is taken after the mail lock is released: friends -> mail is the order)
-    out.erase(std::remove_if(out.begin(), out.end(), [](const Letter& l) { return friends::memberOf(l.peer) != 0xFF; }), out.end());
-    for (auto& l : out) {
-        u8 theirX[32];
-        if (!friends::friendXPub(l.peer, theirX)) continue;  // not met since its letters key was known
-        Tcp t;
-        if (!t.connect(name)) return;
-        std::vector<u8> put = {10};
-        put.insert(put.end(), l.peer, l.peer + 32);
-        put.insert(put.end(), friends::myPublicKey(), friends::myPublicKey() + 32);
-        put64(put, l.id);
-        const auto blob = sealFor(l, l.peer, theirX);
-        put.insert(put.end(), blob.begin(), blob.end());
-        std::vector<u8> ans;
-        if (!t.write(put) || !t.read(ans)) return;
-        if (ans.size() == 1 && ans[0] == 17) {
-            std::printf("[mail] letter %016llx left at the relay\n", (unsigned long long)l.id);
-            std::lock_guard<std::mutex> g(sMutex);
-            unstore(true, l.id);
-            sOut.erase(l.id);
-        }
-    }
-    // 2. Our letters.
-    Tcp t;
-    if (!t.connect(name)) return;
-    std::vector<u8> auth = {11};
-    auth.insert(auth.end(), friends::myPublicKey(), friends::myPublicKey() + 32);
-    std::vector<u8> ch;
-    if (!t.write(auth) || !t.read(ch) || ch.size() != 33 || ch[0] != 12) return;
-    std::vector<u8> msg = {'c', 'f', '-', 'r', 'e', 'l', 'a', 'y'};
-    msg.insert(msg.end(), ch.begin() + 1, ch.end());
-    std::vector<u8> prove = {13};
-    u8 sig[64];
-    oc::ed25519Sign(online::identitySeed(), msg.data(), msg.size(), sig);
-    prove.insert(prove.end(), sig, sig + 64);
-    std::vector<u8> ok;
-    if (!t.write(prove) || !t.read(ok) || ok.size() != 1 || ok[0] != 17) return;
-    std::vector<u8> items;
-    if (!t.write({14}) || !t.read(items) || items.size() < 3 || items[0] != 15) return;
-    const u32 n = u32(items[1]) << 8 | items[2];
-    size_t at = 3;
-    for (u32 k = 0; k < n; k++) {
-        if (at + 44 > items.size()) break;
-        u8 from[32];
-        std::memcpy(from, items.data() + at, 32);
-        std::vector<u8> idb(items.begin() + long(at + 32), items.begin() + long(at + 40));
-        const u32 size = u32(items[at + 40]) << 24 | u32(items[at + 41]) << 16 | u32(items[at + 42]) << 8 | items[at + 43];
-        at += 44;
-        if (at + size > items.size()) break;
-        const std::vector<u8> blob(items.begin() + long(at), items.begin() + long(at + size));
-        at += size;
-        Letter l;
-        if (friends::isFriend(from) && openFrom(from, blob, l)) takeIn(std::move(l), from);
-        else std::printf("[mail] a letter at the relay was not from a friend (or not readable): dropped\n");
-        std::vector<u8> del = {16};
-        del.insert(del.end(), idb.begin(), idb.end());
-        std::vector<u8> a2;
-        if (!t.write(del) || !t.read(a2)) return;
-    }
-}
-
-void relayThread() {
-    double last = -1e9;
-    while (true) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-        bool wake = false;
-        {
-            std::lock_guard<std::mutex> g(sMutex);
-            wake = sWake;
-            sWake = false;
-        }
-        if (!wake && secs() - last < 120) continue;
-        last = secs();
-        relayPass();
-    }
-}
-
-void ensureRelayThread() {
-    static bool started = false;
-    if (started || relayName().empty()) return;
-    started = true;
-    std::thread(relayThread).detach();
-}
-
 }  // namespace
 
 namespace {
@@ -446,7 +351,6 @@ void onRoomMessage(uint8_t from, uint8_t type, const std::vector<uint8_t>& data,
 }
 
 void tick() {
-    ensureRelayThread();
     std::lock_guard<std::mutex> g(sMutex);
     load();
     auto& s = net::session();

@@ -207,9 +207,9 @@ int main() {
     // Through the relay (tools/relay/cf_relay.cpp, run in a thread): a code whose only route is the
     // relay; the joiner reaches the host and a big message crosses.
     {
-        static char a0[] = "cf_relay", a1[] = "--port", a2[] = "39912", a3[] = "--mail-dir", a4[] = "cf_relay_test_mail";
-        static char* av[] = {a0, a1, a2, a3, a4, nullptr};
-        std::thread([] { relayMain(5, av); }).detach();
+        static char a0[] = "cf_relay", a1[] = "--port", a2[] = "39912";
+        static char* av[] = {a0, a1, a2, nullptr};
+        std::thread([] { relayMain(3, av); }).detach();
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
         Session rh, rj;
         rh.setIdentity(ident("RelayHost", 8008));

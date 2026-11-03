@@ -1,8 +1,8 @@
 // cf_relay: the optional self-hosted relay for City Folk Recompiled online play (docs/ONLINE.md
 // "Relay"). Anyone (a friend group) can run it on a machine the players can reach; nothing in the
-// port needs it, and it never sees game data in the clear.
+// port needs it, and it never sees game data in the clear. Rooms only.
 //
-//   cf_relay [--port 29912] [--mail-dir <folder>] [--max-rooms 256]
+//   cf_relay [--port 29912] [--max-rooms 256]
 //
 // UDP (rooms): a host whose router cannot be reached registers its room under a random 8-byte
 // room id (part of its room code); joiners reach it through the relay. Datagrams (sealed by the
@@ -12,14 +12,8 @@
 //   (answers and forwards carry room[8] after the type as well)
 //   3 TO_HOST  room[8] payload              joiner -> relay -> host as 4 FROM_PEER peer(u32) payload
 //   5 TO_PEER  room[8] peer(u32) payload    host -> relay -> joiner as 6 FROM_HOST payload
-// TCP (letters, store-and-forward for friends who are not online at the same time): frames
-// u32 length (big-endian) + body; body = type + fields.
-//   10 PUT    to[32] from[32] id[8] blob     (blob sealed for the recipient by the sender)
-//   11 AUTH   key[32]  -> 12 CHALLENGE nonce[32]; 13 PROVE sig[64] (Ed25519 over "cf-relay" nonce)
-//   14 LIST   (after PROVE) -> 15 ITEMS count(u16) { from[32] id[8] size(u32) blob }
-//   16 DEL    id[8]   (after PROVE)
-//   17 OK / 18 ERR text
-// Limits: 64 letters per recipient, 256 KB per letter, 30 days, 600 datagrams/s per address.
+// It stores nothing (user decision: no letters on the relay). Limits: 256 rooms, 16 joiners per
+// room, 600 datagrams/s per address.
 #include "recomp/online_crypto.h"
 #include "recomp/online_ed25519.h"
 #include "recomp/online_sock.h"
@@ -148,115 +142,6 @@ void udpLoop(Socket s, int fam) {
     }
 }
 
-// ---- letters (TCP) ----
-fs::path sMailDir;
-std::mutex sMailMutex;
-
-bool readAll(Socket c, u8* p, size_t n) {
-    while (n) {
-        const int k = int(recv(c, reinterpret_cast<char*>(p), int(n), 0));
-        if (k <= 0) return false;
-        p += k;
-        n -= size_t(k);
-    }
-    return true;
-}
-bool readFrame(Socket c, std::vector<u8>& b) {
-    u8 h[4];
-    if (!readAll(c, h, 4)) return false;
-    const u32 len = u32(h[0]) << 24 | u32(h[1]) << 16 | u32(h[2]) << 8 | h[3];
-    if (len == 0 || len > 300 * 1024) return false;
-    b.resize(len);
-    return readAll(c, b.data(), len);
-}
-void writeFrame(Socket c, const std::vector<u8>& b) {
-    std::vector<u8> f = {u8(b.size() >> 24), u8(b.size() >> 16), u8(b.size() >> 8), u8(b.size())};
-    f.insert(f.end(), b.begin(), b.end());
-    send(c, reinterpret_cast<const char*>(f.data()), int(f.size()), 0);
-}
-void err(Socket c, const char* t) {
-    std::vector<u8> b = {18};
-    b.insert(b.end(), t, t + std::strlen(t));
-    writeFrame(c, b);
-}
-
-void client(Socket c) {
-    std::vector<u8> b;
-    u8 key[32] = {}, nonce[32] = {};
-    bool proved = false, haveKey = false;
-    while (readFrame(c, b)) {
-        const u8 type = b[0];
-        if (type == 10 && b.size() > 1 + 32 + 32 + 8) {  // PUT
-            const std::string to = hex(b.data() + 1, 32);
-            const fs::path d = sMailDir / to;
-            std::lock_guard<std::mutex> g(sMailMutex);
-            std::error_code ec;
-            fs::create_directories(d, ec);
-            size_t count = 0;
-            for (auto& e : fs::directory_iterator(d, ec)) (void)e, count++;
-            if (count >= 64 || b.size() > 256 * 1024 + 80) {
-                err(c, "mailbox full");
-                continue;
-            }
-            std::ofstream f(d / (hex(b.data() + 65, 8) + ".ltr"), std::ios::binary | std::ios::trunc);
-            f.write(reinterpret_cast<const char*>(b.data() + 33), std::streamsize(b.size() - 33));  // from, id, blob
-            writeFrame(c, {17});
-        } else if (type == 11 && b.size() == 33) {  // AUTH
-            std::memcpy(key, b.data() + 1, 32);
-            haveKey = true;
-            proved = false;
-            oc::randomBytes(nonce, 32);
-            std::vector<u8> ch = {12};
-            ch.insert(ch.end(), nonce, nonce + 32);
-            writeFrame(c, ch);
-        } else if (type == 13 && b.size() == 65 && haveKey) {  // PROVE
-            std::vector<u8> msg = {'c', 'f', '-', 'r', 'e', 'l', 'a', 'y'};
-            msg.insert(msg.end(), nonce, nonce + 32);
-            proved = oc::ed25519Verify(key, msg.data(), msg.size(), b.data() + 1);
-            if (proved) writeFrame(c, {17});
-            else err(c, "bad signature");
-        } else if (type == 14 && proved) {  // LIST
-            std::lock_guard<std::mutex> g(sMailMutex);
-            std::vector<u8> out = {15, 0, 0};
-            u32 n = 0;
-            std::error_code ec;
-            for (auto& e : fs::directory_iterator(sMailDir / hex(key, 32), ec)) {
-                std::ifstream f(e.path(), std::ios::binary);
-                const std::vector<u8> d((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-                if (d.size() < 40) continue;
-                out.insert(out.end(), d.begin(), d.begin() + 40);  // from, id
-                const u32 sz = u32(d.size() - 40);
-                for (int i = 3; i >= 0; i--) out.push_back(u8(sz >> (8 * i)));
-                out.insert(out.end(), d.begin() + 40, d.end());
-                if (++n >= 16) break;
-            }
-            out[1] = u8(n >> 8);
-            out[2] = u8(n);
-            writeFrame(c, out);
-        } else if (type == 16 && proved && b.size() == 9) {  // DEL
-            std::lock_guard<std::mutex> g(sMailMutex);
-            std::error_code ec;
-            fs::remove(sMailDir / hex(key, 32) / (hex(b.data() + 1, 8) + ".ltr"), ec);
-            writeFrame(c, {17});
-        } else {
-            err(c, "bad request");
-        }
-    }
-    closeSocket(c);
-}
-
-void sweepMail() {
-    while (true) {
-        std::this_thread::sleep_for(std::chrono::hours(1));
-        std::lock_guard<std::mutex> g(sMailMutex);
-        std::error_code ec;
-        const auto limit = fs::file_time_type::clock::now() - std::chrono::hours(24 * 30);
-        for (auto& d : fs::directory_iterator(sMailDir, ec))
-            for (auto& e : fs::directory_iterator(d.path(), ec))
-                if (fs::last_write_time(e.path(), ec) < limit) fs::remove(e.path(), ec);
-    }
-}
-
 }  // namespace
 
 #ifdef CF_RELAY_AS_LIB
@@ -265,15 +150,12 @@ int relayMain(int argc, char** argv) {  // the loopback test runs it in a thread
 int main(int argc, char** argv) {
 #endif
     int port = 29912;
-    sMailDir = fs::path("cf_relay_mail");
     for (int i = 1; i + 1 < argc; i++) {
         if (!std::strcmp(argv[i], "--port")) port = std::atoi(argv[++i]);
-        else if (!std::strcmp(argv[i], "--mail-dir")) sMailDir = argv[++i];
         else if (!std::strcmp(argv[i], "--max-rooms")) sMaxRooms = size_t(std::atoi(argv[++i]));
     }
     if (!startup()) return 1;
     std::error_code ec;
-    fs::create_directories(sMailDir, ec);
     // UDP: one dual-stack socket.
     Socket u = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
     int fam = AF_INET6;
@@ -299,25 +181,8 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
-    Socket t = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    {
-        int one = 1;
-        setsockopt(t, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&one), sizeof one);
-        sockaddr_in a{};
-        a.sin_family = AF_INET;
-        a.sin_port = htons(u16(port));
-        if (bind(t, reinterpret_cast<sockaddr*>(&a), sizeof a) != 0 || listen(t, 16) != 0) {
-            std::fprintf(stderr, "cf_relay: TCP port %d is in use\n", port);
-            return 1;
-        }
-    }
-    std::printf("cf_relay: rooms on UDP %d, letters on TCP %d (%s)\n", port, port, sMailDir.string().c_str());
+    std::printf("cf_relay: rooms on UDP %d\n", port);
     std::fflush(stdout);
-    std::thread(udpLoop, u, fam).detach();
-    std::thread(sweepMail).detach();
-    while (true) {
-        Socket c = accept(t, nullptr, nullptr);
-        if (c == kInvalid) continue;
-        std::thread(client, c).detach();
-    }
+    udpLoop(u, fam);
+    return 0;
 }

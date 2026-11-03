@@ -318,62 +318,22 @@ WiiConnect24 letters.
   Kept in friends.txt (`info <key> <hex>`). To do: removal from the game when removed in F1
   (`DWC_DeleteBuddyFriendData`). Then both can visit each
   other directly when online (presence below), and rooms stay for quick sessions.
-- **Presence without a room**: each friend publishes its current endpoint (signed, encrypted to
-  each friend) where friends look: the BitTorrent mainline DHT (BEP 44 mutable item keyed by a
-  per-friendship value) or a direct UDP ping to the last known endpoint. When both are online the
-  game connects directly (the same transport, a two-member room).
-- **Letters, implemented so far (src/recomp/online_mail.cpp, 2026-11-03)**:
-  - Wii number per install: 16 digits from the identity key (`friends::wiiNumberOf`), stable,
-    written into /shared2/wc24/nwc24msg.cfg and .cbk at start-up (user id at 0x08, creation stage
-    2, checksum; sysconf.cpp prepareWc24), so every part of the game sees the same number. Roster
-    entries carry the friend's number (friend info +0x00, always the one its key gives), so the
-    game's WiiConnect24 task registers them as Wii friends (NWC24AddDWCFriendInfo) and its letter
-    code addresses them. NWC24CheckUserId accepts friends' numbers (their check digits are not
-    NWC24's) and answers -0x23 for the own number, as the library.
-  - Send: NWC24CommitMsg with a friend's number as recipient keeps the letter (tag + the 0x30000
-    attachment) in `<data>/online/mail/out`; other recipients go to the library as before.
-    Delivery: room message MAIL (0x46) to the friend whenever both are in one room (re-sent every
-    30 s until MAIL_ACK 0x47), so letters written at any time arrive the next time the two meet.
-    Only proved friends' letters are kept (sender number from its key), 200 per box.
-  - Receive: the game's WiiConnect24 task (on the save path) asks NWC24SearchMsgs for the receive
-    box: inbox letters come first as received messages ('RUU' tag, sender id, attachment), the
-    attachment is read through NWC24ReadMsgAttached (fn_8040B21C, named for all versions), and
-    NWC24DeleteMsg takes them out of the inbox.
-  - Checked: with a Wii number and an F1 friend present the Nintendo events path is unchanged
-    (Receive now: creepy clock downloaded, the game took letter 4D000001, save result 1; the same
-    /shared2/wc24 files are opened as before, nothing goes to the send box). Not yet tested end
-    to end: a letter written in the game (post office -> a friend), its arrival and Pete's
-    delivery; offline store-and-forward (DHT) below is still design.
-- **Mail (design)**: the game's letters to Wii friends go through NWC24 (`NWC24CommitMsg`, message box
-  files under `/shared2/wc24/mbox`, MIME with the letter as an attachment; the game's letter
-  format and attached item to be traced in the NWC24 calls of the letter scene). HLE the send:
-  the committed message goes into our outbox (encrypted to the recipient's X25519 key, signed);
-  delivery: directly when both are online; otherwise store-and-forward in the DHT (BEP 44:
-  1000-byte values, signed by the sender's key, keyed by recipient + sequence; the sender
-  re-publishes every ~30 minutes until the recipient acknowledges). Incoming letters are written
-  where the game's WiiConnect24 receive path reads them (`wc24recv.mbx` + control file), so Pete
-  delivers them as he did WiiConnect24 letters. Only friends can mail you; per-friend rate limits;
-  letters never in plain text on the wire.
-- **Traced so far (US addresses)**: the roster code (fn_8017A220/A488/A5A8/A700/ADD0) sends through
-  `fn_800E9B70` (NWC24InitMsgObj, each recipient Wii number checked with NWC24CheckUserId (0 or
-  -0x23 accepted) and added with NWC24SetMsgToId, then fn_800EA2C8 builds the letter and
-  `fn_800E9AC8` attaches it (NWC24SetMsgDWCId + NWC24SetMsgAttached, type 0x30000) and commits);
-  fn_80179D38/79F14/7A368 -> `fn_800E9C74`, fn_8017B164/B214 -> `fn_800E9D34`; receive
-  `fn_800EA0DC` (NWC24SearchMsgs, tag 'RUU', attachments of type 0x30000, NWC24DeleteMsg).
-  NWC24 message object: +0x04 flags, +0x0C tag, +0x20 from id (u64), +0x68 attachment data
-  (NWC24Data, 8 bytes each), +0x78 attachment sizes [2], +0x80 attachment types [2], +0x88 to ids
-  (u64 x 8), +0xC8 recipient count, +0xC9 attachment count, +0xEC DWC id. Recipients are Wii
-  numbers from the roster's friend info (save+0x1C8, 0x78 per friend), which our roster entries
-  do not have yet (registered with info = NULL): the HLE needs a Wii number per F1 friend (derived
-  from the key) in that info and NWC24CheckUserId answering for it.
-- **Reliability, honestly**: direct delivery is reliable whenever both play at the same time.
-  DHT items live about 2 hours unless re-published; a sender's game re-publishes only while it
-  runs, so a letter between two players who are never online at the same time arrives when the
-  recipient starts the game within ~2 hours of the sender's last session, else later when they
-  overlap. Mainline DHT nodes may drop or not store items (it works in practice for BEP 44 users,
-  but nothing guarantees it). A self-hostable mailbox server (any friend group can run one, the
-  F1 setting names it) would make offline delivery dependable; optional, later.
-
+- **Offline letters (user decision, 2026-11-03)**: no DHT, and the relay stores no letters (it
+  stays an optional route for rooms only). Two paths:
+  - **A. "Always online mail"** (F1 > Online, off by default): each player enters only their own
+    email account; letters go as encrypted, signed attachments by SMTP and are fetched by IMAP
+    (WiiConnect24's own mail model). Friends' addresses travel with the friend data (encrypted, in
+    the room). Credentials only in the OS credential store; TLS with OS certificate checks;
+    presets for the common providers (app passwords with 2-step verification; Microsoft personal
+    accounts not supported, OAuth only). Fixed subject tag, a short human-readable body, the letter
+    as attachment; imported only when signed by a known friend's key; poll at start-up and every
+    few minutes on a background thread; "Send test letter to myself". Being built; tested against
+    a local IMAP/SMTP test server.
+  - **B. "Deliver whenever both games are running"** (default without email): friends' games
+    connect in the background whenever both are open and swap outbox letters. Limits: both games
+    must run at the same time, and it needs automatic port opening (UPnP / NAT-PMP) or an earlier
+    direct connection; otherwise letters wait until the next visit. Being built.
+  With email on, both run; a letter id is taken in once.
 ## 10a. Settings while visiting (src/recomp/online_sync.cpp)
 
 User request: a visitor's game uses the HOST's settings for everything that shapes the shared town
@@ -444,7 +404,8 @@ routers then have outgoing traffic to the other side and let the answers in (end
 mapping, the usual home case); the join then proceeds as usual. It does not get through
 symmetric NATs (some mobile and corporate networks): there the relay (10c) or a VPN helps.
 While a reply code is shown the joiner waits 90 s instead of 10 s. Test: cf_online_test checks
-that the host's punch packets arrive at the address of a reply code.
+that the host's punch packets arrive at the address of a reply code. Untested between two real
+separate networks (the user will try it with a friend).
 
 ## 10c. The optional self-hosted relay (tools/relay/cf_relay.cpp)
 
@@ -460,18 +421,9 @@ CF_ONLINE_RELAY for tests).
   datagrams and the relay only forwards them between that room's host and its joiners (it cannot
   read them; it only knows room ids and addresses). Limits: 256 rooms, 16 joiners per room,
   600 datagrams/s per address, rooms expire 60 s after their host stops registering.
-- **Letters**: a letter whose friend is not in a room with us goes to the relay (TCP, same port):
-  sealed for the pair (ChaCha20 + HMAC with the key HMAC("cf-letter", X25519(own letters key,
-  friend's letters key)); the letters keys travel in IDENT and are covered by the Ed25519 proof)
-  and signed with the sender's Ed25519 key. The recipient's game fetches its letters every two
-  minutes after proving its key to the relay (challenge, Ed25519 signature), checks that the
-  sender is a friend and the signature, opens it and deletes it there; a letter that arrives by
-  both routes is taken once (letter id). 64 letters per recipient, 256 KB each, 30 days.
+- **Letters**: none (user decision): the relay forwards room traffic only.
 - Test (2026-11-03): `cf_online_test` joins a room through an in-process relay with a code that
-  has only the relay route and sends 50 KB; two instances made friends (letters keys exchanged),
-  Alice queued a letter while Bob was not running (`CF_ONLINE_TEST=<f>:mailtest`: a 64-byte test
-  letter, not a game letter) -> `left at the relay`; Bob started later -> `received`, the relay's
-  mailbox empty again.
+  has only the relay route and sends 50 KB.
 
 ## 10b. USB keyboard chat (src/recomp/ios_devices.cpp)
 
@@ -532,6 +484,6 @@ Left:
 - Friend codes: keep the game's own registration (both type each other's code in the game's
   roster, as on the Wii; works now), or also write F1 friends into the roster automatically
   (section 10)?
-- Mail without a common online time: DHT store-and-forward (best effort) or a hosted mailbox
-  server (dependable, someone runs it)?
+- Mail without a common online time: decided 2026-11-03: the player's own email account (optional) and
+  delivery whenever both games run; no DHT, no letters on the relay (section 10).
 - Who hosts an optional public relay/lobby, if ever (none needed for rooms).

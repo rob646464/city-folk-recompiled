@@ -9,16 +9,19 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "game/cf_features.h"
 #include "game/cf_region.h"
 
 #include "recomp/distributions.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 namespace recomp::vi {
 double fieldSeconds();  // hle_vi.cpp
@@ -51,7 +54,14 @@ static void forceSaveOnFrame(Ctx& c, u32 frame) {
         last = r;
         if (!at) return;
     }
-    if (frame == at) {
+    // More frames: CF_FORCE_SAVE=<f1>,<f2>,... (the first one also starts the result log).
+    static const std::vector<u32> more = [] {
+        std::vector<u32> v;
+        if (const char* e = std::getenv("CF_FORCE_SAVE"))
+            for (const char* p = std::strchr(e, ','); p; p = std::strchr(p + 1, ',')) v.push_back(u32(std::strtoul(p + 1, nullptr, 10)));
+        return v;
+    }();
+    if (frame == at || std::find(more.begin(), more.end(), frame) != more.end()) {
         log("[save] CF_FORCE_SAVE: calling the save write request (fn_800D2780) at frame %u, result word %d", frame,
             s32(rd32(kResultWord)));
         guestCall(c, VA(0x800D2780));
