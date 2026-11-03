@@ -14,6 +14,7 @@
 // Test aid CF_LYT_LOG=<first>,<last>: every visible pane drawn in those guest frames (depth,
 // name, position, the caller of the layout's root draw).
 #include "game/cf_features.h"
+#include "port/settings.h"
 #include "recomp/game.h"
 #include "recomp/hle.h"
 #include "recomp/interp.h"
@@ -69,21 +70,79 @@ int sAnchoredAt = -1;  // depth of the pane whose scope is open, -1 none
 // memo button layout's N_all (first child N_tbBtn_00, at 274,0) and the camera adjust icon
 // N_ichichousei (274,-171, under a container at the origin). The side is taken from the pane's
 // x, so an element sliding in from off screen moves with its edge.
-int anchorFor(int depth, u32 pane, float tx) {
-    if (sAnchoredAt >= 0 || depth < 1 || depth > 2) return 0;
+bool hudElement(int depth, u32 pane) {
+    if (depth < 1 || depth > 2) return false;
     const std::string name = paneName(pane);
-    bool hud = false;
     if (name == "N_all") {
         const std::string child = firstChildName(pane);
-        hud = child == "timeFrm_00" || child == "N_tbBtn_00";
-    } else {
-        hud = name == "N_ichichousei";
+        return child == "timeFrm_00" || child == "N_tbBtn_00";
     }
-    if (!hud) return 0;
+    return name == "N_ichichousei";
+}
+int anchorFor(int depth, u32 pane, float tx) {
+    if (sAnchoredAt >= 0 || !hudElement(depth, pane)) return 0;
     return tx < 0.0f ? -1 : 1;
 }
 
+// Anchoring moves the element itself (default): its panes' global matrices are shifted right after
+// the layout computes them, so the game's pointer hit tests (which read the panes' global
+// matrices) find the buttons where they are drawn. CF_HUD_ANCHOR=picture: the old way (only the
+// drawing moves, through a ws::AnchorScope; clicks stay at the 16:9 places).
+const bool sMoveMatrices = [] {
+    const char* v = std::getenv("CF_HUD_ANCHOR");
+    return !(v && std::strcmp(v, "picture") == 0);
+}();
+int sCalcDepth = 0;
+int sShiftedAt = -1;  // depth of the pane whose subtree is being shifted (CalculateMtx), -1 none
+
+bool anchoringOn() { return ws::active() && !port::settings().video.hudKeep4x3; }
+
+// The layout's width in its own units, from the DrawInfo's view rectangle (+0x34 left, +0x3C right).
+float layoutWidth(u32 drawInfo) {
+    const float w = rdf32(drawInfo + 0x3C) - rdf32(drawInfo + 0x34);
+    return w > 16.0f && w < 4096.0f ? w : 608.0f;
+}
+
+void shiftSubtree(u32 pane, float dx, int guard = 0) {
+    if (!pane || guard > 32) return;
+    wrf32(pane + kGlbTx, rdf32(pane + kGlbTx) + dx);
+    const u32 head = pane + kChildren;
+    for (u32 node = rd32(head), n = 0; node && node != head && n < 512; node = rd32(node), n++)
+        shiftSubtree(node - 4, dx, guard + 1);
+}
+
 }  // namespace
+
+// Pane::CalculateMtx(const DrawInfo&) computes the pane's global matrix and then its children's.
+// For an anchored HUD element, once the whole subtree is computed it is moved to its screen edge:
+// dx = (1/f - 1) x half the layout width (f = ws::factor(): the 16:9 frame's share of the window).
+HLE(CalculateMtx__Q34nw4r3lyt4PaneFRCQ34nw4r3lyt8DrawInfo) {
+    const u32 pane = c.r[3], info = c.r[4];
+    const int depth = sCalcDepth;
+    // (Descendants of an element being moved are not elements of their own: moved with it.)
+    const bool a = sMoveMatrices && sShiftedAt < 0 && anchoringOn() && hudElement(depth, pane);
+    sCalcDepth = depth + 1;
+    if (a) sShiftedAt = depth;
+    callOriginal(c, "CalculateMtx__Q34nw4r3lyt4PaneFRCQ34nw4r3lyt8DrawInfo");
+    sCalcDepth = depth;
+    if (a) {
+        sShiftedAt = -1;
+        // The side from the pane's own place (computed just now), so an element sliding in from
+        // off screen goes to its edge.
+        const int side = rdf32(pane + kGlbTx) < 0.0f ? -1 : 1;
+        if (side != 0) {
+            const float f = ws::factor();
+            const float dx = float(side) * (1.0f / f - 1.0f) * 0.5f * layoutWidth(info);
+            shiftSubtree(pane, dx);
+            static bool sLogged = false;
+            if (!sLogged) {
+                sLogged = true;
+                log("[hud] anchoring by pane matrices: %s moved %.1f layout units (layout width %.0f, factor %.3f)",
+                    paneName(pane).c_str(), dx, layoutWidth(info), f);
+            }
+        }
+    }
+}
 
 HLE(Draw__Q34nw4r3lyt4PaneFRCQ34nw4r3lyt8DrawInfo) {
     const u32 pane = c.r[3];
@@ -95,7 +154,7 @@ HLE(Draw__Q34nw4r3lyt4PaneFRCQ34nw4r3lyt8DrawInfo) {
     }
     const float tx = rdf32(pane + kGlbTx);
     std::optional<ws::AnchorScope> scope;
-    if (ws::active())
+    if (ws::active() && !sMoveMatrices)
         if (const int a = anchorFor(depth, pane, tx); a != 0) {
             scope.emplace(a);
             sAnchoredAt = depth;

@@ -1,0 +1,16 @@
+--- a/lib/gx/texture.cpp
++++ b/lib/gx/texture.cpp
+@@ -794,7 +794,12 @@
+   s_stats.publishBytes = streamingStats.publishBytes;
+   ++s_frameCount;
+   apply_pending_invalidations();
+-  sweep_object_caches();
++  // 0305: a full walk of every cached texture/TLUT object, which only drops entries idle for 600
++  // frames, ran every frame: ~12% of the host thread with City Folk's caches at 120 fps (over 1 ms of
++  // an 8.3 ms frame). Every 32 frames removes the same entries at most 32 frames later.
++  if ((s_frameCount & 31) == 0) {
++    sweep_object_caches();
++  }
+ }
+ 
+ void shutdown() noexcept {
