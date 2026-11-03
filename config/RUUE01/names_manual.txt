@@ -69,3 +69,4 @@ dol 8017C3C0 cf_RosterDeleteOffline use:(slot) while offline -> fn_8011AA10 shif
 # of __ios_Ipc2 (real names unknown).
 dol 80222650 IOS_Open2 use:IOS_Open(path, mode) through the second IPC send (USB getDeviceList)
 dol 802228D4 IOS_Close2 use:IOS_Close(fd) through the second IPC send (USB getDeviceList)
+dol 8040B21C NWC24ReadMsgAttached use:(msgObj, index, buf, bufSize) reads attachment index of a received message (City Folk fn_800EA0DC)

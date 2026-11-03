@@ -322,7 +322,29 @@ WiiConnect24 letters.
   each friend) where friends look: the BitTorrent mainline DHT (BEP 44 mutable item keyed by a
   per-friendship value) or a direct UDP ping to the last known endpoint. When both are online the
   game connects directly (the same transport, a two-member room).
-- **Mail**: the game's letters to Wii friends go through NWC24 (`NWC24CommitMsg`, message box
+- **Letters, implemented so far (src/recomp/online_mail.cpp, 2026-11-03)**:
+  - Wii number per install: 16 digits from the identity key (`friends::wiiNumberOf`), stable,
+    written into /shared2/wc24/nwc24msg.cfg and .cbk at start-up (user id at 0x08, creation stage
+    2, checksum; sysconf.cpp prepareWc24), so every part of the game sees the same number. Roster
+    entries carry the friend's number (friend info +0x00, always the one its key gives), so the
+    game's WiiConnect24 task registers them as Wii friends (NWC24AddDWCFriendInfo) and its letter
+    code addresses them. NWC24CheckUserId accepts friends' numbers (their check digits are not
+    NWC24's) and answers -0x23 for the own number, as the library.
+  - Send: NWC24CommitMsg with a friend's number as recipient keeps the letter (tag + the 0x30000
+    attachment) in `<data>/online/mail/out`; other recipients go to the library as before.
+    Delivery: room message MAIL (0x46) to the friend whenever both are in one room (re-sent every
+    30 s until MAIL_ACK 0x47), so letters written at any time arrive the next time the two meet.
+    Only proved friends' letters are kept (sender number from its key), 200 per box.
+  - Receive: the game's WiiConnect24 task (on the save path) asks NWC24SearchMsgs for the receive
+    box: inbox letters come first as received messages ('RUU' tag, sender id, attachment), the
+    attachment is read through NWC24ReadMsgAttached (fn_8040B21C, named for all versions), and
+    NWC24DeleteMsg takes them out of the inbox.
+  - Checked: with a Wii number and an F1 friend present the Nintendo events path is unchanged
+    (Receive now: creepy clock downloaded, the game took letter 4D000001, save result 1; the same
+    /shared2/wc24 files are opened as before, nothing goes to the send box). Not yet tested end
+    to end: a letter written in the game (post office -> a friend), its arrival and Pete's
+    delivery; offline store-and-forward (DHT) below is still design.
+- **Mail (design)**: the game's letters to Wii friends go through NWC24 (`NWC24CommitMsg`, message box
   files under `/shared2/wc24/mbox`, MIME with the letter as an attachment; the game's letter
   format and attached item to be traced in the NWC24 calls of the letter scene). HLE the send:
   the committed message goes into our outbox (encrypted to the recipient's X25519 key, signed);

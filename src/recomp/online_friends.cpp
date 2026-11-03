@@ -14,6 +14,7 @@
 #include "recomp/online.h"
 #include "recomp/online_crypto.h"
 #include "recomp/online_ed25519.h"
+#include "recomp/online_mail.h"
 #include "recomp/online_net.h"
 
 #include <chrono>
@@ -261,6 +262,10 @@ void onMessage(const net::AppMsg& m) {
         }
         break;
     }
+    case 0x46:  // MAIL / MAIL_ACK (online_mail.cpp)
+    case 0x47:
+        mail::onRoomMessage(m.from, m.type, d, ms.verified ? ms.pub : nullptr);
+        break;
     case F_INFO: {
         if (d.size() != kGameInfoSize) return;
         ms.info = d;
@@ -353,6 +358,7 @@ void tick() {
     net::AppMsg msg;
     int budget = 64;
     while (budget-- > 0 && s.pollApp(msg, 0x40, 0x5F)) onMessage(msg);
+    mail::tick();
 }
 
 Rel relation(uint8_t memberId) {
@@ -410,6 +416,39 @@ std::vector<Friend> list() {
     load();
     return sFriends;
 }
+
+uint8_t memberOf(const uint8_t pub[32]) {
+    std::lock_guard<std::recursive_mutex> g(sMutex);
+    return memberOfPub(pub);
+}
+
+bool isFriend(const uint8_t pub[32]) {
+    std::lock_guard<std::recursive_mutex> g(sMutex);
+    load();
+    const Friend* f = byPub(pub);
+    return f && f->state == State::Friend;
+}
+
+bool friendByWiiNumber(uint64_t number, uint8_t pubOut[32]) {
+    std::lock_guard<std::recursive_mutex> g(sMutex);
+    load();
+    for (auto& f : sFriends)
+        if (f.state == State::Friend && wiiNumberOf(f.pub) == number) {
+            std::memcpy(pubOut, f.pub, 32);
+            return true;
+        }
+    return false;
+}
+
+uint64_t wiiNumberOf(const uint8_t pub[32]) {
+    u8 h[32];
+    oc::hmacSha256("cf-wii-number", 13, pub, 32, h);
+    uint64_t v = 0;
+    for (int i = 0; i < 8; i++) v = v << 8 | h[i];
+    return 1000000000000000ull + v % 9000000000000000ull;  // 16 digits, as a Wii number
+}
+
+uint64_t myWiiNumber() { return wiiNumberOf(myPublicKey()); }
 
 bool inRoom(const std::string& code) {
     std::lock_guard<std::recursive_mutex> g(sMutex);

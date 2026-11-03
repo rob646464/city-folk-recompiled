@@ -44,6 +44,14 @@ void requestFriend(uint8_t memberId);
 std::vector<Friend> list();
 // The friend is in the room now with a proved key (its INFO may still be on its way).
 bool inRoom(const std::string& code);
+// Room member id of a friend's proved key (0xFF: not in the room).
+uint8_t memberOf(const uint8_t pub[32]);
+// A friend (state Friend) with this key / this Wii number.
+bool isFriend(const uint8_t pub[32]);
+bool friendByWiiNumber(uint64_t number, uint8_t pubOut[32]);
+// Wii numbers (letters, docs/ONLINE.md "Letters"): 16 decimal digits from the key.
+uint64_t wiiNumberOf(const uint8_t pub[32]);
+uint64_t myWiiNumber();
 void accept(const std::string& code);
 void decline(const std::string& code);
 void block(const std::string& code);

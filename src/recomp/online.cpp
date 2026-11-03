@@ -322,6 +322,11 @@ u32 profileId() {
     return sPid;
 }
 
+u64 wiiNumber() {
+    ensureIdentity();
+    return friends::myWiiNumber();
+}
+
 u64 friendKey() { return sFriendKey; }
 
 const u8* identitySeed() {
@@ -348,6 +353,8 @@ std::string playerName() {
 // +0x1E town (u16 id, name, u8 kind 0x02), +0x34 u8, +0x36 0x42 bytes (save+0x10C8).
 static std::vector<u8> myGameInfo(u32 save) {
     std::vector<u8> v(friends::kGameInfoSize, 0);
+    const u64 wii = friends::myWiiNumber();  // +0x00: the Wii number letters go to
+    for (int i = 0; i < 8; i++) v[size_t(i)] = u8(wii >> (56 - 8 * i));
     const u32 a = save + 0x7EC2, b = save + 0x7ED8;  // the two 0x16-byte name structs
     const bool aIsPlayer = rd8(a + 0x14) == 0x0A;
     const u32 player = aIsPlayer ? a : b, town = aIsPlayer ? b : a;
@@ -358,12 +365,13 @@ static std::vector<u8> myGameInfo(u32 save) {
 }
 
 // A friend's entry from the network: names always terminated, kinds as the game sets them.
-static std::vector<u8> cleanGameInfo(std::vector<u8> v) {
+static std::vector<u8> cleanGameInfo(std::vector<u8> v, const u8 pub[32]) {
     v[0x08 + 0x12] = v[0x08 + 0x13] = 0;
     v[0x1E + 0x12] = v[0x1E + 0x13] = 0;
     v[0x08 + 0x14] = 0x0A;
     v[0x1E + 0x14] = 0x02;
-    std::memset(v.data(), 0, 8);
+    const u64 wii = friends::wiiNumberOf(pub);  // the number that belongs to its key, whatever it sent
+    for (int i = 0; i < 8; i++) v[size_t(i)] = u8(wii >> (56 - 8 * i));
     return v;
 }
 
@@ -441,14 +449,14 @@ static void rosterSync(Ctx& c) {
         }
         const bool haveInfo = fr.gameInfo.size() == friends::kGameInfoSize;
         std::vector<u8> gi;
-        if (haveInfo) gi = cleanGameInfo(fr.gameInfo);
+        if (haveInfo) gi = cleanGameInfo(fr.gameInfo, fr.pub);
         // A friend in the room sends its entry right after proving its key: wait for it, so the
         // roster gets the names at once.
         if (slot < 0 && !haveInfo && friends::inRoom(fr.code)) continue;
         if (slot >= 0) {
             // Registered: refresh the names once the friend's own entry is known.
             const u32 cur = save + 0x1C8 + u32(friends::kGameInfoSize) * u32(slot);
-            if (!haveInfo || std::memcmp(hostp(cur + 8), gi.data() + 8, friends::kGameInfoSize - 8) == 0) continue;
+            if (!haveInfo || std::memcmp(hostp(cur), gi.data(), friends::kGameInfoSize) == 0) continue;
         } else if (empty < 0) {
             static std::string told;
             if (told != fr.code) notice("The game's friend roster is full: " + fr.name + " was not added");
