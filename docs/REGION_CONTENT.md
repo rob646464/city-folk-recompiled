@@ -369,3 +369,184 @@ filled. Differences with English (message 0, the source name, not counted):
   game's code is the reference for those rules (same RELs, region value 3).
 - Still not on any disc: the Korea-only distributed items (section 3, ~11 items; their names and
   letters would be Korean only).
+
+## 9. What the region decides in the code (branch region-1)
+
+[disc] USA rev 1 addresses unless noted; PAL/JP/KR addresses from `config/<id>/us_map.txt`, the
+code being the same. Found with `tools/research/callers.py` (every `b`/`bl` to an address in
+main.dol and every REL relocation against it) plus a disassembly of each caller. Two values
+matter, and they are different things:
+
+- the **disc region** from the getter fn_801069D0 (`li r3,N`: JP 0, US 1, EU 2, KR 3);
+- the **town's language index** stored in the town data when the town is made (fn_80154F80):
+  byte **+0x735C2** of the save block fn_8010DD60/fn_8010E308 return, high nibble = language
+  index (0 JP, 1-3 USA English/Spanish/French, 4-8 Europe English/Spanish/French/Italian/German,
+  9 Korea; from fn_801069D8 = the console language through the disc's map), low nibble = its
+  region group (table 0x80475E88: 0,1,1,1,2,2,2,2,2,3). **The holidays, the house set and the
+  sign textures follow the town byte, not the disc region**; the disc region is used for the
+  rest below. fn_801048C0 compares the byte's low nibble with the disc region.
+
+### 9.1 Callers of the disc region getter
+
+| Caller | What it decides | Kind | Option |
+|---|---|---|---|
+| fn_801456B4 +0x398, +0x41C, +0x430, +0x444 (called by d_shop_fgNP and fn_8014406C) | Nook's seasonal item of the day: Dec 1-23 festive tree, or (USA, 50 %) festive flag / candle (item category 0x2B, #2279/#2280); Dec 24 tree (category 0x2A); Dec 26-31 kadomatsu / kagamimochi (JP, category 0x52, #2274/#2275) or flag / candle (USA), nothing elsewhere; Mar 1-3 hinaningyo (JP, 0x53, #2276) | shop stock | yes (10.3) |
+| fn_800D2084 +0x20 (from fn_800D11C8 / fn_800D17C0, `MAIL_ETC_MotherEvent`) | event letter templates per region: table 0x804EC5D0[region*4 + kind], counts by language group (0x80474040); the Mother's Day / Korean Parent's Day letter from your mother | letters | follows the Mother's/Father's Day rule (10.2) |
+| fn_80104C30 | profanity list `/PRC/J.bin`, `E.bin`, `P.bin`, `K.bin` (table 0x804EDBA0) | text filter | no |
+| fn_801048C0 (no direct caller; vtable) | town byte's region nibble against the disc region; on a mismatch a default (0x805EBF68 +4/+8) is used for the following open (fn_801F80E8) | save-region check | never changed |
+| fn_80103710 (search by name, via fn_80103D34 / fn_80103E48) | JP: kana-aware comparison (fn_8010363C), US/EU: fn_801036B4 | text sort/search | no |
+| fn_801038A8 (from fn_80103AA0) | JP only: folds dakuten/handakuten kana before matching | text search | no |
+| fn_8015680C via fn_80156698 / fn_8015670C (+ language index) | number formatting: digit grouping and the thousands separator (',' '.' ' ') of Bells and other numbers | number display | no |
+| fn_8015C0E8 (from d_a_npc_sp_player_selectNP) | USA/Europe: a name string goes through fn_80158FBC (letter case) before display | text | no |
+| wrapper fn_80085388 -> 15 functions fn_80085484 ... fn_80085CEC (all called by d_a_npc_sp_player_selectNP) | per-region record layouts (table 0x804DEA98: field offsets) and character sets (full-width to ASCII, JP/KR paths) for reading an imported character: the Wild World (DS) character move-in | DS transfer | no |
+| wrapper fn_800C7D5C -> fn_800C8CA0, fn_800CA40C, fn_800CA488, fn_800CA5C4 | software keyboard layout (`KB_base_prtbl_00` etc.; JP kana pages, KR Hangul) | keyboard | no |
+| d_menu_hanNP fn_148_10CC, fn_148_12FC | text-entry pages of the keyboard menu (JP-specific pages when region 0) | keyboard | no |
+| d_menu_noticeNP fn_169_B8C (two calls) | USA/Europe skip a check (fn_8011AF64) that Japan/Korea make in the notice menu | menu UI | no |
+| d_menu_time00NP fn_181_3EC0 (wrapper) | the date-entry menu (field order) | menu UI | no |
+
+No disc-region caller selects events, NPCs, items in the catalog, fish or insects. The online
+URLs (`rvforestdl_us/eu/jp`) are string constants per disc, not chosen at run time.
+
+### 9.2 Readers of the town byte +0x735C2
+
+| Reader | What it decides | Kind |
+|---|---|---|
+| fn_80089BD4 (in fn_80089890, the event test) | the event table's language mask (10.1) | event calendar |
+| fn_800895E0 / fn_800897B0 (events #45/#46) | Mother's Day and Father's Day date rules by language (10.2) | event calendar |
+| fn_80169890 (group) / fn_801698B4 (language) / fn_801698E0 / fn_80169918 | `/Str/Brres/field<Rgn><Lng>StrBrres<S/W>.arc` (fn_80166FC4: villager houses, shops' signs, bulletin board) and `<Rgn><Lng>TownTex<S/W>.brres` (fn_80166DC8: town signs); d_a_str_fieldNP fn_102_1E10: `obj_house_usa/eur/jpn` house-type data from obj_npc_common; d_str_managerNP | structures (10.4) |
+| fn_800C0F88 (from fn_800C2008) | the region group 1-4 of the town for another table | other |
+| fn_800D11C8 (+0x78), fn_800EC19C (+0x25C, bulletin board `BBS_event`) | language-specific letter and notice variants | letters / bulletin board |
+| d_fg_drawNP fn_112_9B4 (+0x510, +0x598) | field items 0x39/0x3A drawn with a language-specific texture | field items |
+
+The language index getter fn_801069D8 itself has 49 callers (item and message names by language
+column, number/date formats, keyboards, the town byte at creation); it is the player's language
+and is never changed by the port.
+
+## 10. Content from other regions in the port
+
+F1 > Enhancements > Gameplay "Content from other regions" (`src/game/cf_region.cpp`, settings
+in `[region]` of settings.ini through a settings extension; test aid
+`CF_REGION=<key>,...|all[,moon=N][,parents=N][,houses=N]`, log `CF_REGION_LOG=1`). Everything off
+by default = the game as it shipped. Never changed: the disc region, the town byte, the save,
+online/region checks. USA, Europe, Japan and Korea discs (each version's own function names in
+tools/recomp/hooks.txt).
+
+### 10.1 Events
+
+The event table (USA/PAL 0x8046EEF0, JP 0x8046EE30, KR 0x80478870; identical on all discs):
+47 records of 12 bytes `{u32 date test; u16 language mask; u8 kind[3]; u8 month, day; pad}`.
+fn_80089890(&event, date) = "this event runs on this date" = mask test (fn_80089BD4) + the
+record's date test; every user of the calendar goes through it (today's list fn_80089D3C at
+0x805855E8, Tortimer fn_8008A6A0, bulletin board fn_800EC19C, shops, letters). The hook answers
+it per event:
+
+| # | Event | Mask (languages) | Date test |
+|---|---|---|---|
+| 0-9 / 10-13 | monthly / tourney days | all | fn_80088C34 / fn_80088BCC |
+| 14-17, 22, 24, 25 | the computed-date shared events (Bug-Off, fireworks, Festivale, Harvest Festival, Bunny Day...; which record is which not checked) | all | various |
+| 18-21, 23 | Valentine's Feb 14, Countdown Dec 31, New Year Jan 1, Halloween Oct 31, Toy Day Dec 24 | all | fixed |
+| 26 | Bean Day Feb 3 | JP | fixed |
+| 27 | Girl's Day Mar 3 | JP | fixed |
+| 28 | Boy's Day May 5 | JP | fixed |
+| 29 | Tsukimi (JP autumn moon) | JP | lunar table 0x8046E830 (2000-2035) |
+| 30 | Tanabata Jul 7 | JP | fixed |
+| 31 | Groundhog Day Feb 2 | USA | fixed |
+| 32 | Nature Day Apr 22 | USA | fixed |
+| 33 | Labor Day | USA | 1st Monday of September |
+| 34 | Explorer's Day | USA | 2nd Monday of October |
+| 35 | Autumn Moon (wheat bundle) | USA | table 0x8046E950 |
+| 36 | Midsummer's Day Jun 21 | Europe | fixed |
+| 37 | Naughty-or-Nice Day Dec 6 | Europe | fixed |
+| 38 | Midwinter's Day Dec 21 | Europe | fixed |
+| 39 | Autumn Moon (veggie basket) | Europe | same table as #35 |
+| 40 | Lunar New Year | Korea | lunar table 0x8046EA70 |
+| 41 | Tree Day Apr 5 | Korea | fixed |
+| 42 | Teacher's Day May 15 | Korea | fixed |
+| 43 | Daeboreum | Korea | lunar new year + 14 days |
+| 44 | April Fool's Apr 1 | all | fixed |
+| 45 / 46 | Mother's Day / Father's Day | all | by town language (10.2) |
+
+Kinds (bytes 6-7): `01 06` = Tortimer's holiday (all region events and April Fool's),
+`00 06` = notice-only days, `02 06` monthly. The hook: an enabled event of another region runs on
+its own date; the town's own events unchanged. Priority: if an own event of the same kind runs
+that day, or an earlier enabled foreign one, the foreign event is skipped that year (no two
+Tortimer days at once). Autumn Moon is a selector (own / USA / Europe / Japan Tsukimi): a variant
+other than the town's own replaces it. All the dialogue (Tortimer `NPC_soncho_1`, the bulletin
+board `BBS_event`, villagers' `*_FreeA_Moon*`) and the gift items exist in every language on every
+disc (sections 1, 8.5), so no event is left off for missing text.
+
+### 10.2 Mother's and Father's Day
+
+Rules (fn_800895E0 / fn_800897B0, by the town's language index): 1-3/0/7 (Mother's: 2nd Sunday
+of May), 4 English EU (Mothering Sunday table 0x8046EB90; a Dutch console: 2nd Sunday of May), 5
+Spanish EU (1st Sunday of May), 6 French EU (table 0x8046ECB0), 9 Korea (May 8 = Parent's Day);
+Father's: 5/7 March 19, 8 German Ascension Day (table 0x8046EDD0), 9 none, else 3rd Sunday of June.
+The option runs both with the chosen language in the nibble for the call only, and the Mother's
+Day letter templates (fn_800D2084) with that language's region.
+
+### 10.3 Nook's seasonal items
+
+Per call site of the disc region getter in fn_801456B4 (9.1): "Japan's New Year decorations" (Dec
+26-31 kadomatsu / kagamimochi), "Hinaningyo" (Mar 1-3), "Festive flag and candle" (North America's
+December stock). With both Dec 26-31 options on, Japan's item wins (the game asks for Japan
+first).
+
+### 10.4 Villager house styles
+
+Answer for the user's question "how is the town's set chosen and stored": **not stored**. The five
+house models of a town are `TN_obj_house0-4.brres` + `obj_house_tex.brres` inside the town's field
+archive, which is picked by the town byte (region + language); a villager's house only stores its
+style index 0-4. Every region's archive has its own five (all five differ in data between USA,
+Europe and Japan; Korea's are Japan's). Mixing sets of several regions in one town is not possible
+with the game's data (one texture file per set, same member names); the option picks the set of
+one region for the whole town: the port serves the town's own archive with those six members from
+`field{UsaEng|EurEng|JpnJpn}StrBrres<S/W>.arc` (a disc overlay built in memory, ~3 MB, shop signs
+stay in the town's language) and answers the house-type data lookup of d_a_str_fieldNP
+(`obj_house_usa/eur/jpn`) with that region. Works for new and existing towns from the next load,
+switching back restores the town's own houses.
+
+The player's own house: its exterior models `obj_myhome0-4.brres` are byte-identical in every
+region's archive (arcdiff of the field archives: only obj_house_tex, TN_obj_house0-4, the
+shops `obj_nc/ng/nk/nw`, `obj_cdbbs`, `obj_tailor` differ), so Nook's remodels look the same in
+every region; roof colours etc. come from the same data.
+
+### 10.5 Title screen logo
+
+d_title_demoNP opens its disc's `/Layout/title_<us|eu|jp|kr>.arc` (the only difference of that
+REL between versions). "Title screen logo" serves the chosen region's file under that name (disc
+overlay); every disc has the US/EU/JP files, `title_kr.arc` only the Korean disc (with another
+disc that choice keeps the disc's own). Verified: "Let's Go to the City" logo on the USA disc.
+
+### 10.6 Verification (USA disc, 2026-10-28)
+
+Runs from the user's town save (`CF_FIXTURE=user-town`, `tools/routes/continue.txt`, then the
+holiday Tortimer found by his actor and the player moved in front of him, `CF_TELEPORT=<f>:tortimer`,
+A presses + D-pad for the choices; scratch route files). On the move-in day (a new game) no
+holiday Tortimer appears, also not for the town's own holidays: check events from a save.
+
+| Date | Setting | Result |
+|---|---|---|
+| 2027-02-03 | Bean Day on | Tortimer at the town hall: "It's Bean Day!", the red/blue question, gives the **blue ogre mask**, Bean Day lines (English) |
+| 2027-02-03 | all off | no holiday Tortimer, today's event list empty (retail) |
+| 2026-12-06 | Naughty-or-Nice Day on (Europe) | "Today is Naughty-or-Nice Day", nice/naughty question, **stuffed stocking** |
+| 2026-07-07 | Tanabata on | "Today is Starcrossed Day", **bamboo grass**, the wish-paper lines |
+| 2026-09-25 20:00 | Autumn Moon = Japan | "Today is the Tsukimi moon-viewing", **dango** (the town's own USA moon is 2026-09-26 in the game's table) |
+| 2026-10-12 | all off | the town's own Explorer's Day Tortimer as before |
+| 2027-02-07 | Lunar New Year on (Korea) | "Today is Lunar New Year", **yut** |
+| 2026-06-21 | Midsummer's Day on (Europe) | in today's event list (with the town's own Father's Day, #46: June 21 2026 is the 3rd Sunday), but no Tortimer that day; not checked on another year (open) |
+| 2026-12-27 | Japan's New Year decorations | the shop's "region == Japan" question (0x80145AD0) answered yes (log); Nook's interior not looked at |
+| 2026-10-29 | Villager houses own / Europe / Japan | the same villager's house (same style index) drawn as the USA Pink house, the European Brick house and the Japanese one; signs unchanged |
+| title | Title logo = Europe | "Let's Go to the City" logo |
+
+Lunar dates come from the game's tables (Lunar New Year 2027 = Feb 7 there, not Feb 6). Rover's
+greeting differs after a long absence (the continue route only fits dates within about four
+months of the save; earlier dates work too).
+
+### 10.7 Not done yet / later
+
+- The EU TV test card: cosmetic, not started.
+- Korean Parent's Day letter: the template switch follows the Mother's Day rule; not checked in
+  play.
+- Distributed items (section 3): no disc has them (WiiLink / user files, translation of JP/KR-only
+  names and letters). Korean-language text: only with the Korean disc as the base.
+- Town sign textures per language (`TownTex`) and shop signs: per language, left as they are.
