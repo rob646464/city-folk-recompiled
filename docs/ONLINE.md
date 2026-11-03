@@ -306,6 +306,18 @@ WiiConnect24 letters.
   where the game's WiiConnect24 receive path reads them (`wc24recv.mbx` + control file), so Pete
   delivers them as he did WiiConnect24 letters. Only friends can mail you; per-friend rate limits;
   letters never in plain text on the wire.
+- **Traced so far (US addresses)**: the roster code (fn_8017A220/A488/A5A8/A700/ADD0) sends through
+  `fn_800E9B70` (NWC24InitMsgObj, each recipient Wii number checked with NWC24CheckUserId (0 or
+  -0x23 accepted) and added with NWC24SetMsgToId, then fn_800EA2C8 builds the letter and
+  `fn_800E9AC8` attaches it (NWC24SetMsgDWCId + NWC24SetMsgAttached, type 0x30000) and commits);
+  fn_80179D38/79F14/7A368 -> `fn_800E9C74`, fn_8017B164/B214 -> `fn_800E9D34`; receive
+  `fn_800EA0DC` (NWC24SearchMsgs, tag 'RUU', attachments of type 0x30000, NWC24DeleteMsg).
+  NWC24 message object: +0x04 flags, +0x0C tag, +0x20 from id (u64), +0x68 attachment data
+  (NWC24Data, 8 bytes each), +0x78 attachment sizes [2], +0x80 attachment types [2], +0x88 to ids
+  (u64 x 8), +0xC8 recipient count, +0xC9 attachment count, +0xEC DWC id. Recipients are Wii
+  numbers from the roster's friend info (save+0x1C8, 0x78 per friend), which our roster entries
+  do not have yet (registered with info = NULL): the HLE needs a Wii number per F1 friend (derived
+  from the key) in that info and NWC24CheckUserId answering for it.
 - **Reliability, honestly**: direct delivery is reliable whenever both play at the same time.
   DHT items live about 2 hours unless re-published; a sender's game re-publishes only while it
   runs, so a letter between two players who are never online at the same time arrives when the

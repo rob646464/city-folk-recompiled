@@ -17,7 +17,13 @@ struct Friend {
     uint8_t pub[32] = {};
     uint32_t pid = 0;  // the DWC profile id the key gives (the game's friend code)
     State state = State::Friend;
+    std::vector<uint8_t> gameInfo;  // the friend's own roster entry (0x78 bytes, kGameInfoSize) or empty
 };
+
+// The game's roster entry for this player (save friend info, 0x78 bytes: names, town; built by
+// online.cpp from the loaded save). Sent to room members; friends' entries go into their rosters.
+constexpr size_t kGameInfoSize = 0x78;
+void setMyGameInfo(const std::vector<uint8_t>& info);
 
 // This install's keys (online.cpp's identity seed) and codes.
 const uint8_t* myPublicKey();

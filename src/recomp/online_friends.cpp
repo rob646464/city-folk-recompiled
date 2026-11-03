@@ -4,6 +4,8 @@
 //   IDENT   public key, a fresh nonce, name       (to every member, on joining / when one joins)
 //   PROVE   Ed25519 signature over "cf-prove" | the peer's nonce | our key: the key is ours
 //   REQ     friend request (name)                  ACCEPT / DECLINE   the answer
+//   INFO    our roster entry as the game builds it (0x78 bytes: player and town name); kept for
+//           friends only, so their roster shows the right names before the first visit
 // A member's room profile id must be pidOf(its key) (the DWC layer uses that id as the game's
 // friend code), so a proved key also proves the friend code shown in the game.
 #include "recomp/online_friends.h"
@@ -31,12 +33,13 @@ namespace oc = ::onlinecrypto;
 using u8 = uint8_t;
 using u32 = uint32_t;
 
-enum : u8 { F_IDENT = 0x40, F_PROVE = 0x41, F_REQ = 0x42, F_ACCEPT = 0x43, F_DECLINE = 0x44 };
+enum : u8 { F_IDENT = 0x40, F_PROVE = 0x41, F_REQ = 0x42, F_ACCEPT = 0x43, F_DECLINE = 0x44, F_INFO = 0x45 };
 
 std::recursive_mutex sMutex;
 bool sLoaded = false;
 u8 sPub[32];
 std::vector<Friend> sFriends;
+std::vector<u8> sMyInfo;
 
 struct MemberState {
     u8 pub[32] = {};
@@ -44,6 +47,8 @@ struct MemberState {
     u8 myNonce[16] = {};   // we sent; they sign it
     std::string name;
     bool identSent = false;
+    bool infoSent = false;
+    std::vector<u8> info;  // their INFO (applied once proved and a friend)
     double lastReq = -100;
     int reqCount = 0;
 };
@@ -73,6 +78,14 @@ void save() {
     std::ofstream out(listPath());
     out << "# City Folk Recompiled friends: <state> <public key> <name>\n";
     for (auto& f : sFriends) out << stateName(f.state) << " " << oc::hex(f.pub, 32) << " " << f.name << "\n";
+    for (auto& f : sFriends)
+        if (f.gameInfo.size() == kGameInfoSize) out << "info " << oc::hex(f.pub, 32) << " " << oc::hex(f.gameInfo.data(), f.gameInfo.size()) << "\n";
+}
+
+std::vector<u8> unhex(const std::string& hx) {
+    std::vector<u8> v;
+    for (size_t i = 0; i + 1 < hx.size(); i += 2) v.push_back(u8(std::stoi(hx.substr(i, 2), nullptr, 16)));
+    return v;
 }
 
 void load() {
@@ -90,6 +103,13 @@ void load() {
         std::getline(ls, name);
         while (!name.empty() && name[0] == ' ') name.erase(name.begin());
         if (hx.size() != 64) continue;
+        if (st == "info") {
+            const auto key = unhex(hx);
+            while (!name.empty() && (name.back() == '\r' || name.back() == ' ')) name.pop_back();
+            for (auto& f : sFriends)
+                if (std::memcmp(f.pub, key.data(), 32) == 0 && name.size() == 2 * kGameInfoSize) f.gameInfo = unhex(name);
+            continue;
+        }
         Friend f;
         for (int i = 0; i < 32; i++) f.pub[i] = u8(std::stoi(hx.substr(2 * i, 2), nullptr, 16));
         f.name = name.substr(0, 32);
@@ -137,6 +157,22 @@ u32 memberPid(u8 id) {
     for (auto& m : net::session().members())
         if (m.id == id) return m.pid;
     return 0;
+}
+
+// A friend's INFO into its friend entry (proved key, friend state).
+void applyInfo(MemberState& ms) {
+    if (!ms.verified || ms.info.size() != kGameInfoSize) return;
+    Friend* f = byPub(ms.pub);
+    if (!f || f->state != State::Friend || f->gameInfo == ms.info) return;
+    f->gameInfo = ms.info;
+    save();
+    if (online::logOn()) std::printf("[friends] roster entry of %s received\n", f->name.c_str());
+}
+
+void sendInfo(u8 to, MemberState& m) {
+    if (sMyInfo.size() != kGameInfoSize) return;
+    send(to, F_INFO, sMyInfo);
+    m.infoSent = true;
 }
 
 void onMessage(const net::AppMsg& m) {
@@ -192,6 +228,7 @@ void onMessage(const net::AppMsg& m) {
             f->state = State::Friend;
             send(m.from, F_ACCEPT, {});
             notice("You and " + ms.name + " are friends now");
+            applyInfo(ms);
         } else if (!f) {
             Friend nf;
             std::memcpy(nf.pub, ms.pub, 32);
@@ -212,7 +249,14 @@ void onMessage(const net::AppMsg& m) {
             f->state = State::Friend;
             save();
             notice(ms.name + " accepted your friend request");
+            applyInfo(ms);
         }
+        break;
+    }
+    case F_INFO: {
+        if (d.size() != kGameInfoSize) return;
+        ms.info = d;
+        applyInfo(ms);
         break;
     }
     case F_DECLINE: {
@@ -269,6 +313,13 @@ std::string codeOf(const uint8_t pub[32]) {
 
 std::string myCode() { return codeOf(myPublicKey()); }
 
+void setMyGameInfo(const std::vector<uint8_t>& info) {
+    std::lock_guard<std::recursive_mutex> g(sMutex);
+    if (info.size() != kGameInfoSize || info == sMyInfo) return;
+    sMyInfo = info;
+    for (auto& [id, ms] : sMembers) ms.infoSent = false;  // tick() sends it again
+}
+
 void tick() {
     std::lock_guard<std::recursive_mutex> g(sMutex);
     load();
@@ -289,6 +340,7 @@ void tick() {
         if (m.id == self || m.self) continue;
         auto& st = sMembers[m.id];
         if (!st.identSent) sendIdent(m.id, st);
+        if (!st.infoSent) sendInfo(m.id, st);
     }
     net::AppMsg msg;
     int budget = 64;
@@ -326,6 +378,9 @@ void requestFriend(uint8_t memberId) {
         f->state = State::Friend;
         send(memberId, F_ACCEPT, {});
         notice("You and " + ms.name + " are friends now");
+        save();
+        applyInfo(ms);
+        return;
     } else if (!f) {
         Friend nf;
         std::memcpy(nf.pub, ms.pub, 32);
@@ -365,6 +420,7 @@ void accept(const std::string& code) {
     const u8 m = memberOfPub(f->pub);
     if (m != 0xFF) send(m, F_ACCEPT, {});
     save();
+    if (m != 0xFF) applyInfo(sMembers[m]);
 }
 
 void decline(const std::string& code) {

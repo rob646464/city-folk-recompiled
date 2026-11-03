@@ -341,50 +341,102 @@ std::string playerName() {
     return s.empty() ? "Player" : s;
 }
 
+// This player's roster entry as another game stores it (save friend info, 0x78 bytes; layout from
+// fn_8011AD7C, which clears one, and fn_800AC160, which builds the DWC status data from the same
+// save fields): +0x00 u64 (0 here), +0x08 player (u16 id, 9 UTF-16 name units, u8 kind 0x0A),
+// +0x1E town (u16 id, name, u8 kind 0x02), +0x34 u8, +0x36 0x42 bytes (save+0x10C8).
+static std::vector<u8> myGameInfo(u32 save) {
+    std::vector<u8> v(friends::kGameInfoSize, 0);
+    const u32 a = save + 0x7EC2, b = save + 0x7ED8;  // the two 0x16-byte name structs
+    const bool aIsPlayer = rd8(a + 0x14) == 0x0A;
+    const u32 player = aIsPlayer ? a : b, town = aIsPlayer ? b : a;
+    std::memcpy(v.data() + 0x08, hostp(player), 0x16);
+    std::memcpy(v.data() + 0x1E, hostp(town), 0x16);
+    std::memcpy(v.data() + 0x36, hostp(save + 0x10C8), 0x42);
+    return v;
+}
+
+// A friend's entry from the network: names always terminated, kinds as the game sets them.
+static std::vector<u8> cleanGameInfo(std::vector<u8> v) {
+    v[0x08 + 0x12] = v[0x08 + 0x13] = 0;
+    v[0x1E + 0x12] = v[0x1E + 0x13] = 0;
+    v[0x08 + 0x14] = 0x0A;
+    v[0x1E + 0x14] = 0x02;
+    std::memset(v.data(), 0, 8);
+    return v;
+}
+
+static std::string utf16Name(const std::vector<u8>& v, size_t off) {
+    std::string s;
+    for (size_t i = 0; i < 9; i++) {
+        const u16 ch = u16(v[off + 2 * i] << 8 | v[off + 2 * i + 1]);
+        if (!ch) break;
+        s += ch < 0x80 ? char(ch) : '?';
+    }
+    return s;
+}
+
 // F1 friends into the game's own friend roster (docs/ONLINE.md section 10): a friend whose
 // profile id is not in the save's DWC friend list yet is registered the way the roster menu does
-// it after a friend code is typed (cf_RosterRegisterOffline: slot, friend data, no info: the
-// game fills name and town at the first visit), only while the game is offline and a town save
-// with valid DWC user data is loaded. The save keeps it when the game next saves.
+// it after a friend code is typed (cf_RosterRegisterOffline: slot, friend data, friend info), only
+// while the game is offline and a town save with valid DWC user data is loaded. The friend info
+// (names, town) is the one the friend's own game sent (INFO); an entry registered before that is
+// updated once it arrives. The save keeps it when the game next saves.
 static void rosterSync(Ctx& c) {
     static u32 next = 0;
     const u32 f = recomp::game::guestFrames();
     if (f < next) return;
     next = f + 120;
-    auto fl = friends::list();
-    bool any = false;
-    for (auto& fr : fl) any |= fr.state == friends::State::Friend;
-    if (!any) return;
     static const u32 fnSave = guestSymbol("cf_SaveData"), fnReg = guestSymbol("cf_RosterRegisterOffline"),
                      fnCheck = guestSymbol("DWC_CheckUserData");
     if (!fnSave || !fnReg || !fnCheck) return;
     // cf_RosterRegisterOffline itself refuses while the game is connected (online system state > 1).
     const u32 save = gu::call(c, fnSave);
     if (!save || !gu::call(c, fnCheck, {save + 4})) return;
-    static u32 buf = 0;
+    friends::setMyGameInfo(myGameInfo(save));
+    auto fl = friends::list();
+    bool any = false;
+    for (auto& fr : fl) any |= fr.state == friends::State::Friend;
+    if (!any) return;
+    static u32 buf = 0, info = 0;
     if (!buf) buf = hleAlloc(16);
+    if (!info) info = hleAlloc(u32(friends::kGameInfoSize));
     for (auto& fr : fl) {
         if (fr.state != friends::State::Friend || !fr.pid) continue;
-        int empty = -1;
-        bool have = false;
+        int empty = -1, slot = -1;
         for (int i = 0; i < 32; i++) {
             const u32 e = save + 0x44 + 12u * u32(i);
             const u32 type = (rd32(e) >> 11) & 3;
             if (type == 0 && empty < 0) empty = i;
-            if ((type == 2 || type == 3) && rd32(e + 4) == fr.pid) have = true;
+            if ((type == 2 || type == 3) && rd32(e + 4) == fr.pid && slot < 0) slot = i;
         }
-        if (have) continue;
-        if (empty < 0) {
-            notice("The game's friend roster is full: " + fr.name + " was not added");
+        const bool haveInfo = fr.gameInfo.size() == friends::kGameInfoSize;
+        std::vector<u8> gi;
+        if (haveInfo) gi = cleanGameInfo(fr.gameInfo);
+        if (slot >= 0) {
+            // Registered: refresh the names once the friend's own entry is known.
+            const u32 cur = save + 0x1C8 + u32(friends::kGameInfoSize) * u32(slot);
+            if (!haveInfo || std::memcmp(hostp(cur + 8), gi.data() + 8, friends::kGameInfoSize - 8) == 0) continue;
+        } else if (empty < 0) {
+            static std::string told;
+            if (told != fr.code) notice("The game's friend roster is full: " + fr.name + " was not added");
+            told = fr.code;
             continue;
         }
-        wr32(buf, 3u << 11);
-        wr32(buf + 4, fr.pid);
-        wr32(buf + 8, 0);
-        const u32 ok = gu::call(c, fnReg, {u32(empty), buf, 0});
-        std::printf("[online] friend %s (profile id %u) -> game roster slot %d: %s\n", fr.name.c_str(), fr.pid, empty,
-                    ok ? "registered" : "refused");
-        if (ok) notice(fr.name + " is now in the game's friend roster");
+        const int at = slot >= 0 ? slot : empty;
+        if (slot >= 0) {
+            std::memcpy(hostp(buf), hostp(save + 0x44 + 12u * u32(slot)), 12);
+        } else {
+            wr32(buf, 3u << 11);
+            wr32(buf + 4, fr.pid);
+            wr32(buf + 8, 0);
+        }
+        if (haveInfo) std::memcpy(hostp(info), gi.data(), gi.size());
+        const u32 ok = gu::call(c, fnReg, {u32(at), buf, haveInfo ? info : 0u});
+        const std::string as = haveInfo ? ", as " + utf16Name(gi, 0x0A) + " of " + utf16Name(gi, 0x20) : std::string();
+        std::printf("[online] friend %s (profile id %u) -> game roster slot %d%s: %s\n", fr.name.c_str(), fr.pid, at, as.c_str(),
+                    ok ? (slot >= 0 ? "updated" : "registered") : "refused");
+        if (ok && slot < 0) notice(fr.name + " is now in the game's friend roster");
         return;  // one per pass
     }
 }

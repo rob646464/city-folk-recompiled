@@ -440,6 +440,15 @@ void handle(Ctx& c, const net::AppMsg& m) {
         p->known = r.ok;
         if (log()) std::printf("[dwc] status of member %u: pid %u status %u (%u/%u) data %u bytes, %zu friends%s\n", m.from, p->pid,
                                p->status, p->numEntry, p->maxEntry, len, p->friends.size(), mutual(*p) ? ", has us" : "");
+        if (log() && len) {
+            std::string hx;
+            for (u16 i = 0; i < len; i++) {
+                char b[4];
+                std::snprintf(b, sizeof b, "%02X", p->data[i]);
+                hx += b;
+            }
+            std::printf("[dwc]   status data %s\n", hx.c_str());
+        }
         notifyStatuses(c);
         break;
     }
