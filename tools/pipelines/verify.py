@@ -50,16 +50,17 @@ def routes():
         # town arrival (new_game.txt, its own deterministic town).
         "new_game": ("new_game.txt", 15000, {**day}),
         # Saved town by day, walking around (the fixture's town).
-        "town_day": ("precache_town.txt", 9000, {**fx, **day}),
+        "town_day": ("precache_town.txt", 8000, {**fx, **day}),
         # Evening and night (street lights, lit windows, night sky).
-        "town_night": ("precache_town.txt", 9000, {**fx, "CF_CLOCK_START": "2026-10-27 21:30"}),
-        # Rain and snow (CF_WEATHER_FAKE, docs/CALENDAR.md).
-        "town_rain": ("precache_town.txt", 9000, {**fx, **day, "CF_WEATHER_FAKE": "rain"}),
-        "town_snow": ("precache_town.txt", 9000, {**fx, "CF_CLOCK_START": "2026-01-15 11:00", "CF_WEATHER_FAKE": "heavysnow"}),
-        # Buildings: the player's house, then the town's buildings (route file comments).
-        "house": ("precache_house.txt", 8000, {**fx, **day}),
+        "town_night": ("precache_town.txt", 8000, {**fx, "CF_CLOCK_START": "2026-10-27 21:30"}),
+        # Rain and snow (CF_WEATHER_FAKE, docs/CALENDAR.md; snow needs the snow season).
+        "town_rain": ("precache_town.txt", 8000, {**fx, **day, "CF_WEATHER_FAKE": "rain"}),
+        "town_snow": ("precache_town.txt", 8000, {**fx, "CF_CLOCK_START": "2027-01-15 11:00", "CF_WEATHER_FAKE": "heavysnow"}),
+        # Buildings: the player's house; Nook's Cranny (Tom Nook, shop interior); the museum
+        # (to_museum.txt walks the new_game town: its own deterministic town, no fixture).
+        "house": ("precache_house.txt", 7800, {**fx, **day}),
+        "nook": ("precache_nook.txt", 7800, {**fx, **day}),
         "museum": ("to_museum.txt", 18500, {**day}),
-        "menus": ("precache_menus.txt", 9000, {**fx, **day}),
     }
 
 
