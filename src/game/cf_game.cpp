@@ -13,6 +13,8 @@
 #include "game/cf_features.h"
 #include "game/cf_region.h"
 
+#include "recomp/distributions.h"
+
 #include <atomic>
 #include <cmath>
 #include <mutex>
@@ -93,6 +95,7 @@ bool onGuestFrame(Ctx& c) {
     region::onGuestFrame(frame);  // cf_region.cpp test aids
     cf::grassOnFrame(c);  // cf_grass.cpp, cf_skin.cpp (docs/FEATURES.md)
     cf::skinOnFrame(c);
+    distrib::onGuestFrame(c);  // Nintendo events (docs/DISTRIBUTIONS.md)
     online::onGuestFrame(c);  // CF_ONLINE_* test aids (online.cpp)
     return cf::devOnGuestFrame(c);  // CF_FF fast-forward and other test aids (cf_devaids.cpp)
 }

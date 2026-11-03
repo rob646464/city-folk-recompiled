@@ -71,6 +71,10 @@ add_executable(cf_wiimote_hid_test tools/tests/wiimote_hid_test.cpp src/recomp/w
 target_include_directories(cf_wiimote_hid_test PRIVATE src)
 enable_testing()
 add_test(NAME wiimote_hid COMMAND cf_wiimote_hid_test)
+# Nintendo events: WC24 crypto (SHA-1, AES-OFB, RSA) and VFF volumes (docs/DISTRIBUTIONS.md "Testing").
+add_executable(cf_distrib_test tools/tests/distrib_test.cpp src/recomp/wc24_crypto.cpp src/recomp/vff.cpp)
+target_include_directories(cf_distrib_test PRIVATE src)
+add_test(NAME distrib COMMAND cf_distrib_test)
 
 # Online room transport (src/recomp/online_net.*, docs/ONLINE.md): host + members over loopback UDP.
 add_executable(cf_online_test tools/tests/online_net_test.cpp src/recomp/online_net.cpp

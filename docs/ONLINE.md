@@ -314,6 +314,15 @@ Left:
   present-but-off, `/shared2/wc24` files from sysconf.cpp prepareWc24; the game's NWC24 tasks run on
   the save path) and with the distributions agent (NWC24 downloads): the mail HLE must leave the
   "WC24 off" behaviour unchanged while online is off.
+  **Download side done** (branch distrib-1, docs/DISTRIBUTIONS.md; files `src/recomp/nwc24_dl.cpp`,
+  `vff.cpp`, `wc24_crypto.cpp`, `distributions.cpp`): while F1 > Online > Nintendo events is on, a
+  working KD (`/dev/net/kd/request`, `/dev/net/kd/time`) and a minimal NCD (ReadConfig: one wired,
+  tested connection) replace main's KdDevice, SYSCONF `NET.WCFG` = 1, and the game's own
+  WiiConnect24 check reports "available". For the mail HLE: register KD's mail ioctls (0x0A check,
+  0x0B send, 0x0C receive, 0x0D save) with `nwc24::setMailHandler()`, take over NCD with
+  `nwc24::setNcdOwner()`, and make `nwc24::wc24On()` (nwc24_dl.h) also true when mail is on; the
+  VFF writer (`vff::write`, VFAT long names as the game's VF uses them) serves `wc24recv.mbx` too.
+  The town's own WiiConnect24 setting (save +0x735E4, setter `fn_80177DE0`) also gates mail.
 - **Friends in the game's roster** and **presence** without a room: section 10. Leads for the
   roster: the roster menu `d_menu_friendNP` fn_139_10EC builds the entry with
   DWC_CreateFriendKeyToken, checks duplicates with `fn_8017BD64` and stores it at menu+0x5A0; the

@@ -73,3 +73,10 @@ fn_802B5598 all
 # Enhanced world (src/game/cf_world.cpp, docs/RENDERING.md "Enhanced world"): dWeather_c's per-frame
 # update (its weather state at +0x5884).
 fn_801C92F0 all
+
+# Nintendo events (docs/DISTRIBUTIONS.md): the game keeps a Nintendo letter from a WiiConnect24
+# package (save letter slot, letter, item, letter id); src/recomp/distributions.cpp records which
+# distribution the town received and calls the original. USA only.
+fn_8010F194
+# Pete hands a kept Nintendo letter over (copies it into the player's mail); logged by distributions.cpp.
+fn_80104520

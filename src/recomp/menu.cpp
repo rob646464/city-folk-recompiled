@@ -17,6 +17,7 @@
 #include "recomp/controls.h"
 #include "recomp/wiimote.h"
 #include "recomp/crt.h"
+#include "recomp/distributions.h"
 #include "recomp/enhanced_lighting.h"
 #include "recomp/frame.h"
 #include "recomp/interp.h"
@@ -95,7 +96,7 @@ constexpr Page kPages[] = {
     {"Visuals", "Texture packs"},
     {"Sound", nullptr},           {"Controls", "Ports"},           {"Controls", "Bindings"},
     {"Controls", "Pointer"},      {"Controls", "Analog"},       {"Controls", "DSU"},             {"Enhancements", "General"},     {"Enhancements", "Gameplay"},
-    {"Enhancements", "Silly"},          {"Enhancements", "Unused content"}, {"Enhancements", "Debug"}, {"Game", nullptr},
+    {"Enhancements", "Silly"},          {"Enhancements", "Unused content"}, {"Enhancements", "Debug"}, {"Game", nullptr}, {"Online", "Play together"}, {"Online", "Nintendo events"},
 };
 constexpr int kPageCount = int(sizeof(kPages) / sizeof(kPages[0]));
 constexpr float kXs[] = {0.05f, 0.3f, 0.6f, 0.88f};
@@ -1968,7 +1969,17 @@ void draw() {
                 ImGui::EndTabItem();
             }
             if (tab("Online")) {
-                sDirty |= recomp::online::drawTab();
+                if (ImGui::BeginTabBar("##online")) {
+                    if (ImGui::BeginTabItem("Play together", nullptr, envTab("Play together"))) {
+                        sDirty |= recomp::online::drawTab();
+                        ImGui::EndTabItem();
+                    }
+                    if (ImGui::BeginTabItem("Nintendo events", nullptr, envTab("Nintendo events"))) {
+                        sDirty |= recomp::distrib::drawMenuPage();  // docs/DISTRIBUTIONS.md
+                        ImGui::EndTabItem();
+                    }
+                    ImGui::EndTabBar();
+                }
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar();

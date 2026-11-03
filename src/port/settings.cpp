@@ -298,6 +298,12 @@ std::vector<Field> fields() {
         rgb("silly_luigi", "poltergust_color", sSettings.sillyLuigi.colorRgb[kSillyPoltergust]),
         flag("updates", "check_at_startup", sSettings.updates.checkAtStartup),
         str("updates", "skip_version", sSettings.updates.skipVersion),
+        num("nintendo_events", "mode", sSettings.events.mode),
+        num("nintendo_events", "loop_period", sSettings.events.loopPeriod),
+        flag("nintendo_events", "original_yearly", sSettings.events.originalYearly),
+        flag("nintendo_events", "other_regions", sSettings.events.otherRegions),
+        flag("nintendo_events", "live_delivery", sSettings.events.liveDelivery),
+        flag("nintendo_events", "town_wc24", sSettings.events.townWc24),
         str("online", "player_name", sSettings.online.playerName),
         str("online", "room_name", sSettings.online.roomName),
         num("online", "port", sSettings.online.port),
@@ -332,6 +338,8 @@ void sanitize() {
     clampTo(sSettings.online.port, 1024, 65535);
     if (sSettings.online.playerName.size() > 24) sSettings.online.playerName.resize(24);
     clampTo(v.targetFps, kMinFps, kMaxFps);
+    clampTo(sSettings.events.mode, 0, 3);
+    clampTo(sSettings.events.loopPeriod, 0, 2);
     clampEnum(v.aspect, AspectMode::Ultra32x9, AspectMode::Auto);
     clampTo(v.resolutionScale, 0, 8);
     clampTo(v.fovScale, 0.75f, 1.5f);

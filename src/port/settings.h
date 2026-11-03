@@ -361,6 +361,17 @@ struct InterfaceSettings {
     bool startHint = true;  // "Press F1 for options" notice for the first seconds of play (menu.cpp)
 };
 
+// Nintendo event distributions (F1 > Online > Nintendo events; src/recomp/distributions.cpp,
+// docs/DISTRIBUTIONS.md). Off by default: nothing is downloaded and WiiConnect24 stays off.
+struct NintendoEventSettings {
+    int mode = 0;               // 0 off, 1 loop (every distribution in turn), 2 original dates, 3 only when I choose
+    int loopPeriod = 0;         // loop: 0 every week, 1 every 2 weeks, 2 every month
+    bool originalYearly = true; // original dates: every year (month/day); false = only in the original years
+    bool otherRegions = false;  // include other regions' distributions
+    bool liveDelivery = true;   // USA: run the game's own WiiConnect24 check while playing
+    bool townWc24 = true;       // USA: turn the town's own WiiConnect24 setting on (the game's setter) when it is off
+};
+
 // Online play between players of this port (F1 > Online; src/recomp/online.cpp, docs/ONLINE.md).
 // Room passwords are never saved.
 struct OnlineSettings {
@@ -390,6 +401,7 @@ struct Settings {
     SillyWorldSettings sillyWorld;
     SillyLuigiSettings sillyLuigi;
     UpdateSettings updates;
+    NintendoEventSettings events;
     OnlineSettings online;
 };
 

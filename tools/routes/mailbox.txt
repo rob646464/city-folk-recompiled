@@ -1,0 +1,22 @@
+# Continue the user-town fixture and check the mailbox (Nintendo events, docs/DISTRIBUTIONS.md):
+# CF_FIXTURE=user-town, CF_INPUT_CLOCK=frames. In town at the house by ~5000; the mailbox is up-left.
+include continue.txt
+
+# Walk left, then up to the mailbox, open it (A), read on.
+7000:STICKLEFT*58
++70:STICKUP*90
++100:A
++120:A ~5
+# Pockets (bag button, HUD bottom left).
+8000:@-0.82/0.82
++30:A
+
+# Letters (envelope button, top right of the pockets)
+8150:@0.59/-0.66
++30:A
+# The first letter (the Nintendo one, with a present): Read
+8350:@-0.42/-0.71
++30:A
++40:@-0.19/-0.80
++20:A
++150:A ~6
