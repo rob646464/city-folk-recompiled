@@ -490,8 +490,43 @@ static void rosterSync(Ctx& c) {
     }
 }
 
+// CF_GIVE_ITEM=<frame>:<item code hex>[x<n>],... (test aid, letters test): puts items into the first
+// empty pocket slots of the player being played. Pockets: player data + 0x7F22, 15 x u16, empty =
+// 0xFFF1 (fn_8013807C writes them so); item code = 0x9000 + item number * 4 (+ count bits, e.g.
+// stationery), the item number being the record's second field in Item/item.arc item.bin
+// (fn_800C29D0: number = (code - 0x9000) >> 2). Examples: butterfly paper 0x9640 (+3 = 4 sheets),
+// 1,000 Bells 0x91B8.
+static void giveItems(Ctx& c) {
+    static const char* env = std::getenv("CF_GIVE_ITEM");
+    if (!env) return;
+    const u32 f = recomp::game::guestFrames();
+    for (const char* p = env; *p;) {
+        char* e = nullptr;
+        const u32 at = u32(std::strtoul(p, &e, 10));
+        if (*e != ':') break;
+        const u32 code = u32(std::strtoul(e + 1, &e, 16));
+        u32 n = 1;
+        if (*e == 'x') n = u32(std::strtoul(e + 1, &e, 10));
+        if (at == f) {
+            const u32 pd = gu::call(c, VA(0x801017B8), {0});
+            if (pd >= 0x90000000u && pd < 0x94000000u) {
+                u32 given = 0;
+                for (u32 i = 0; i < 15 && given < n; i++)
+                    if (rd16(pd + 0x7F22 + 2 * i) == 0xFFF1) {
+                        wr16(pd + 0x7F22 + 2 * i, u16(code));
+                        given++;
+                    }
+                std::printf("[online-test] frame %u: %u x item %04X into the pockets\n", f, given, code);
+            }
+        }
+        p = *e == ',' ? e + 1 : e;
+        if (*e != ',') break;
+    }
+}
+
 void onGuestFrame(Ctx& c) {
     if (!sEnvDone) envStart();
+    giveItems(c);
     rosterSync(c);
     if (sJoinPending) tryJoinFromEnv();
     if (!sCodeFile.empty() && envOr("CF_ONLINE_HOST")) {
