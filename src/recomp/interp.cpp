@@ -361,8 +361,53 @@ struct TagFrame {
 constexpr int kMaxTagDepth = 64;
 TagFrame sTagStack[kMaxTagDepth];
 int sTagDepth = 0;
-std::unordered_map<u64, u32> sTagOcc;   // per tape: scope base identity -> occurrences so far
-std::unordered_map<u64, u32> sValOcc;   // per tape: (scope, kind, site...) -> values noted so far
+// Per-tape counters by 64-bit identity: an open-addressing table emptied by bumping an epoch, so
+// a tape's thousands of keys cost no heap allocation (std::unordered_map allocated a node per key,
+// every game frame: with g3d's ~400 display lists and ~4500 values per City Folk tape the guest
+// spent ~18% of its time in the heap while capturing).
+struct OccTable {
+    std::vector<u64> keys;
+    std::vector<u32> vals, stamp;
+    u32 epoch = 1, used = 0;
+    u32& at(u64 key) {
+        if (keys.empty() || (used + 1) * 2 > keys.size()) grow();
+        const size_t mask = keys.size() - 1;
+        for (size_t i = size_t((key * 0x9E3779B97F4A7C15ull) >> 20) & mask;; i = (i + 1) & mask) {
+            if (stamp[i] != epoch) {
+                stamp[i] = epoch, keys[i] = key, vals[i] = 0, used++;
+                return vals[i];
+            }
+            if (keys[i] == key) return vals[i];
+        }
+    }
+    u32 find(u64 key) const {  // 0 when absent
+        if (keys.empty()) return 0;
+        const size_t mask = keys.size() - 1;
+        for (size_t i = size_t((key * 0x9E3779B97F4A7C15ull) >> 20) & mask;; i = (i + 1) & mask) {
+            if (stamp[i] != epoch) return 0;
+            if (keys[i] == key) return vals[i];
+        }
+    }
+    void clear() {
+        used = 0;
+        if (++epoch == 0) {
+            std::fill(stamp.begin(), stamp.end(), 0u);
+            epoch = 1;
+        }
+    }
+    void grow() {
+        std::vector<u64> ok = std::move(keys);
+        std::vector<u32> ov = std::move(vals), os = std::move(stamp);
+        const size_t n = ok.empty() ? 4096 : ok.size() * 2;
+        keys.assign(n, 0), vals.assign(n, 0), stamp.assign(n, 0);
+        const u32 e = epoch;
+        used = 0;
+        for (size_t i = 0; i < ok.size(); i++)
+            if (os[i] == e) at(ok[i]) = ov[i];
+    }
+};
+OccTable sTagOcc;  // per tape: scope base identity -> occurrences so far
+OccTable sValOcc;  // per tape: (scope, kind, site...) -> values noted so far
 std::map<u32, u32> sGen;  // tagged object address -> generation (ordered: freed blocks are ranges)
 u32 sGenEpoch = 0;        // added to every generation; bumped when the table is reset
 std::vector<SiteTag> sSiteTags;
@@ -393,9 +438,9 @@ u64 scopeBase(u64 parent, TagCat cat, u32 obj, u32 type, u32 sub) {
     return mix(parent ^ mix(u64(cat) << 56 ^ u64(obj) << 20 ^ u64(type) * 0x9E3779B97F4A7C15ull) ^
                mix(u64(sub) << 32 ^ generationOf(obj)));
 }
-u32 occurrence(std::unordered_map<u64, u32>& m, u64 k) {
+u32 occurrence(OccTable& m, u64 k) {
     if (!sCapturing) return 0;
-    return m[k]++;
+    return m.at(k)++;
 }
 
 // The camera the game is drawing with now (see viewMatrixSource), as an index into sViews. A
@@ -853,15 +898,14 @@ void pairTapes(const Tape& a, Tape& b) {
         for (int c = 0; c < 3; c++) b.worldAxis[3 * i + c].store(0.0f, std::memory_order_relaxed);
         b.groupSnap[i].store(0, std::memory_order_relaxed);
     }
-    static std::unordered_map<u64, s32> byKey;
+    // (Flat tables, no allocation per key: index + 1 of a's value, ~0u when ambiguous.)
+    static OccTable byKey, seenB;
     byKey.clear();
-    byKey.reserve(a.patches.size() * 2);
     for (u32 i = 0; i < a.patches.size(); i++)
         if (const u64 k = a.patches[i].key) {
-            auto [it, fresh] = byKey.try_emplace(k, s32(i));
-            if (!fresh) it->second = -2;  // the same identity twice: ambiguous, never paired
+            u32& v = byKey.at(k);
+            v = v == 0 ? i + 1 : ~0u;  // the same identity twice: ambiguous, never paired
         }
-    static std::unordered_set<u64> seenB;
     seenB.clear();
     b.paired = b.unpaired = b.untagged = 0;
     for (u32 i = 0; i < b.patches.size(); i++) {
@@ -870,16 +914,16 @@ void pairTapes(const Tape& a, Tape& b) {
             b.untagged++;
             continue;
         }
-        if (!seenB.insert(p.key).second) {  // ambiguous in b too
+        if (seenB.at(p.key)++ != 0) {  // ambiguous in b too
             b.unpaired++;
             continue;
         }
-        const auto it = byKey.find(p.key);
-        if (it == byKey.end() || it->second < 0 || !compatible(a.patches[it->second], p)) {
+        const u32 v = byKey.find(p.key);
+        if (v == 0 || v == ~0u || !compatible(a.patches[v - 1], p)) {
             b.unpaired++;
             continue;
         }
-        b.partner[i] = it->second;
+        b.partner[i] = s32(v - 1);
         b.paired++;
     }
     texWrapPairs(a, b);
@@ -1651,18 +1695,26 @@ void endTape(u32 retraceCount) {
     tape->bytes.assign(sScratch.begin(), sScratch.begin() + size);
     tape->sites = std::make_shared<const std::vector<std::pair<u32, u32>>>(std::move(sTapeSites));
     sTapeSites = {};
+    // (The next tape's vectors start at this one's size: no reallocation while capturing.)
+    const size_t nPatches = sPatches.size(), nBundles = sBundleIds.size();
     tape->patches = std::move(sPatches);
     sPatches = {};
+    sPatches.reserve(nPatches + nPatches / 8 + 64);
     tape->bundleIds = std::move(sBundleIds);
     sBundleIds = {};
+    sBundleIds.reserve(nBundles + nBundles / 8 + 16);
     tape->bundleKey = std::move(sBundleKey);
     sBundleKey = {};
+    sBundleKey.reserve(nBundles + nBundles / 8 + 16);
     tape->bundleRange = std::move(sBundleRange);
     sBundleRange = {};
+    sBundleRange.reserve(nBundles + nBundles / 8 + 16);
     tape->bundlePass = std::move(sBundlePass);
     sBundlePass = {};
+    sBundlePass.reserve(nBundles + nBundles / 8 + 16);
     tape->bundleCentre = std::move(sBundleCentre);
     sBundleCentre = {};
+    sBundleCentre.reserve(nBundles + nBundles / 8 + 16);
     tape->slotCentres = std::move(sSlotCentres);
     sSlotCentres = {};
     tape->bundleSlots = std::move(sBundleSlots);
