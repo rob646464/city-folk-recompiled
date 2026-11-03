@@ -20,6 +20,7 @@
 #include "recomp/interp.h"
 #include "recomp/runtime.h"
 #include "recomp/widescreen.h"
+#include "game/cf_light.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -154,6 +155,7 @@ HLE(Draw__Q34nw4r3lyt4PaneFRCQ34nw4r3lyt8DrawInfo) {
     if (depth == 0) {
         sRootLr = c.lr;
         sRootPane = pane;
+        cflight::onLayoutDraw(c);  // cf_light.cpp: the 2D starts, the 3D scene has ended
         cf::navLayoutDrawn(c, pane);  // menu items for the pointer snap (cf_menu_nav.cpp)
         world::onLayoutDraw();  // cf_world.cpp: the 2D starts, the world effects end (after enhanced lighting's scene end)
     }

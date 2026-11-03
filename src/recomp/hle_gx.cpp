@@ -1923,7 +1923,18 @@ GXHLE(GXLoadLightObjImm) {
     // Position and direction (view space) are blended by frame interpolation.
     const u32 at = interp::mark();
     GXLoadLightObjImm(light(c.r[3]), GXLightID(c.r[4]));
-    if (std::getenv("CF_LIGHT_TRACE")) {
+    enh::noteGameLight(reinterpret_cast<const float*>(hostp(c.r[3])), c.r[4]);
+    static const int sTrace = [] {
+        const char* v = std::getenv("CF_LIGHT_TRACE");
+        return v ? std::max(std::atoi(v), 1) : 0;
+    }();
+    if (sTrace >= 2 && copyDispCount() % 600 == 0) {  // =2: every load with position / direction every 600 frames
+        const auto* lo = reinterpret_cast<const float*>(hostp(c.r[3]) + 4);
+        log("[light] f%u obj %08X id %X col %08X a %.3f %.3f %.3f k %.4f %.4f %.4f pos %.1f %.1f %.1f dir %.3f %.3f %.3f lr %08X",
+            copyDispCount(), c.r[3], c.r[4], rd32(c.r[3]), lo[0], lo[1], lo[2], lo[3], lo[4], lo[5], lo[6], lo[7], lo[8], lo[9],
+            lo[10], lo[11], c.lr);
+    }
+    if (sTrace == 1) {
         const auto* lo = reinterpret_cast<const float*>(hostp(c.r[3]) + 4);  // a0 a1 a2 k0 k1 k2 px..nz
         static std::vector<u64> seen;
         const u64 key = u64(c.lr) << 32 | c.r[4] | u64(lo[1] != 0.0f) << 31;

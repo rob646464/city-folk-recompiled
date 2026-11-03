@@ -938,85 +938,10 @@ const char* presetNote(bool custom) {
     return custom ? "" : "\n\nSet by the quality preset: choose \"Custom\" to change it.";
 }
 
-// ---- Enhanced lighting > Lights > World lights (src/recomp/world_lights.cpp) ----
-void worldLightsSection() {
-    auto& w = port::settings().worldLights;
-    sDirty |= recomp::menu::Checkbox("World lights", &w.enabled);
-    ImGui::SetItemTooltip(
-        "Candles, fireplaces, lamps, the Poltergust's element sprays, fire, lightning and sparkles\n"
-        "light the room around them in color, like the ghost lights. Positions come from the game's\n"
-        "own flames and effects. Off: only the game's own lighting. GPU cost grows with the number\n"
-        "of lights in view (up to 64 colored lights in total).");
-    ImGui::BeginDisabled(!w.enabled);
-    ImGui::Indent();
-    sDirty |= recomp::menu::SliderFloat("World light intensity", &w.masterIntensity, 0.0f, 3.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("Brightness of every world light (1 = default), on top of each kind's own slider.");
-    struct Row {
-        int cat;
-        const char* name;
-        const char* tip;
-    };
-    static const Row kRows[] = {
-        {port::kWlCandles, "Candles", "Candles and candelabras: fiery orange (violet where the game's flame is violet), flickering."},
-        {port::kWlFires, "Fireplaces and torches", "Hearth fires and torches: strong flickering orange light."},
-        {port::kWlLamps, "Lamps and chandeliers", "Lamps and chandeliers: steady warm light."},
-        {port::kWlSprays, "Element sprays", "The Poltergust's fire spray lights the room orange; water and ice sprays a subtle blue/cyan."},
-        {port::kWlFireFx, "Fire effects", "Fireballs, burning objects and characters."},
-        {port::kWlLightning, "Lightning", "A cool blue-white flash from the windows when lightning strikes."},
-        {port::kWlSparkles, "Sparkles and glows", "Subtle glows of treasure, coins, keys and other sparkling pickups."},
-    };
-    for (const Row& r : kRows) {
-        ImGui::PushID(r.cat);
-        sDirty |= recomp::menu::Checkbox(r.name, &w.on[r.cat]);
-        ImGui::SetItemTooltip("%s", r.tip);
-        ImGui::SameLine(ImGui::GetWindowWidth() * 0.42f);
-        ImGui::SetNextItemWidth(ImGui::GetWindowWidth() * 0.3f);
-        ImGui::BeginDisabled(!w.on[r.cat]);
-        sDirty |= recomp::menu::SliderFloat("##i", &w.intensity[r.cat], 0.0f, 3.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
-        ImGui::SetItemTooltip("Brightness of these lights (1 = default).");
-        ImGui::EndDisabled();
-        ImGui::PopID();
-    }
-    sDirty |= recomp::menu::Checkbox("Flame flicker", &w.flicker);
-    ImGui::SetItemTooltip("Flames flicker naturally. Off: steady flames.");
-    sDirty |= recomp::menu::Checkbox("Merge nearby flames", &w.mergeNearby);
-    ImGui::SetItemTooltip("Flames of one kind close together (a candelabra) become one light. Faster; off: one light per flame.");
-    ImGui::Unindent();
-    ImGui::EndDisabled();
-}
-
-// ---- Enhanced lighting > Lights > Ghost lights (src/recomp/ghost_lights.cpp) ----
-void ghostLightsSection() {
-    auto& g = port::settings().ghostLights;
-    sDirty |= recomp::menu::Checkbox("Ghost lights", &g.enabled);
-    ImGui::SetItemTooltip(
-        "Every visible ghost lights the room around it in its own glow colour (the colour the game\n"
-        "uses for that ghost's light effects; fire, water and ice ghosts glow orange, blue, cyan).\n"
-        "Invisible ghosts give no light. Off: the original lighting. Small GPU cost per light.");
-    ImGui::BeginDisabled(!g.enabled);
-    ImGui::Indent();
-    sDirty |= recomp::menu::SliderFloat("Ghost light intensity", &g.intensity, 0.0f, 4.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("Brightness of every ghost light (1 = default).");
-    sDirty |= recomp::menu::SliderFloat("Ghost light radius", &g.radiusScale, 0.25f, 3.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("How far each ghost's light reaches (scaled by the ghost's size; bosses reach farthest).");
-    sDirty |= recomp::menu::Checkbox("Dramatic ghost light effects", &g.dramatic);
-    ImGui::SetItemTooltip(
-        "The light pulses gently, flares when a ghost appears, ramps up and flickers while the\n"
-        "Poltergust drains the ghost, and bursts then fades when it is captured.\n"
-        "Off: a steady light that only follows the ghost's visibility.");
-    sDirty |= recomp::menu::SliderInt("Max ghost lights", &g.maxLights, 1, 64, "%d lights", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("Most ghost lights at once (the strongest/nearest first; all colored lights share\n"
-                          "a budget of 64). Lower is faster.");
-    sDirty |= recomp::menu::Checkbox("Shadows from ghost lights", &g.shadows);
-    ImGui::SetItemTooltip("The one or two strongest ghost lights cast shadows (with \"Colored light shadows\"\n"
-                          "under Shadows). Costs a shadow pass per light.");
-    ImGui::Unindent();
-    ImGui::EndDisabled();
-}
-
-// Enhanced lighting (src/recomp/enhanced_lighting.cpp, docs/RENDERING.md "Enhanced lighting"):
-// a master switch (off by default) and every part with its own switch and controls, grouped
-// into Lights / Shadows / Flashlight / Effects.
+// Enhanced lighting for City Folk (src/game/cf_light.cpp, src/recomp/enhanced_lighting.cpp;
+// docs/RENDERING.md "Enhanced lighting (City Folk)"): a master switch (off by default), a quality
+// preset, and every part with its own switch, grouped into Sun & moon / Time of day / Night lights
+// / Ambient occlusion / Bloom & sun shafts.
 void enhancedLightingTab() {
     auto& l = port::settings().enhancedLighting;
     ImGui::TextDisabled("Optional effects on top of the accurate rendering. Off by default: the original");
@@ -1031,222 +956,139 @@ void enhancedLightingTab() {
     static const char* kPresets[] = {"Low", "Medium", "High", "Ultra", "Custom"};
     sDirty |= combo("Quality preset", l.preset, kPresets, 5);
     ImGui::SetItemTooltip(
-        "Sets the soft shadow, volumetric beam and colored-light shadow quality. Low suits weaker\n"
-        "GPUs; Ultra is for high-end cards at high resolutions. Custom keeps the values chosen below.");
+        "Sets the shadow-map size and filter, how many night lights cast shadows and the sun-shaft\n"
+        "steps. Low suits weaker GPUs; Ultra is for high-end cards at high resolutions. Custom keeps\n"
+        "the values chosen below.");
     const bool custom = l.preset == port::EnhancedPreset::Custom;
-
-    // ---- Lights ----
-    ImGui::SeparatorText("Lights");
     sDirty |= recomp::menu::Checkbox("Per-pixel lighting", &l.perPixelLighting);
+    ImGui::SetItemTooltip("The game's own lights are computed for every pixel instead of every vertex, with\n"
+                          "the same formulas: smoother shading on the ground, houses and characters. Small GPU cost.");
+
+    // ---- Sun & moon ----
+    ImGui::SeparatorText("Sun & moon");
+    sDirty |= recomp::menu::Checkbox("Real sun and moon shadows", &l.sunShadows);
     ImGui::SetItemTooltip(
-        "The game's own lights (room lights, flashlight, specular) are computed for every pixel\n"
-        "instead of every vertex, with the same formulas. Smoother, rounder light pools on walls\n"
-        "and floors instead of blotchy triangles. Small GPU cost.");
-    sDirty |= recomp::menu::Checkbox("Dynamic colored lights", &l.extraLights);
-    ImGui::SetItemTooltip(
-        "Colored real-time light from ghosts and other light-emitting objects, lighting the room\n"
-        "around them (through the game's own materials). Cost grows with the number of lights.\n"
-        "Needed by the ghost lights, world lights and colored light shadows.");
-    ImGui::BeginDisabled(!l.extraLights);
+        "Characters, trees, houses, furniture and fences cast soft shadows from the sun by day and the\n"
+        "moon by night. The light follows the game clock (east in the morning, south at noon, west in\n"
+        "the evening; long shadows at sunrise and sunset), weaker and softer under clouds, almost gone\n"
+        "in rain and snow. Cost: one extra render of the scene from the light per frame (four cascades),\n"
+        "about 0.5-1.5 ms at 1080p (see docs for measurements).");
+    ImGui::BeginDisabled(!l.sunShadows);
     ImGui::Indent();
-    sDirty |= recomp::menu::SliderFloat("Light intensity", &l.extraLightIntensity, 0.0f, 3.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("Brightness of every colored light (ghost lights, world lights; 1 = default).");
+    static const char* kDir[] = {"Time of day (sun path)", "The game's own key light"};
+    sDirty |= ImGui::Combo("Light direction", &l.sunDirection, kDir, 2);
+    ImGui::SetItemTooltip("Time of day: a real sun path from the game clock (and hemisphere setting).\n"
+                          "The game's own key light: the direction the game lights its models from (mostly from\n"
+                          "behind the camera, so shadows fall away from you and are mostly hidden).");
+    sDirty |= recomp::menu::SliderFloat("Shadow strength", &l.sunShadowStrength, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetItemTooltip("How much a full shadow darkens (tinted with the sky's colour). The moon's shadows are weaker.");
+    sDirty |= recomp::menu::SliderFloat("Shadow softness", &l.sunShadowSoftness, 0.0f, 3.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetItemTooltip("Size of the sun / moon as a light source: sharp where an object touches the ground,\n"
+                          "softer farther away. 0: a fixed small blur.");
+    sDirty |= recomp::menu::SliderFloat("Shadow distance", &l.sunShadowDistance, 1000.0f, 8000.0f, "%.0f units", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetItemTooltip("How far from the camera shadows are drawn (an acre is 640 units). Farther spreads\n"
+                          "the same shadow-map texels over more ground (blurrier). No cost difference.");
+    static const char* kSize[] = {"512", "1024", "2048"};
+    static const char* kQ[] = {"Low (8 taps)", "Medium (12 taps)", "High (20 taps)"};
+    ImGui::BeginDisabled(!custom);
+    sDirty |= ImGui::Combo("Shadow map size", &l.sunShadowMapSize, kSize, 3);
+    ImGui::SetItemTooltip("Texels per cascade (four cascades; night-light shadows use the same size per cube face).\n"
+                          "Larger: sharper shadows, more GPU memory and time.%s", presetNote(custom));
+    sDirty |= ImGui::Combo("Shadow filter", &l.sunShadowQuality, kQ, 3);
+    ImGui::SetItemTooltip("Filter taps of the soft edge. More: smoother edges, more GPU time.%s", presetNote(custom));
+    ImGui::EndDisabled();
+    static const char* kBlob[] = {"Keep", "Fade under real shadows", "Hide"};
+    sDirty |= ImGui::Combo("Round blob shadows", &l.blobShadows, kBlob, 3);
+    ImGui::SetItemTooltip("The game's own round shadows under characters and objects: kept as they are, faded\n"
+                          "where a real shadow already falls, or hidden.");
+    sDirty |= recomp::menu::Checkbox("Indoor shadows", &l.indoorShadows);
+    ImGui::SetItemTooltip("Inside houses and shops: shadows from the room's main light.");
+    ImGui::Unindent();
+    ImGui::EndDisabled();
+    sDirty |= recomp::menu::Checkbox("Sunlight", &l.sunLight);
+    ImGui::SetItemTooltip("Warm sunlight on the sides facing the sun (golden near sunrise and sunset, faint cool\n"
+                          "moonlight at night), stopped by the shadows. Off: shadows only.");
+    ImGui::BeginDisabled(!l.sunLight);
+    ImGui::Indent();
+    sDirty |= recomp::menu::SliderFloat("Sunlight intensity", &l.sunLightIntensity, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::Unindent();
+    ImGui::EndDisabled();
+
+    // ---- Time of day ----
+    ImGui::SeparatorText("Time of day");
+    sDirty |= recomp::menu::Checkbox("Time-of-day lighting", &l.timeOfDay);
+    ImGui::SetItemTooltip(
+        "Golden light at sunrise and sunset, a blue dusk, cool moonlight at night, blended smoothly\n"
+        "with the game clock, on top of the game's own hourly colours (the HUD is never tinted).\n"
+        "One full-screen pass, ~0.1-0.3 ms.");
+    ImGui::BeginDisabled(!l.timeOfDay);
+    ImGui::Indent();
+    sDirty |= recomp::menu::SliderFloat("Strength##tod", &l.timeOfDayStrength, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::Unindent();
+    ImGui::EndDisabled();
+    sDirty |= recomp::menu::Checkbox("Follow the weather", &l.timeOfDayWeather);
+    ImGui::SetItemTooltip("Overcast skies flatten the light (weaker, softer shadows, less colour); rain and snow\n"
+                          "almost remove the sun's shadows.");
+
+    // ---- Night lights ----
+    ImGui::SeparatorText("Night lights");
+    sDirty |= recomp::menu::Checkbox("Night lights that light", &l.nightLights);
+    ImGui::SetItemTooltip("Lit house windows, lamps and shop windows cast warm light onto the ground around them at\n"
+                          "night; fireflies and fireworks are small coloured lights. Cost grows with the lights in view.");
+    ImGui::BeginDisabled(!l.nightLights);
+    ImGui::Indent();
+    sDirty |= recomp::menu::SliderFloat("Night light intensity", &l.nightLightIntensity, 0.0f, 3.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+    sDirty |= recomp::menu::Checkbox("Night light shadows", &l.nightLightShadows);
+    ImGui::SetItemTooltip("The strongest night lights cast shadows (cube shadow maps; the preset sets how many).");
     sDirty |= recomp::menu::SliderFloat("Light color vibrance", &l.extraLightSaturation, 0.0f, 2.5f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("Saturation of every colored light (ghosts and other sources) and its glow.\n"
-                          "1: the colors as the game defines them; higher: deeper, more contrasty colors.");
-    ghostLightsSection();
-    worldLightsSection();
     ImGui::Unindent();
     ImGui::EndDisabled();
 
-    // ---- Shadows ----
-    ImGui::SeparatorText("Shadows");
-    sDirty |= recomp::menu::Checkbox("Soft shadows", &l.softShadows);
-    ImGui::SetItemTooltip(
-        "Filters the game's flashlight/lightning shadow map: soft edges instead of hard, stair-stepped\n"
-        "ones, and (High/Ultra) contact hardening: sharp where an object touches the surface, softer\n"
-        "farther away. Also removes the faint stripes of the original depth packing. Cost: a few\n"
-        "dozen texture reads per shadowed pixel.");
-    ImGui::BeginDisabled(!l.softShadows);
-    ImGui::Indent();
-    static const char* kShadowQ[] = {"Low (PCF 8)", "Medium (PCF 16)", "High (PCSS 16)", "Ultra (PCSS 32)"};
-    ImGui::BeginDisabled(!custom);
-    sDirty |= ImGui::Combo("Shadow quality", &l.softShadowQuality, kShadowQ, 4);
-    ImGui::EndDisabled();
-    ImGui::SetItemTooltip("Filter of the soft edge: PCF (fixed softness) with 8 or 16 taps, or PCSS (contact\n"
-                          "hardening) with 16 or 32 taps. More taps: smoother edges, more GPU time.%s",
-                          presetNote(custom));
-    sDirty |= recomp::menu::SliderFloat("Shadow softness", &l.softShadowRadius, 0.25f, 6.0f, "%.2f texels", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("Width of the soft edge, in texels of the console's 640x480 shadow map.");
-    sDirty |= recomp::menu::SliderFloat("Contact hardening", &l.softShadowPenumbra, 0.0f, 20.0f, "%.1f", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("High/Ultra only: how quickly shadows soften with distance from the object casting them.");
-    ImGui::Unindent();
-    ImGui::EndDisabled();
-    sDirty |= recomp::menu::SliderFloat("Shadow darkness", &l.shadowDarkness, 0.0f, 1.5f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip(
-        "How dark the game's shadows get (1 = as the game draws them, near black).\n"
-        "Colored lights (ghost lights, test lights) always keep lighting the shadowed area, so a\n"
-        "shadow only removes the light it stands for.");
-    sDirty |= recomp::menu::SliderFloat("Colored shadow tint", &l.shadowAmbientKeep, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip(
-        "How much of the room's ambient light stays in shadows: higher = shadows take on the\n"
-        "surrounding color instead of going black (0 = the game's look).");
-    static const char* kMapSize[] = {"Render resolution", "2048 x 1536", "4096 x 3072"};
-    ImGui::BeginDisabled(!port::settings().rendering.shadowRenderResolution);
-    sDirty |= ImGui::Combo("Shadow map size##flashlight", &l.shadowMapSize, kMapSize, 3);
-    ImGui::EndDisabled();
-    ImGui::SetItemTooltip(
-        "Resolution of the flashlight/lightning shadow map. Render resolution: as the accurate\n"
-        "renderer (the shadow pass uses the internal resolution). 2048/4096: the shadow pass is\n"
-        "drawn into its own target of that size, so shadows stay sharp at low render resolutions.\n"
-        "Needs Visuals > Rendering > \"Shadow map at render resolution\"%s. Cost: one larger depth\n"
-        "pass per frame (4096: noticeable on weak GPUs).",
-        port::settings().rendering.shadowRenderResolution ? "" : " (currently off)");
-    ImGui::BeginDisabled(!l.extraLights);
-    sDirty |= recomp::menu::Checkbox("Colored light shadows", &l.extraLightShadows);
-    ImGui::SetItemTooltip(
-        "The strongest colored lights (ghosts, fireplaces and braziers, candelabras, the fire spray)\n"
-        "cast shadows: furniture and characters between a light and a wall block its glow.%s",
-        l.extraLights ? "" : "\n\nNeeds \"Dynamic colored lights\" (under Lights).");
-    static const char* kXlMode[] = {"Screen-space (fast)", "Shadow maps (detailed)"};
-    ImGui::BeginDisabled(!l.extraLightShadows);
-    ImGui::Indent();
-    sDirty |= ImGui::Combo("Light shadow method", &l.extraShadowMode, kXlMode, 2);
-    ImGui::SetItemTooltip(
-        "Shadow maps: the room is rendered from each shadow-casting light into a cube map, so\n"
-        "objects outside the picture (behind the camera, off to the side) still cast shadows, with\n"
-        "accurate soft edges. Cost: one extra render of the room per frame for all lights together.\n"
-        "Screen-space: a ray march through the visible depth at half resolution (up to 4 lights);\n"
-        "cheap, but only what is on screen casts shadows and the edges are approximate.");
-    static const char* kXlQ[] = {"Low", "Medium", "High"};
-    static const char* kXlN[] = {"Off", "2 lights", "4 lights", "8 lights", "12 lights", "16 lights"};
-    static const char* kXlS[] = {"256", "512", "1024", "2048"};
-    ImGui::BeginDisabled(!custom);
-    sDirty |= ImGui::Combo("Shadow-casting lights", &l.extraShadowLights, kXlN, 6);
-    ImGui::SetItemTooltip("How many of the strongest colored lights cast shadows each frame (screen-space: at most 4).\n"
-                          "Each light adds a cube map (shadow maps) or a ray march (screen-space). With 12 or 16,\n"
-                          "single candles and lit lamps cast shadows too.\n"
-                          "Cost with shadow maps at 1024, High quality (RTX 3090 Ti, 1280x960): 8 lights ~1.5 ms,\n"
-                          "12 ~1.9 ms, 16 ~2.4 ms per frame; shadow-map memory ~200 / 300 / 450 MB.%s",
-                          presetNote(custom));
-    sDirty |= ImGui::Combo("Light shadow quality", &l.extraShadowQuality, kXlQ, 3);
-    ImGui::SetItemTooltip("Filter taps of the soft edge (shadow maps: 8 / 12 / 20) or ray-march steps (screen-space).%s",
-                          presetNote(custom));
-    ImGui::BeginDisabled(l.extraShadowMode != 1);
-    sDirty |= ImGui::Combo("Shadow map size##colored", &l.extraShadowMapSize, kXlS, 4);
-    ImGui::SetItemTooltip("Texels per cube face (shadow maps method only). Larger: sharper, more detailed shadows,\n"
-                          "more GPU memory (at 1024: 8 lights about 200 MB, 16 about 450 MB; 2048 is reduced to fit\n"
-                          "the texture size limit).%s",
-                          presetNote(custom));
-    ImGui::EndDisabled();
-    ImGui::EndDisabled();
-    ImGui::BeginDisabled(l.extraShadowMode != 1);
-    sDirty |= recomp::menu::SliderFloat("Light shadow softness", &l.extraShadowSoftness, 0.0f, 60.0f, "%.0f units", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("Shadow maps method only. Size of the light source (world units): contact-hardening\n"
-                          "penumbrae, sharp where an object meets the surface and softer farther from it. 0: hard edges.");
-    ImGui::EndDisabled();
-    ImGui::Unindent();
-    ImGui::EndDisabled();
-    ImGui::EndDisabled();
-
-    // ---- Flashlight ----
-    ImGui::SeparatorText("Flashlight");
-    sDirty |= recomp::menu::Checkbox("Flashlight quality", &l.flashlightQuality);
-    ImGui::SetItemTooltip(
-        "The flashlight cone is evaluated per pixel with a smooth penumbra: a clean round beam\n"
-        "edge without a hard rim.");
-    ImGui::BeginDisabled(!l.flashlightQuality);
-    ImGui::Indent();
-    sDirty |= recomp::menu::SliderFloat("Penumbra softness", &l.flashlightSoftness, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("Softness of the beam's edge: from the original falloff (0) to fully smoothed (1).");
-    sDirty |= recomp::menu::SliderFloat("Beam highlights", &l.flashlightSpecular, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("Glossy highlights where the flashlight hits floors, furniture and characters\n"
-                          "(per pixel, tinted by the surface). 0: the original matte response.");
-    ImGui::Unindent();
-    ImGui::EndDisabled();
-    static const char* kRealQ[] = {"Off", "Medium", "High", "Ultra"};
-    sDirty |= ImGui::Combo("Realistic flashlight", &l.realisticFlashlight, kRealQ, 4);
-    ImGui::SetItemTooltip(
-        "A physically based flashlight beam: light scattering in the air of the room, ray-marched\n"
-        "against the flashlight's own shadow map, so Luigi's hand, furniture, ghosts and door frames\n"
-        "cut shadow shafts into the haze; a reflector-shaped pool on walls and floors (hot centre,\n"
-        "faint rings, soft edge, inverse-square falloff); dust motes lit only inside the beam; a\n"
-        "flare when the light flashes. Replaces the game's cone mesh and the volumetric beam below.\n"
-        "GPU cost while the beam is on screen (RTX 3090 Ti, 2560x1920; the volumetric beam below\n"
-        "costs ~0.3 ms): Medium ~0.5-0.9 ms (half resolution up to 540 lines, 20 steps), High\n"
-        "~0.6-1.4 ms (up to 720 lines, 32 steps), Ultra ~2-3 ms (up to 1080 lines, 48 steps, more\n"
-        "dust). Nothing when the flashlight is off. Weak GPUs: Medium. Off: the volumetric beam below.");
-    ImGui::BeginDisabled(l.realisticFlashlight == 0);
-    ImGui::Indent();
-    sDirty |= recomp::menu::SliderFloat("Beam density", &l.beamDensity, 0.0f, 3.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("How hazy the air is: brightness of the beam and its shadow shafts, and how quickly\n"
-                          "it fades with distance (denser air also absorbs more). No cost difference.");
-    sDirty |= recomp::menu::SliderFloat("Dust motes", &l.beamDust, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("Dust drifting in the beam, lit only where the beam (and not a shadow) reaches it.\n"
-                          "Small cost (a walk through the dust cells near the lens); 0 turns it off.");
-    ImGui::Unindent();
-    ImGui::EndDisabled();
-    ImGui::BeginDisabled(l.realisticFlashlight != 0);
-    sDirty |= recomp::menu::Checkbox("Volumetric flashlight beam", &l.volumetricBeam);
-    ImGui::SetItemTooltip(
-        "Light scattering in the air of the flashlight beam (dusty haze), stopped by walls and\n"
-        "objects. One reduced-resolution pass; quality = ray-march steps/resolution.%s",
-        l.realisticFlashlight != 0 ? "\n\nNot used while \"Realistic flashlight\" is on (it replaces this beam)." : "");
-    ImGui::BeginDisabled(!l.volumetricBeam);
-    ImGui::Indent();
-    sDirty |= recomp::menu::SliderFloat("Beam intensity", &l.volumetricIntensity, 0.0f, 3.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("Brightness of the haze in the beam.");
-    static const char* kVolQ[] = {"Low", "Medium", "High"};
-    ImGui::BeginDisabled(!custom);
-    sDirty |= ImGui::Combo("Beam quality", &l.volumetricQuality, kVolQ, 3);
-    ImGui::EndDisabled();
-    ImGui::SetItemTooltip("Ray-march steps and resolution of the beam pass. Higher: smoother haze, more GPU time.%s",
-                          presetNote(custom));
-    ImGui::Unindent();
-    ImGui::EndDisabled();
-    ImGui::EndDisabled();
-
-    // ---- Effects ----
-    ImGui::SeparatorText("Effects");
-    sDirty |= recomp::menu::Checkbox("Bloom / glow", &l.bloom);
-    ImGui::SetItemTooltip(
-        "Light sources glow: lamps, candles, fireplaces, the flashlight lens, ghost auras,\n"
-        "lightning, nozzle effects. The HUD never glows. Computed at a capped resolution, so the\n"
-        "cost hardly depends on the render resolution.");
-    ImGui::BeginDisabled(!l.bloom);
-    ImGui::Indent();
-    sDirty |= recomp::menu::SliderFloat("Glow intensity", &l.bloomIntensity, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("Overall strength of the glow.");
-    sDirty |= recomp::menu::SliderFloat("Light sources", &l.bloomEmissive, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("Glow of light-emitting effects (what the game draws as added light): lamp and candle\n"
-                          "glows, fire, the flashlight lens, ghost auras, sparkles, lightning and nozzle effects.");
-    sDirty |= recomp::menu::SliderFloat("Bright surfaces", &l.bloomScene, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("Glow of ordinary surfaces that are brighter than the threshold (lit walls, white\n"
-                          "objects). Low keeps the glow on actual light sources.");
-    sDirty |= recomp::menu::SliderFloat("Glow threshold", &l.bloomThreshold, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("Brightness where bright surfaces start to glow. Lower: more of the scene glows.");
-    sDirty |= recomp::menu::SliderFloat("Glow radius", &l.bloomRadius, 0.25f, 2.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("How far the glow spreads around a light (1 = default).");
-    sDirty |= recomp::menu::SliderFloat("Flashlight-lit walls glow less", &l.bloomFlashlightSuppress, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("Surfaces that are only bright because the flashlight shines on them glow less\n"
-                          "than actual light sources.");
-    ImGui::Unindent();
-    ImGui::EndDisabled();
+    // ---- Ambient occlusion ----
+    ImGui::SeparatorText("Ambient occlusion");
     sDirty |= ImGui::Checkbox("Ambient occlusion", &l.ssao);
     ImGui::SetItemTooltip(
-        "Soft contact shading: darkens corners, creases, the floor under furniture and around\n"
-        "characters' feet (horizon-based, from the depth buffer and the models' own normals, so\n"
-        "round characters shade smoothly). Applied only to solid surfaces: ghosts, the flashlight\n"
-        "beam, glows, particles and glass keep their brightness. About 0.5-1 ms per frame at 4K.\n"
-        "Switching it rebuilds some shaders once.");
+        "Soft contact shading under trees, furniture, fences and characters (horizon-based, from the\n"
+        "depth buffer and the models' own normals). Only solid surfaces: water, glass, particles and\n"
+        "the HUD keep their brightness. About 0.5-1 ms at 4K.");
     ImGui::BeginDisabled(!l.ssao);
     ImGui::Indent();
     sDirty |= recomp::menu::SliderFloat("Occlusion intensity", &l.ssaoIntensity, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("How dark occluded corners and contact areas get.");
     sDirty |= recomp::menu::SliderFloat("Occlusion radius", &l.ssaoRadius, 10.0f, 200.0f, "%.0f units", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("How far (world units; Luigi is about 100 tall) nearby surfaces darken a point.\n"
-                          "Larger: broader, softer darkening; smaller: tight contact shadows.");
+    ImGui::SetItemTooltip("How far nearby surfaces darken a point (the player is about 40 units tall).");
     ImGui::Unindent();
+    ImGui::EndDisabled();
+
+    // ---- Bloom & sun shafts ----
+    ImGui::SeparatorText("Bloom & sun shafts");
+    sDirty |= recomp::menu::Checkbox("Bloom / glow", &l.bloom);
+    ImGui::SetItemTooltip("Bright skies, lamps, the aurora and light effects glow. The HUD never glows.\n"
+                          "Computed at a capped resolution.");
+    ImGui::BeginDisabled(!l.bloom);
+    ImGui::Indent();
+    sDirty |= recomp::menu::SliderFloat("Glow intensity", &l.bloomIntensity, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    sDirty |= recomp::menu::SliderFloat("Light sources", &l.bloomEmissive, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetItemTooltip("Glow of what the game draws as added light (lamps, sparkles, fireworks, the aurora).");
+    sDirty |= recomp::menu::SliderFloat("Bright surfaces", &l.bloomScene, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    sDirty |= recomp::menu::SliderFloat("Glow threshold", &l.bloomThreshold, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    sDirty |= recomp::menu::SliderFloat("Glow radius", &l.bloomRadius, 0.25f, 2.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::Unindent();
+    ImGui::EndDisabled();
+    ImGui::BeginDisabled(!l.sunShadows);
+    sDirty |= recomp::menu::Checkbox("Sun shafts", &l.sunShafts);
+    ImGui::SetItemTooltip("Sunlight scattered in the air, cut into shafts by the shadows of trees and houses\n"
+                          "(strongest at sunrise and sunset, gone in rain). Ray-marched against the sun's shadow map\n"
+                          "at mask resolution.%s", l.sunShadows ? "" : "\n\nNeeds \"Real sun and moon shadows\".");
+    ImGui::BeginDisabled(!l.sunShafts);
+    ImGui::Indent();
+    sDirty |= recomp::menu::SliderFloat("Shaft intensity", &l.sunShaftIntensity, 0.0f, 3.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    static const char* kShaftQ[] = {"Low (12 steps)", "Medium (20 steps)", "High (32 steps)"};
+    ImGui::BeginDisabled(!custom);
+    sDirty |= ImGui::Combo("Shaft quality", &l.sunShaftQuality, kShaftQ, 3);
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Ray-march steps of the shafts.%s", presetNote(custom));
+    ImGui::Unindent();
+    ImGui::EndDisabled();
     ImGui::EndDisabled();
     ImGui::EndDisabled();
 }

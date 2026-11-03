@@ -1,0 +1,297 @@
+diff --git a/include/aurora/enhanced.h b/include/aurora/enhanced.h
+index 04e4c6c..26950f7 100644
+--- a/include/aurora/enhanced.h
++++ b/include/aurora/enhanced.h
+@@ -103,6 +103,22 @@ typedef struct {
+   // 0340: unlit opaque world draws also get the enhanced variant (as with ambient occlusion), so
+   // they receive directional-light shadows (ExtraLightDirectional, include/aurora/lights.h).
+   bool lightReceivers;
++
++  // 0342: colour grade of the 3D scene at its end (GXSceneEndAurora, before the HUD), e.g. a
++  // time-of-day look: c = c * gain + lift * (1 - c), then saturation around the luma and contrast
++  // around mid grey. gain 1 / lift 0 / saturation 1 / contrast 1 = unchanged (and no pass).
++  bool grade;
++  float gradeGain[3];
++  float gradeLift[3];
++  float gradeSaturation;
++  float gradeContrast;
++
++  // 0343: sun shafts: light of the first shadow-casting directional light scattered in the air,
++  // ray-marched against its shadow cascades (tree and house shadows cut shafts into the haze),
++  // added at scene end. Colour = the light's colour x shaftIntensity.
++  bool shafts;
++  float shaftIntensity;
++  uint32_t shaftSteps; // 8..48
+ } AuroraEnhancedConfig;
+ 
+ // 0196: an ExtraLight with this flag is no light: three of them (ids BeamAnchorId + 0..2) carry
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+index 5465819..de52c2c 100644
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -52,7 +52,9 @@ bool same(const AuroraEnhancedConfig& a, const AuroraEnhancedConfig& b) {
+          // 0031: the fields added after 0016 (changing only them did not reach the renderer)
+          EQ(extraShadows) && EQ(extraShadowQuality) && EQ(extraShadowMode) && EQ(extraShadowLights) &&
+          EQ(extraShadowMapSize) && EQ(extraShadowSoftness) && EQ(shadowDarkness) && EQ(shadowAmbientKeep) &&
+-         EQ(realisticFlashlight) && EQ(beamDensity) && EQ(beamDust) && EQ(lightReceivers);
++         EQ(realisticFlashlight) && EQ(beamDensity) && EQ(beamDust) && EQ(lightReceivers) &&
++         EQ(grade) && EQ(gradeGain[0]) && EQ(gradeGain[1]) && EQ(gradeGain[2]) && EQ(gradeLift[0]) && EQ(gradeLift[1]) &&
++         EQ(gradeLift[2]) && EQ(gradeSaturation) && EQ(gradeContrast) && EQ(shafts) && EQ(shaftIntensity) && EQ(shaftSteps);
+ #undef EQ
+ }
+ 
+@@ -594,6 +596,10 @@ fn dir_occlusion(s: u32, p: vec3f, nr: vec4f, mp: vec2f) -> f32 {
+   if (c < 3u && t > 0.88) {
+     o = mix(o, dir_cascade(s, c + 1u, p, n, l, ndl, mp), smoothstep(0.88, 1.0, t));
+   }
++  // Debug (AURORA_ENH_GLOWDBG=9): cascade (red), shadow (green), N.L (blue).
++  if (fx.pp.w > 0.5) { dbg = vec4f(f32(c) / 3.0, o, ndl * 0.5 + 0.5, 1.0); }
++  // (=10: the light direction left half, the receiver normal right half)
++  if (fx.pp.w > 1.5) { dbg = vec4f(select(n, l, mp.x * fx.pp.y < fx.size.x * 0.5) * 0.5 + 0.5, 1.0); }
+   return o * (1.0 - smoothstep(maxd * 0.85, maxd, vz));
+ }
+ fn cube_occlusion(s: u32, p: vec3f, nr: vec4f, mp: vec2f) -> f32 {
+@@ -1454,8 +1460,8 @@ fn fs_composite(in: VsOut) -> @location(0) vec4f {
+     // 0220: AURORA_BEAM_SHOW=3: the scattering amount v as a heat map (red 0..2, + green 2..6, + blue 8..16)
+     if (fx.beam[12].z > 0.5) { return vec4f(clamp(vec3f(v / 2.0, v / 4.0 - 0.5, v / 8.0 - 1.0), vec3f(0.0), vec3f(1.0)), 0.0); }
+     if ((mask & 64u) != 0u) { return vec4f(col * (1.0 - exp(-v)), 0.0); } // AURORA_BEAM_SHOW: the beam alone
+-  } else if ((mask & 2u) != 0u) {
+-    add = add + textureSampleLevel(t1, samp, in.uv, 0.0).rgb;
++  } else if ((mask & 2u) != 0u || (mask & 256u) != 0u) {
++    add = add + textureSampleLevel(t1, samp, in.uv, 0.0).rgb; // (256: 0343 sun shafts)
+   }
+   var ao = 1.0;
+   if ((mask & 4u) != 0u) {
+@@ -1463,6 +1469,64 @@ fn fs_composite(in: VsOut) -> @location(0) vec4f {
+   }
+   return vec4f(add, ao);
+ }
++
++// 0342: colour grade (fx.beam[13] gain, [14] lift, [15].x saturation, .y contrast) of the scene
++// copy in t0.
++@fragment
++fn fs_grade(in: VsOut) -> @location(0) vec4f {
++  let c0 = textureLoad(t0, vec2i(floor(in.pos.xy)), 0);
++  var c = clamp(c0.rgb, vec3f(0.0), vec3f(1.0));
++  c = c * fx.beam[13].rgb + fx.beam[14].rgb * (vec3f(1.0) - c);
++  c = mix(vec3f(luma(c)), c, fx.beam[15].x);
++  c = (c - vec3f(0.5)) * fx.beam[15].y + vec3f(0.5);
++  return vec4f(clamp(c, vec3f(0.0), vec3f(1.0)), c0.a);
++}
++
++// 0343: sun shafts. Single scattering of the directional light in slot fx.beam[0].x along each
++// view ray (mask resolution) up to the pre-pass surface (or the shadow distance where nothing
++// was drawn), every step tested against the light's cascades: the shadows of trees and houses
++// cut darker shafts into the lit haze. Henyey-Greenstein forward scattering (brighter looking
++// toward the light). Colour = fx.beam[1].rgb.
++@fragment
++fn fs_shafts(in: VsOut) -> @location(0) vec4f {
++  let mp = floor(in.pos.xy);
++  let s = u32(fx.beam[0].x);
++  let steps = max(u32(fx.beam[0].y), 4u);
++  let maxd = fx.xl[s].w;
++  let l = normalize(fx.xl[s].xyz);
++  let px = (mp + vec2f(0.5)) * fx.pp.y;
++  let d0 = textureLoad(tdepth, vec2i(mp), 0).r;
++  let dir = normalize(view_pos(px, 0.5));
++  var tend = maxd;
++  if (d0 > 1e-7) { tend = min(length(view_pos(px, d0)), maxd); }
++  let mb = (s * 6u + 4u) * 24u;
++  let adims = fx.xl[32].xy;
++  let jit = ign(mp);
++  var acc = 0.0;
++  for (var k = 0u; k < steps; k++) {
++    let x = dir * ((f32(k) + jit) / f32(steps) * tend);
++    let vz = -x.z;
++    var c = 0u;
++    for (; c < 3u; c++) {
++      if (vz < xrec[mb + 16u + c]) { break; }
++    }
++    let b = (s * 6u + c) * 24u;
++    let fm = mat4x4f(xrow(b), xrow(b + 4u), xrow(b + 8u), xrow(b + 12u));
++    let pr = cube_proj(fm, x, adims);
++    let tile = xrow(b + 20u);
++    var vis = 1.0;
++    if (all(pr.xy > tile.xy) && all(pr.xy < tile.zw)) {
++      vis = textureSampleCompareLevel(tatlas, tcmp, pr.xy / adims, pr.z);
++    }
++    acc = acc + vis;
++  }
++  let g = 0.6;
++  let cv = dot(dir, l);
++  let hg = (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * cv, 1e-4), 1.5);
++  let phase = 0.25 + hg * 0.12;
++  let amount = acc / f32(steps) * (tend / maxd) * phase;
++  return vec4f(fx.beam[1].rgb * amount, 1.0);
++}
+ )""";
+ 
+ struct FxUniform {
+@@ -1543,6 +1607,11 @@ struct Gpu {
+   wgpu::PipelineLayout dirtyLayout;
+   wgpu::RenderPipeline dirtyPipe;
+   wgpu::Sampler pointSampler;
++  // 0342 colour grade, 0343 sun shafts
++  Tex gradeSrc, shaft;
++  wgpu::RenderPipeline grade, shaftPipe;
++  wgpu::TextureFormat gradeFormat = wgpu::TextureFormat::Undefined;
++  uint32_t gradeSamples = 0;
+ };
+ Gpu g_gpu;
+ // 0223: the lazily built pipelines and render targets (init_*, the pipelines created in the encode
+@@ -1884,7 +1953,12 @@ struct MaskJob {
+   bool point = true, ao = false;
+   // 0210: firstNew > 0 with shadow maps or AO: recompute only around changed pre-pass depth.
+   bool incremental = false;
++  // 0343: sun shafts from the directional light's cascades (fs_shafts, mask resolution).
++  bool shafts = false;
+ };
++// 0343: a sun-shaft texture was written for the frame being recorded (FIFO thread; set by
++// flush_shadows, read by scene_end).
++bool g_shaftsQueued = false;
+ 
+ // GPU timing of the light-shadow passes (AURORA_ENH_GPU_TIMING=1, needs TimestampQuery): camera
+ // depth pre-pass, shadow-map atlas, mask pass; averaged and logged every 240 masks.
+@@ -2382,6 +2456,35 @@ void encode_mask(const wgpu::CommandEncoder& cmd, const MaskJob& job) {
+     pass.SetBindGroup(0, bg);
+     pass.Draw(3);
+     pass.End();
++    if (job.shafts) {
++      // 0343: sun shafts against the cascades just rendered (same bindings).
++      ensure_tex(g_gpu.shaft, w, h, HdrFormat, wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding,
++                 "Enhanced sun shafts");
++      {
++        const std::lock_guard initLock{g_initMutex};
++        if (!g_gpu.shaftPipe) {
++          const wgpu::ColorTargetState target{.format = HdrFormat, .writeMask = wgpu::ColorWriteMask::All};
++          const wgpu::FragmentState fragment{.module = g_gpu.module, .entryPoint = "fs_shafts", .targetCount = 1, .targets = &target};
++          const wgpu::RenderPipelineDescriptor sd{
++              .label = "Enhanced sun shafts",
++              .layout = g_gpu.cubeLayout,
++              .vertex = {.module = g_gpu.module, .entryPoint = "vs_main"},
++              .primitive = {.topology = wgpu::PrimitiveTopology::TriangleList},
++              .fragment = &fragment,
++          };
++          g_gpu.shaftPipe = webgpu::g_device.CreateRenderPipeline(&sd);
++        }
++      }
++      const wgpu::RenderPassColorAttachment sa{
++          .view = g_gpu.shaft.view, .loadOp = wgpu::LoadOp::Clear, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}};
++      const wgpu::RenderPassDescriptor sdesc{.label = "Sun shafts", .colorAttachmentCount = 1, .colorAttachments = &sa,
++                                             .timestampWrites = webgpu::gpu_prof::pass_writes("Sun shafts")};
++      const auto sp = cmd.BeginRenderPass(&sdesc);
++      sp.SetPipeline(g_gpu.shaftPipe);
++      sp.SetBindGroup(0, bg);
++      sp.Draw(3);
++      sp.End();
++    }
+     const wgpu::TexelCopyTextureInfo src2{.texture = g_gpu.mask2.texture};
+     const wgpu::TexelCopyBufferInfo dst2{
+         .layout = {.offset = job.maskOffset + uint64_t(job.pitchBytes) * h, .bytesPerRow = job.pitchBytes, .rowsPerImage = h},
+@@ -2601,6 +2704,41 @@ void encode_scene(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, co
+     aoView = g_gpu.aoBlur.view;
+   }
+ 
++  if ((job.mask & 256u) != 0 && g_gpu.shaft.view) {
++    volView = g_gpu.shaft.view; // 0343: sun shafts (mask resolution), added by the composite
++  }
++  if ((job.mask & 512u) != 0 && t.colorSource) {
++    // 0342: colour grade of the scene so far: a copy of the resolved colour, then a full-screen
++    // pass over the EFB (alpha kept).
++    ensure_tex(g_gpu.gradeSrc, t.width, t.height, t.colorFormat, wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::TextureBinding,
++               "Enhanced grade source");
++    const wgpu::TexelCopyTextureInfo src{.texture = t.colorSource};
++    const wgpu::TexelCopyTextureInfo dst{.texture = g_gpu.gradeSrc.texture};
++    const wgpu::Extent3D ext{t.width, t.height, 1};
++    cmd.CopyTextureToTexture(&src, &dst, &ext);
++    {
++      const std::lock_guard initLock{g_initMutex};
++      if (!g_gpu.grade || g_gpu.gradeFormat != t.colorFormat || g_gpu.gradeSamples != t.msaa) {
++        g_gpu.grade = make_pipeline("fs_grade", t.colorFormat, t.msaa, nullptr,
++                                    wgpu::ColorWriteMask::Red | wgpu::ColorWriteMask::Green | wgpu::ColorWriteMask::Blue);
++        g_gpu.gradeFormat = t.colorFormat;
++        g_gpu.gradeSamples = t.msaa;
++      }
++    }
++    const wgpu::RenderPassColorAttachment ga{
++        .view = t.colorView, .resolveTarget = t.resolveView, .loadOp = wgpu::LoadOp::Load, .storeOp = wgpu::StoreOp::Store};
++    const wgpu::RenderPassDescriptor gdesc{.label = "Enhanced colour grade", .colorAttachmentCount = 1, .colorAttachments = &ga,
++                                           .timestampWrites = webgpu::gpu_prof::pass_writes("Enhanced colour grade")};
++    const auto gp = cmd.BeginRenderPass(&gdesc);
++    gp.SetPipeline(g_gpu.grade);
++    if (job.clipped && job.clip[0] + job.clip[2] <= t.width && job.clip[1] + job.clip[3] <= t.height) {
++      gp.SetScissorRect(job.clip[0], job.clip[1], job.clip[2], job.clip[3]);
++    }
++    gp.SetBindGroup(0, bind(job.base, g_gpu.gradeSrc.view, {}, {}, {}));
++    gp.Draw(3);
++    gp.End();
++  }
++
+   // Composite onto the EFB.
+   ensure_composite(t.colorFormat, t.msaa);
+   const wgpu::RenderPassColorAttachment att{
+@@ -3826,6 +3964,24 @@ void flush_shadows() noexcept {
+     }
+     job.cube = true;
+     job.lights = k;
++    // 0343: sun shafts from the first shadowed directional light.
++    if (g_cfg.shafts && g_cfg.shaftIntensity > 0.f) {
++      for (uint32_t i = 0; i < g_lightCount; ++i) {
++        const uint32_t s = g_shadowSlot[i];
++        const auto& l = g_lights[i];
++        if (s >= MaxShadowLights || (l.flags & ExtraLightDirectional) == 0) {
++          continue;
++        }
++        u.beam[0][0] = float(s);
++        u.beam[0][1] = float(std::clamp(g_cfg.shaftSteps, 8u, 48u));
++        for (int c = 0; c < 3; ++c) {
++          u.beam[1][c] = l.color[c] * g_cfg.shaftIntensity;
++        }
++        job.shafts = true;
++        g_shaftsQueued = true;
++        break;
++      }
++    }
+     const uint64_t key = uint64_t(g_lightGen) << 32 | uint64_t(S) << 16 | uint64_t(k) << 8 | uint64_t(g_maskW & 0xFF);
+     job.firstNew = key == g_maskKey ? flushedBefore : 0;
+     g_maskKey = key;
+@@ -3934,6 +4090,7 @@ void begin_frame() noexcept {
+   g_cone = {};
+   g_spotCount = 0;
+   g_anchorValid = false;
++  g_shaftsQueued = false;
+ }
+ 
+ // 0196: realistic flashlight uniforms (fx.beam, see fs_beam) and target size.
+@@ -4108,6 +4265,17 @@ void scene_end() noexcept {
+       job.mask |= std::atoi(std::getenv("AURORA_BEAM_SHOW")) == 2 ? 192u : 64u;
+     }
+   }
++  // 0343: sun shafts (the mask pass of this frame wrote them) where no flashlight beam uses t1.
++  if (g_shaftsQueued && (job.mask & (2u | 32u)) == 0) {
++    job.mask |= 256u;
++  }
++  // 0342: colour grade.
++  const bool gradeOn = c.grade && (c.gradeGain[0] != 1.f || c.gradeGain[1] != 1.f || c.gradeGain[2] != 1.f ||
++                                   c.gradeLift[0] != 0.f || c.gradeLift[1] != 0.f || c.gradeLift[2] != 0.f ||
++                                   c.gradeSaturation != 1.f || c.gradeContrast != 1.f);
++  if (gradeOn) {
++    job.mask |= 512u;
++  }
+   if (job.mask == 0) {
+     return;
+   }
+@@ -4193,6 +4361,13 @@ void scene_end() noexcept {
+   if (realistic) {
+     fill_beam(u, job, size.x, size.y);
+   }
++  // 0342: grade parameters (beam[13..15]: unused by the realistic flashlight).
++  for (int k = 0; k < 3; ++k) {
++    u.beam[13][k] = gradeOn ? c.gradeGain[k] : 1.f;
++    u.beam[14][k] = gradeOn ? c.gradeLift[k] : 0.f;
++  }
++  u.beam[15][0] = gradeOn ? c.gradeSaturation : 1.f;
++  u.beam[15][1] = gradeOn ? c.gradeContrast : 1.f;
+   job.base = push_uniform(reinterpret_cast<const uint8_t*>(&u), sizeof(u));
+   if (realistic) {
+     FxUniform pu = u;

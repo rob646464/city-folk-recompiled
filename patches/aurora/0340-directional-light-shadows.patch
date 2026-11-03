@@ -1,0 +1,395 @@
+diff --git a/include/aurora/enhanced.h b/include/aurora/enhanced.h
+index efb1bda..04e4c6c 100644
+--- a/include/aurora/enhanced.h
++++ b/include/aurora/enhanced.h
+@@ -99,6 +99,10 @@ typedef struct {
+   uint32_t realisticFlashlight;
+   float beamDensity; // 0..3: how hazy the air is (brightness and extinction of the shafts)
+   float beamDust;    // 0..2: dust motes drifting in the beam (0 = none)
++
++  // 0340: unlit opaque world draws also get the enhanced variant (as with ambient occlusion), so
++  // they receive directional-light shadows (ExtraLightDirectional, include/aurora/lights.h).
++  bool lightReceivers;
+ } AuroraEnhancedConfig;
+ 
+ // 0196: an ExtraLight with this flag is no light: three of them (ids BeamAnchorId + 0..2) carry
+diff --git a/include/aurora/lights.h b/include/aurora/lights.h
+index 3017336..08d2407 100644
+--- a/include/aurora/lights.h
++++ b/include/aurora/lights.h
+@@ -35,6 +35,16 @@ constexpr uint32_t ExtraLightSpecular = 1u << 2;
+ constexpr uint32_t ExtraLightFire = 1u << 3;
+ // 0187: limited to `box` (its room).
+ constexpr uint32_t ExtraLightRoomBox = 1u << 4;
++// 0340: a directional light (sun, moon). `pos` is the unit vector TOWARD the light (view space),
++// `radius` the shadow distance (view depth the shadow cascades cover), color x intensity is added
++// per pixel (N.L, shadowed) like a GX directional light (0 = shadows only). `box` holds its
++// parameters instead of a room box: [0..2] the colour a pixel is multiplied by in full shadow (the
++// shadow darkens whatever lit the pixel, the game's own lighting included), [3] how much surfaces
++// turned away from the light count as shadowed (0..1), [4] the width of that terminator (cosine),
++// [5] the light's angular radius (tangent; soft contact-hardening edges, 0 = fixed filter),
++// [6] the distance behind the view toward the light within which casters are rendered (world units).
++// With ExtraLightCastShadows it takes a shadow slot: four orthographic cascades in its atlas cell.
++constexpr uint32_t ExtraLightDirectional = 1u << 5;
+ 
+ // Call once per game frame (guest thread), before the frame's draws; applies to world-geometry
+ // draws of that frame. Lights beyond MaxExtraLights are dropped (pass the strongest first).
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+index 28f94d8..9990d2e 100644
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -52,7 +52,7 @@ bool same(const AuroraEnhancedConfig& a, const AuroraEnhancedConfig& b) {
+          // 0031: the fields added after 0016 (changing only them did not reach the renderer)
+          EQ(extraShadows) && EQ(extraShadowQuality) && EQ(extraShadowMode) && EQ(extraShadowLights) &&
+          EQ(extraShadowMapSize) && EQ(extraShadowSoftness) && EQ(shadowDarkness) && EQ(shadowAmbientKeep) &&
+-         EQ(realisticFlashlight) && EQ(beamDensity) && EQ(beamDust);
++         EQ(realisticFlashlight) && EQ(beamDensity) && EQ(beamDust) && EQ(lightReceivers);
+ #undef EQ
+ }
+ 
+@@ -192,6 +192,8 @@ void assign_shadow_slots() noexcept;
+ const bool g_aoPost = std::getenv("AURORA_ENH_AO_POST") != nullptr;
+ // Unlit textured opaque world draws get the enhanced variant too while AO is on (they receive it).
+ bool ao_receivers() noexcept { return g_cfg.enabled && g_cfg.ssao && !g_aoPost; }
++// 0340: unlit opaque world draws get the world class (they receive AO and/or directional shadows).
++bool receivers() noexcept { return ao_receivers() || (g_cfg.enabled && g_cfg.lightReceivers); }
+ bool ao_forward() noexcept { return ao_receivers() && g_cfg.ssaoIntensity > 0.f; }
+ constexpr auto GlowFormat = wgpu::TextureFormat::RGBA16Float;
+ constexpr size_t MaxGlowDraws = 4096;
+@@ -523,7 +525,79 @@ fn cube_proj(m: mat4x4f, w: vec3f, adims: vec2f) -> vec3f {
+   let nd = c.xyz / max(c.w, 1e-4);
+   return vec3f((nd.x * 0.5 + 0.5) * adims.x, (0.5 - nd.y * 0.5) * adims.y, nd.z);
+ }
++// 0340: shadow of a directional light (directional_records): the cascade by view depth, a
++// receiver-plane PCF in world units on the surface's tangent plane (PCSS with the light's angular
++// size), blended into the next cascade over the last 12% of a slice and faded out toward the
++// shadow distance. Surfaces turned away from the light are left to the receiving shader's
++// terminator (this is only the shadow map's verdict).
++fn dir_cascade(s: u32, c: u32, q0: vec3f, n: vec3f, l: vec3f, ndl: f32, mp: vec2f) -> f32 {
++  let b = (s * 6u + c) * 24u;
++  let mb = (s * 6u + 4u) * 24u;
++  let texel = xrec[mb + 20u + c];
++  let range = xrec[mb + 24u + 16u + c];
++  let tanSun = xrec[mb + 24u + 20u];
++  let q = q0 + n * texel * (1.0 + 2.0 * (1.0 - clamp(ndl, 0.0, 1.0))) + l * texel * 1.5;
++  let fm = mat4x4f(xrow(b), xrow(b + 4u), xrow(b + 8u), xrow(b + 12u));
++  let adims = fx.xl[32].xy;
++  let tile = xrow(b + 20u);
++  let lo = tile.xy + vec2f(1.0);
++  let hi = tile.zw - vec2f(1.0);
++  let taps = max(u32(fx.xl[32].z), 4u);
++  let rot = ign(mp) * 6.2831853;
++  let tu = normalize(select(cross(n, vec3f(0.0, 1.0, 0.0)), cross(n, vec3f(1.0, 0.0, 0.0)), abs(n.y) > 0.9));
++  let tv = cross(n, tu);
++  var radius = fx.xl[32].w * texel;
++  let rev = fx.xl[33].y > 0.5;
++  if (tanSun > 0.0) {
++    let t0 = cube_proj(fm, q, adims);
++    let search = clamp(tanSun * 600.0, 2.0 * texel, 24.0 * texel);
++    let ns = max(taps / 2u, 8u);
++    var sum = 0.0;
++    var cnt = 0.0;
++    for (var k = 0u; k < ns; k++) {
++      let o = vogel(k, ns, rot + 1.7) * search;
++      let t = cube_proj(fm, q + tu * o.x + tv * o.y, adims);
++      let z = textureLoad(tatlas, vec2i(clamp(t.xy, lo, hi)), 0);
++      if (atlas_blocks(z, t.z)) {
++        sum = sum + abs(t.z - z) * range;
++        cnt = cnt + 1.0;
++      }
++    }
++    if (cnt < 0.5) { return 0.0; }
++    if (cnt > f32(ns) - 0.5) { return 1.0; }
++    radius = clamp(radius + tanSun * (sum / cnt), texel, 24.0 * texel);
++  }
++  var lit = 0.0;
++  for (var k = 0u; k < taps; k++) {
++    let o = vogel(k, taps, rot) * radius;
++    let t = cube_proj(fm, q + tu * o.x + tv * o.y, adims);
++    lit = lit + textureSampleCompareLevel(tatlas, tcmp, clamp(t.xy, lo, hi) / adims, t.z);
++  }
++  return 1.0 - lit / f32(taps);
++}
++fn dir_occlusion(s: u32, p: vec3f, nr: vec4f, mp: vec2f) -> f32 {
++  let l = normalize(fx.xl[s].xyz);
++  let maxd = fx.xl[s].w;
++  let vz = -p.z;
++  if (vz >= maxd || vz <= 0.0) { return 0.0; }
++  let n = select(l, nr.xyz, nr.w > 0.5);
++  let ndl = dot(n, l);
++  let mb = (s * 6u + 4u) * 24u;
++  var c = 0u;
++  for (; c < 3u; c++) {
++    if (vz < xrec[mb + 16u + c]) { break; }
++  }
++  var o = dir_cascade(s, c, p, n, l, ndl, mp);
++  let far = xrec[mb + 16u + c];
++  let near = select(0.0, xrec[mb + 16u + c - 1u], c > 0u);
++  let t = (vz - near) / max(far - near, 1e-3);
++  if (c < 3u && t > 0.88) {
++    o = mix(o, dir_cascade(s, c + 1u, p, n, l, ndl, mp), smoothstep(0.88, 1.0, t));
++  }
++  return o * (1.0 - smoothstep(maxd * 0.85, maxd, vz));
++}
+ fn cube_occlusion(s: u32, p: vec3f, nr: vec4f, mp: vec2f) -> f32 {
++  if (fx.xl[16u + s].w > 0.5) { return dir_occlusion(s, p, nr, mp); }
+   let lp = fx.xl[s];
+   let lq = fx.xl[16u + s];
+   let toL = lp.xyz - p;
+@@ -2558,7 +2632,7 @@ bool sync_config() noexcept {
+   }
+   std::lock_guard lock{g_cfgMutex};
+   const bool masterChanged = g_cfg.enabled != g_pending.enabled;
+-  const bool aoBefore = ao_receivers();
++  const bool aoBefore = receivers();
+   g_cfg = g_pending;
+   g_cfgGen = gen;
+   ++g_lightGen;
+@@ -2567,7 +2641,7 @@ bool sync_config() noexcept {
+   gx::g_gxState.dirty |= gx::DirtyUniform;
+   // Only the master switch selects shader variants; the parts are uniforms. 0032: and ambient
+   // occlusion, which also gives unlit opaque world draws the variant.
+-  return masterChanged || aoBefore != ao_receivers();
++  return masterChanged || aoBefore != receivers();
+ }
+ 
+ const AuroraEnhancedConfig& config() noexcept { return g_cfg; }
+@@ -2592,7 +2666,7 @@ uint8_t shader_class(const gx::ShaderConfig& sc, uint8_t drawClass, bool blended
+   }
+   // 0032: unlit textured opaque world surfaces (depth-writing, not additive: LM draws most of its
+   // solid geometry with SRCALPHA/INVSRCALPHA blending) receive the forward ambient occlusion.
+-  want = want || (ao_receivers() && drawClass == AURORA_DRAW_CLASS_WORLD && gx::g_gxState.depthUpdate);
++  want = want || (receivers() && drawClass == AURORA_DRAW_CLASS_WORLD && gx::g_gxState.depthUpdate);
+   if (!want || !textured) {
+     return 0;
+   }
+@@ -2619,7 +2693,9 @@ DrawUniform draw_uniform() noexcept {
+         uint32_t* w = &words[i * 24];
+         std::memcpy(w + 0, l.pos, 12);
+         std::memcpy(w + 3, &l.radius, 4);
+-        const auto vc = vivid(l.color, std::clamp(c.extraLightSaturation, 0.f, 2.5f));
++        // (0340: directional lights keep their colour: the sky's light, not a coloured lamp)
++        const auto vc = (l.flags & ExtraLightDirectional) != 0 ? std::array<float, 3>{l.color[0], l.color[1], l.color[2]}
++                                                               : vivid(l.color, std::clamp(c.extraLightSaturation, 0.f, 2.5f));
+         std::memcpy(w + 4, vc.data(), 12);
+         std::memcpy(w + 7, &l.intensity, 4);
+         w[8] = l.flags;
+@@ -2728,14 +2804,17 @@ void assign_shadow_slots() noexcept {
+   uint32_t n = 0;
+   for (uint32_t i = 0; i < MaxExtraLights; ++i) {
+     g_shadowSlot[i] = UINT32_MAX;
+-    if (i < g_lightCount && (g_lights[i].flags & ExtraLightCastShadows) != 0 && g_lights[i].intensity > 0.f &&
+-        g_lights[i].radius > 0.f) {
++    // 0340: a directional light casts with any intensity (it can be shadows only), and only with
++    // shadow maps (the screen-space march needs a position).
++    const bool dir = i < g_lightCount && (g_lights[i].flags & ExtraLightDirectional) != 0;
++    if (i < g_lightCount && (g_lights[i].flags & ExtraLightCastShadows) != 0 && (g_lights[i].intensity > 0.f || dir) &&
++        g_lights[i].radius > 0.f && (!dir || shadow_maps())) {
+       order[n++] = i;
+     }
+   }
+   const auto weight = [](const ExtraLight& l) {
+     const uint32_t w = (l.flags >> 8) & 0xFFu;
+-    return w != 0 ? w : 256u;
++    return ((l.flags & ExtraLightDirectional) != 0 ? 512u : 0u) + (w != 0 ? w : 256u); // directional first
+   };
+   std::stable_sort(order.begin(), order.begin() + n,
+                    [&](uint32_t a, uint32_t b) { return weight(g_lights[a]) > weight(g_lights[b]); });
+@@ -2866,6 +2945,9 @@ uint32_t precache_bits() noexcept {
+   if (aoRecv) {
+     bits |= PrecacheAo;
+   }
++  if (c.lightReceivers) {
++    bits |= PrecacheRecv; // 0340
++  }
+   return bits;
+ }
+ 
+@@ -2894,7 +2976,7 @@ void precache_variants(const gx::PipelineConfig& c, uint32_t bits,
+       // shader_class's test on the (canonical) config: textured and lit, a GR16 shadow compare, or
+       // an AO receiver (depth-writing). A channel lit but unread by the TEV no longer shows in the
+       // canonical config; such a draw is still built when it is first drawn (with its variants).
+-      bool textured = false, want = (bits & PrecacheAo) && c.depthUpdate;
++      bool textured = false, want = (bits & (PrecacheAo | PrecacheRecv)) && c.depthUpdate;
+       for (const auto& cc : c.shaderConfig.colorChannels) {
+         want = want || cc.lightingEnabled;
+       }
+@@ -3479,6 +3561,100 @@ void flush_glow() noexcept {
+   }
+ }
+ 
++// 0340: the shadow cascades of a directional light (ExtraLightDirectional: sun, moon) in its
++// atlas cell. Faces 0-3 of the cube layout hold four orthographic cascades (view-depth slices,
++// each fitted with a bounding sphere so its size does not change with the camera's rotation, the
++// centre snapped to whole texels so the shadow edges do not crawl when the camera moves); faces 4
++// and 5 clip everything (w = -1) and carry the cascade data for the lookup: face 4 [16..19] the
++// slices' far view depths, [20..23] their texel sizes (world units), face 5 [16..19] their depth
++// ranges, [20] the light's angular radius (tangent). xa = direction toward the light + shadow
++// distance, xb = (0, 0, S, 1) (w = 1 marks a directional slot for fs_xlcube).
++static void directional_records(const ExtraLight& l, uint32_t s, uint32_t cols, uint32_t S, float W, float H, float* rec,
++                                float (&xa)[4], float (&xb)[4]) noexcept {
++  float d[3] = {l.pos[0], l.pos[1], l.pos[2]};
++  float dl = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
++  if (!(dl > 1e-6f) || !std::isfinite(dl)) {
++    d[0] = 0.f, d[1] = 1.f, d[2] = 0.f, dl = 1.f;
++  }
++  for (float& v : d) v /= dl;
++  const float f[3] = {-d[0], -d[1], -d[2]}; // the light's travel direction
++  const float ref[3] = {std::fabs(f[1]) < 0.95f ? 0.f : 1.f, std::fabs(f[1]) < 0.95f ? 1.f : 0.f, 0.f};
++  float r[3] = {ref[1] * f[2] - ref[2] * f[1], ref[2] * f[0] - ref[0] * f[2], ref[0] * f[1] - ref[1] * f[0]};
++  const float rl = std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
++  for (float& v : r) v /= rl;
++  const float up[3] = {f[1] * r[2] - f[2] * r[1], f[2] * r[0] - f[0] * r[2], f[0] * r[1] - f[1] * r[0]};
++  const auto dot3 = [](const float* a, const float* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
++  const float maxDist = std::clamp(l.radius, 100.f, 100000.f);
++  const float back = std::clamp(l.box[6] > 0.f ? l.box[6] : maxDist, 100.f, 100000.f);
++  const float camNear = std::max(maxDist * 0.004f, 1.f);
++  // Practical split scheme (log / uniform blend).
++  float split[4];
++  for (int c = 0; c < 4; ++c) {
++    const float t = float(c + 1) / 4.f;
++    const float lg = camNear * std::pow(maxDist / camNear, t), un = camNear + (maxDist - camNear) * t;
++    split[c] = lg * 0.7f + un * 0.3f;
++  }
++  const float p00 = std::fabs(g_camera.p00) > 1e-4f ? g_camera.p00 : 1.f, p11 = std::fabs(g_camera.p11) > 1e-4f ? g_camera.p11 : 1.f;
++  const float fS = float(S);
++  for (uint32_t c = 0; c < 4; ++c) {
++    const float n0 = c == 0 ? camNear : split[c - 1], n1 = split[c];
++    float ctr[3] = {0, 0, 0}, pts[8][3];
++    for (int k = 0; k < 8; ++k) {
++      const float dz = (k & 4) ? n1 : n0;
++      const float nx = (k & 1) ? 1.f : -1.f, ny = (k & 2) ? 1.f : -1.f;
++      pts[k][0] = dz * (nx + g_camera.p02) / p00;
++      pts[k][1] = dz * (ny + g_camera.p12) / p11;
++      pts[k][2] = -dz;
++      for (int a = 0; a < 3; ++a) ctr[a] += pts[k][a] / 8.f;
++    }
++    float R = 0.f;
++    for (const auto& p : pts) {
++      const float dx = p[0] - ctr[0], dy = p[1] - ctr[1], dz = p[2] - ctr[2];
++      R = std::max(R, std::sqrt(dx * dx + dy * dy + dz * dz));
++    }
++    R = std::ceil(R * 1.04f / 8.f) * 8.f; // steady size; room for the filter at the edge
++    const float texel = 2.f * R / fS;
++    float cr = dot3(r, ctr), cu = dot3(up, ctr);
++    cr = std::floor(cr / texel) * texel;
++    cu = std::floor(cu / texel) * texel;
++    const float cf = dot3(f, ctr);
++    const float dmin = cf - R - back, dmax = cf + R, range = dmax - dmin;
++    const float tx = float((s % cols) * 3 * S + (c % 3) * S), ty = float((s / cols) * 2 * S + (c / 3) * S);
++    const float cx = 2.f / W * (tx + fS * 0.5f) - 1.f, kx = fS / W;
++    const float cy = 1.f - 2.f / H * (ty + fS * 0.5f), ky = fS / H;
++    float* o = rec + c * 24;
++    for (int a = 0; a < 3; ++a) {
++      o[0 + a] = kx / R * r[a];
++      o[4 + a] = ky / R * up[a];
++      o[8 + a] = (gx::UseReversedZ ? -f[a] : f[a]) / range;
++      o[12 + a] = 0.f;
++    }
++    o[3] = cx - kx / R * cr;
++    o[7] = cy - ky / R * cu;
++    o[11] = gx::UseReversedZ ? 1.f + dmin / range : -dmin / range;
++    o[15] = 1.f;
++    o[16] = tx / W * 2.f - 1.f;
++    o[17] = 1.f - (ty + fS) / H * 2.f;
++    o[18] = (tx + fS) / W * 2.f - 1.f;
++    o[19] = 1.f - ty / H * 2.f;
++    o[20] = tx;
++    o[21] = ty;
++    o[22] = tx + fS;
++    o[23] = ty + fS;
++    rec[4 * 24 + 16 + c] = n1;
++    rec[4 * 24 + 20 + c] = texel;
++    rec[5 * 24 + 16 + c] = range;
++  }
++  for (uint32_t c = 4; c < 6; ++c) {
++    float* o = rec + c * 24;
++    std::fill(o, o + 16, 0.f);
++    o[15] = -1.f; // w < 0: every caster instance of this face is clipped
++  }
++  rec[5 * 24 + 20] = std::clamp(l.box[5], 0.f, 0.2f);
++  xa[0] = d[0], xa[1] = d[1], xa[2] = d[2], xa[3] = maxDist;
++  xb[0] = 0.f, xb[1] = 0.f, xb[2] = fS, xb[3] = 1.f;
++}
++
+ void flush_shadows() noexcept {
+   // The mask is computed before every EFB pass that added opaque world draws, from all of the
+   // frame's opaque world draws so far (the pass's own included: they are recorded, not yet run).
+@@ -3603,6 +3779,10 @@ void flush_shadows() noexcept {
+         continue;
+       }
+       const auto& l = g_lights[i];
++      if ((l.flags & ExtraLightDirectional) != 0) {
++        directional_records(l, s, cols, S, W, H, &rec[size_t(s) * 6 * 24], u.xl[s], u.xl[16 + s]);
++        continue;
++      }
+       const float near = std::clamp(l.radius * 0.02f, 3.f, 20.f);
+       u.xl[16 + s][0] = near;
+       u.xl[16 + s][1] = t;
+diff --git a/lib/gfx/enhanced.hpp b/lib/gfx/enhanced.hpp
+index df36786..b4c93d6 100644
+--- a/lib/gfx/enhanced.hpp
++++ b/lib/gfx/enhanced.hpp
+@@ -88,6 +88,7 @@ enum : uint32_t {
+   PrecacheCasters = 1u << 3, // light shadow maps (shadow-map mode)
+   PrecacheBeam = 1u << 4,    // realistic flashlight (alpha-only cone)
+   PrecacheAo = 1u << 5,      // ambient occlusion receivers (unlit opaque world draws get the world class)
++  PrecacheRecv = 1u << 6,    // 0340: directional-shadow receivers (unlit opaque world draws get the world class)
+ };
+ // Render targets a variant is built for (emit's second argument).
+ enum : uint8_t {
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index e5187dc..4b3a312 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1032,12 +1032,41 @@ fn enh_mask(frag: vec2f, slot: u32) -> f32 {
+ // Extra point lights (aurora/lights.h), 24 words each in the storage buffer:
+ // pos xyz, radius, color rgb, intensity, flags, id, shadow slot (or ~0), 0, then (0187) the room
+ // box: centre relative to pos (3), half-axis vectors (3 x 3), all view space.
++// 0340: directional lights (ExtraLightDirectional: sun, moon). pos = unit vector toward the light;
++// box[0..2] = the colour the pixel is multiplied by in full shadow (the game's own lighting is
++// darkened toward it: enh_dir_tint, applied at the end of the fragment), box[3] = how much a
++// surface facing away from the light counts as shadowed (0..1), box[4] = wrap of that terminator.
++var<private> enh_dir_tint: vec3f = vec3f(1.0);
++fn enh_dir_light(b: u32, p: vec3f, n: vec3f, ghost: bool, frag: vec2f, flags: u32) -> vec3f {
++  let l = normalize(vec3f(enh_ld(b), enh_ld(b + 1u), enh_ld(b + 2u)) + vec3f(0.0, 0.0, 1e-7));
++  let nl = dot(n, l);
++  var sh = 0.0;
++  let slot = abuf[b + 10u];
++  if (slot < 16u) {
++    let sw = (flags >> 8u) & 0xFFu;
++    sh = enh_mask(frag, slot) * select(1.0, f32(sw) / 255.0, sw != 0u);
++  }
++  // Surfaces turned away from the light are in their own shadow (a soft terminator).
++  let wrapw = max(enh_ld(b + 16u), 0.02);
++  let away = (1.0 - smoothstep(-wrapw, wrapw * 0.5, nl)) * clamp(enh_ld(b + 15u), 0.0, 1.0);
++  let s = select(max(sh, away), sh * 0.5, ghost);
++  let tint = vec3f(enh_ld(b + 12u), enh_ld(b + 13u), enh_ld(b + 14u));
++  enh_dir_tint = enh_dir_tint * mix(vec3f(1.0), clamp(tint, vec3f(0.0), vec3f(1.0)), s);
++  var ndl = select(max(nl, 0.0), nl * 0.5 + 0.5, ghost);
++  ndl = select(ndl, clamp((nl + 0.45) / 1.45, 0.0, 1.0) * 0.85, ubuf.enh_material > 0.5 && !ghost);
++  let col = vec3f(enh_ld(b + 4u), enh_ld(b + 5u), enh_ld(b + 6u)) * enh_ld(b + 7u);
++  return col * (ndl * (1.0 - sh));
++}
+ fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
+   var sum = vec3f(0.0);
+   let cnt = min(ubuf.enh_light_count, 64u);
+   let v = normalize(-p);
+   for (var i = 0u; i < cnt; i++) {
+     let b = ubuf.enh_light_base + i * 24u;
++    if ((abuf[b + 8u] & 32u) != 0u) {
++      if (!ghost || (abuf[b + 8u] & 2u) != 0u) { sum = sum + enh_dir_light(b, p, n, ghost, frag, abuf[b + 8u]); }
++      continue;
++    }
+     // 0213: the reach test first (most lights miss a given pixel), then the flags.
+     let d = vec3f(enh_ld(b), enh_ld(b + 1u), enh_ld(b + 2u)) - p;
+     let radius = max(enh_ld(b + 3u), 1.0);
+@@ -2546,6 +2575,8 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+   }
+   if (enh) {
+     // 0032: forward ambient occlusion (opaque world draws: enh_flags bit 16; mask slot 16 since 0187).
++    // 0340: directional-light (sun / moon) shadows darken the pixel toward the light's shadow tint.
++    fragmentFn += "\n    prev = vec4f(prev.rgb * enh_dir_tint, prev.a);";
+     fragmentFn += "\n    if ((ubuf.enh_flags & 16u) != 0u) { prev = vec4f(prev.rgb * (1.0 - enh_mask(in.pos.xy, 16u)), prev.a); }"
+                   // 0186 debug (AURORA_ENH_AO_SHOW=1): the occlusion each surface receives, white = none.
+                   "\n    if ((ubuf.enh_flags & 0x30000u) == 0x30000u) { prev = vec4f(vec3f(1.0 - enh_mask(in.pos.xy, 16u)), prev.a); }";

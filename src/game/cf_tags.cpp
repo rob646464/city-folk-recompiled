@@ -13,6 +13,7 @@
 #include "recomp/hle.h"
 #include "recomp/interp.h"
 #include "recomp/runtime.h"
+#include "game/cf_light.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -42,25 +43,35 @@ HLE(SetCameraProjMtx__Q34nw4r3g3d8G3DStateFRCQ34nw4r3g3d6Cameraib) {
         log("[cam] f%u camera %08X index %u data %08X t %.2f %.2f %.2f r0 %.3f %.3f %.3f lr %08X", game::guestFrames(), c.r[3],
             c.r[4], sViewSrc, rdf32(sViewSrc + 12), rdf32(sViewSrc + 28), rdf32(sViewSrc + 44), rdf32(sViewSrc),
             rdf32(sViewSrc + 4), rdf32(sViewSrc + 8), c.lr);
+    cflight::onCamera(c, rd32(c.r[3]));
     callOriginal(c, "SetCameraProjMtx__Q34nw4r3g3d8G3DStateFRCQ34nw4r3g3d6Cameraib");
 }
 
 HLE(DrawOpa__Q34nw4r3g3d7ScnRootFv) {
-    interp::TagScope t(interp::TagCat::View, c.r[3], 0, 0);
-    world::onScnRoot(c.r[3], false, true);
-    callOriginal(c, "DrawOpa__Q34nw4r3g3d7ScnRootFv");
-    world::onScnRoot(0, false, false);
+    if (!cflight::onRootDraw(c, false, true)) return;
+    {
+        interp::TagScope t(interp::TagCat::View, c.r[3], 0, 0);
+        world::onScnRoot(c.r[3], false, true);
+        callOriginal(c, "DrawOpa__Q34nw4r3g3d7ScnRootFv");
+        world::onScnRoot(0, false, false);
+    }
+    cflight::onRootDraw(c, false, false);
 }
 HLE(DrawXlu__Q34nw4r3g3d7ScnRootFv) {
-    interp::TagScope t(interp::TagCat::View, c.r[3], 0, 1);
-    world::onScnRoot(c.r[3], true, true);
-    callOriginal(c, "DrawXlu__Q34nw4r3g3d7ScnRootFv");
-    world::onScnRoot(0, true, false);
+    if (!cflight::onRootDraw(c, true, true)) return;
+    {
+        interp::TagScope t(interp::TagCat::View, c.r[3], 0, 1);
+        world::onScnRoot(c.r[3], true, true);
+        callOriginal(c, "DrawXlu__Q34nw4r3g3d7ScnRootFv");
+        world::onScnRoot(0, true, false);
+    }
+    cflight::onRootDraw(c, true, false);
 }
 
 namespace {
 void objectScope(Ctx& c, const char* name) {
     const u32 obj = c.r[3];
+    if (!cflight::onModel(c, obj)) return;
     interp::TagScope t(interp::TagCat::Object, obj, rd32(obj), c.r[4]);
     interp::tagGroupIfNone(obj);
     callOriginal(c, name);

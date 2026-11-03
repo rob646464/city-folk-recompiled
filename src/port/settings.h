@@ -298,6 +298,32 @@ struct EnhancedLightingSettings {
     bool ssao = true;
     float ssaoIntensity = 0.4f;        // 0..2
     float ssaoRadius = 60.0f;          // world units
+
+    // ---- City Folk (src/game/cf_light.cpp, docs/RENDERING.md "Enhanced lighting (City Folk)") ----
+    // Sun and moon: soft shadow maps from a directional light that follows the game clock.
+    bool sunShadows = true;
+    int sunDirection = 0;              // 0 time of day (real sun path), 1 the game's own key light
+    float sunShadowStrength = 0.6f;    // 0..1: how much a full shadow darkens (day; the moon's is weaker)
+    float sunShadowDistance = 3500.0f; // world units of view depth with shadows (a town acre is 640)
+    float sunShadowSoftness = 1.0f;    // 0..3: penumbra (the light's apparent size)
+    int sunShadowMapSize = 1;          // 0..2: 512 / 1024 / 2048 texels per cascade (preset)
+    int sunShadowQuality = 1;          // 0..2: filter taps 8 / 12 / 20 (preset)
+    bool sunLight = true;              // warm sunlight added on sun-facing surfaces (shadowed)
+    float sunLightIntensity = 0.3f;    // 0..1
+    int blobShadows = 1;               // the game's round blob shadows: 0 keep, 1 fade under real shadows, 2 hide
+    bool indoorShadows = true;         // rooms: shadows from the room's main light
+    // Time of day: golden hour, blue dusk, cool moonlight, from the game clock (and the weather).
+    bool timeOfDay = true;
+    float timeOfDayStrength = 1.0f;    // 0..2
+    bool timeOfDayWeather = true;      // overcast / rain / snow flatten the light
+    // Night lights: windows, lamps, shop interiors, fireflies, fireworks light their surroundings.
+    bool nightLights = true;
+    float nightLightIntensity = 1.0f;  // 0..3
+    bool nightLightShadows = true;     // the strongest night lights cast shadows
+    // Sun shafts: light scattered in the air, cut by the shadows of trees and houses.
+    bool sunShafts = true;
+    float sunShaftIntensity = 1.0f;    // 0..3
+    int sunShaftQuality = 1;           // 0..2: march steps 12 / 20 / 32 (preset)
 };
 
 // Second batch of restored unused content (src/recomp/unused2.*, docs/UNUSED_CONTENT.md

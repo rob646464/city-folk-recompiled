@@ -219,10 +219,6 @@ bool splitScreen() { return false; }
 bool textBoxShown() { return false; }
 int textMode() { return 0; }
 bool viewerOpen() { return false; }
-bool enhViewMatrix(float*) { return false; }
-bool enhPlayerPos(float*) { return false; }
-void enhBeginScene(Ctx&) {}
-bool enhRoomBounds(const float*, float*, float*) { return false; }
 void drawOverlay() {}
 void debugMenu() {}
 s32 overlayEntry(const char* path) { return region::overlayEntry(path); }
