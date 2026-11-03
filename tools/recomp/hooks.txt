@@ -69,3 +69,7 @@ fn_80177F44 all
 fn_80314AF4 all
 # The pane-tree walk the game's menus hit-test the pointer with (Bounding panes named "B*").
 fn_802B5598 all
+
+# Enhanced world (src/game/cf_world.cpp, docs/RENDERING.md "Enhanced world"): dWeather_c's per-frame
+# update (its weather state at +0x5884).
+fn_801C92F0 all

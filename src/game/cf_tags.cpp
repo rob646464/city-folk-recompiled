@@ -19,6 +19,9 @@
 #include <string>
 
 namespace recomp {
+namespace world {
+void onScnRoot(u32 root, bool xlu, bool begin);  // cf_world.cpp (F1 > Visuals > Enhanced world)
+}
 namespace {
 u32 sViewSrc = 0;
 }  // namespace
@@ -44,11 +47,15 @@ HLE(SetCameraProjMtx__Q34nw4r3g3d8G3DStateFRCQ34nw4r3g3d6Cameraib) {
 
 HLE(DrawOpa__Q34nw4r3g3d7ScnRootFv) {
     interp::TagScope t(interp::TagCat::View, c.r[3], 0, 0);
+    world::onScnRoot(c.r[3], false, true);
     callOriginal(c, "DrawOpa__Q34nw4r3g3d7ScnRootFv");
+    world::onScnRoot(0, false, false);
 }
 HLE(DrawXlu__Q34nw4r3g3d7ScnRootFv) {
     interp::TagScope t(interp::TagCat::View, c.r[3], 0, 1);
+    world::onScnRoot(c.r[3], true, true);
     callOriginal(c, "DrawXlu__Q34nw4r3g3d7ScnRootFv");
+    world::onScnRoot(0, true, false);
 }
 
 namespace {

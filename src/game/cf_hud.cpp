@@ -144,6 +144,10 @@ HLE(CalculateMtx__Q34nw4r3lyt4PaneFRCQ34nw4r3lyt8DrawInfo) {
     }
 }
 
+namespace world {
+void onLayoutDraw();
+}
+
 HLE(Draw__Q34nw4r3lyt4PaneFRCQ34nw4r3lyt8DrawInfo) {
     const u32 pane = c.r[3];
     const int depth = sDepth;
@@ -151,6 +155,7 @@ HLE(Draw__Q34nw4r3lyt4PaneFRCQ34nw4r3lyt8DrawInfo) {
         sRootLr = c.lr;
         sRootPane = pane;
         cf::navLayoutDrawn(c, pane);  // menu items for the pointer snap (cf_menu_nav.cpp)
+        world::onLayoutDraw();  // cf_world.cpp: the 2D starts, the world effects end (after enhanced lighting's scene end)
     }
     const float tx = rdf32(pane + kGlbTx);
     std::optional<ws::AnchorScope> scope;

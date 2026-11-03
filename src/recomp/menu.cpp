@@ -45,6 +45,9 @@
 
 namespace recomp {
 u32 copyDispCount();  // hle_gx.cpp
+namespace world {
+bool drawMenu();  // src/game/cf_world.cpp (F1 > Visuals > Enhanced world)
+}
 }
 
 namespace recomp::menu {
@@ -88,7 +91,8 @@ struct Page {
     const char* sub;
 };
 constexpr Page kPages[] = {
-    {"Visuals", "General"},       {"Visuals", "Rendering"},        {"Visuals", "Enhanced lighting"}, {"Visuals", "Texture packs"},
+    {"Visuals", "General"},       {"Visuals", "Rendering"},        {"Visuals", "Enhanced lighting"}, {"Visuals", "Enhanced world"},
+    {"Visuals", "Texture packs"},
     {"Sound", nullptr},           {"Controls", "Ports"},           {"Controls", "Bindings"},
     {"Controls", "Pointer"},      {"Controls", "Analog"},       {"Controls", "DSU"},             {"Enhancements", "General"},     {"Enhancements", "Gameplay"},
     {"Enhancements", "Silly"},          {"Enhancements", "Unused content"}, {"Enhancements", "Debug"}, {"Game", nullptr},
@@ -1787,6 +1791,7 @@ void scriptedSettings() {
             std::printf("[settings] frame %u: %s.%s=%s%s\n", now, it->section.c_str(), it->key.c_str(),
                         it->value.c_str(), ok ? "" : " (unknown key)");
             std::fflush(stdout);
+            if (ok && it->section == "video") applyWindowSettings();  // (resolution scale: applied like the F1 slider)
             it = sChanges.erase(it);
         } else {
             ++it;
@@ -1932,6 +1937,10 @@ void draw() {
                     }
                     if (ImGui::BeginTabItem("Enhanced lighting", nullptr, envTab("Enhanced lighting"))) {
                         enhancedLightingTab();
+                        ImGui::EndTabItem();
+                    }
+                    if (ImGui::BeginTabItem("Enhanced world", nullptr, envTab("Enhanced world"))) {
+                        sDirty |= recomp::world::drawMenu();  // src/game/cf_world.cpp
                         ImGui::EndTabItem();
                     }
                     if (ImGui::BeginTabItem("Texture packs", nullptr, envTab("Texture packs"))) {
