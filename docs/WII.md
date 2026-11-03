@@ -160,6 +160,77 @@ items done as they land.
   writes `town.txt` (boot -> town gate, ~frame 13300) and `town_walk.txt` (+ walking from 16700):
   `cfrecomp --input @tools/routes/town.txt` with `CF_INPUT_CLOCK=frames`.
 
+### Rendering status (branch render-3)
+
+- **Display lists read a frame late** (the main interpolation gap): NW4R g3d writes its material
+  and shape display list calls (`GX_CMD_CALL_DL`, ~400 per frame in the town) straight into the
+  write-gather pipe; Aurora 0300 processed them in place when the tape was replayed, so every
+  material colour/texture animation the game patched into those lists came from the newest frame
+  and nothing in them was noted. While a tape is captured such calls are now held back and made
+  as a GXCallDisplayList (`rawCallWrite`, hle_gx.cpp): the list is inlined as it is now and parsed
+  like any display list. Indexed matrix loads inside called lists (g3d shape pre-primitive lists)
+  are rewritten into immediate loads of the matrices in memory now and noted (`convertListIndexed`;
+  they were drawn with frame b's matrices from the array copy). Raw and list indexed loads are
+  keyed by their matrix-array address (`interp::noteBySource`: g3d skips loads already in a slot,
+  which shifted occurrence keys). A list's own colour writes belong to its own draw
+  (`claimForLastDraw`), and draws with no matrices (g3d material lists) pair by list + scope:
+  colour registers switched (shown at the game frame) per present 1300 -> about 1, blended ~2000.
+  A/B: `CF_RAW_DL_INLINE=0`, `CF_DL_INDEXED=0`, `CF_KEY_BY_SOURCE=0`.
+- **Camera**: `G3DState::SetCameraProjMtx` is called by `ScnRoot::SetGlbSettings` for all 32
+  cameras of a scene; r5 is true only for the current one. The hook took the last stored (camera
+  31, a fixed identity camera at z -15), so no camera motion was ever factored out of the blend and
+  no cut could be found. Now only r5 = true sets the view source (`CF_CAM_LOG=1`). Cuts are also
+  judged relative to the scene's depth (median view distance of the main pass, City Folk's sets
+  are small): `CF_CUT_LOG=1` lists every tape's main camera step. The bus "cut" at ~frame 6250 is a
+  pan (1-2 units per frame), scene changes come after black frames (no main view in a).
+- **Particles**: nw4r::ef billboard particles (DrawQuad from the strategy at 0x80292388, particle
+  in r27) are one Particle scope each, with a birth stamp from the age at +0xDC (+1 per frame in
+  every particle followed, `CF_EF_PEEK=<words>`): a born/retired particle no longer shifts the
+  pairing of the others (running dust, rain splashes). Lines and strips (rain streaks 0x80295174,
+  0x8028E930, 0x8029077C) are still keyed by occurrence under their emitter.
+- **Text boxes / HUD**: lyt panes are tagged per pane and blend; the dialogue box opening in the bus
+  grows every present (region mean 54 -> 194 in 14 game frames, 2 distinct steps per game frame at
+  120, `pdT` sheet); no grouping needed so far.
+- **Capture cost**: the per-tape occurrence and pairing maps were std::unordered_map (a heap node
+  per key, ~4500 values and ~400 lists per town tape): the guest spent ~18% of its time in the heap
+  while capturing, and the town ran 31-36 game fps at 120. Flat epoch-cleared tables
+  (`OccTable`) and reserved tape vectors: 42-60 game fps in the user's town under the same load.
+  Aurora 0305: the texture-object cache sweep ran every frame (12% of the host thread at 120 fps),
+  now every 32 frames.
+- **Rain streaks** (Aurora 0304): the rain is GX_LINES (2 vertices, texcoords (0,0)-(0,1), line
+  width 18/6 px, GXEnableTexOffsets + GX_TO_ONE). Aurora put the line texture offset on T, so S
+  stayed 0, the clamped transparent edge of the 8x16 I4 streak texture: alpha 0, nothing drawn
+  (AURORA_LINE_DEBUG=1 showed the lines in place). The offset goes on S now and the streaks show
+  (faint, A0 25/255 x texture alpha by the game's TEV). Not compared with Dolphin (no way to force
+  rain there yet); the game's own vertex data only makes sense with the offset on S. Test aids
+  `CF_LINE_LOG=1` (first words of line draws), draw log line state.
+- **PAL 50/60 Hz**: the VI retrace rate follows the TV format of the game's VIConfigure (EuRGB60 =
+  59.94 Hz, PAL = 50 Hz); LM's separate "PAL refresh rate" option is gone, the console's EuRGB60
+  (F1 > Game > Console, default on) is the only setting. The PAL game asked SCGetEuRgb60Mode 0.4 ms
+  after SYSCONF was opened, before the read came back (a Wii is far slower in between), and always
+  got 0: a 0 is now answered from the same setting the SYSCONF is generated from. PAL disc:
+  `SCGetEuRgb60Mode = 1`, TV format 5, 59.5 presents/s (59.9 retraces/s); EuRGB60 off: format 1,
+  50.0 retraces/s, the game one frame per retrace (its speed follows, as on a console).
+- **Pacing** (user-town fixture, `play.txt` walk/run/pockets/map, 1280x720, VSync off; this PC is
+  shared with other agents' game instances and builds: CPU 50-100% loaded): presented 108 / 117 /
+  114 fps at targets 120 / 144 / 240 (presents p50 8.2-8.4 ms: the offscreen window here does not
+  present faster than ~120 Hz), step error mean 2.6-3.0 ms p95 6.0-6.6, shown-time error p95 17-26
+  ms, 0 reversals, 0-6 stalls; game 42-60 fps in the town (it also misses 60 at Original 60 under this
+  load: 45-53, guest busy ~70% incl. the AX DSP stand-in ~19%). Identity check: 0 of 0.7-0.9 M
+  tagged matrices jumped there and back. The judder detector's blend "defects" (16 per in-between,
+  the player model) are its limitation with g3d skinned draws (per-vertex matrix indices; the
+  present dumps show the model whole); not usable as a defect count for City Folk yet.
+- **Original 60**: every change is behind interp::capturing() or the anchoring option: frame dumps
+  identical to the render-2 build for every still frame of the title/Rover route (the frames that
+  differ also differ between two runs of the same build: animation timing vs. load).
+- **Ultrawide clicks** (open): anchoring now moves the HUD elements' pane global matrices
+  (`Pane::CalculateMtx` hook, dx = (1/f - 1) x half the layout width; clock -217 -> -312, camera
+  icon 274 -> 369 at 21:9; `CF_HUD_ANCHOR=picture` the old picture-only shift). But the game treats a
+  pointer beyond the 16:9 frame (|KPAD x| > 1) as off the screen: the memo button hides as soon as
+  the pointer leaves the toolbar, so an element at the window edge cannot be clicked either way.
+  The fix needs the pointer remapped into the 16:9 frame over an anchored element (and the cursor
+  drawn at the mouse); "Keep HUD at 16:9" stays on by default.
+
 ## IOS (Starlet)
 
 The game reaches every device through IPC to IOS (`IOS_Open/Ioctl(v)/Read/Write`). Decision

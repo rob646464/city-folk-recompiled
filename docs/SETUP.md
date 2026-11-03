@@ -196,9 +196,9 @@ What is still USA- or LM-shaped (not fixed here, none of it stops the boot):
   fields per frame, an in-range one would mistime interpolation), `presentOnCopy()` is forced for
   PAL (City Folk switches to presenting at GXCopyDisp on every version anyway), and
   `HLE(palfn_80007844)` is LM's (never bound in City Folk). Owner: VI/interpolation.
-- The European game runs at 50 Hz unless the console's EuRGB60 is on (`[system] eurgb60`, default
-  off, as a new European Wii): 49 presents/s measured vs 59 for USA/Japan. A default of 60 Hz for
-  PAL may be what players expect.
+- The European game runs at 60 Hz (EuRGB60, F1 > Game > Console, `[system] eurgb60`, default on)
+  or 50 Hz with it off; the VI rate follows the TV mode the game configures (branch render-3, docs/WII.md
+  "Rendering status (branch render-3)"): 59.5 presents/s by default, 50 retraces/s with it off.
 - Debug-only USA addresses from LM: the message-queue trace filter (`hle_os.cpp`, 0x803A3608), the
   watchdog's queue dump (`sched.cpp`), `CF_IND_PATTERN` (`hle_gx.cpp`). Wrong addresses on every
   City Folk version, harmless.
