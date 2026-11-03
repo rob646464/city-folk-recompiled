@@ -61,8 +61,14 @@ git -C "$WORK" checkout --force --detach FETCH_HEAD
 git -C "$WORK" clean -fdq
 # Aurora from this checkout's submodule (has the pinned commit; no network needed).
 AURORA_GIT=$(gitdir_of "$SRC/extern/aurora")
+# A worktree's submodule cloned with --reference borrows its objects through an alternates file
+# holding a Windows path: use the main checkout's submodule repository instead.
+if [ -f "$AURORA_GIT/objects/info/alternates" ] && [ -f "$SRC_GIT/commondir" ]; then
+    MAIN_AURORA=$(cd "$SRC_GIT/$(cat "$SRC_GIT/commondir" | tr -d '\r')" && pwd)/modules/extern/aurora
+    [ -d "$MAIN_AURORA" ] && AURORA_GIT=$MAIN_AURORA
+fi
 git -C "$WORK" config submodule.extern/aurora.url "$AURORA_GIT"
-git -C "$WORK" -c protocol.file.allow=always submodule update --init --recursive --force
+git -C "$WORK" -c protocol.file.allow=always submodule update --init --recursive --force || { echo "submodule checkout failed" >&2; exit 1; }
 # --force reset Aurora to pristine: drop the applied-patches stamp so configure applies them
 # again (with an unchanged patch set it would otherwise skip them and the build fails).
 rm -f "$(git -C "$WORK/extern/aurora" rev-parse --absolute-git-dir)/cf_patches_applied"
