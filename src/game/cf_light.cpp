@@ -11,6 +11,7 @@
 // fn_125_C0 or at the first root layout pane, whichever comes first.
 #include "game/cf_light.h"
 #include "game/cf_calendar.h"
+#include "recomp/version.h"
 
 #include "port/settings.h"
 #include "recomp/enhanced_lighting.h"
@@ -67,7 +68,7 @@ struct Clock {
 };
 Clock readClock() {
     Clock k;
-    const u32 f = calendar::versionAddr(0x8016D40C);
+    const u32 f = VA(0x8016D40C);
     const u32 lis = rd32(f), addi = rd32(f + 4);
     if ((lis >> 26) != 15 || (addi >> 26) != 14) return k;  // lis / addi expected
     const u32 t = ((lis & 0xFFFF) << 16) + u32(int32_t(int16_t(addi & 0xFFFF)));
@@ -570,11 +571,11 @@ static void stageDraw(Ctx& c) {
     if (enh::masterOn() && copyDispCount() - cflight::sWeatherFrame >= 120) {
         // The town's weather this hour (fn_801C9E48(time*), cf_weather.cpp's hook included).
         cflight::sWeatherFrame = copyDispCount();
-        const u32 f = calendar::versionAddr(0x8016D40C);
+        const u32 f = VA(0x8016D40C);
         const u32 lis = rd32(f), addi = rd32(f + 4);
         if ((lis >> 26) == 15 && (addi >> 26) == 14) {
             const u32 t = ((lis & 0xFFFF) << 16) + u32(int32_t(int16_t(addi & 0xFFFF)));
-            const u32 st = guestCall(c, calendar::versionAddr(0x801C9E48), t);
+            const u32 st = guestCall(c, VA(0x801C9E48), t);
             cflight::sWeather = st <= 6 ? int(st) : 0;
         }
     }
