@@ -24,30 +24,15 @@ patch 30 801CE714 60000000 all
 
 # Content from other regions (src/game/cf_region.cpp, docs/REGION_CONTENT.md "Content from other
 # regions in the port"): the event calendar's "event runs on this date" test (region mask + date
-# rule), Mother's Day and Father's Day date rules. Each version under its own address name.
-fn_80089890
-fn_800895E0
-fn_800897B0
-fn_800898B0 pal
-fn_80089600 pal
-fn_800897D0 pal
-fn_80089818 jp
-fn_80089568 jp
-fn_80089738 jp
-fn_8008986C kr
-fn_800895BC kr
-fn_8008978C kr
+# rule), Mother's Day and Father's Day date rules.
+fn_80089890 all
+fn_800895E0 all
+fn_800897B0 all
 # The region getter itself, answered per call site (Nook's seasonal item, event letters).
-fn_801069D0
-fn_80106B30 pal
-fn_80106B64 jp
-fn_80106A50 kr
+fn_801069D0 all
 # The town's region group (0 JP, 1 USA, 2 Europe, 3 Korea), for the villager house-type data of
 # d_a_str_fieldNP (other regions' houses).
-fn_80169890
-fn_80169540 pal
-fn_80169480 jp
-fn_80169418 kr
+fn_80169890 all
 # Calendar / hemisphere / real-time weather (src/game/cf_calendar.cpp, cf_weather.cpp; docs/CALENDAR.md).
 fn_8016D40C all  # game clock getter
 fn_8016DD58 all  # date -> term index

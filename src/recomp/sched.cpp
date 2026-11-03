@@ -509,8 +509,7 @@ void dumpThreads() {
             log("%s", line.c_str());
         }
         }
-    log("[sched]   mq 803A3608: used %u base %u interval %u retrace %u", rd32(0x803A3608 + 0x1C), rd32(0x803A3600),
-        rd32(0x803A3604), viRetraceCount());
+    log("[sched]   retrace %u", viRetraceCount());
     log("[sched]   irq ctx: lr %08X fn %08X, queued %zu", sIrqCtx.lr, sIrqCtx.lastFn, sIrqs.size());
 }
 

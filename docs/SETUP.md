@@ -199,12 +199,83 @@ What is still USA- or LM-shaped (not fixed here, none of it stops the boot):
 - The European game runs at 50 Hz unless the console's EuRGB60 is on (`[system] eurgb60`, default
   off, as a new European Wii): 49 presents/s measured vs 59 for USA/Japan. A default of 60 Hz for
   PAL may be what players expect.
-- Debug-only USA addresses from LM: the message-queue trace filter (`hle_os.cpp`, 0x803A3608), the
-  watchdog's queue dump (`sched.cpp`), `CF_IND_PATTERN` (`hle_gx.cpp`). Wrong addresses on every
-  City Folk version, harmless.
-- `tools/recomp/hooks.txt` has no City Folk entries yet; a REL hook written against USA offsets
-  needs a `pal`/`jp`/`kr` line with the offsets from `config/<id>/rels_us_map.txt`. The surround
-  patch 30 (USA address) has no PAL/Japan/Korea line yet.
+- Debug-only LM addresses (the message-queue trace filter and the watchdog's queue dump at LM's
+  0x803A3608) were removed on branch parity-1.
+
+## Version-aware code
+
+Host code (src/game/, the City Folk hooks in src/recomp/) is written against the USA game
+(RUUE01 rev 1) and runs on all four versions through two mechanisms (branch parity-1, after LM's
+`version.h`):
+
+- **Hooks by USA name, `all` tag** (`tools/recomp/hooks.txt`): `fn_8016D40C all` hooks the USA
+  function and, on the other versions, the function `config/<id>/us_map.txt` matches to it; the
+  recompiler renames that function to the USA name in the version's build (a function of the
+  version that already had the name gets a `_<id>` suffix), so one `HLE(fn_8016D40C)` and
+  `callOriginal(c, "fn_8016D40C")` serve every version. REL functions: `<module>::fn_<id>_<USA
+  offset> all` (rels_us_map.txt). Patches: `patch <id> <USA address> <word> all`, mapped into the
+  hash-matched function at the same offset. A build fails when an `all` entry matches nothing.
+  The inputs (`--us-map`/`--rel-us-map` of cfrecompile, embedded `kUsMap_<id>`/`kRelUsMap_<id>`
+  for setup) are part of the module key. Entries without `all` keep the old meaning (a `pal` /
+  `jp` / `kr` line names that version's own function). Named SDK/NW4R/DWC functions already have
+  the same name everywhere (every HLE / hook name checked in all four symbols.txt).
+- **`VA(0x...)` for USA guest addresses** (`src/recomp/version.h`): functions host code calls,
+  return addresses it compares, static objects it reads. `tools/recomp/gen_version_map.py` scans
+  src/ for `VA(...)` and writes `src/recomp/version_addrs.inc` (USA, PAL, Japan, Korea): code
+  addresses through the matched function + offset (hash match, or the same instruction at that
+  offset), data addresses decoded from every matched place the USA code builds them (lis+addi /
+  load / store, r13/r2 small data; the vote is printed). It exits non-zero on an address it cannot
+  map; re-run it after adding a `VA(...)`. `VOFF(us, pal, jp, kr)` is there for struct offsets
+  that differ (none so far).
+- **Struct offsets are checked, not mapped** (the matcher masks load/store displacements):
+  `gen_version_map.py diff <USA functions...>` lists the instructions of matched functions that
+  differ other than in addresses, `reldiff <module> <offsets...>` the same for REL functions,
+  `field <function> <offset>...` the instructions using one displacement. Checked identical in all
+  four apart from addresses: the grass manager and tile functions, the player-data/tan/palette
+  functions, d_a_playerNP's skin/face/setup/step functions, the calendar/weather lookups, the save
+  and WiiConnect24 entry points, Random, the surround call site, NW4R snd (Voice/Channel/
+  SeqTrack/StrmPlayer/WsdPlayer callbacks, InitParam, AttachSoundPlayer, GetBasicPlayer,
+  SetupSoundPlayer, __AXGetPBs), lyt Pane::Draw/LoadMtx/CalculateMtx, g3d SetCameraProjMtx, the
+  online-system entry points and most DWC functions. One difference found: an address operand in
+  fn_800A7F9C (Japan/Korea; not a field the port reads).
+- Dev builds of the other versions: `toolsuild.ps1 -Game RUUP01|RUUJ01|RUUK01 -Disc "<that
+  disc>"` (build folder `build/windows-clang-<id>`), runs with `toolsoutesun.ps1 -Build
+  windows-clang-<id> -Disc ...` (`-Settings "[audio]|output=3"` writes settings read at boot).
+- **The USA save loads on every version**: the `user-town` fixture with its title folder renamed
+  (`52555545` -> `52555550` / `5255554a` / `5255554b`, passed as `CF_FIXTURE=<folder>
+and`) is
+  "Preparing saved data" -> the town on PAL, Japan and Korea (the clock shows 27/10 on PAL, the
+  Korean title shows the saved town). Continue routes per version: Korea's choice boxes sit further
+  right ("좋아!" at `@0.44/0.14`, the player's name at `@0.56/0.33`); PAL and Japan take the USA
+  positions.
+
+### Per-version status (2026-11-02, branch parity-1)
+
+One run per version: saved town (above), CF_RNG_SEED, south hemisphere, fake weather, skin tone
+forced to 8 at frame 5300, grass wear x10 while walking/running, forced save at 6200, CF_REGION=all,
+discrete 5.1 output, CF_AUDIO_LOG, CF_LYT_LOG (logs and shots in build/runs/feat-<ver>).
+
+| Feature (how checked) | USA | PAL | Japan | Korea |
+|---|---|---|---|---|
+| Boot, title, continue into the saved town | yes | yes (50 Hz) | yes | yes |
+| Hemisphere (`[cal]` lookups moved to April) | yes | yes | yes | yes |
+| Real-time weather hook (`[weather]` fake answers; rain, since April is not snow season) | yes | yes | yes | yes |
+| Skin tone (palettes read, player rebound to tone 8, shots) | yes | yes | yes | yes |
+| Grass wear (`[grass]` step wear on the player's tiles) | yes | yes | yes | yes |
+| Save path (CF_FORCE_SAVE: write request -> result 1, /tmp safe copy) | yes | yes | yes | yes |
+| CF_RNG_SEED (boot seed at the mapped return address) | yes | yes | yes | yes |
+| Surround: patch 30 keeps DPL2 (`AXSetMode(2)`) | yes | yes | yes | yes |
+| Volume sliders: voices classified by sound player | yes | yes | yes | yes |
+| HUD anchoring: the clock / memo / camera panes found by name | yes | yes | yes | yes |
+| Region content: events of other regions (`[region] event`) | yes | yes | yes | yes |
+| Region getter per call site (Nook's stock, letters) | not reached | not reached | not reached | not reached |
+| Interpolation tags, Wii Remote HLE, NAND/IOS, DWC HLE | by SDK/NW4R name, same code (pointer + Nunchuk routes drove all four) | | | |
+| Online test actions (CF_ONLINE_TEST steps, state logs) | VA, not run here | VA, not run | VA, not run | VA, not run |
+
+Not checked here: a new game into town on PAL/Japan/Korea (the town-name / name keyboards differ:
+JP kana, KR Hangul; the PAL route's language choice is not scripted), the
+New Leaf grass mode and the real Open-Meteo lookup per version (same code paths as above), online
+play between versions. Nothing found that cannot work on a version.
 
 ## Korea
 
