@@ -78,6 +78,8 @@ struct Snapshot {
     std::vector<JoinRequest> pending;  // host with "ask before join"
     // Host reachability (port mapping / STUN), human readable.
     std::string lanEndpoint, publicEndpoint, reachability;
+    // Joiner without an answer yet: its public address for the host (hole punching), or empty.
+    std::string replyCode;
 };
 
 // LAN room list entry (beacons heard in the last 6 s) while scanning.
@@ -115,6 +117,8 @@ public:
     bool joinCode(const std::string& code, const std::string& password, std::string* err);
     bool joinAddress(const std::string& hostPort, const std::string& password, std::string* err);
     bool joinLan(const LanRoom& room, const std::string& password, std::string* err);
+    // Host: a joiner's reply code: send packets to it for 30 s (hole punching).
+    bool punch(const std::string& replyCode, std::string* err);
     void leave();
     void kick(u8 memberId);
     void answerJoinRequest(u32 ticket, bool accept);

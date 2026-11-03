@@ -685,6 +685,13 @@ bool drawTab() {
                                                              : "Not in a room";
     ImGui::Text("Room: %s", stateText);
     if (!snap.message.empty() && snap.state != net::State::Hosting) ImGui::TextWrapped("%s", snap.message.c_str());
+    if (!snap.replyCode.empty()) {
+        ImGui::TextWrapped("No answer from the host yet. Send the host this reply code (they enter it under "
+                           "\"Let them in\"):");
+        ImGui::TextUnformatted(snap.replyCode.c_str());
+        ImGui::SameLine();
+        if (menu::SmallButton("Copy##reply")) ImGui::SetClipboardText(snap.replyCode.c_str());
+    }
     ImGui::Text("Game: %s", dwcStatusText().c_str());
     ImGui::Text("Your friend code: %s", fcText(sFriendKey).c_str());
     ImGui::SetItemTooltip("The game's 12-digit friend code. Others enter it in their game's friend roster,\n"
@@ -713,6 +720,19 @@ bool drawTab() {
             if (!snap.lanEndpoint.empty()) ImGui::Text("On your network: %s", snap.lanEndpoint.c_str());
             if (!snap.publicEndpoint.empty()) ImGui::Text("On the internet: %s", snap.publicEndpoint.c_str());
             ImGui::TextWrapped("Internet: %s", snap.reachability.c_str());
+            // Hole punching: a joiner whose packets do not get through sends its reply code.
+            static char reply[64] = {};
+            ImGui::SetNextItemWidth(260.0f * ui::scale());
+            ImGui::InputTextWithHint("##reply", "a joiner's reply code", reply, sizeof reply);
+            ImGui::SameLine();
+            if (menu::SmallButton("Let them in")) {
+                std::string e;
+                if (net::session().punch(reply, &e)) reply[0] = 0;
+                else sError = e;
+            }
+            ImGui::SetItemTooltip("For a player who cannot reach you (no UPnP, no port forward): they get a reply code\n"
+                                  "while joining. Enter it here and both routers open the way (works with most home\n"
+                                  "routers; not through every mobile or corporate network).");
             memberTable(snap, true);
             for (auto& r : snap.pending) {
                 ImGui::PushID(int(r.ticket));

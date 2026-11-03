@@ -432,6 +432,20 @@ with the roster menu's own delete (`cf_RosterDeleteOffline`, fn_8017C3C0: later 
 Verified with `CF_ONLINE_TEST=24000:removefriends` after a visit: `profile id ... removed from
 the game roster (slot 0): done`.
 
+## 10d. Hole punching (no server of ours)
+
+For a host that is not reachable (no UPnP / NAT-PMP, no port forward) and a joiner behind an
+ordinary home router: the joiner asks a public STUN server for its own public address while it
+connects; after 3 s without an answer F1 shows it as a **reply code** (the room code format with
+one endpoint and no secret). The joiner sends that code to the host by chat; the host enters it
+under "Let them in": for 30 s the host sends small T_PUNCH packets to that address while the
+joiner keeps sending HELLO to the host's public address (from its STUN, in the room code). Both
+routers then have outgoing traffic to the other side and let the answers in (endpoint-independent
+mapping, the usual home case); the join then proceeds as usual. It does not get through
+symmetric NATs (some mobile and corporate networks): there the relay (10c) or a VPN helps.
+While a reply code is shown the joiner waits 90 s instead of 10 s. Test: cf_online_test checks
+that the host's punch packets arrive at the address of a reply code.
+
 ## 10c. The optional self-hosted relay (tools/relay/cf_relay.cpp)
 
 Nobody has to run a server; a friend group that wants one runs `cf_relay [--port 29912]

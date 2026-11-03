@@ -3,6 +3,7 @@
 #include "recomp/online_crypto.h"
 #include "recomp/online_ed25519.h"
 #include "recomp/online_net.h"
+#include "recomp/online_sock.h"
 
 #include <cctype>
 #include <chrono>
@@ -233,6 +234,37 @@ int main() {
         AppMsg got;
         CHECK(waitFor([&] { return rh.pollApp(got, 0x40, 0x40) && got.data.size() == msg.size(); }, 6), "big message via relay");
         std::printf("relay: joined and a %zu-byte message crossed\n", msg.size());
+    }
+
+    // Hole punching: the host sends packets to a joiner's reply code (its public address).
+    {
+        Session ph;
+        ph.setIdentity(ident("PunchHost", 1111));
+        HostOptions o;
+        o.port = 39960;
+        o.portMapping = false;
+        CHECK(ph.host(o, &err), "%s", err.c_str());
+        online::sock::Socket u = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_port = htons(39961);
+        a.sin_addr.s_addr = htonl(0x7F000001u);
+        CHECK(bind(u, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0, "bind");
+        online::sock::setNonBlocking(u);
+        Endpoint e;
+        e.family = 4;
+        e.addr[0] = 127; e.addr[3] = 1;
+        e.port = 39961;
+        const u8 zero[10] = {};
+        CHECK(ph.punch(encodeCode(zero, {e}), &err), "%s", err.c_str());
+        bool got = waitFor([&] {
+            char b[64];
+            const int n = int(recv(u, b, sizeof b, 0));
+            return n >= 4 && b[0] == 'C' && b[1] == 'F' && u8(b[3]) == 0x23;
+        }, 3);
+        CHECK(got, "punch packets arrive at the reply code's address");
+        std::printf("hole punching: packets to the reply code: %s\n", got ? "yes" : "no");
+        online::sock::closeSocket(u);
     }
 
     std::printf(sFails ? "%d FAILURES\n" : "all online transport checks passed\n", sFails);
