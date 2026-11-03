@@ -24,6 +24,7 @@
 //
 // Test aids: CF_NAV_LOG=1 (item sets as they appear, moves; recomp/menu_nav.cpp), CF_NAV_DUMP=1
 // (every hit test source and its items, every 30 frames).
+#include "game/cf_features.h"
 #include "recomp/game.h"
 #include "recomp/hle.h"
 #include "recomp/menu_nav.h"
@@ -46,6 +47,7 @@ constexpr u32 kHitTestPane = 0x80007878;   // the 'B' pane test of the walk
 constexpr u32 kListGetNext = 0x8022A514;   // nw4r::ut::List_GetNext
 constexpr u32 kGuiContain = 0x803158DC;    // game gui::PaneComponent::contain
 constexpr u32 kHbmListGetNth = 0x802DF948; // nw4hbm::ut::List_GetNth (HOME Menu)
+constexpr u32 kBoundingVtable = 0x805231B0; // nw4r::lyt::Bounding
 
 const bool sDump = [] {
     const char* v = std::getenv("CF_NAV_DUMP");
@@ -130,7 +132,7 @@ struct Pending {
     float x0, y0, x1, y1;
 };
 
-void publish(const std::vector<Pending>& v, const menunav::Scale& s, bool hud) {
+void publish(const std::vector<Pending>& v, const menunav::Scale& s, bool hud, bool tested = true) {
     for (const auto& p : v) {
         menunav::Item it;
         float ax, ay, bx, by;
@@ -142,6 +144,7 @@ void publish(const std::vector<Pending>& v, const menunav::Scale& s, bool hud) {
         it.y1 = std::max(ay, by);
         it.key = p.pane;
         it.hud = hud;
+        it.tested = tested;
         std::snprintf(it.name, sizeof it.name, "%s", p.name.c_str());
         menunav::report(it);
     }
@@ -179,6 +182,32 @@ HLE(fn_802B5598) {
     }
     publish(found, s, hud && !found.empty());
     c.r[3] = ret;
+}
+
+// 1b. Layouts drawn this frame: screens that hit-test against positions they stored when they
+// opened (the pockets record their slot panes' centres once, with the same pane walk) are found
+// by their visible Bounding panes named 'B*' as they are drawn.
+void cf::navLayoutDrawn(Ctx& c, u32 root) {
+    (void)c;
+    if (!menunav::wanted() || !root) return;
+    std::vector<Pending> found;
+    bool hud = true;
+    walk(root, 0, [&](u32 p) {
+        if (rd8(p + 0xBC) != 'B' || rd32(p) != kBoundingVtable || !visibleChain(p)) return;
+        Pending pd{p, paneName(p), 0, 0, 0, 0};
+        if (pd.name == "B_msgWin") return;  // the text box: A advances it wherever the pointer is
+        if (!paneBox(p, 1.0f, pd.x0, pd.y0, pd.x1, pd.y1)) return;
+        hud &= hudName(pd.name);
+        found.push_back(pd);
+    });
+    if (found.empty()) return;
+    if (dumpFrame()) {
+        log("[navdump] f%u drawn root %08X: %zu items%s", game::guestFrames(), root, found.size(), hud ? " (hud)" : "");
+        for (const auto& p : found)
+            log("[navdump]   %s %.1f,%.1f .. %.1f,%.1f alpha %u/%u", p.name.c_str(), p.x0, p.y0, p.x1, p.y1, rd8(p.pane + 0xB8),
+                rd8(p.pane + 0xB9));
+    }
+    publish(found, sLastWalkScale, hud, false);
 }
 
 // 2. The game's gui::Manager::update (keyboards).

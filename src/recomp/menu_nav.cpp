@@ -146,7 +146,8 @@ const Item* inDirection(const std::vector<Item>& items, const Box& from, float d
         const float fAcross = std::fabs(fw * dy) + std::fabs(fh * dx), bAcross = std::fabs(bw * dy) + std::fabs(bh * dx);
         const float gap = std::max(0.0f, std::fabs(across) - fAcross - bAcross);  // 0: in line
         const float edge = std::max(0.0f, along - fAlong - bAlong);               // gap along
-        const float cost = edge + 0.25f * along + 3.0f * gap + 0.35f * std::fabs(across);
+        // Items in line (overlapping across the direction) always win over items off to the side.
+        const float cost = edge + 0.25f * along + (gap > 0 ? 1.0f + 4.0f * gap : 0.0f) + 0.35f * std::fabs(across);
         if (cost < bestCost) {
             bestCost = cost;
             best = &it;
@@ -171,7 +172,9 @@ void report(const Item& it) {
     rotate(game::guestFrames());
     for (auto& e : sCollect)
         if (e.key == it.key) {
+            const bool tested = e.tested || it.tested;
             e = it;
+            e.tested = tested;
             return;
         }
     sCollect.push_back(it);
@@ -245,6 +248,10 @@ Output apply(int chan, const Input& in) {
         rotate(game::guestFrames());
         if (sPublishedFrame + 3 >= game::guestFrames()) items = sPublished;
     }
+    // A screen the game hit-tests (a choice box over the pockets, the map) is the one in front:
+    // items only seen drawn behind it are left out.
+    if (std::any_of(items.begin(), items.end(), [](const Item& it) { return it.tested && !it.hud; }))
+        items.erase(std::remove_if(items.begin(), items.end(), [](const Item& it) { return !it.tested; }), items.end());
     bool menu = false, hud = false;
     for (const auto& it : items) {
         Box b;

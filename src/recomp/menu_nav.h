@@ -23,6 +23,9 @@ struct Item {
     u32 key = 0;      // stable identity while the screen is up (the pane's guest address)
     bool hud = false; // part of the always-present field HUD (toolbar): navigable, but alone it
                       // does not take the D-pad / stick from the game
+    bool tested = true; // the game hit-tested it this frame (false: only seen drawn). While tested
+                        // non-HUD items are up (a choice box over the pockets), only tested items
+                        // are navigable: the screen in front is modal.
     char name[17] = {};
 };
 

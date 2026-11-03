@@ -172,8 +172,70 @@ Defaults: Wii Remote 1 = Remote + Nunchuk from keyboard + mouse and the first ga
 
 Settings: `[controls]`, `[controls.keyboard]`, `[controls.pad.<guid>]` (bindings) and `[wiimote]`
 (`remote<N>_connect=auto|on|off`, `remote<N>_extension=nunchuk|none`,
-`remote<N>_pointer=mouse+stick|...|none`, `pointer_stick_speed`, `pointer_stick_absolute`,
-`gyro_sensitivity`, `gyro_invert_x/y`, `hide_cursor`, `distance`).
+`remote<N>_pointer=mouse+stick|...|none`, `remote<N>_snap=auto|on|off`, `pointer_stick_speed`,
+`pointer_stick_absolute`, `gyro_sensitivity`, `gyro_invert_x/y`, `hide_cursor`, `distance`).
+
+## Snap pointer to menu items
+
+Every City Folk menu is pointer-only (FEATURE_RESEARCH.md section 1). With "Snap pointer to menu
+items" (F1 > Controls > Pointer & motion, per Wii Remote: Auto / On / Off) a normal controller plays
+them without aiming: while a pointer screen is up, the **D-pad or the left (Nunchuk) stick moves the
+pointer to the nearest item in that direction**, A clicks it (the game's own A), B is the game's own
+cancel / back. The pointer stays on the chosen item (and follows it while it slides or scrolls)
+until the right stick, the mouse or the gyro moves it freely again; then the next D-pad press
+continues from the item under the pointer. "Recenter pointer" (right stick press) jumps to the item
+nearest the pointer. The game still only ever sees a Wii Remote pointer: no menu code is changed.
+Files: `src/recomp/menu_nav.cpp/.h` (generic: items, direction search, lock, pointer <-> layout
+mapping helpers), `src/game/cf_menu_nav.cpp` (where the items come from), wiimote.cpp (applied to
+the emulated source only; real Wii Remotes point themselves).
+
+**Default Auto** (on for every port): snapping is active while the port's pointer was last placed by
+something other than the mouse (gamepad D-pad / sticks / gyro, or nothing yet). The first mouse
+movement turns it off until a controller moves the pointer again, so mouse play is exactly the
+original (the D-pad then reaches the game in menus too). Reason: a gamepad player gets menu
+navigation without finding an option, a mouse player never notices it; the D-pad / stick change
+meaning only while a pointer screen is up, where the game does not use them (it walks and changes
+tools with them in the field, which stays unchanged). On = also while the mouse points; Off = the
+original everywhere.
+
+**Where the items come from** (USA rev 1, the game's own hit tests, not coordinates of ours): after
+each hit test the hook reads what the game tested, every guest frame:
+1. Bounding panes named `B*` (`BC*`/`Bc*` = circles): the game's menus walk a layout's pane tree with
+   fn_802B5598(layout, test fn_80007878, filter, {x, y, scale, hit}); the test checks the visible
+   chain, the name, and the point through the inverse global matrix against the pane rectangle x
+   scale. The hook enumerates the same panes (same filter, called as the game calls it) and takes
+   each one's rectangle through its global matrix. This covers the HUD toolbar (`B_tb_00..07`, the
+   memo button `B_tbBtn_00`), the town map (resident list `B_msg_*`, house markers, scroll and map
+   buttons), dialogue choices (`B_msg_00..`), pockets, shops and the other `d_menu_*` screens.
+2. Keyboards (name, town name, letters) use the game's copy of the HOME Menu's gui library:
+   gui::Manager::update fn_80314AF4 with one PaneComponent per pane; the keys are the components
+   with their trigger-target byte (+0x90) set; managers of screens that are not up get x = y = 1000.
+3. The HOME Menu: homebutton::gui::Manager::update, trigger-target components (+0x24).
+
+Layout coordinates (screen centre origin, y up) are converted to KPAD units with a scale calibrated
+per source from the point the game tested and the pointer it had (`menunav::calibrate`): walks use
+x * 304, y * -228 at 16:9 (the game's full-screen 608 x 456 space; 4:3-designed screens are squeezed
+by their pane matrices), the keyboards x * 416. So the mapping follows whatever the screen uses;
+`menunav::layoutToPointer` / `pointerToLayout` are the shared helpers for other pointer work.
+
+**Field HUD**: the toolbar's layouts (pane names `B_tb*`, `B_actnBtn*`) are hit-tested whenever the
+player walks. Alone they do not take the D-pad / stick (tools, view, walking stay the game's):
+"Recenter pointer" enters the toolbar (pointer onto the slot nearest it, the toolbar slides up),
+D-pad left / right moves along it, A opens (pockets, map, ...), B or Recenter leaves it (the pointer
+goes back where it was; that B does not reach the game), moving the pointer freely leaves it too.
+The game's own shortcuts stay: + opens the town map; - opens nothing in the field with the Nunchuk
+(tried) so the bag slot of the toolbar is the way to the pockets (Recenter, left, A).
+
+Direction search: candidates beyond the selected item's middle in the pressed direction (8 ways with
+the stick), cost = gap along + 0.25 x centre distance along + 3 x gap across + 0.35 x centre
+distance across (isotropic screen units), so items in line win and a grid moves cell by cell; at the
+edge the selection stays. Item boxes are clipped to the screen (the toolbar slots reach below it);
+the target is the clipped box's centre. Auto-repeat while held: 0.36 s, then every 0.11 s.
+
+Test aids: script tokens `UP DOWN LEFT RIGHT STICK*` drive it like a pad, `RECENTER` presses
+"Recenter pointer"; a scripted `@x/y` counts as a free pointer move. `CF_NAV_LOG=1` (each item set
+as it becomes navigable, every selection change, toolbar enter/leave), `CF_NAV_DUMP=1` (every hit-test
+source with its scale and items, every 30 frames).
 
 ## Test aids
 
