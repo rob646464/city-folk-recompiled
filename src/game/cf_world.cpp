@@ -33,6 +33,7 @@
 #include "recomp/game.h"
 #include "recomp/gx_bridge.h"
 #include "recomp/hle.h"
+#include "recomp/version.h"
 #include "recomp/interp.h"
 #include "recomp/menu.h"
 #include "recomp/runtime.h"
@@ -338,7 +339,7 @@ void updateAmounts(bool outdoor) {
 
     Amounts a;
     const u32 clk = [] {
-        const u32 f = calendar::versionAddr(0x8016D40C);
+        const u32 f = VA(0x8016D40C);
         const u32 lis = rd32(f), addi = rd32(f + 4);
         return ((lis & 0xFFFF) << 16) + u32(int32_t(int16_t(addi & 0xFFFF)));
     }();
