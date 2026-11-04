@@ -1,0 +1,51 @@
+--- a/include/aurora/enhanced.h
++++ b/include/aurora/enhanced.h
+@@ -136,6 +136,9 @@
+ // AURORA_MATERIAL_CHARACTER. Only uniforms change (no pipeline variants).
+ #define AURORA_MATERIAL_WORLD 0
+ #define AURORA_MATERIAL_CHARACTER 1
++// 0420: a light-emitting surface (a lit window, a glowing sign, a lamp head): no directional
++// (sun / moon) shadow or terminator and no ambient occlusion darkens it; extra lights still add.
++#define AURORA_MATERIAL_EMISSIVE 2
+ void GXSetMaterialHintAurora(uint8_t hint);
+ // End of the 3D scene of this frame (before the HUD). GX FIFO command; no effect when the
+ // enhanced mode or all of its screen-space parts are off, or inside an offscreen pass.
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -2928,6 +2928,10 @@
+     // still reach them, with a matte wrap-around response (shader: enh_material).
+     u.flags &= ~(1u | 8u);
+     u.material = 1.f;
++  } else if (gx::g_gxState.materialHint == AURORA_MATERIAL_EMISSIVE) {
++    // 0420: light-emitting surfaces are not shadowed (shader: enh_material 2) nor occluded.
++    u.flags &= ~0x30010u;
++    u.material = 2.f;
+   }
+   return u;
+ }
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1052,11 +1052,12 @@
+   let maxd = max(enh_ld(b + 3u), 1.0);
+   let near = 1.0 - smoothstep(maxd * 0.7, maxd, -p.z);
+   let away = (1.0 - smoothstep(-wrapw, wrapw * 0.5, nl)) * clamp(enh_ld(b + 15u), 0.0, 1.0) * near;
+-  let s = select(max(sh, away), sh * 0.5, ghost);
++  // 0420: light-emitting surfaces (enh_material 2) are never in the sun's / moon's shadow.
++  let s = select(select(max(sh, away), sh * 0.5, ghost), 0.0, ubuf.enh_material > 1.5);
+   let tint = vec3f(enh_ld(b + 12u), enh_ld(b + 13u), enh_ld(b + 14u));
+   enh_dir_tint = enh_dir_tint * mix(vec3f(1.0), clamp(tint, vec3f(0.0), vec3f(1.0)), s);
+   var ndl = select(max(nl, 0.0), nl * 0.5 + 0.5, ghost);
+-  ndl = select(ndl, clamp((nl + 0.45) / 1.45, 0.0, 1.0) * 0.85, ubuf.enh_material > 0.5 && !ghost);
++  ndl = select(ndl, clamp((nl + 0.45) / 1.45, 0.0, 1.0) * 0.85, ubuf.enh_material > 0.5 && ubuf.enh_material < 1.5 && !ghost);
+   let col = vec3f(enh_ld(b + 4u), enh_ld(b + 5u), enh_ld(b + 6u)) * enh_ld(b + 7u);
+   return col * (ndl * (1.0 - sh));
+ }
+@@ -1098,7 +1099,7 @@
+     ndl = select(max(ndl, 0.0), ndl * 0.5 + 0.5, ghost);
+     // Characters (enh_material 1): matte wrap-around diffuse, so a colored light shapes the body
+     // softly instead of a hard terminator; no highlight.
+-    ndl = select(ndl, clamp((dot(n, l) + 0.45) / 1.45, 0.0, 1.0) * 0.85, ubuf.enh_material > 0.5 && !ghost);
++    ndl = select(ndl, clamp((dot(n, l) + 0.45) / 1.45, 0.0, 1.0) * 0.85, ubuf.enh_material > 0.5 && ubuf.enh_material < 1.5 && !ghost);
+     var col = vec3f(enh_ld(b + 4u), enh_ld(b + 5u), enh_ld(b + 6u)) * enh_ld(b + 7u);
+     if ((flags & 8u) != 0u) {
+       // Fire (ExtraLightFire): yellow-white near the flame, deepening to red-orange with distance

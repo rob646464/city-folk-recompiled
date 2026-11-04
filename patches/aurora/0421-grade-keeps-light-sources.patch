@@ -1,0 +1,44 @@
+--- a/include/aurora/enhanced.h
++++ b/include/aurora/enhanced.h
+@@ -112,6 +112,9 @@
+   float gradeLift[3];
+   float gradeSaturation;
+   float gradeContrast;
++  // 0421: 0..1, how much bright, coloured pixels (lit windows, lamps, signs: the scene's light
++  // sources) keep their colour through the grade (e.g. a cool night look leaves warm windows warm).
++  float gradeKeepLights;
+ 
+   // 0343: sun shafts: light of the first shadow-casting directional light scattered in the air,
+   // ray-marched against its shadow cascades (tree and house shadows cut shafts into the haze),
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -54,7 +54,7 @@
+          EQ(extraShadowMapSize) && EQ(extraShadowSoftness) && EQ(shadowDarkness) && EQ(shadowAmbientKeep) &&
+          EQ(realisticFlashlight) && EQ(beamDensity) && EQ(beamDust) && EQ(lightReceivers) &&
+          EQ(grade) && EQ(gradeGain[0]) && EQ(gradeGain[1]) && EQ(gradeGain[2]) && EQ(gradeLift[0]) && EQ(gradeLift[1]) &&
+-         EQ(gradeLift[2]) && EQ(gradeSaturation) && EQ(gradeContrast) && EQ(shafts) && EQ(shaftIntensity) && EQ(shaftSteps);
++         EQ(gradeLift[2]) && EQ(gradeSaturation) && EQ(gradeContrast) && EQ(gradeKeepLights) && EQ(shafts) && EQ(shaftIntensity) && EQ(shaftSteps);
+ #undef EQ
+ }
+ 
+@@ -1479,6 +1479,12 @@
+   c = c * fx.beam[13].rgb + fx.beam[14].rgb * (vec3f(1.0) - c);
+   c = mix(vec3f(luma(c)), c, fx.beam[15].x);
+   c = (c - vec3f(0.5)) * fx.beam[15].y + vec3f(0.5);
++  // 0421: light sources keep their colour (bright and saturated: lit windows, lamp glows, neon).
++  let s0 = clamp(c0.rgb, vec3f(0.0), vec3f(1.0));
++  let hi = max(s0.r, max(s0.g, s0.b));
++  let chroma = hi - min(s0.r, min(s0.g, s0.b));
++  let keep = fx.beam[15].z * smoothstep(0.45, 0.8, hi) * smoothstep(0.1, 0.3, chroma);
++  c = mix(c, s0, keep);
+   return vec4f(clamp(c, vec3f(0.0), vec3f(1.0)), c0.a);
+ }
+ 
+@@ -4372,6 +4378,7 @@
+   }
+   u.beam[15][0] = gradeOn ? c.gradeSaturation : 1.f;
+   u.beam[15][1] = gradeOn ? c.gradeContrast : 1.f;
++  u.beam[15][2] = gradeOn ? std::clamp(c.gradeKeepLights, 0.f, 1.f) : 0.f; // 0421
+   job.base = push_uniform(reinterpret_cast<const uint8_t*>(&u), sizeof(u));
+   if (realistic) {
+     FxUniform pu = u;
