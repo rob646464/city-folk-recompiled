@@ -176,3 +176,21 @@ fn_8022A238 all
 # The game's echo suppressor (mic frame vs the voices being played): F1 "Echo suppression" off
 # (headphones) skips it, so both players can talk at once.
 fn_80229D08 all
+
+# Unused items at Nook's (src/game/cf_unused_items.cpp, docs/FEATURES.md "Unused items at Nook's"):
+# the day's stock generator (shop stock at save + 0x630C0; called by the daily update fn_8014406C
+# and by d_shop_fgNP when the shop is rebuilt) and the save-write starters (each computes the
+# save's checksum and starts the save worker: the replacement is taken out of the stock first, so
+# it never reaches the save file).
+fn_801456B4 all
+# The item value every buy / sell / price reader uses (record price, stationery by sheets): the
+# port's prices for the unused walls, floors, boxes, bench, pikmin and Blue Falcon at all times.
+fn_800A5F74 all
+fn_800D256C all
+fn_800D25D8 all
+fn_800D2648 all
+fn_800D26B0 all
+fn_800D2720 all
+fn_800D2780 all
+fn_800D27E0 all
+fn_800D2830 all

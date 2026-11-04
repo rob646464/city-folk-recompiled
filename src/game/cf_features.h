@@ -24,6 +24,10 @@ void skinMenu(bool& dirty);
 // actors in this game; in memory only, this player's own choices win. Replaces the whole set.
 void skinSetRemote(const std::map<std::string, int>& tones);
 
+// cf_unused_items.cpp: F1 > Enhancements > Unused content "Unused items at Nook's" (docs/FEATURES.md).
+void unusedItemsOnFrame(Ctx& c);
+bool unusedItemsMenu();  // true when the setting changed
+
 // cf_menu_nav.cpp: a layout's root pane is drawn (cf_hud.cpp): its Bounding panes become items
 // for "Snap pointer to menu items" (screens that hit-test with positions they stored, e.g. pockets).
 void navLayoutDrawn(Ctx& c, u32 rootPane);

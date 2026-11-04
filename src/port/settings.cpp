@@ -57,6 +57,15 @@ Field rgb(const char* section, const char* key, unsigned& v) {
                 if (end && end != s.c_str()) v = unsigned(x & 0xFFFFFFu);
             }};
 }
+// A 16-bit value as four hex digits (item codes); 0 = none.
+Field hex16(const char* section, const char* key, int& v) {
+    return {section, key, [&v] { char b[8]; std::snprintf(b, sizeof b, "%04X", unsigned(v) & 0xFFFFu); return std::string(b); },
+            [&v](const std::string& s) {
+                char* end = nullptr;
+                const unsigned long x = std::strtoul(s.c_str(), &end, 16);
+                if (end && end != s.c_str()) v = int(x & 0xFFFFu);
+            }};
+}
 template <typename E>
 Field enm(const char* section, const char* key, E& v) {
     return {section, key, [&v] { return std::to_string(int(v)); },
@@ -354,6 +363,7 @@ std::vector<Field> fields() {
         num("online", "email_smtp_port", sSettings.online.emailSmtpPort),
         flag("move_in", "any_region", sSettings.moveIn.anyRegion),
         str("move_in", "last_file", sSettings.moveIn.lastFile),
+        hex16("unused_content", "nook_item", sSettings.unusedContent.nookItem),
     };
 }
 

@@ -112,6 +112,7 @@ bool onGuestFrame(Ctx& c) {
 #endif
     cf::grassOnFrame(c);  // cf_grass.cpp, cf_skin.cpp (docs/FEATURES.md)
     cf::skinOnFrame(c);
+    cf::unusedItemsOnFrame(c);  // cf_unused_items.cpp: unused items at Nook's
     distrib::onGuestFrame(c);  // Nintendo events (docs/DISTRIBUTIONS.md)
     online::onGuestFrame(c);  // CF_ONLINE_* test aids (online.cpp)
     cf::miiOnGuestFrame(c);   // Mii maker: saved Miis to the game's RFL (cf_mii.cpp)

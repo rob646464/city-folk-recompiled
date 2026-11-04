@@ -2,9 +2,12 @@
 // USA (RUUE01) address -> {USA, PAL RUUP01, Japan RUUJ01, Korea RUUK01} for every VA(...) in src/
 // (version.h). 0 = no mapping (that feature is off on that version).
     {0x80007878u, 0x80007878u, 0x80007878u, 0x80007878u},  // start of fn_80007878
+    {0x8008C850u, 0x8008C870u, 0x8008C7D8u, 0x8008C82Cu},  // start of fn_8008C850
     {0x8008D698u, 0x8008D6B8u, 0x8008D620u, 0x8008D674u},  // fn_8008D658+0x40
     {0x800A7C84u, 0x800A7CA4u, 0x800A7C0Cu, 0x800A7C60u},  // start of fn_800A7C84
     {0x800B9718u, 0x800B9738u, 0x800B96A0u, 0x800B96F4u},  // start of fn_800B9718
+    {0x800C24CCu, 0x800C24ECu, 0x800C2454u, 0x800C24B0u},  // start of fn_800C24CC
+    {0x800C27E0u, 0x800C2800u, 0x800C2768u, 0x800C27C4u},  // start of fn_800C27E0
     {0x800D2084u, 0x800D21E4u, 0x800D233Cu, 0x800D20ECu},  // start of fn_800D2084; start of fn_800D2084 (order)
     {0x800D2780u, 0x800D28E0u, 0x800D2A38u, 0x800D27E8u},  // start of fn_800D2780
     {0x800DCBC4u, 0x800DCD24u, 0x800DCE7Cu, 0x800DCC2Cu},  // start of fn_800DCBC4
@@ -24,6 +27,10 @@
     {0x80116634u, 0x801162E4u, 0x80116224u, 0x801160E0u},  // start of fn_80116634
     {0x8011A918u, 0x8011A5C8u, 0x8011A508u, 0x8011A3F4u},  // start of fn_8011A918
     {0x801456B4u, 0x80145364u, 0x801452A4u, 0x80145214u},  // start of fn_801456B4
+    {0x801460E8u, 0x80145D98u, 0x80145CD8u, 0x80145C48u},  // start of fn_801460E8
+    {0x80146118u, 0x80145DC8u, 0x80145D08u, 0x80145C78u},  // start of fn_80146118
+    {0x80146128u, 0x80145DD8u, 0x80145D18u, 0x80145C88u},  // start of fn_80146128
+    {0x80146138u, 0x80145DE8u, 0x80145D28u, 0x80145C98u},  // start of fn_80146138
     {0x8016266Cu, 0x8016231Cu, 0x8016225Cu, 0x801621F4u},  // start of fn_8016266C
     {0x801629BCu, 0x8016266Cu, 0x801625ACu, 0x80162544u},  // start of fn_801629BC
     {0x80162C40u, 0x801628F0u, 0x80162830u, 0x801627C8u},  // start of fn_80162C40
@@ -37,6 +44,7 @@
     {0x80177DE0u, 0x80177AB4u, 0x801779D0u, 0x80177978u},  // start of fn_80177DE0
     {0x801782FCu, 0x80177FD0u, 0x80177EECu, 0x80177E94u},  // start of fn_801782FC
     {0x80178498u, 0x8017816Cu, 0x80178088u, 0x80178030u},  // start of fn_80178498
+    {0x80190D68u, 0x80190A5Cu, 0x80190938u, 0x80190930u},  // start of fn_80190D68
     {0x8019B064u, 0x8019AD58u, 0x8019AC34u, 0x8019AC2Cu},  // start of fn_8019B064
     {0x801C9E48u, 0x801C9B3Cu, 0x801C9BE8u, 0x801C9C20u},  // start of fn_801C9E48
     {0x801C9FC4u, 0x801C9CB8u, 0x801C9D64u, 0x801C9D9Cu},  // start of fn_801C9FC4

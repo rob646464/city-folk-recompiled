@@ -1543,6 +1543,12 @@ void enhancementsTab() {
             gameplayTab();
             ImGui::EndTabItem();
         }
+        // Restored unused content (src/game/cf_unused_items.cpp, docs/FEATURES.md "Unused items
+        // at Nook's"): every option off by default, retail unchanged.
+        if (ImGui::BeginTabItem("Unused content", nullptr, envTab("Unused content"))) {
+            sDirty |= recomp::cf::unusedItemsMenu();
+            ImGui::EndTabItem();
+        }
 #ifdef CF_DEV_TOOLS  // warps and other test tools: developer builds (cfrecomp) only, never shipped
         if (ImGui::BeginTabItem("Debug", nullptr, envTab("Debug"))) {
             debugTab();
