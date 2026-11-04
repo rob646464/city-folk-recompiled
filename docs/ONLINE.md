@@ -392,7 +392,11 @@ WiiConnect24 letters.
      `<id>-<name>` form) are ignored, so each town gets its default once again and is then
      recorded under its own key; a town turned off on the attic telephone before this fix gets
      turned on once more (the old file cannot tell which town that was). Not done while in an
-     online room (the town data may be another player's town during a visit).
+     online room (the town data may be another player's town during a visit). Verified
+     (2026-11-04, scratch folders): a `town_wc24.txt` holding only the old all-zero line, Nintendo
+     events off, `user-town2`: "setting of test (A056): turned on for this town (first start)",
+     line `A056-0074006500730074 test (A056)` added; with `user-town-clean` and the same old file
+     `F177-004600720075006E00630068 Frunch (F177)` added, then test's own line in the same file.
   3. Flag 0x1F. The game's only setter is in the player-creation scene module
      (d_a_npc_sp_player_createNP fn_25_BB4, scene 0x3D; a new game is scene 0x3C); no town we have
      has it and a visit does not set it (a visit sets flag 0x16 in the visitor's town). The port sets

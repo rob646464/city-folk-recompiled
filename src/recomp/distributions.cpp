@@ -437,10 +437,10 @@ std::string encKey(const std::vector<u8>& data) {
 
 // The town in the save (town_id.h: town id + name; shared with online.cpp's town_wc24.txt).
 // "" while no town is loaded.
-std::string townInSave(std::string* readable) {
+std::string townInSave(std::string* readable, u32 save = 0) {
     // In an online room the town data may be another player's town (a visit): keep the last one.
     if (recomp::online::active()) return "";
-    return recomp::town::keyInSave(readable);
+    return recomp::town::keyInSave(readable, save);
 }
 // Called with sM held: the game shows this town (its record becomes the current one).
 void noteTown(const std::string& key, const std::string& readable) {
@@ -454,6 +454,7 @@ void noteTown(const std::string& key, const std::string& readable) {
         for (const auto& [k, when] : town().now) got += (got.empty() ? "" : ", ") + k;
         recomp::log("[distrib] town %s (%s): received through Receive now: %s", readable.c_str(), key.c_str(),
                     got.empty() ? "none" : got.c_str());
+        nwc24::requestDownload();  // KD's check waits for the town (serve)
     }
 }
 std::string dateText(long long secs2000);
@@ -913,6 +914,19 @@ Reply serve(const std::string& url) {
     // Original files the player supplied: served first (each once, in file order), as they are.
     // (Which distribution one carries is known only after KD decrypts it.)
     // "Receive now" wins over the schedule.
+    // Whose record decides: the town in the save. Until one is loaded in this session (KD checks
+    // at boot, before the save is read), nothing is served: the last town's record is not
+    // necessarily this one's (another save in the same data folder).
+    {
+        std::string readable;
+        const std::string k = townInSave(&readable);
+        if (!k.empty()) noteTown(k, readable);
+        else if (!sTownSeen) {
+            r.kind = Reply::NotModified;
+            r.what = "waiting for the town to be loaded";
+            return r;
+        }
+    }
     int di = -1;
     u32 id = 0;
     std::string why;
@@ -1029,7 +1043,7 @@ void onStored(const Reply& r, bool ok, const std::string& why) {
 // The game keeps a Nintendo letter (USA fn_8010F194: r3 = the save's letter slot, r4 = letter
 // text, r5 = item, r6 = letter id): Pete will bring it. Recorded for the town.
 HLE(fn_8010F194) {
-    const u32 id = c.r[6];
+    const u32 id = c.r[6], slot = c.r[3];
     callOriginal(c, "fn_8010F194");
     std::lock_guard lk(sM);
     loadState();
@@ -1037,9 +1051,11 @@ HLE(fn_8010F194) {
     recomp::log("[distrib] the game took Nintendo letter %08X (%s): Pete brings it at the next town load", id,
                 it != sState.served.end() ? kDefs[it->second].key : "not from this port");
     if (it == sState.served.end()) return;
-    {  // the town being loaded (player select runs the game's job before the town is shown)
+    {  // the town whose save keeps the letter (the job runs while the save is loaded, before the
+       // game's town data pointer is set at boot): its data = the letter slot - 0xFC980
         std::string readable;
-        const std::string k = townInSave(&readable);
+        std::string k = townInSave(&readable, slot - 0xFC980u);
+        if (k.empty()) k = townInSave(&readable);
         noteTown(k, readable);
     }
     TownState& t = town();

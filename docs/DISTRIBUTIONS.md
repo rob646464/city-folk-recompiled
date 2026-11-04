@@ -217,8 +217,12 @@ receive the same item over and over and sell it at Nook's. See "Receive now once
   moves) carries the file, so a copied or renamed data folder keeps the record, restarting keeps
   it, and a different town (another save) gets its own record. The town is identified every 60
   frames while a town is loaded (all four versions; not while in an online room, where the town
-  data may be another player's) and when the game keeps a letter. `state.ini` is written whole
-  (temporary file + rename).
+  data may be another player's), at each KD check, and when the game keeps a letter (from the
+  letter slot's save, r3 - 0xFC980: the game's job runs at boot while the save is being read,
+  before the town data pointer is set). Until a town has been identified in a session KD serves
+  nothing ("waiting for the town to be loaded"; found in testing: a boot-time check used the
+  previous town's record and a schedule delivery was recorded for the wrong town), then checks
+  at once. `state.ini` is written whole (temporary file + rename).
 - **Records from before this change** (`format` missing in `[state]`): one record `[town.town]`
   for the install. At the first start a distribution counts as received through "Receive now"
   when that record has it and a "Receive now" letter id (`4D...`) was served for it
@@ -319,6 +323,28 @@ Credit line: "Distribution archive courtesy of WiiLink". `CF_MENU_ID_CHECK` swee
    opened, no `[nwc24]`/`[distrib]` line, no distributions folder, no network access by this
    feature, `wc24dl.vff` byte-identical to the fixture's, no distribution task; the save completed
    (result word 1).
+
+### Verified: "Receive now" once per town (2026-11-04, branch distrib-once, USA, cfrecomp)
+
+Scratch APPDATA/NAND per run, copies of the `user-town-clean` (town "Frunch", F177) and
+`user-town2` (town "test", A056) fixtures, continue route, muted, off screen, controllers hidden,
+console clock 2026-10-27 unless noted; checked in `[distrib]` log lines and `state.ini`.
+
+1. Same session: `CF_DISTRIB_NOW=creepy_clock,creepy_clock@180`: the first gives letter
+   `4D000001`, the game keeps it; the second is refused ("received through Receive now on
+   2026-10-27"), no second letter; the save completes.
+2. Restart with the same data folder and save: creepy clock refused at once, red Pikmin
+   (`4D000002`) delivered; Pete hands over the creepy clock letter from the first run.
+3. Another town (`user-town2` with the same data folder): its own record, creepy clock delivered
+   (`4D000003`); both towns in `state.ini`.
+4. Schedule duplicate: "In turn", clock 2027-06-22 = creepy clock's slot in the next cycle (28):
+   KD serves it (`4C000599`), the game keeps it, it is recorded for Frunch (cycle 28) while the
+   "Receive now" record stays, and "Receive now" for it is still refused.
+5. Older record: a format-1 `state.ini` (`[town.town]` creepy clock + `4D000001` served) is
+   upgraded ("1 distribution(s) counted"), adopted by Frunch, creepy clock refused, red Pikmin
+   delivered.
+6. Developer aid `CF_DISTRIB_FORGET=creepy_clock`: forgotten, then delivered again.
+7. `cf_distrib_test`: record checks pass.
 
 ## 7. Gaps
 

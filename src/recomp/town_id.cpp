@@ -7,8 +7,8 @@
 
 namespace recomp::town {
 
-std::string keyInSave(std::string* readable) {
-    const u32 save = rd32(VA(0x8074E960));
+std::string keyInSave(std::string* readable, u32 save) {
+    if (!save) save = rd32(VA(0x8074E960));
     if (save < 0x80000000u || save >= 0x93F00000u) return "";
     for (u32 slot = 0; slot < 4; slot++) {
         const u32 pd = save + 0x20 + slot * 0x86C0;
