@@ -73,6 +73,23 @@ def routes():
         "city": ("city.txt", 15000, {**fxc, **day}),
         "city_shops": ("city_shops.txt", 22500, {**fxc, **day}),
         "city_shops2": ("city_shops2.txt", 18500, {**fxc, **day}),
+        # The same places by warps (docs/WARPS.md; *_warp.txt include warp.txt): seconds instead of
+        # minutes of walking; the outdoor ones walk the beach / river / city streets after the warp.
+        "beach_warp": ("beach_warp.txt", 8000, {**fx, **day}),
+        "river_warp": ("river_warp.txt", 8000, {**fx, **day}),
+        "town_hall_warp": ("town_hall_warp.txt", 8000, {**fx, **day}),
+        "museum_warp": ("museum_warp.txt", 8600, {**fx, **day}),
+        "city_warp": ("city_warp.txt", 8400, {**fx, **day}),
+        "city_shops_warp": ("city_shops_warp.txt", 8600, {**fx, **day}),
+        "city_shops2_warp": ("city_shops2_warp.txt", 8600, {**fx, **day}),
+        "beach_warp_night": ("beach_warp.txt", 8000, {**fx, "CF_CLOCK_START": "2026-10-27 21:30"}),
+        "city_warp_night": ("city_warp.txt", 8400, {**fx, "CF_CLOCK_START": "2026-10-27 21:30"}),
+        # Every warp destination in turn (docs/WARPS.md CF_WARP_SWEEP; each from the town, 400
+        # frames in each place): houses, villager houses, shops, museum rooms, the city and its
+        # rooms. Ends at "[warp] sweep done". By day and at night (Crazy Redd's, night lights).
+        "sweep": ("continue_any.txt", 90000, {**fx, **day, "CF_WARP_SWEEP": "{dir}/sweep,400,town"}),
+        "sweep_night": ("continue_any.txt", 90000, {**fx, "CF_CLOCK_START": "2026-10-27 21:30",
+                                                     "CF_WARP_SWEEP": "{dir}/sweep,400,town"}),
     }
 
 
@@ -80,6 +97,12 @@ def routes():
 PRESETS = {
     "default": {},
     "enh": {"enhanced_lighting": {"enabled": 1}},
+    # Enhanced lighting at Ultra with world lights, and Enhanced world (reflections, wet ground,
+    # particles, haze, tilt-shift): every enhancement pass and shader class on.
+    "enh_all": {"enhanced_lighting": {"enabled": 1, "preset": 3}, "world_lights": {"enabled": 1},
+                "enhanced_world": {"enabled": 1, "reflections": 1, "wet_ground": 1, "rain_ripples": 1,
+                                   "snow_sparkle": 1, "haze": 1, "particles": 1, "tilt_shift": 1}},
+    "world": {"enhanced_world": {"enabled": 1}},
     "fps120": {"video": {"target_fps": 120, "match_display_refresh": "false"}},
     "msaa4": {"video": {"msaa": 4}},
     # Performance: 2400p (resolution_scale 5 = 5 x 480p, more pixels than 4K) at 120 fps, no VSync.
@@ -99,7 +122,7 @@ def write_ini(path: Path, ini: dict):
 
 def run_once(a, d: Path, route, frames, extra, ini, cache: Path, tag: str):
     app = d / "appdata"
-    for sub in ("appdata", "card", "nand"):
+    for sub in ("appdata", "card", "nand", "sweep"):
         p = d / sub
         if p.exists():
             shutil.rmtree(p)
@@ -123,7 +146,7 @@ def run_once(a, d: Path, route, frames, extra, ini, cache: Path, tag: str):
         e["CF_PRECACHE"] = "0"
     elif a.list:
         e["CF_PIPELINE_LIST"] = a.list
-    e.update(extra)
+    e.update({k: v.replace("{dir}", str(d)) for k, v in extra.items()})
     e.update(dict(kv.split("=", 1) for kv in a.env if "=" in kv))
     cmd = [a.exe, "--disc", a.disc, "--input", "@" + str(ROUTES / route)]
     log_path = d / f"log{tag}.txt"
@@ -136,6 +159,8 @@ def run_once(a, d: Path, route, frames, extra, ini, cache: Path, tag: str):
             text = log_path.read_text(encoding="utf-8", errors="replace")
             seen = re.findall(r"\[frame\] (\d+) presents", text)
             if seen and int(seen[-1]) >= frames:
+                break
+            if "[warp] sweep done" in text:
                 break
             if time.time() - log_path.stat().st_mtime > a.stall_seconds:
                 print(f"{d.name}: no log output for {a.stall_seconds:.0f} s, ended (hang)", flush=True)
@@ -150,7 +175,7 @@ def run_once(a, d: Path, route, frames, extra, ini, cache: Path, tag: str):
     r = {"run": d.name + tag, "misses": len(misses), "seconds": round(time.time() - t0),
          "hold_s": float(start.group(1)) if start else None, "pipelines": int(start.group(3)) if start else None,
          "presents": int(seen[-1]) if seen else 0}
-    r["complete"] = r["presents"] >= frames
+    r["complete"] = r["presents"] >= frames or "[warp] sweep done" in text
     (d / f"misses{tag}.txt").write_text("\n".join(misses) + "\n", encoding="utf-8")
     print(json.dumps(r), flush=True)
     return r

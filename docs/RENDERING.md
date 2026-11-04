@@ -167,16 +167,33 @@ on behaves like Dolphin; one with it off (or never set up) like main's port. The
 will be Rover's, like Dolphin's; routes that time Kapp'n's talk (city_bus.txt: A until the city)
 work either way.
 
-### Numbers (2026-11-02)
+### Numbers (2026-11-04, quiet PC, RTX 3090 Ti, branch perf-2)
 
-- Recorded so far: town day/night/rain/snow, house, Nook's, new_game: **300 configs** (6.7 KB
-  zstd). Per route a fresh cache met 135-186 configs.
-- Warm start, 2400p/120 fps settings, 238 pipelines (list + derived variants): **hold 0.17 s**
-  (1.5 s after startup). Cold hold of the same set on the loaded PC: ~26 s (476 shaders compiled
-  on 8 threads); a quiet-PC cold measurement is pending (cold runs held, see above).
-- Coverage: a fully warm cache of one nook run still missed 9-12 configs in the next nook run
-  (Rover's dialogue, the shop): see "Vertex-format variants". The fresh-cache verification pass
-  (every route with the list, target ~0 misses) is pending a quiet window.
+- **Recorded** (fresh cache, no list, one game at a time on an otherwise idle PC): the warp sweep
+  (`sweep`: all 88 destinations of docs/WARPS.md, 400 frames each, from the town) by day and at
+  night, the sweep again with every enhancement on (`enh_all`: Enhanced lighting Ultra + world
+  lights + Enhanced world with reflections, wet ground, ripples, sparkle, haze, particles,
+  tilt-shift), the warp routes (beach, river, town hall, museum rooms through the sweep, city
+  streets, city shops in two parts, beach and city at night), town rain/snow, new_game; enh_all
+  also for beach, city at night, town rain and snow. Union exported in canonical form
+  (`CF_PIPELINE_EXPORT`): **2517 configs** (39 KB zstd). Per run a fresh cache met 138-209
+  configs (sweeps 726-779).
+- **Aurora 0392** (generic, LM/SMS too): list rows whose texgen reads a position matrix row
+  (`GX_PNMTX0-9`, mtx 0-27: NW4R's projected textures in Rover's dialogue and the HUD) were rejected
+  at load ("row N rejected: texgen", 12 rows), so every run missed the same 7 configs at the first
+  dialogue (frame ~1694). The validator now accepts every XF matrix row (the shader reads
+  `postex_mtx[mtx / 3]` either way).
+- **Verified, default settings** (fresh cache with the list): beach_warp 0, river_warp 0,
+  city_warp_night 0, town_snow 0, new_game 2, the 88-place sweep 13 misses (before 0392 with a
+  default-only list: 8 / 3 / 7 / 9 / 18). Cold hold **12.7-13.5 s** (default: 1184 pipelines on 8
+  threads), warm hold **0.17-0.22 s**.
+- **Enhanced lighting/world (enh_all)**: cold hold 70-81 s (4934 pipelines). Measured only with a
+  default-only list (29-98 misses per route: enh class 1 draws the canonical config does not show
+  as lit, built at first draw as documented in Aurora's precache_variants); the shipped list now
+  holds the enh_all recordings too (a recorded class-1 config builds class 1 when the enhancement
+  is on and plain class 0 when it is off, deduplicated), but a fresh-cache enh_all pass with it was
+  not run (user decision: step closed). Not recorded: MSAA layouts (rebuilt from the same list),
+  festivals/holidays, other regions' discs, the shipped exe (warps are dev-only).
 
 ### Vertex-format variants (open, generic)
 
