@@ -91,3 +91,25 @@ d_s_stageNP::fn_125_C0 all
 fn_8017FF4C all
 fn_800FA6AC all
 d_a_playerNP::fn_80_2DB28 all
+
+# Move in from Wild World (docs/MOVE_IN.md; src/recomp/hle_mp.cpp, src/game/cf_move_in.cpp): the
+# RevoEX MP / MPDL libraries (DS wireless: DS Download Play of DSApp/*.srl, then MP data) answered
+# on the host, with a virtual DS child in the role of Exch_Sign.srl that sends the Wild World save
+# the player picked. The game's link manager, protocol, checks and import run unchanged.
+fn_803FAA64 all  # MP startup (config: ggid +0x10, indication callback +0x194)
+fn_803FAC4C all  # MP cleanup
+fn_803FBC4C all  # MP set user game info (beacon bytes, <= 0x70)
+fn_803FE8FC all  # MP set a callback (the game passes an empty one)
+fn_803FCA0C all  # MP disconnect every child (0 = done)
+fn_803FBDB8 all  # MP send async (data, len, aid mask, port, result*, callback, arg)
+fn_8040141C all  # MPDL startup (download-play config: program image, banner, ggid)
+fn_8040171C all  # MPDL cleanup
+fn_80401A2C all  # MPDL: children that have the program (aid bit mask)
+fn_804017C8 all  # MPDL: boot those children (aid bit mask)
+fn_80401B04 all  # MPDL: booted children (aid bit mask)
+fn_8040193C all  # MPDL: child info (aid, 0x28-byte out)
+# The game's MP link poll (once a frame, outside the link mutex): delivers the MP indications.
+fn_800E3EE4 all
+# "Imported resident exists" (Rover's resident list): with one resident picked in the port's
+# window only that one is offered.
+fn_80085894 all

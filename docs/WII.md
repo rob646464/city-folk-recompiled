@@ -327,7 +327,8 @@ door opens on stick-up (when exactly varies: route with `after link d_bgi_drawNP
 - **OSLink/OSUnlink**, OSThread/alarms/messages, cache ops: LM's HLE + REL support.
 - **WiiConnect24**: some content was distributed by Nintendo through it (event letters, items):
   see docs/REGION_CONTENT.md for whether we can deliver it offline.
-- **DS transfer** (DSApp, Wild World characters): needs a real DS; out of scope for now.
+- **DS transfer** (DSApp, Wild World characters): the move-in works with a Wild World save file
+  and a virtual DS behind the MP/MPDL libraries (docs/MOVE_IN.md); the DS Suitcase has no DS side.
 
 ## Order of work
 

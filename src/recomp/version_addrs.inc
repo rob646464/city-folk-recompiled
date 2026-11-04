@@ -15,7 +15,7 @@
     {0x800E4ECCu, 0x800E502Cu, 0x800E5184u, 0x800E4F34u},  // start of fn_800E4ECC
     {0x800E593Cu, 0x800E5A9Cu, 0x800E5BF4u, 0x800E59A4u},  // start of fn_800E593C
     {0x801017B8u, 0x80101918u, 0x8010194Cu, 0x80101838u},  // start of fn_801017B8
-    {0x80101894u, 0x801019F4u, 0x80101A28u, 0x80101914u},  // start of fn_80101894
+    {0x80101894u, 0x801019F4u, 0x80101A28u, 0x80101914u},  // start of cf_SaveData
     {0x80106AACu, 0x80106C34u, 0x80106C14u, 0x80106AD0u},  // start of fn_80106AAC
     {0x8010DD60u, 0x8010DA10u, 0x8010D950u, 0x8010D80Cu},  // start of fn_8010DD60
     {0x8011A918u, 0x8011A5C8u, 0x8011A508u, 0x8011A3F4u},  // start of fn_8011A918
@@ -31,6 +31,7 @@
     {0x802DF948u, 0x802DF798u, 0x802DF9C4u, 0x802E0F04u},  // start of List_GetNth__Q26nw4hbm2utFPCQ36nw4hbm2ut4ListUs
     {0x803158DCu, 0x8031572Cu, 0x8031595Cu, 0x8031B61Cu},  // start of fn_803158DC
     {0x803ADAE4u, 0x803AD934u, 0x803ADA20u, 0x803B6428u},  // start of fn_803ADAE4
+    {0x8046D870u, 0x8046D870u, 0x8046D7B0u, 0x804771F0u},  // data, 2/2 sites
     {0x8046EEF0u, 0x8046EEF0u, 0x8046EE30u, 0x80478870u},  // data, 1/1 sites
     {0x805231B0u, 0x80525DD0u, 0x80527610u, 0x8053C7F0u},  // data, 1/1 sites
     {0x805855E8u, 0x80588268u, 0x80589A68u, 0x805A06E8u},  // data, 4/4 sites

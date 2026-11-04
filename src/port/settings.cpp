@@ -333,6 +333,8 @@ std::vector<Field> fields() {
         flag("online", "port_mapping", sSettings.online.portMapping),
         str("online", "last_direct", sSettings.online.lastDirect),
         flag("online", "notices", sSettings.online.notices),
+        flag("move_in", "any_region", sSettings.moveIn.anyRegion),
+        str("move_in", "last_file", sSettings.moveIn.lastFile),
     };
 }
 

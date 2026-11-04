@@ -412,8 +412,16 @@ struct OnlineSettings {
     bool notices = true;        // room events as notices over the game
 };
 
+// Move in from Wild World (F1 > Enhancements > Gameplay; src/game/cf_move_in.cpp, docs/MOVE_IN.md):
+// Rover's "Move from the DS!" reads a Wild World save file through the game's own DS receive path.
+struct MoveInSettings {
+    bool anyRegion = false;  // accept Wild World saves of every region (a Wii accepts only its own region's)
+    std::string lastFile;    // the save file picked last time (offered again in the window)
+};
+
 struct Settings {
     InterfaceSettings ui;  // (not "interface": a macro in the Windows headers)
+    MoveInSettings moveIn;
     VideoSettings video;
     RenderingSettings rendering;
     GhostLightSettings ghostLights;
