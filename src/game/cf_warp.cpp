@@ -201,7 +201,7 @@ const Dest kDests[] = {
     // The city (TOWN).
     {"city", "City bus stop (off Kapp'n's bus)", "City", Kind::Bus, 0, 0, 0, 0, 0,
      "as the bus drops you off: the game's own arrival (fn_80169950); Kapp'n's first-trip talk is skipped"},
-    {"city.plaza", "City plaza (fountain)", "City", Kind::Pos, kCity, 0, 752, 56, 520, nullptr},
+    {"city.plaza", "City plaza (in front of the fountain)", "City", Kind::Pos, kCity, 0, 752, 56, 640, nullptr},
     {"city.gracie_door", "City: GracieGrace door", "City", Kind::Door, kCity, 0xD026, 0, 0, 0, nullptr},
     {"city.shampoodle_door", "City: Shampoodle door", "City", Kind::Door, kCity, 0xD022, 0, 0, 0, nullptr},
     {"city.katrina_door", "City: Katrina's door", "City", Kind::Door, kCity, 0xD025, 0, 0, 0, nullptr},
@@ -246,7 +246,8 @@ struct Request {
     bool hasPos = false;
     float pos[3] = {};
     u32 frame = 0;               // 0 = as soon as possible
-    bool second = false;         // second step of a two-step warp (city spot after the bus)
+    bool second = false;         // second step of a two-step warp (a city door: out of its room)
+    u32 type = 0;                // @x,y,z#<type>: arrival type instead of the default
     std::string text;
 };
 
@@ -260,6 +261,10 @@ bool parseTarget(std::string t, Request& r) {
     if (const auto at = t.find('@'); at != std::string::npos) {
         std::string p = t.substr(at + 1);
         std::replace(p.begin(), p.end(), '/', ',');
+        if (const auto h = p.find('#'); h != std::string::npos) {  // @x,y,z#<type>: arrival type (tests)
+            r.type = u32(std::strtoul(p.c_str() + h + 1, nullptr, 16));
+            p.resize(h);
+        }
         if (std::sscanf(p.c_str(), "%f,%f,%f", &r.pos[0], &r.pos[1], &r.pos[2]) != 3) return false;
         r.hasPos = true;
         t.resize(at);
@@ -383,14 +388,56 @@ bool execute(Ctx& c, const Request& r, std::string& why, u32& dst, bool& again) 
         return true;
     };
     if (d && d->kind == Kind::Bus) return bus(d->stage);
-    // The city's streets are only entered by bus or from one of its rooms: a player put there
-    // from the town (fn_80163064 to TOWN at a position) waits hidden and is sent home after 292
-    // frames (d_a_playerNP fn_80_1A5F4 -> fn_80_1B304). So a city spot from outside the city is
-    // two warps: off the bus, then (90 frames after the arrival) the spot within the city.
-    // fn_80162990 = "stage belongs to the city" (table 0x8047A190: the city rooms).
-    const bool citySpot = d ? (d->kind == Kind::Door || d->kind == Kind::Pos) && d->stage == kCity : stage == kCity;
-    if (citySpot && cur != kCity && !guestCall(c, VA(0x80162990), cur)) {
-        if (!bus(0)) return false;
+    auto goTo = [&](u32 st, const float p[3], u32 ty, u32 an) {
+        const u32 s = scratch() + 0x60;
+        for (int i = 0; i < 3; i++) wrf32(s + 4 * i, p[i]);
+        c.r[7] = an;
+        c.r[8] = 2;
+        c.r[9] = 2;
+        return guestCall(c, VA(0x80163064), stageMgr(), st, s, ty) != 0;
+    };
+    // The city's door spots. Arriving in the city with type 0xB ("out of a door") anywhere but
+    // out of the building the player was in leaves the player hidden, waiting for that door; after
+    // 292 frames d_a_playerNP (fn_80_1A5F4 -> fn_80_1B304) gives up and sends them home (type
+    // 0x75). So a city door spot is reached as the game does it: into that building's room
+    // (fn_801629BC: structure id -> its stage), then out through the room's own exit to the
+    // outside (exit code 0x44, fn_801635D0(mgr, exit, fades)).
+    if (d && d->kind == Kind::Door && d->stage == kCity) {
+        const u32 room = guestCall(c, VA(0x801629BC), d->structId) & 0xFF;
+        if (!room || !(stageFlags(room) & kFlagRoom)) {
+            why = "no room for that building";
+            return false;
+        }
+        if (cur == room) {
+            int idx = -1, i = 0;
+            for (u32 e : exits(cur)) {
+                if ((rd32(e) >> 24) == 0x44 && idx < 0) idx = i;
+                i++;
+            }
+            if (idx < 0) {
+                why = "the room has no way out";
+                return false;
+            }
+            log("[warp] f%u warp %s: out of %s through its exit %d", game::guestFrames(), r.text.c_str(),
+                stageName(cur).c_str(), idx);
+            dst = kCity;
+            if (!guestCall(c, VA(0x801635D0), stageMgr(), u32(idx), 2, 2)) {
+                why = "the game refused the stage change";
+                return false;
+            }
+            return true;
+        }
+        if (!roomArrival(room, pos, type, angle)) {
+            why = "no way into " + stageName(room);
+            return false;
+        }
+        log("[warp] f%u warp %s: into %s first, from %u %s", game::guestFrames(), r.text.c_str(), stageName(room).c_str(),
+            cur, stageName(cur).c_str());
+        if (!goTo(room, pos, type, angle)) {
+            why = "the game refused the stage change";
+            return false;
+        }
+        dst = room;
         again = true;
         return true;
     }
@@ -411,16 +458,6 @@ bool execute(Ctx& c, const Request& r, std::string& why, u32& dst, bool& again) 
                 return false;
             }
             stage = st;
-            if (stage == kCity) {
-                // In the city, arriving exactly on a door spot without having been inside leaves
-                // the player hidden, waiting for the door to let them out; after 292 frames
-                // d_a_playerNP (fn_80_1A5F4 -> fn_80_1B304) gives up and sends them home (type
-                // 0x75). One step out of the door (48 units along the door's facing) is a normal
-                // arrival.
-                const float a = float(angle) * (6.28318531f / 65536.0f);
-                pos[0] += 48.0f * std::sin(a);
-                pos[2] += 48.0f * std::cos(a);
-            }
             break;
         }
         case Kind::Pos:
@@ -445,6 +482,7 @@ bool execute(Ctx& c, const Request& r, std::string& why, u32& dst, bool& again) 
                 pos[0] = d->x;
                 pos[1] = d->y;
                 pos[2] = d->z;
+                if (stage == kCity) type = 0x8;  // a city spot: arrival type 8 as RM_RESET's exit to the streets
             }
             break;
         case Kind::Demo: demo = true; break;
@@ -473,8 +511,9 @@ bool execute(Ctx& c, const Request& r, std::string& why, u32& dst, bool& again) 
     }
     if (r.hasPos) {
         for (int i = 0; i < 3; i++) pos[i] = r.pos[i];
-        if (!(stageFlags(stage) & kFlagRoom)) type = 0xB;
+        if (!(stageFlags(stage) & kFlagRoom)) type = stage == kCity ? 0x8 : 0xB;  // city: as RM_RESET's exit
     }
+    if (r.type) type = r.type;
     dst = stage;
     log("[warp] f%u warp %s: stage %u %s from %u %s, pos %.1f %.1f %.1f type 0x%X angle 0x%04X", game::guestFrames(),
             r.text.c_str(), stage, stageName(stage).c_str(), cur, stageName(cur).c_str(), pos[0], pos[1], pos[2], type, angle);
@@ -600,8 +639,6 @@ u32 sStageSince = 0;  // guest frame the current stage was entered
 u32 sLastStage = ~0u;
 u32 sIssuedAt = 0, sIssuedDst = 0, sIssuedFrom = 0;  // the last warp made (0 = none / failed)
 
-bool canWarp(u32 frame) { return playable(curStage()) && !changePending() && frame >= sStageSince + 90; }
-
 // The last warp has arrived: the stage it asked for is loaded (a warp within the same stage, e.g.
 // town -> town, reloads it without changing the stage byte: 300 frames after the change ended).
 bool arrived(u32 frame) {
@@ -609,6 +646,15 @@ bool arrived(u32 frame) {
     if (curStage() != sIssuedDst) return false;
     if (sStageSince > sIssuedAt) return true;
     return sIssuedDst == sIssuedFrom && frame > sIssuedAt + 300;
+}
+
+// A playable stage, no change requested (mgr+0x1F is cleared once the scene manager takes the
+// request, while the old stage is still shown, so the last warp must also have arrived: up to
+// 4000 frames), 90 frames after the last arrival.
+bool sArrivedSeen = false;  // the last warp has arrived once (the game may have moved on since)
+bool canWarp(u32 frame) {
+    if (sIssuedAt && !sArrivedSeen && frame < sIssuedAt + 4000) return false;
+    return playable(curStage()) && !changePending() && frame >= sStageSince + 90;
 }
 
 // ---- Sweep (CF_WARP_SWEEP): every destination in turn, with a screenshot of each ---------------
@@ -777,6 +823,7 @@ void onGuestFrame(Ctx& c, u32 frame) {
     }
     if (!firstPlayable && playable(s)) firstPlayable = frame;
     if (s == kField && frame == sStageSince + 60) noteRiverMouth();  // the town's acres are loaded
+    if (sIssuedAt && !sArrivedSeen && arrived(frame)) sArrivedSeen = true;
     if (!envDone) {
         envDone = true;
         if (const char* v = std::getenv("CF_WARP")) {
@@ -825,6 +872,7 @@ void onGuestFrame(Ctx& c, u32 frame) {
     if (execute(c, r, why, dst, again)) {
         sLastResult = "Warped to " + r.text;
         sIssuedAt = frame;
+        sArrivedSeen = false;
         sIssuedDst = dst;
         sIssuedFrom = s;
         sLastFailed = false;
