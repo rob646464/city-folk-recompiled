@@ -7,6 +7,11 @@ game loads the place, its actors, music and save state as it always does. Nothin
 
 ## Interfaces
 
+**Developer builds only.** Warps are a test tool, never shipped: everything below is compiled in
+only with `CF_DEV_TOOLS` (the `cfrecomp` developer build). The shipped `CityFolkRecomp` has no
+F1 > Enhancements > Debug page, ignores `CF_WARP` / `CF_WARP_SWEEP` and the route token `WARP=`
+(user decision 2026-11-04). Agents test warps with `cfrecomp`.
+
 - **F1 > Enhancements > Debug > Warp**: every destination below, grouped and searchable, a `Warp`
   button each (labels `Warp##<name>` for `CF_MENU_CLICK`), the current stage, the last result.
   "Keep the current time and weather" (on): the warp is like walking through a door. Off: the

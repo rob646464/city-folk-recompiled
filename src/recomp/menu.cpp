@@ -99,7 +99,11 @@ constexpr Page kPages[] = {
     {"Visuals", "Texture packs"},
     {"Sound", nullptr},           {"Controls", "Ports"},           {"Controls", "Bindings"},
     {"Controls", "Pointer"},      {"Controls", "Analog"},       {"Controls", "DSU"},             {"Enhancements", "General"},     {"Enhancements", "Gameplay"},
-    {"Enhancements", "Silly"},          {"Enhancements", "Unused content"}, {"Enhancements", "Debug"}, {"Game", nullptr}, {"Miis", nullptr}, {"Online", "Play together"}, {"Online", "Nintendo events"},
+    {"Enhancements", "Silly"},          {"Enhancements", "Unused content"},
+#ifdef CF_DEV_TOOLS
+    {"Enhancements", "Debug"},
+#endif
+    {"Game", nullptr}, {"Miis", nullptr}, {"Online", "Play together"}, {"Online", "Nintendo events"},
 };
 constexpr int kPageCount = int(sizeof(kPages) / sizeof(kPages[0]));
 constexpr float kXs[] = {0.05f, 0.3f, 0.6f, 0.88f};
@@ -1524,8 +1528,10 @@ void gameplayTab() {
     recomp::online::sync::lockEnd(lock);
 }
 
+#ifdef CF_DEV_TOOLS
 // Debug: the game's debug entries (src/game).
 void debugTab() { recomp::game::debugMenu(); }
+#endif
 
 void enhancementsTab() {
     if (ImGui::BeginTabBar("enhancements")) {
@@ -1537,10 +1543,12 @@ void enhancementsTab() {
             gameplayTab();
             ImGui::EndTabItem();
         }
+#ifdef CF_DEV_TOOLS  // warps and other test tools: developer builds (cfrecomp) only, never shipped
         if (ImGui::BeginTabItem("Debug", nullptr, envTab("Debug"))) {
             debugTab();
             ImGui::EndTabItem();
         }
+#endif
         ImGui::EndTabBar();
     }
 }

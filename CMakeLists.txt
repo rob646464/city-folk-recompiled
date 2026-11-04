@@ -308,7 +308,8 @@ if (EXISTS ${CF_DOL})
     add_executable(cfrecomp ${RECOMP_RUNTIME_SOURCES} ${_recomp_files})
     cf_runtime_target(cfrecomp)
     target_include_directories(cfrecomp PRIVATE ${CF_RECOMP_DIR})
-    target_compile_definitions(cfrecomp PRIVATE CF_STATIC_MODULE=1 "CF_DEV_DISC=\"${CF_DISC}\"")
+    # CF_DEV_TOOLS: test tools players never get (warps, F1 > Enhancements > Debug; docs/WARPS.md).
+    target_compile_definitions(cfrecomp PRIVATE CF_STATIC_MODULE=1 CF_DEV_TOOLS=1 "CF_DEV_DISC=\"${CF_DISC}\"")
     # Generated code: one huge function per guest function, lots of gotos.
     if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
         set_source_files_properties(${_recomp_files} PROPERTIES COMPILE_OPTIONS "/clang:-Wno-unused-label;/clang:-Wno-unused-variable")

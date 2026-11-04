@@ -734,7 +734,9 @@ void actorAids(u32 frame) {
             std::replace(act.begin(), act.end(), '/', ',');
             teleport(frame, act.c_str() + 3);
         } else if (act.rfind("WARP=", 0) == 0) {
+#ifdef CF_DEV_TOOLS
             warp::requestFromScript(act.substr(5));  // cf_warp.cpp (docs/WARPS.md)
+#endif
         }
     static const char* tp = std::getenv("CF_TELEPORT");
     if (!tp) return;

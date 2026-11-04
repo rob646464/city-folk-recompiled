@@ -107,7 +107,9 @@ bool onGuestFrame(Ctx& c) {
     forceWc24OnFrame(c, frame);
     movein::onGuestFrame(c, frame);  // cf_move_in.cpp: CF_OPEN_MENU
     region::onGuestFrame(frame);  // cf_region.cpp test aids
-    warp::onGuestFrame(c, frame);  // cf_warp.cpp: warps (docs/WARPS.md)
+#ifdef CF_DEV_TOOLS
+    warp::onGuestFrame(c, frame);  // cf_warp.cpp: warps (docs/WARPS.md), developer builds only
+#endif
     cf::grassOnFrame(c);  // cf_grass.cpp, cf_skin.cpp (docs/FEATURES.md)
     cf::skinOnFrame(c);
     distrib::onGuestFrame(c);  // Nintendo events (docs/DISTRIBUTIONS.md)
@@ -236,7 +238,11 @@ bool textBoxShown() { return false; }
 int textMode() { return 0; }
 bool viewerOpen() { return false; }
 void drawOverlay() { cf::miiDrawOverlay(); }
+#ifdef CF_DEV_TOOLS
 void debugMenu() { warp::debugMenu(); }
+#else
+void debugMenu() {}
+#endif
 s32 overlayEntry(const char* path) { return region::overlayEntry(path); }
 bool isOverlayEntry(s32 e) { return region::isOverlayEntry(e); }
 u32 overlayLength(s32 e) { return region::overlayLength(e); }
