@@ -100,8 +100,8 @@ outside DWC touches the network. Replacing that API (about 50 functions) means:
   while in a room);
 - the account functions keep computing real friend codes from our profile ids.
 The IOS-device approach of the earlier research (host sockets under SO, rewrite hostnames to a
-revival service) is not needed any more. Not covered by DWC HLE: Wii Speak (PMIC/USB device),
-the USB keyboard, WiiConnect24 letters (NWC24): section 11.
+revival service) is not needed any more. Not covered by DWC HLE: Wii Speak (PMIC HLE, section
+10e), the USB keyboard (section 10b), WiiConnect24 letters (NWC24): section 11.
 
 ## 4. DWC on rooms (src/recomp/online_dwc.cpp)
 
@@ -493,6 +493,109 @@ u8 0; u8 keys[6] (HID usages)}`. The host thread polls the SDL keyboard state ea
 Off: as before (the open fails: no keyboard). Keys bound to the Wii Remote act on both, so play
 with a controller while typing.
 
+Fix (branch online-voice): the first key report crashed the game (`std::_Throw_Cpp_error` in
+`UsbKeyboard::ioctl`): answering the pending request runs the KBD library's callback at once on
+the same thread, and that callback queues the next request (ioctl -> the keyboard mutex, still
+held). Requests are now answered after the mutex is released.
+
+Verified 2026-11-03 in a real visit (host `Frunch-rob64`, visitor `test-tester`, copies of the
+test_builds profiles): with the keyboard on, typing starts the game's chat input; Enter sends.
+The visitor's "Hello rob" shows as a bubble over the visitor in its game and as "tester Hello
+rob" in the host's chat strip (top right) while the host stood in the gatehouse. It also works offline (the bubble shows
+in one's own town). Test aid `CF_KBD_TYPE="<guest frame>:<text>|..."` (src/recomp/usb_kbd_script.cpp:
+letters, digits, space, `.,!?'-;`, `{ENTER}` `{BACK}` `{ESC}` `{UP}`...; each key 3 host frames
+down, 3 up; needs the USB keyboard setting on).
+
+## 10e. Wii Speak voice chat (src/recomp/online_voice.cpp)
+
+User request: voice chat from the PC microphone, played through the game's own path.
+
+**How the game does it [disc]** (USA addresses): the Wii Speak is driven by Nintendo's PMIC
+library (`<< RVL_SDK - PMIC release build: Sep 18 2008 >>`, USB 057E:0308 on `/dev/usb/oh0` via
+the IUSB library). The network thread starts it (`fn_800E7E90` -> PMICInit `fn_80225CE4`) and
+runs the game's Wii Speak state machine `fn_80172E20` every frame: PMICProbe `fn_802260CC`
+(0 attached, -2 none) each frame, then Open `fn_802261A0` -> control requests `fn_80229B50`
+(0), `fn_8022A15C` (3) -> Start `fn_80226358`; Stop `fn_8022646C` / Close `fn_802262C8` when it
+closes. Async calls take `(cb, arg)`; the game sets a "waiting" word before each call and polls
+it every frame, the callback stores the result. The device stays closed until a voice
+conference exists: when a player is in the visit, the online system's request mask (+0x36DC,
+set by `fn_800E5754` from the visit protocol) makes the network thread call `fn_80171B94(aid)`
+-> VCT conference add `fn_8036A978`; VCT's event (7) -> VCT_StartStreaming `fn_80366244`. Then a
+periodic alarm `fn_8017169C` every VCT frame (144 ms): VCT's mixed incoming voices
+(`fn_80366B2C`) -> soft limiter `fn_80171554` -> an AX voice the game streams (`fn_801721E0`),
+so **everyone hears the others with or without a Wii Speak**; PMICRead `fn_80228FD4` (1152
+samples = 8 kHz) -> the game's echo suppressor `fn_80229D08` (mic frame vs the voices playing)
+-> VCT_SendAudio `fn_803664E8` (only with a session in state 2) -> voice detection
+`fn_8036CCF4` -> `_VCT` packets of 912 bytes over `DWC_SendUnreliable` (`fn_803675A4`), which
+the DWC HLE carries over the room (sealed, section 6); received ones go to VCT through the
+game's DWC receive callback (`fn_800E9164` -> `fn_8036D398`). With a Wii Speak the HUD shows a
+grey microphone icon at the top right. An AI DMA callback (`fn_801723BC`) feeds the game's own
+output back to PMIC as an echo reference.
+
+**The port**: the PMIC API is answered by the host (hooks.txt "Wii Speak", USA names, `all`
+versions; tables matched in PAL/JP/KR): Init/Quit 0; Probe 0 while F1 > Online "Microphone" is
+on, else -2 (a Wii without a Wii Speak: the game still plays the others' voices); Open/Close/
+Start/Stop and the control requests answer 0 with the callback called at once; Read gives 1152
+samples from the microphone (SDL3 recording stream, mono s16 at 8 kHz, at most ~2 frames of
+latency kept) after the input gain, or 0 when there are none / push-to-talk is up; the echo
+reference resampler/writer return 0 / n (no speaker next to a PC microphone). The game's VCT,
+VAD, packet format and playback are untouched.
+- **Voice detection needs a noise floor.** VCT ignores frames with energy < 49 and starts sending
+  only on a frame ~5x louder (rms) than the last four frames above that (`fn_8036CCF4`, threshold
+  520 %). With digital silence between words (a test file, a noise-suppressed PC microphone)
+  only loud frames are kept and it never starts: measured, the test speech file sent nothing.
+  The read adds white noise of +-20 LSB (about -68 dBFS), as the Wii Speak's analog input has;
+  then speech and tones start at once.
+- **Echo suppression = half duplex.** While the other player's voice plays, the game's suppressor
+  holds the microphone frame down and VCT's voice detection never fires (measured: the visitor
+  with push-to-talk sent 0 frames while the host talked, 11+ logged sends with the host silent).
+  F1 "Echo suppression" (`[online] mic_echo_suppression`, on = as on the Wii) off skips
+  `fn_80229D08` (hooked: original or pass-through) for headphone users: both can talk at once.
+- **Privacy**: off by default; no recording device is opened and nothing is read while off. The
+  capture opens only while the game has the Wii Speak open, or while the F1 section is shown
+  (level meter), and closes when the microphone is turned off. With push-to-talk, samples read
+  while the key is up are dropped (no frame reaches VCT, nothing is sent). Voice goes only to the
+  players of the visit, through the room's sealed connection.
+
+**F1 > Online > Voice chat (Wii Speak)**: Microphone (off), Device (system default or a named SDL
+recording device), Push-to-talk / Open mic, the push-to-talk key (default V; "Change..." takes the
+next key or a button of port 1's controller), Input gain (0-4), Echo suppression, a level meter
+(dBFS, "clipping") with "sending" while frames go to the game. Settings `[online] mic_on,
+mic_device, mic_push_to_talk, mic_ptt_key (SDL scancode), mic_ptt_pad_button, mic_gain,
+mic_echo_suppression` (own settings, not synced while visiting).
+
+**Test aids**: `CF_MIC_WAV=<16-bit or float WAV>` replaces the microphone (forced on, looped,
+resampled to 8 kHz; open mic unless `CF_MIC_PTT_CYCLE=<on s>,<off s>` holds push-to-talk in that
+rhythm), `CF_MIC_LOG=1` (`[voice]` PMIC calls, talking on/off, every 5 s: reads, frames given to
+the game, held back, short reads, peak), `CF_MIC_ECHO=0|1` overrides Echo suppression,
+`CF_ONLINE_LOG=1` now also logs `SendUnreliable` and unreliable receives (`_VCT...`) apart from
+the reliable ones. Analysis: scratch `voicecheck.py` correlated the band-passed loudness envelope
+of the listener's recorded game output (`CF_AUDIO_WAV_RAW`) with the looped test speech.
+Routes (scratch, from online-1's gate scripts): Copper's menu shows at a load-dependent frame
+and a scripted `@x/y` pointer drifts off its line after a while, so the host route hovers
+"Invite guests!" and presses A every 100 frames; the visitor's Copper talk is anchored with
+`after link d_a_npc_sp_gatekeeper_aNP`. The host must not press A on after the gate is open
+(it reopens Copper's menu and closes the gate), and must not still be talking to Copper when the
+visitor asks to come ("You cannot enter because there seems to be a conversation in progress").
+Test speech: Windows' own TTS (System.Speech) written to a 16 kHz WAV.
+
+**Verified 2026-11-03** (two instances on this PC, real visit through Copper, host speaks a TTS
+test sentence via CF_MIC_WAV, visitor without microphone): both games PMICInit when Copper
+connects; the host's game opens/starts the Wii Speak once the visitor is in the visit, reads 7.0
+frames/s; the host sends `_VCT` 912-byte packets (~7/s; 1000+ in 2 minutes), the visitor
+receives every one; the visitor's recorded game output matches the test speech (envelope
+correlation 0.84-0.88 in every 20 s window after the stream started, 0.14-0.26 before it); the
+visitor (mic on, push-to-talk cycling 4 s / 4 s, host silent) sends only while "talking" (frames
+given 777, held back 772). Full duplex (`CF_MIC_ECHO=0` on both, host speech open mic, visitor
+tones with push-to-talk): both send at once (host 1000+ packets, visitor 500+ in the same two
+minutes, each received by the other) and the visitor's output still matches the host's speech
+(0.78-0.87). The host's HUD shows the game's grey Wii Speak icon (top right); the visitor's (mic
+off) not. F1: `CF_MENU_ID_CHECK=exit` sweep with the voice section open: 0 ID conflicts.
+Not seen: the game's per-player "speaking" mark (the scripted players were never on one screen
+while talking), a real microphone, two PCs. One run where the host walked out of the gatehouse
+while the visitor was arriving left the host's picture black for the rest of the run (voice and
+chat kept working; the game kept running); not reproduced or investigated (route timing?).
+
 ## 11. Status and what is left
 
 Done (branch online-1): the DWC-level HLE (51 named DWC functions + IOS_Open2/IOS_Close2 the USB
@@ -501,11 +604,9 @@ F1 friends with keys, test aids. Two-instance result: section 9 (DWC login, budd
 matching and game traffic work; the trip itself waits for Copper's conversation, not yet scripted).
 
 Left:
-- **Wii Speak voice chat** with the PC microphone: PMIC / the USB device under it
-  (`/dev/usb/oh0`) are absent, so VCT never records; the transport already carries VCT packets
-  (unreliable, the game hands them to VCT). Needs a PMIC-level HLE (SDL3 audio capture, opt-in,
-  push-to-talk) and testing the VCT streaming between two instances.
-- **USB keyboard** for chat (KBD library on `/dev/usb/kbd`): host keyboard events.
+- **Wii Speak voice chat**: done (section 10e, branch online-voice); open: a real microphone and
+  two PCs, the speaking mark on screen.
+- **USB keyboard** chat: done and verified in a visit (section 10b).
 - **The visit itself** end to end: a gate route for both players (and a second town fixture).
 - **WiiConnect24 letters** between towns: section 10. Coordinate with main's WC24 setup (KD device
   present-but-off, `/shared2/wc24` files from sysconf.cpp prepareWc24; the game's NWC24 tasks run on
