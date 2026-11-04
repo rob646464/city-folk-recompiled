@@ -591,10 +591,33 @@ tones with push-to-talk): both send at once (host 1000+ packets, visitor 500+ in
 minutes, each received by the other) and the visitor's output still matches the host's speech
 (0.78-0.87). The host's HUD shows the game's grey Wii Speak icon (top right); the visitor's (mic
 off) not. F1: `CF_MENU_ID_CHECK=exit` sweep with the voice section open: 0 ID conflicts.
-Not seen: the game's per-player "speaking" mark (the scripted players were never on one screen
-while talking), a real microphone, two PCs. One run where the host walked out of the gatehouse
-while the visitor was arriving left the host's picture black for the rest of the run (voice and
-chat kept working; the game kept running); not reproduced or investigated (route timing?).
+Not tested: a real microphone, two PCs.
+
+**Speaking mark**: none in City Folk as far as the game code and the screens show. Both players
+on one screen in front of the gate (host speaking the TTS sentence, 2000+ voice packets received
+by the visitor, recorded every 50 frames on both): no mark over the speaker on either screen,
+the HUD's Wii Speak icon unchanged (grey, only on the player who has one). The game's VCT event
+callback (`fn_801713F0`) handles only events 7 (start streaming), 9 and 12 (session over); no game
+code asks VCT who is talking. What the game does show: the HUD icon, the "Now starting Mic Chat.
+Please don't raise the volume while you're using Mic Chat." ticker when the conference starts
+(`fn_800E50DC` -> notice 0x11), and each player's Wii Speak presence in its status data
+(`fn_800E8C44` -> `fn_800E69F4`).
+
+**Black host screen (fixed, branch online-voice, commit "Online DWC: unreliable data in its own
+receive buffer")**: the host walking out of the gatehouse into town just after a visitor arrived,
+with voice streaming, left the host's picture black for good (6 of ~11 such runs; the game kept
+running, voice and chat too). Cause: the host's scene change asks every visitor first (visit
+event 0x0F; the visit state machine at 0x805B2950 waits in state 0xB, `fn_800DB164`) and the
+visitor answers with event 0x10 (`fn_800DEDCC`). The visitor's game reads each reliable
+message straight from the DWC receive buffer (`DWC_SetRecvBuffer`, aid 0: 0x814219A0) a frame or
+more after its receive callback; our DWC copied VCT voice packets (unreliable) into the same
+buffer, so the request was overwritten by `_VCT@D...` and parsed as a visit message with lengths
+0x4354 / 0x4044 (traced: `fn_800D3BF8` called with r4 = 0x4044, the 0x0F handler never ran).
+Unreliable data now reaches the callback from a buffer of its own per AID (VCT reads it at once;
+the game never sends unreliable data itself). After the fix: 0 black in 6 runs of the same
+route, including runs where the host's state passed through 0xB and on to the town. Test aid:
+`CF_ONLINE_LOG=all` (every reliable message, small ones whole; SetRecvBuffer addresses); route
+scratch `host_black.txt` (host walks out late) + `vis.txt`; `CF_WATCHDOG=1 CF_PEEK=805B2950`.
 
 ## 11. Status and what is left
 
