@@ -391,6 +391,19 @@ WiiConnect24 letters.
   (now on the town data, not the save file object), CF_TOWN_WC24=<frame> (the setter at a frame),
   CF_MAIL_PROBE=1 (Pelly's / the WiiConnect24 checks' results, scene id and flag 0x1F changes).
   The letter route: scratchpad letter_tv_other.txt (town test; to be moved to tools/routes).
+- **When the letter leaves (2026-11-03)**: Pelly only keeps it (save letter slots). The game sends
+  her outbox in the save flow's WiiConnect24 step (save menu fn_801BC9E4 -> fn_801031B8 reset,
+  fn_801031F4 until done: fn_80103064 walks the outbox, fn_8017816C starts one send task per
+  letter, fn_8017ADD0 -> ... -> NWC24CommitMsg, our HLE: sealed letter in the outbox). So a letter
+  goes when the player saves (save icon, bed, save and quit). Test aid CF_WC24_SEND=<frame> runs
+  that step. Then path B carries it; the receiver's game takes it in at its next start
+  (NWC24 search/read HLE, the game's own start-up WiiConnect24 job) and Pete delivers it.
+  Verified both ways with the real visit pair (tester -> rob64, rob64 -> tester): queued, sent,
+  "delivered over the letters link", "received", next start "taken by the game", the mailbox's
+  new-mail flag. Not yet seen on screen: the letter opened from the mailbox (route not written).
+- **Letters link HELLO**: datagram type 3 (sender key, time, its addresses, HMAC with the pair's
+  letter key) to every friend's known addresses at start and every 10 minutes; the receiver keeps
+  the source address first (a changed port or address is learned without a room) and answers once.
 ## 10a. Settings while visiting (src/recomp/online_sync.cpp)
 
 User request: a visitor's game uses the HOST's settings for everything that shapes the shared town
