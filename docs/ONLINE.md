@@ -311,9 +311,13 @@ WiiConnect24 letters.
   registration call `cf_RosterRegisterOffline(slot, friendData, info)` (fn_8017C294; only while
   the game is offline, online system state <= 1), friend data = GS profile id entry. The friend
   info (0x78 bytes, save+0x1C8 per slot) is the one the friend's own game sends (room message
-  INFO 0x45): +0x08 player (u16 id, 9 UTF-16 units, kind 0x0A) = its save+0x7ED8, +0x1E town
-  (kind 0x02) = save+0x7EC2, +0x36 0x42 bytes = save+0x10C8 (the fields fn_800AC160 builds the
-  DWC status data from), names terminated and kinds forced on receipt. Registration waits for
+  INFO 0x45), in the layout the host's game itself writes for a visitor during a visit (read
+  from a save after a real visit, 2026-11-03): +0x00 the Wii number letters go to, +0x08 a copy of
+  the town name struct save+0x7EC2 (u16 id, 9 UTF-16 units, byte +0x14 = 0x01), +0x1E a copy of
+  the player name struct save+0x7ED8 (byte +0x14 = 0x00), +0x36 0x42 bytes = save+0x10C8. The
+  letter writer's "Dear <name>," / "To <name>" reads +0x1E. Builds before 2026-11-03 had the two
+  structs the other way round (letters said "Dear Frunch,"): such entries from friends.txt are
+  swapped on receipt. Registration waits for
   the INFO while the friend is in the room; an entry registered without it is updated later.
   Kept in friends.txt (`info <key> <hex>`). To do: removal from the game when removed in F1
   (`DWC_DeleteBuddyFriendData`). Then both can visit each
@@ -359,6 +363,34 @@ WiiConnect24 letters.
     friend's game acknowledges it; only proved friends' letters that open are taken. Tested
     2026-11-03 with two instances on one PC: delivered and acknowledged.
   With email on, both run; a letter id is taken in once.
+- **Pelly's "Other town." (found 2026-11-03)**: Pelly's destination list is built by
+  d_a_npc_sp_perikoNP fn_34_3794: "<town>." (message 0x18), "Other town." (0x19) only when town
+  flag 0x1F is set (fn_801165F4(town data, 0x1F); town flags at town data +0x735C3, town data =
+  fn_8010DD60 / r13-0x2FE0), "Future self." (0x1A), "Never mind." (0x1B). Choosing it then needs:
+  1. The console's WiiConnect24 on (NWC24 check fn_80404BBC: SCGetWCFlags bit 0, else NWC24 error
+     -39 and the game's message "The WiiConnect24 setting is not turned on" <109139>) and a tested
+     network configuration (NCD, else "An Internet connection cannot be established" <109133>).
+     The port now always reports both (SYSCONF NET.WCFG = 1, KD and NCD devices; nwc24_dl.cpp
+     consoleWc24()); KD downloads still run only with Nintendo events on, and nothing goes on the
+     network otherwise. A/B: CF_WC24_CONSOLE=0 (the old behaviour: on only with Nintendo events).
+  2. The town's own WiiConnect24 setting (save +0x735E4, the attic telephone's option; else Pelly:
+     "You can't send letters to people from out of town because your WiiConnect24 settings are
+     turned off"). User decision 2026-11-03: the port turns it on once per town, the first time it
+     sees the town with WiiConnect24 available, with the game's own setter fn_80177DE0, and records
+     the town in `<data>/town_wc24.txt` (town name struct hex), so turning it off on the attic
+     telephone stays off. A/B: CF_TOWN_WC24_DEFAULT=0. Checked with a town without friends and
+     Nintendo events off (user-town fixture): no message, saves complete, no KD download, no
+     network use.
+  3. Flag 0x1F. The game's only setter is in the player-creation scene module
+     (d_a_npc_sp_player_createNP fn_25_BB4, scene 0x3D; a new game is scene 0x3C); no town we have
+     has it and a visit does not set it (a visit sets flag 0x16 in the visitor's town). The port sets
+     it once when an F1 friend is in the town's roster (rosterSync). Not for every town: the extra
+     choice would show for players who cannot address a letter to anyone.
+  With these, Pelly answers "You'd like to send mail to another town, correct?" and takes the
+  letter ("OK, I'll be happy to take your outgoing mail."). Test aids: CF_TOWN_FLAG=<frame>:<hex>
+  (now on the town data, not the save file object), CF_TOWN_WC24=<frame> (the setter at a frame),
+  CF_MAIL_PROBE=1 (Pelly's / the WiiConnect24 checks' results, scene id and flag 0x1F changes).
+  The letter route: scratchpad letter_tv_other.txt (town test; to be moved to tools/routes).
 ## 10a. Settings while visiting (src/recomp/online_sync.cpp)
 
 User request: a visitor's game uses the HOST's settings for everything that shapes the shared town

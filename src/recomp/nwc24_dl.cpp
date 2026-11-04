@@ -303,11 +303,25 @@ public:
 
 bool wc24On() { return distrib::enabled(); }
 
-u32 sysconfWcFlags() { return wc24On() ? 1u : 0u; }
+// WiiConnect24 as the console reports it (SYSCONF NET.WCFG bit 0), with KD and a tested network
+// configuration (NCD): on, as on a console whose owner set WiiConnect24 up. Letters to other towns
+// need it (the game's NWC24 check fn_80404BBC: error 109139 while off, 109133 without NCD), and the
+// town's own setting (attic telephone) can only be turned on while it is. Nothing is downloaded and
+// nothing goes on the network unless Nintendo events is on (wc24On(): KD's download check).
+// CF_WC24_CONSOLE=0 reports it off unless Nintendo events is on (the behaviour before 2026-11-03).
+static bool consoleWc24() {
+    static const bool off = [] {
+        const char* v = std::getenv("CF_WC24_CONSOLE");
+        return v && *v == '0';
+    }();
+    return !off || wc24On();
+}
+
+u32 sysconfWcFlags() { return consoleWc24() ? 1u : 0u; }
 
 std::unique_ptr<ios::Handle> openDevice(const std::string& path, s32& err) {
     err = ios::IPC_ENOENT;
-    if (!wc24On()) return nullptr;
+    if (!consoleWc24()) return nullptr;  // KD's downloads stay off unless wc24On()
     if (path == "/dev/net/ncd/manage") {
         std::function<std::unique_ptr<ios::Handle>(const std::string&, s32&)> owner;
         {

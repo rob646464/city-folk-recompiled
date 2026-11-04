@@ -320,6 +320,8 @@ u64 wiiNumber() {
     return friends::myWiiNumber();
 }
 
+static std::vector<u8> cleanGameInfo(std::vector<u8> v, const u8 pub[32]);
+
 // nwc24fl.bin (layout from the NWC24 library's reads: GetCachedFLHeader / iReadFriendInfoRaw /
 // fn_8040E23C): 0x00 "WcFl", 0x04 version 2, 0x08 entries (100), 0x40 Wii numbers u64[100],
 // 0x360 entries 0x140 each: +0 type (1 Wii), +4 status (2 confirmed: City Folk's fn_800E98C0
@@ -345,9 +347,9 @@ void writeWiiFriends() {
         const size_t e = 0x360 + 0x140 * size_t(n);
         be32(e, 1);
         be32(e + 4, 2);
-        // The game's own name for that player (its roster entry, +0x0A UTF-16) when known, else the F1 name.
+        // The game's own name for that player (its roster entry's player name) when known, else the F1 name.
         if (f.gameInfo.size() == friends::kGameInfoSize)
-            std::memcpy(b.data() + e + 8, f.gameInfo.data() + 0x0A, 0x12);
+            std::memcpy(b.data() + e + 8, cleanGameInfo(f.gameInfo, f.pub).data() + 0x20, 0x12);
         else
             for (size_t i = 0; i < f.name.size() && i < 11; i++) b[e + 8 + 2 * i + 1] = u8(f.name[i]);
         n++;
@@ -384,29 +386,30 @@ std::string playerName() {
     return s.empty() ? "Player" : s;
 }
 
-// This player's roster entry as another game stores it (save friend info, 0x78 bytes; layout from
-// fn_8011AD7C, which clears one, and fn_800AC160, which builds the DWC status data from the same
-// save fields): +0x00 u64 (0 here), +0x08 player (u16 id, 9 UTF-16 name units, u8 kind 0x0A),
-// +0x1E town (u16 id, name, u8 kind 0x02), +0x34 u8, +0x36 0x42 bytes (save+0x10C8).
+// This player's roster entry as another game stores it (save friend info, 0x78 bytes), in the
+// game's own layout: what the host's game writes for a visitor during a visit (seen in the save
+// after a real visit) is +0x00 the Wii number letters go to (u64), +0x08 a copy of the town name
+// struct (save+0x7EC2: u16 id, 9 UTF-16 units, u8 at +0x14 = 0x01, pad), +0x1E a copy of the player
+// name struct (save+0x7ED8, +0x14 = 0x00), +0x34 u8, +0x36 0x42 bytes (save+0x10C8). The letter
+// writer's "Dear <name>," reads the player at +0x1E (+0x20 the name).
 static std::vector<u8> myGameInfo(u32 save) {
     std::vector<u8> v(friends::kGameInfoSize, 0);
-    const u64 wii = friends::myWiiNumber();  // +0x00: the Wii number letters go to
+    const u64 wii = friends::myWiiNumber();
     for (int i = 0; i < 8; i++) v[size_t(i)] = u8(wii >> (56 - 8 * i));
-    const u32 a = save + 0x7EC2, b = save + 0x7ED8;  // the two 0x16-byte name structs
-    const bool aIsPlayer = rd8(a + 0x14) == 0x0A;
-    const u32 player = aIsPlayer ? a : b, town = aIsPlayer ? b : a;
-    std::memcpy(v.data() + 0x08, hostp(player), 0x16);
-    std::memcpy(v.data() + 0x1E, hostp(town), 0x16);
+    std::memcpy(v.data() + 0x08, hostp(save + 0x7EC2), 0x16);  // town
+    std::memcpy(v.data() + 0x1E, hostp(save + 0x7ED8), 0x16);  // player
     std::memcpy(v.data() + 0x36, hostp(save + 0x10C8), 0x42);
     return v;
 }
 
-// A friend's entry from the network: names always terminated, kinds as the game sets them.
+// A friend's entry from the network: names always terminated, the Wii number its key gives. Entries
+// from builds before 2026-11-03 put the player first (+0x08, struct byte 0x00) and the town second
+// (struct byte 0x01): those are turned into the game's order.
 static std::vector<u8> cleanGameInfo(std::vector<u8> v, const u8 pub[32]) {
+    if (v[0x08 + 0x14] == 0x00 && v[0x1E + 0x14] == 0x01)
+        for (size_t i = 0; i < 0x16; i++) std::swap(v[0x08 + i], v[0x1E + i]);
     v[0x08 + 0x12] = v[0x08 + 0x13] = 0;
     v[0x1E + 0x12] = v[0x1E + 0x13] = 0;
-    v[0x08 + 0x14] = 0x0A;
-    v[0x1E + 0x14] = 0x02;
     const u64 wii = friends::wiiNumberOf(pub);  // the number that belongs to its key, whatever it sent
     for (int i = 0; i < 8; i++) v[size_t(i)] = u8(wii >> (56 - 8 * i));
     return v;
@@ -482,6 +485,25 @@ static void rosterSync(Ctx& c) {
     bool any = false;
     for (auto& fr : fl) any |= fr.state == friends::State::Friend;
     if (!any) return;
+    // Pelly offers "Other town." only when town flag 0x1F is set (d_a_npc_sp_perikoNP fn_34_3794
+    // builds "<town>. / [Other town.] / Future self. / Never mind." and asks fn_801165F4(town, 0x1F)).
+    // The game's only setter is in the player-creation scene module (d_a_npc_sp_player_createNP
+    // fn_25_BB4, scene 0x3D, not the new-game scene 0x3C); none of the towns we have has it, and a
+    // visit does not set it. A town with an F1 friend in its roster can send letters to other towns
+    // in this port, so the flag is set then (once; it stays in the save). docs/ONLINE.md section 10.
+    if (const u32 town = gu::call(c, VA(0x8010DD60)); town >= 0x80000000u && !gu::call(c, VA(0x801165F4), {town, 0x1Fu})) {
+        bool inRoster = false;
+        for (auto& fr : fl)
+            for (int i = 0; i < 32 && !inRoster; i++) {
+                const u32 e = save + 0x44 + 12u * u32(i);
+                const u32 type = (rd32(e) >> 11) & 3;
+                inRoster |= fr.state == friends::State::Friend && (type == 2 || type == 3) && rd32(e + 4) == fr.pid;
+            }
+        if (inRoster) {
+            gu::call(c, VA(0x80116634), {town, 0x1Fu});
+            std::printf("[online] town flag 0x1F set (Pelly: \"Other town.\"): a friend is in the roster\n");
+        }
+    }
     static u32 buf = 0, info = 0;
     if (!buf) buf = hleAlloc(16);
     if (!info) info = hleAlloc(u32(friends::kGameInfoSize));
@@ -520,7 +542,7 @@ static void rosterSync(Ctx& c) {
         }
         if (haveInfo) std::memcpy(hostp(info), gi.data(), gi.size());
         const u32 ok = gu::call(c, fnReg, {u32(at), buf, haveInfo ? info : 0u});
-        const std::string as = haveInfo ? ", as " + utf16Name(gi, 0x0A) + " of " + utf16Name(gi, 0x20) : std::string();
+        const std::string as = haveInfo ? ", as " + utf16Name(gi, 0x20) + " of " + utf16Name(gi, 0x0A) : std::string();
         std::printf("[online] friend %s (profile id %u) -> game roster slot %d%s: %s\n", fr.name.c_str(), fr.pid, at, as.c_str(),
                     ok ? (slot >= 0 ? "updated" : "registered") : "refused");
         if (ok && slot < 0) notice(fr.name + " is now in the game's friend roster");
@@ -574,8 +596,10 @@ static void townFlags(Ctx& c) {
         if (*e != ':') break;
         const u32 n = u32(std::strtoul(e + 1, &e, 16));
         if (at == f) {
-            const u32 save = gu::call(c, VA(0x80101894));
-            if (save) gu::call(c, VA(0x80116634), {save, n});
+            // The town flags live in the town data (fn_8010DD60, r13-0x2FE0) +0x735C3, not in the save
+            // file object fn_80101894 returns.
+            const u32 town = gu::call(c, VA(0x8010DD60));
+            if (town) gu::call(c, VA(0x80116634), {town, n});
             std::printf("[online-test] frame %u: town flag %X set\n", f, n);
         }
         if (*e != ',') break;
@@ -583,10 +607,91 @@ static void townFlags(Ctx& c) {
     }
 }
 
+// The town's own WiiConnect24 setting (save +0x735E4; the attic telephone's option, Rover's
+// question in a new town) is turned on once per town, the first time the port sees that town
+// with the console's WiiConnect24 available (the game's check state 1 at 0x8074EBCC), with the
+// game's own setter fn_80177DE0. Towns done are remembered in <data>/town_wc24.txt (town id + name),
+// so a player who turns it off on the attic telephone keeps it off. Letters to other towns need it
+// (Pelly: "You can't send letters to people from out of town because your WiiConnect24 settings
+// are turned off"); docs/ONLINE.md section 10. CF_TOWN_WC24_DEFAULT=0 leaves it alone (A/B).
+static void townWc24Default(Ctx& c) {
+    static const bool off = [] {
+        const char* v = std::getenv("CF_TOWN_WC24_DEFAULT");
+        return v && *v == '0';
+    }();
+    if (off) return;
+    static u32 next = 0;
+    const u32 f = recomp::game::guestFrames();
+    if (f < next) return;
+    next = f + 60;
+    const u32 town = rd32(VA(0x8074E960));  // the town data (fn_8010DD60), null before a town is loaded
+    if (town < 0x80000000u || town >= 0x94000000u) return;
+    if (rd32(VA(0x8074EBCC)) != 1) return;  // the game's WiiConnect24 check: not (yet) available
+    // Only once the town is in play: at the title, on the train and in player creation (scenes
+    // 0x44, 0x38, 0x3B, 0x3C) the town data is reloaded from the save afterwards, which undoes it.
+    if (const u32 scene = gu::call(c, VA(0x8016266C)) & 0xFF; scene == 0x44 || scene == 0x38 || scene == 0x3B || scene == 0x3C) return;
+    char key[64];
+    {
+        std::string k;
+        const u32 t = town + 0x7EC2;  // town name struct: u16 id, 9 UTF-16 units
+        char b[8];
+        for (u32 i = 0; i < 0x14; i++) {
+            std::snprintf(b, sizeof b, "%02x", rd8(t + i));
+            k += b;
+        }
+        std::snprintf(key, sizeof key, "%s", k.c_str());
+    }
+    static std::string doneFor;
+    if (doneFor == key) return;
+    const auto path = port::dataDir() / "town_wc24.txt";
+    std::vector<std::string> done;
+    {
+        std::ifstream in(path);
+        for (std::string l; std::getline(in, l);)
+            if (!l.empty() && l[0] != '#') done.push_back(l.substr(0, l.find(' ')));
+    }
+    if (std::find(done.begin(), done.end(), key) == done.end()) {
+        const bool was = rd8(town + 0x735E4) != 0;
+        u32 r = 0;
+        if (!was) r = gu::call(c, VA(0x80177DE0));
+        std::printf("[online] town WiiConnect24 setting: %s (fn_80177DE0 -> %u, now %u)\n",
+                    was ? "already on" : "turned on for this town (first start)", r, rd8(town + 0x735E4));
+        if (!was && !rd8(town + 0x735E4)) return;  // the setter refused: try again later
+        std::error_code ec;
+        std::filesystem::create_directories(path.parent_path(), ec);
+        const bool fresh = !std::filesystem::exists(path, ec);
+        std::ofstream out(path, std::ios::app);
+        if (fresh) out << "# Towns whose WiiConnect24 setting City Folk Recompiled turned on once (town name struct hex).\n";
+        out << key << "\n";
+    }
+    doneFor = key;
+}
+
 void onGuestFrame(Ctx& c) {
     if (!sEnvDone) envStart();
+    townWc24Default(c);
     giveItems(c);
     townFlags(c);
+    // CF_TOWN_WC24=<frame> (test aid): the town's own WiiConnect24 setting (save +0x735E4) turned on
+    // with the game's setter fn_80177DE0, what the attic telephone's WiiConnect24 option does (it
+    // takes effect only while the console reports WiiConnect24 available).
+    if (static const char* tw = std::getenv("CF_TOWN_WC24"); tw && recomp::game::guestFrames() == u32(std::atoi(tw)))
+        std::printf("[online-test] town WiiConnect24 setting (fn_80177DE0) -> %u\n", gu::call(c, VA(0x80177DE0)));
+    // Research aid (CF_MAIL_PROBE): scene id changes (fn_8016266C) and town flag 0x1F, the flag
+    // Pelly's destination list (d_a_npc_sp_perikoNP fn_34_3794) needs for "Other town.".
+    if (static const bool probe = envOr("CF_MAIL_PROBE") != nullptr; probe) {
+        static u32 lastScene = ~0u, lastFlag = ~0u;
+        const u32 scene = gu::call(c, VA(0x8016266C)) & 0xFF;
+        const u32 town = gu::call(c, VA(0x8010DD60));
+        const u32 flag = town >= 0x80000000u ? (rd8(town + 0x735C3 + 3) >> 7) & 1 : 2;
+        if (scene != lastScene)  // scene names fn_801F6B6C compares (0x3C at +0x770, 0x3D at +0x78C)
+            for (u32 off : {0x770u, 0x78Cu, 0x7A0u})
+                std::printf("[mail-probe] scene name +%X: %.24s\n", off, reinterpret_cast<const char*>(hostp(0x80505D28u + off)  /* USA */));
+        if (scene != lastScene || flag != lastFlag)
+            std::printf("[mail-probe] frame %u: scene %02X, town flag 1F %u\n", recomp::game::guestFrames(), scene, flag);
+        lastScene = scene;
+        lastFlag = flag;
+    }
     rosterSync(c);
     if (sJoinPending) tryJoinFromEnv();
     if (!sCodeFile.empty() && envOr("CF_ONLINE_HOST")) {
