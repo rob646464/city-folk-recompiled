@@ -397,7 +397,11 @@ run).
   place of `,`: `TP=1300/28/2860` (position x/y/z), `TP=mod102t0100:0/60` (60 units in front of the
   last actor of REL module 102 whose structure type, +0x8 >> 16, is 0100: the museum),
   `TP=tortimer`. Structure types and positions per place: tools/routes/*.txt comments and
-  `CF_ACTOR_LOG=<n> CF_ACTOR_MODULES=101,102,103` (lists each actor with its type). Time in retraces, or in guest frames with `CF_INPUT_CLOCK=frames` (matches `CF_SHOT` frame
+  `CF_ACTOR_LOG=<n> CF_ACTOR_MODULES=101,102,103` (lists each actor with its type).
+  `WARP=<target>` (route action, same timing as `TP=`) loads another place through the game's
+  own stage change: `WARP=museum.cafe`, `WARP=city`, `WARP=town@1880/28/2000`, `WARP=stage:0x25`
+  (docs/WARPS.md: every destination, `CF_WARP`, the F1 page; it waits until the game can change
+  stage). Time in retraces, or in guest frames with `CF_INPUT_CLOCK=frames` (matches `CF_SHOT` frame
   numbers). A time `+N` = N after the previous item's start; `~N` after an item repeats it N times
   (`+60:A ~10` = ten presses 60 apart). `after link <REL module> [n]` in a route file: the items
   after it are timed (`+N`) from the n-th time the game links that module (scene changes, e.g.
