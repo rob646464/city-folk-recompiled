@@ -323,6 +323,11 @@ struct EnhancedLightingSettings {
     bool nightLightShadows = true;     // the strongest night lights cast shadows
     bool nightLightsGameState = true;  // windows follow the game's own lights-on state (off: every building glows at night)
     bool effectLights = true;          // fireflies and fireworks are small coloured lights (game particle positions/colours)
+    // Furniture lights (src/game/cf_furniture_light.cpp): lamps, TVs, fires, candles... light the
+    // room, following the game's own on/off state.
+    bool furnitureLights = true;
+    float furnitureLightIntensity = 1.0f;  // 0..3
+    bool furnitureLightShadows = true;     // fires and screens cast shadows (lamps never: their shade encloses the light)
     // Sun shafts: light scattered in the air, cut by the shadows of trees and houses.
     bool sunShafts = true;
     float sunShaftIntensity = 1.0f;    // 0..3

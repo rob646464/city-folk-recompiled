@@ -14,4 +14,7 @@ bool onRootDraw(Ctx& c, bool xlu, bool begin);
 void onCamera(Ctx& c, u32 cameraData);
 // G3dProc of a g3d scene model (cf_tags.cpp): night-light sources by model name.
 bool onModel(Ctx& c, u32 scnObj);  // false: do not draw (blob shadows hidden)
+// A furniture glow material's TEV colour data with its light amount (cf_furniture_light.cpp):
+// drawn with the emissive hint while lit (Aurora 0420), like the structures' lit materials.
+void markLitMaterial(u32 tevColorData, float amount);
 }  // namespace recomp::cflight

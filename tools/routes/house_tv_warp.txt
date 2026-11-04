@@ -1,0 +1,13 @@
+﻿# Furniture lights: a TV switched with A (docs/RENDERING.md "Furniture lights"), saved town
+# CF_FIXTURE=user-town-clean with the house's tape deck turned into a retro TV before the warp
+# (CF_POKE on the house item grid, see the docs), the player next to it, the pointer on the TV.
+include warp.txt
++1600:WARP=house1
+after link d_bgi_drawNP 2
++300:TP=288/0/388
++40:STICKUP*10
++100:@0.34/-0.39
++90:A*6
++700:A*6
++500:@0.34/0.39
++90:A*6
