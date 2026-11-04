@@ -179,6 +179,8 @@ std::vector<Field> fields() {
         flag("enhanced_lighting", "night_lights", l.nightLights),
         num("enhanced_lighting", "night_light_intensity", l.nightLightIntensity),
         flag("enhanced_lighting", "night_light_shadows", l.nightLightShadows),
+        flag("enhanced_lighting", "night_lights_game_state", l.nightLightsGameState),
+        flag("enhanced_lighting", "effect_lights", l.effectLights),
         flag("enhanced_lighting", "sun_shafts", l.sunShafts),
         num("enhanced_lighting", "sun_shaft_intensity", l.sunShaftIntensity),
         num("enhanced_lighting", "sun_shaft_quality", l.sunShaftQuality),

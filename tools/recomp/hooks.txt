@@ -91,3 +91,8 @@ d_s_stageNP::fn_125_C0 all
 fn_8017FF4C all
 fn_800FA6AC all
 d_a_playerNP::fn_80_2DB28 all
+
+# The structures' window glow (daSTR_c light controller, d_a_strNP fn_99_A40: lerps TEV colour 1
+# of m_light / m_window / m_spotlight / m_museum ... by the light amount at controller +0, ScnMdl
+# at +0x2C): night lights follow the game's own lights-on state.
+d_a_strNP::fn_99_A40 all

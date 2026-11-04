@@ -329,14 +329,108 @@ a flat grey look. On top of the game's own hourly colours. Strength slider; off 
 ### Night lights
 
 Lit windows and lamps as warm extra lights (LM's ExtraLight path, interpolated by id): sources by
-model name (obj_myhome*, obj_house*, obj_shop*, obj_museum*, obj_police*, obj_townhall*,
-obj_busstop*, obj_lamp* / obj_light*, obj_cafe*), placed in front of the model at window height
-(model space offset through its world matrix), from dusk (sun below +1 degree) to dawn. Shadows
-for the house / shop / lamp kinds ("Night light shadows", cube maps). Collected from frame N's
-draws, submitted with frame N+1 (static sources). **Open**: whether a villager's window is really
-lit (the game's own window state is not read: every house glows at night); fireflies and
-fireworks are not light sources yet (their particle emitters are not identified); only names seen
-in the user's town were verified (obj_myhome0, obj_house0/2, obj_busstop0).
+model name, placed in front of the model at window height (model space offset through its world
+matrix), from dusk (sun below +1 degree) to dawn. The structure models of a town (disc archive
+`Str/Brres/field<Rgn><Lng>StrBrres<S/W>.arc`): players' houses `obj_myhome0-4`, villagers' houses
+`obj_house0-4` (`TN_obj_house*.brres`), Nook's stores `obj_nc` / `obj_nk` / `obj_nw` / `obj_ng`,
+Able Sisters `obj_tailor`, town hall `obj_office`, `obj_museum`, `obj_lighthouse`, `obj_windmill`,
+`obj_busstop0` (the earlier names obj_shop / obj_townhall / obj_police / obj_cafe do not exist).
+Window offsets of obj_nk / obj_nw / obj_ng / obj_lighthouse / obj_windmill are estimates (none
+of them is in the user's town).
+Shadows for the house / shop / lamp kinds ("Night light shadows", cube maps). Collected from frame
+N's draws, submitted with frame N+1 (static sources).
+
+**The game's own lights-on state** (branch enh-light-2; F1 "Follow the game's lights", on): every
+structure with lit materials has a `daSTR_c` light controller (d_a_strNP). Its material table
+(d_a_strNP .data + 0x140, 17 entries: `m_letter`, `m_light`, `m_board`, `m_special`, `m_bus_ind`,
+`m_museum`, `m_spotlight`, `m_window`, `m_tw_light`, `m_tw_light_00..07`) names the materials of a
+model that glow; **d_a_strNP fn_99_A40** (hooked, `all`) sets TEV colour 1 of each of them to a
+lerp of two colours by the controller's **light amount** (controller + 0, float 0..1; the ScnMdl at
+controller + 0x2C, through `ScnMdl::CopiedMatAccess` / `ResMatTevColor::GXSetTevColor`). The
+actors decide the amount and call fn_99_A40 only when it changes (and at creation), so the hook
+records it per ScnMdl and the night light's intensity is multiplied by it. What the game decides
+(USA user-town fixture): players' houses 0 while nobody is inside, villagers' houses 1 or 0 (at
+21:30 three of six were dark; that is what the game draws), Nook's Cranny fades 1 -> 0 over ten
+frames at 22:00 (closing time; `[window]` log), town hall / Able Sisters / museum / gate / bus 1.
+Kinds without a controller (bus stop, lamps) glow from dusk to dawn. Off = the old behaviour
+(every structure glows). Screenshots (build/runs/win4 of the branch's worktree): a dark villager
+house without / with the old light, lit houses with their light.
+
+### Fireflies and fireworks (effect lights)
+
+F1 "Fireflies and fireworks" (under Night lights, on). Both are `nw4r::ef` effects, so the lights
+come from the game's own particles (cf_light.cpp `noteEffectDraw`, hook on
+`nw4r::ef::DrawOrder::Draw(Effect*, const DrawInfo&)`, which draws an effect's particle managers):
+
+- Layout (USA rev 1; NW4R, so the same on every disc): Effect + 0x90 its ParticleManagers
+  (`ut::List`, link offset at list + 0xA); ParticleManager + 0x24 its EmitterResource, whose first
+  word points at the emitter's name; + 0x38 its particles (`ut::List` of 0xE4-byte Particles, link
+  at + 0x14); + 0x8C the effect's root matrix (`Effect::SetRootMtx` copies it to Effect + 0x54; the
+  emitters' world matrix). Particle + 0x20 primary colour (RGBA; the colour animation and the
+  alpha fade / blink are applied there every frame), + 0x24 secondary colour, + 0x28 a modulation
+  colour (white), + 0xA0 velocity, + 0xAC position (emitter space), + 0xB8 previous position,
+  + 0xDC age. Positions were checked against the matrix the billboard strategy loads with
+  `GXLoadPosMtxImm` for the quad (identical to 0.1 unit) and a visible firefly glow on screen sat
+  exactly where its light's projection put it.
+- **Fireflies**: emitters `af_ins_hotaru_glow` + `af_ins_hotaru_glow_child` (one particle each, two
+  managers per firefly at one place: merged), `af_hotaru_glow`. One green light per firefly
+  (colour from the particle, ~(0.6, 1, 0.5)), radius 110, intensity 1.6 x the glow's alpha (it
+  blinks with it). Seen in June at 21:30 in the user-town fixture: 5-10 fireflies around the
+  player, along the river.
+- **Fireworks** (the August Sunday show, also `af_itm_firework*` items): `af_fld_firework`,
+  `_top`, `00`-`02`, `_child`, `_st_child`. The show is a **sky backdrop**: its effects are drawn
+  with their own camera (DrawInfo + 0 view matrix: identity rotation, translation (0, 110, -1300)),
+  not the town's, so a burst has no place in the town. Its light is placed where the burst appears:
+  the backdrop's view-space position taken as the main camera's view space (same projection), i.e.
+  up and ahead of the scene; radius 1100-1800 (with the burst's spread), intensity 2.5 x the
+  burst's brightness (alpha-weighted particle count / 8), colour = alpha-weighted mean of the
+  particles' primary and secondary colours with the hue pushed (bursts are green, orange, teal,
+  pale yellow). The game flashes the scene's ambient colour itself during the show; this adds the
+  burst's coloured light from above. Effects drawn with the main camera use world positions
+  (submitted with the next frame through the main camera, like night lights).
+- Budget: at most 12 firefly and 8 firework lights (strongest first, sources of one kind closer
+  than 25 / 200 units merged), then the shared ranking in enhanced_lighting.cpp into Aurora's 64
+  extra lights; no shadows. Outdoors scaled by darkness (0.25 + 0.75 x night), indoors full.
+- Ids `0x5A000000 ^ manager address` (stable while the effect lives) for interpolation; backdrop
+  lights are view-space fixed, so a camera move between game frames shifts them slightly (not
+  checked at 120 fps).
+- Test aids: `CF_EFL_LOG=1` (every emitter name with its kind once, per manager every 30 frames:
+  particles, brightness, world / backdrop, centre; the lights every 60 frames), `CF_EFL_AS=<emitter
+  name prefix>` (that emitter lights like a test firefly: white, radius 400, to check placement on
+  an easy effect such as `af_fsh_shadow`), `CF_EFL_AB=1` with `CF_ENHANCED_AB=1` (effect lights
+  only in dump frames 4k+1, not 4k+3: neighbouring shots compare them), `CF_WINDOW_LOG=1` (light
+  amount changes per structure model, controller call counts, every 1200 frames the list with
+  world positions). Routes: `CF_CLOCK_START="2026-06-20 21:30"` (fireflies), `"2026-08-02 20:00"`
+  (Sunday: fireworks), `CF_TELEPORT=6600:tortimer` (the plaza during the show),
+  `"2026-08-03 21:57"` (Nook's closes at 22:00).
+- World vs actor coordinates (for teleports): world x = actor x; the town is a cylinder about X, a
+  ground point's world (y, z) = r (sin p, cos p) with p = 0.3526 - (actor z - 697) / 573 (radians,
+  fitted in the user-town fixture; r ~ 700). A structure in front of its door: actor z of its centre
+  + ~130.
+
+### Indoor places (branch enh-light-2)
+
+Checked with A/B shots (user-town fixture, `CF_TELEPORT` in front of the door, then walking in):
+town hall (Pelly), museum (Blathers' hall), Able Sisters (Mabel) besides the house, Nook's and
+Rover's bus from enh-light: `[sky] indoors` in each (d_bgi_drawNP linked, d_bgo_drawNP not), the
+room key light's soft shadows and AO, no sun / grade / night lights, nothing broken. Not reached:
+the city (bus), the museum's other rooms, the café.
+
+### Other versions (branch enh-light-2)
+
+Dev builds per version (`tools\build.ps1 -Game <id>`), the user-town save with its title folder
+renamed (docs/SETUP.md), continue route:
+
+| Check (2026-11-03) | USA | PAL | Japan | Korea |
+|---|---|---|---|---|
+| Light-controller hook (`[window]`: 31 structure models with their light amounts) | yes | yes | yes | yes |
+| Fireflies (June 21:30: `af_ins_hotaru_glow*` found, 5-10 firefly lights) | yes (shots) | yes (shot) | yes | yes |
+| Fireworks show (Aug 2 20:00 at the plaza: backdrop bursts, firework lights) | yes (shots) | yes | yes | yes |
+| Nook's Cranny closing at 22:00 (light amount 1 -> 0) | yes | - | - | - |
+| Indoors (town hall, museum, Able Sisters) | yes (shots) | - | - | - |
+
+Korea's continue route needs its own choice-box positions (`@0.44/0.14`, `@0.56/0.33`). The town in
+the save is a USA town, so its events (the August fireworks) follow the US calendar on every disc.
 
 ### Bloom and sun shafts (Aurora 0342 shafts)
 
@@ -381,3 +475,13 @@ hour 16:50 (long warm shadows, golden grade, shafts), dusk 17:45 (moon rising, b
 flatter), snow (Jan 15, state 5), indoors (Rover's bus stage: the room key light, no sun/grade).
 Not compared with Dolphin (these are enhancements: the plain frames are the reference and stay
 byte-identical with the master off).
+
+Branch enh-light-2 (agent scratch, not in the repo; plain | enhanced pairs unless noted): a dark
+villager house at 21:30 with "Follow the game's lights" on (no light) and off (the old warm light
+on a house the game shows dark), lit villager houses with their light; fireworks at the plaza
+(Aug 2 20:00, `CF_EFL_AB`: with | without the burst's light, orange flash on the plaza); a firefly
+by a tree (with | without: the leaves beside it turn green); a firefly glow on screen exactly at its
+light's projection; town hall / museum / Able Sisters interiors; a PAL firefly scene (date shown
+20/6). An enhanced-off frame was not pixel-compared with main: two runs are not frame-identical
+(the HUD appears at different frames), so "off = original" rests on the hooks only reading guest
+memory and calling the original.
