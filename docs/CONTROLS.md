@@ -265,19 +265,88 @@ Verified (USA, fixture `user-town` and the new-game route, scripted D-pad presse
 - Name keyboard (new game): keys, "More" (symbol page), "Confirm" reached; "@", "=", "m" typed.
 - Mouse unchanged: with Auto the first mouse movement switches snapping off (not run with a real
   mouse in a scripted test: the scripted pointer counts as a free move, not as the mouse).
-Not tried yet: shops / catalog / museum, the letter writing screen, the design editor, the HOME
-Menu (hooked, unverified), PAL / Japan / Korea (the hooks are USA-only: hooks.txt lines untagged).
+- (menu-nav-2) Letters list (pockets > envelope), designs list + its submenu, chat keyboard (toolbar),
+  Nook's offer choice box ("I'll take it! / How do I use it? / Never mind."): moved through by
+  D-pad, checked by the trace checker below.
+Not tried yet: shops' buy / sell screens, catalog, museum, the letter writing screen, the design
+editor, the HOME Menu (its gui hook reported no items in a run with the HOME Menu open), PAL /
+Japan / Korea.
 
-Direction search: candidates beyond the selected item's middle in the pressed direction (8 ways with
-the stick), cost = gap along + 0.25 x centre distance along + 3 x gap across + 0.35 x centre
-distance across (isotropic screen units), so items in line win and a grid moves cell by cell; at the
-edge the selection stays. Item boxes are clipped to the screen (the toolbar slots reach below it);
-the target is the clipped box's centre. Auto-repeat while held: 0.36 s, then every 0.11 s.
+**The screen in front is modal** (menu_nav.cpp `navigable()`): besides the tested/drawn rule above,
+of two menu layouts that both hit-test and overlap (the design list's "Wear / Display on Ground /
+Edit Design / Quit" submenu over the patterns; the letters over the pockets) the one drawn later is
+in front and every item of the one behind is left out. Draw order = the order of the root panes'
+draws in the frame (`Item::layer`, from `cf::navLayoutDrawn`). Only layouts of several items count
+as "in front" (the town map's house markers are one-item layouts that may touch each other), and
+the HUD toolbar is never left out (it stays reachable below every screen, as before).
+
+Direction search (branch menu-nav-2, `moveCardinal`; 8 directions, the stick snapped to the nearest
+of them; isotropic screen units). Candidates lie past the selected item (centre beyond its centre,
+far edge beyond its far edge), are not a box that contains the selected item's centre (a panel
+behind it) and not a **container** (a box holding the centre of a smaller item: list backgrounds,
+the pockets' player circle around letter slots; containers stay clickable under the pointer, the
+first press / Recenter takes them only when nothing else is near). Then, for left / right / up /
+down:
+1. **In line** (overlapping the selected item's row band for left / right, its column band for up /
+   down, by 20 % of the smaller): the nearest by edge gap, then the one closest to the kept
+   column / row (moving down through the wide Space key and back keeps the column).
+2. Else items **near the direction**: gap across under the distance along *and* centres within 35
+   degrees; the nearest by gap along + 2 x gap across.
+3. **Grids with a short last row** (up / down only): the next row of the selected item's own
+   layout, right after it (gap under one item height, items wholly past it), its item closest to the
+   kept column. Taken when 1 and 2 find nothing, and instead of an item of another layout that is
+   further away (a short last row above the toolbar). Left / right at the end of a short row stays.
+4. Nothing: **no move**, never a jump along the other axis, no wrapping (the game's pointer menus do
+   not wrap either). Diagonals (stick) take items in that quadrant only.
+A selection that vanishes (a list rebuilt its panes, the item scrolled away) moves to the item now
+nearest where it was (its own layout first, within 0.3 KPAD units), so the place in the list is
+kept. Item boxes are clipped to the screen (the toolbar slots reach below it); the target is the
+clipped box's centre. Auto-repeat while held: 0.36 s, then every 0.11 s. `CF_NAV_OLD=1` = the first
+version (cost search over everything beyond the middle) for A/B.
+
+**Checking the moves** (`CF_NAV_TRACE=<file>`, `tools/nav/check.py`): the trace has every distinct
+item set of a run (keys + geometry stable for 6 frames) with all visible items, whether each is
+navigable after the modal rules (`nav`), its layout (`g`), draw order (`l`), and the move chosen from
+every navigable item in 8 directions (JSON lines). `py tools/nav/check.py <trace>... [--summary
+[--cardinal]] [--warn]` checks each move against rules written from the user's point of view: wrong
+way, left the row / column although an item is in line, skipped an in-line item, axis jump (not in
+line and not within 40 degrees: "left moved the cursor down"), left a grid past its own next row,
+landed on a container, stuck although an item is in line or within 30 degrees, a diagonal outside
+its quadrant, and two overlapping navigable layouts (the screen behind not modal). `--replay new|old`
+rebuilds `tools/nav/replay.cpp` with the current `src/recomp/menu_nav.cpp` (clang++ from Visual
+Studio's LLVM) and recomputes the modal set and every move of every logged set offline, so the
+selection code is checked against all screens without a game run; `tools/nav/synthetic.jsonl` is a
+hand-made grid with a ragged last row, a panel behind it and the toolbar below. `--warn` adds
+unreachable items and not-reversible moves (honeycomb rows are not reversible by nature).
+
+Found and fixed (branch menu-nav-2; USA, fixture `user-town` + new-game route; 135 logged sets of
+pockets, item submenu, letters, designs + submenu, town map, toolbar, choice boxes, chat keyboard,
+name / town-name keyboard incl. the symbol page, the OK button screen): the first version made 913
+distinct illogical moves (screen, direction, from -> to), every one of the kinds the user reported:
+- pockets: LEFT from the left column (BC_00, BC_09) -> toolbar slot below (B_tb_01 / B_tb_00); RIGHT
+  from the right column -> toolbar (BC_03 -> B_tb_03); UP from the top row into the player circle;
+  DOWN on the hovered toolbar slot (it grows when pointed at) -> the next slot sideways;
+- town map: RIGHT from the resident list -> toolbar Close / Map slot (B_msg_02 -> B_tb_07), LEFT from
+  the map buttons -> toolbar (B_mapBtn_08 -> B_tb_01), UP from the toolbar's hovered slot sideways;
+- keyboards: LEFT / RIGHT between staggered rows (B_key_31 -> B_key_21), UP from the top row to the
+  "change keyboard" button off to the side, RIGHT from the sign switch to Confirm, DOWN from the last
+  row past the keys to the toolbar;
+- designs: the submenu not modal (moves went to the patterns behind it), LEFT from the player circle
+  -> a pattern below, UP from the Mii button into the player circle;
+- letters: moves onto the pockets behind the letter list and onto container panes;
+- toolbar: UP from a slot -> the memo button at the top right (B_tb_00 -> B_tbBtn_00).
+After the fix the checker reports **0 errors** on every logged set, both for the moves made in the
+game runs of the final build (74 sets) and for the offline replay of all 135 sets (the one set
+recorded before draw order was logged cannot show the submenu rule; the final run of that screen
+passes). Screenshots checked: pockets grid / submenu, letters, designs submenu, map, keyboards.
+Not reached by script: shops (Nook's buy / sell, catalogue), museum, Able's, Copper's gate, letter
+writing + address book, stationery picker, the design editor itself, HOME Menu (its gui hook
+reports no items: open), title file select (Rover's choices are covered).
 
 Test aids: script tokens `UP DOWN LEFT RIGHT STICK*` drive it like a pad, `RECENTER` presses
 "Recenter pointer"; a scripted `@x/y` counts as a free pointer move. `CF_NAV_LOG=1` (each item set
 as it becomes navigable, every selection change, toolbar enter/leave), `CF_NAV_DUMP=1` (every hit-test
-source with its scale and items, every 30 frames).
+source with its scale and items, every 30 frames), `CF_NAV_TRACE=<file>` (above), `CF_NAV_OLD=1`.
 
 ## Test aids
 
