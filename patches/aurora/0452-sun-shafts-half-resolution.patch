@@ -1,0 +1,48 @@
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -193,6 +193,11 @@
+ // 0032: ambient occlusion runs forward (mask pass, applied in the opaque world draws);
+ // AURORA_ENH_AO_POST=1 restores the former scene-end multiply (A/B).
+ const bool g_aoPost = std::getenv("AURORA_ENH_AO_POST") != nullptr;
++// 0452: sun shafts at half the mask resolution (AURORA_ENH_SHAFTS_FULL=1: full, A/B).
++bool shafts_half() noexcept {
++  static const bool sFull = std::getenv("AURORA_ENH_SHAFTS_FULL") != nullptr;
++  return !sFull;
++}
+ // Unlit textured opaque world draws get the enhanced variant too while AO is on (they receive it).
+ bool ao_receivers() noexcept { return g_cfg.enabled && g_cfg.ssao && !g_aoPost; }
+ // 0340: unlit opaque world draws get the world class (they receive AO and/or directional shadows).
+@@ -1498,7 +1503,10 @@
+ // toward the light). Colour = fx.beam[1].rgb.
+ @fragment
+ fn fs_shafts(in: VsOut) -> @location(0) vec4f {
+-  let mp = floor(in.pos.xy);
++  // 0452: computed at half the mask resolution (fx.beam[0].z = 2; the composite samples the shaft
++  // texture filtered by uv): 1.0-1.2 ms -> ~0.3 ms at 4K with 32 steps, shafts being soft anyway.
++  let sc = max(fx.beam[0].z, 1.0);
++  let mp = min(floor(in.pos.xy) * sc, vec2f(textureDimensions(tdepth)) - vec2f(1.0));
+   let s = u32(fx.beam[0].x);
+   let steps = max(u32(fx.beam[0].y), 4u);
+   let maxd = fx.xl[s].w;
+@@ -2467,8 +2475,10 @@
+     pass.End();
+     if (job.shafts) {
+       // 0343: sun shafts against the cascades just rendered (same bindings).
+-      ensure_tex(g_gpu.shaft, w, h, HdrFormat, wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding,
+-                 "Enhanced sun shafts");
++      // 0452: half the mask resolution (AURORA_ENH_SHAFTS_FULL=1: the mask resolution, A/B)
++      const uint32_t sd = shafts_half() ? 2u : 1u;
++      ensure_tex(g_gpu.shaft, (w + sd - 1) / sd, (h + sd - 1) / sd, HdrFormat,
++                 wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding, "Enhanced sun shafts");
+       {
+         const std::lock_guard initLock{g_initMutex};
+         if (!g_gpu.shaftPipe) {
+@@ -3989,6 +3999,7 @@
+         }
+         u.beam[0][0] = float(s);
+         u.beam[0][1] = float(std::clamp(g_cfg.shaftSteps, 8u, 48u));
++        u.beam[0][2] = shafts_half() ? 2.f : 1.f; // 0452
+         for (int c = 0; c < 3; ++c) {
+           u.beam[1][c] = l.color[c] * g_cfg.shaftIntensity;
+         }

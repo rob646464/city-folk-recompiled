@@ -310,9 +310,17 @@ void logFrame(const FrameRec& r, const AuroraPresentTiming& t, double cost, doub
 // plus the filler. At 120 fps lower caps did not hold the clocks (2-minute menu cycling: 40% ->
 // 20-28 ms frames after each menu, 60% -> 69 intervals over 1.5x, 90% -> 14); at 60 fps `heavy`
 // is the binding limit anyway.
+//
+// Branch stutter-ao: the filler only starts after a run of menu-light frames (under 40% of `want`
+// for 12 frames in a row: a menu or a still picture, not an ordinary cheap view). It used to start
+// whenever a frame took under 75% of `want`, which in play (4K, enhanced lighting: frames between
+// 3 and 9 ms as the view changes) switched it on and off 350-900 times a minute; each time the
+// view got heavier again the frame carried scene + filler, a late frame (a visible stutter).
+// CF_KEEP_WARM_RULE=old: the previous rule (A/B).
 struct KeepWarm {
     double heavy = 0;   // s
     u32 units = 0;
+    u32 light = 0;      // menu-light frames in a row (filler off)
 } sWarm;
 
 void setWarmUnits(KeepWarm& w, u32 u) {
@@ -347,11 +355,15 @@ void keepWarm(double gpu, double period) {
     // CF_KEEP_WARM_CAP=<fraction> (test aid): the cap as a fraction of the period (default 0.9).
     static const double sCap = [] { const char* e = std::getenv("CF_KEEP_WARM_CAP"); return e ? std::atof(e) : 0.9; }();
     const double want = std::min(w.heavy, sCap * period);
+    static const bool sOldRule = [] { const char* e = std::getenv("CF_KEEP_WARM_RULE"); return e && std::strcmp(e, "old") == 0; }();
+    if (w.units == 0) w.light = gpu < want * 0.4 ? w.light + 1 : 0;
+    const bool mayStart = sOldRule || w.light >= 12;
     u32 u = w.units;
     if (w.heavy < 0.003) u = 0;  // light settings: the GPU stays fast enough at any clock
     else if (gpu > period * 0.9 || gpu > want * 1.6) u = 0;  // the full scene is back (or too much)
     else if (gpu > want * 1.15) u = u * 7 / 8;
-    else if (gpu < want * 0.75) u = u == 0 ? 2 : std::min<u32>(u + u / 5 + 1, 400);
+    else if (gpu < want * 0.75 && (u != 0 || mayStart)) u = u == 0 ? 2 : std::min<u32>(u + u / 5 + 1, 400);
+    if (w.units != 0 && u == 0) w.light = 0;  // stopped: the next start needs a new light run
     if (u != w.units) setWarmUnits(w, u);
 }
 

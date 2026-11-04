@@ -499,6 +499,24 @@ unchanged (the hooks call the original and return). Presets Low / Medium / High 
   from the geometry (the tree wall behind the town has upward normals): the horizon AO took them
   and greyed the whole wall out. Where a vertex normal is more than ~60 degrees off a reliable
   depth-derived normal, the depth one is used.
+- **AO only on the ambient light, off by default** (branch stutter-ao, Aurora 0450; user report
+  2026-11-04: "AO overpowers the real-time shadows"). AO multiplied the pixel's whole colour after
+  the sun / moon tint, so a contact shadow in full sun was as dark as a sun shadow (the two read
+  alike), and its intensity curve was visibility^(1 + 2 i): even the slider's lowest value gave the
+  full occlusion. Now (gx/shader.cpp) AO only darkens the share of the light a full shadow of the
+  directional lights would leave (`enh_dir_full`, the product of their shadow tints, against the
+  tint actually there, `enh_dir_tint`), minus the extra lights' share of colour channel 0
+  (`enh_s_xl`), and never light-emitting surfaces: in full sun only the ambient part (~40% at the
+  default sun strength) is occluded, inside a sun shadow all of what is left (that is ambient
+  light: nothing is darkened twice). Intensity i is visibility^(2 i) (0 none, 0.5 the plain
+  horizon-based occlusion). Defaults: off in every preset, intensity 0.30, radius 40 (was on,
+  0.40 = ^1.8, 60). `AURORA_ENH_AO_SHOW=1` shows the occlusion actually applied (share included).
+  **Settings migration** (src/port/settings.cpp `migrateAo`, logged as `[settings] ambient
+  occlusion settings from an older version: ...`): a settings.ini without
+  `[enhanced_lighting] ao_version` (written before this branch) with AO at the old defaults
+  (on, 0.40) gets the new defaults (AO off, 0.30); values the player changed are kept, the
+  intensity converted to the same strength on the new curve (i + 0.5); radius 60 (old default)
+  becomes 40, any other radius is kept. Saved with `ao_version=2` afterwards.
 
 ### Time of day (Aurora 0342 grade)
 

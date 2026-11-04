@@ -1079,11 +1079,14 @@ void enhancedLightingTab() {
     sDirty |= ImGui::Checkbox("Ambient occlusion", &l.ssao);
     ImGui::SetItemTooltip(
         "Soft contact shading under trees, furniture, fences and characters (horizon-based, from the\n"
-        "depth buffer and the models' own normals). Only solid surfaces: water, glass, particles and\n"
+        "depth buffer and the models' own normals). Off by default. It darkens only the ambient part\n"
+        "of the light: in full sun it is faint, in shadow and indoors stronger, and sunlight, lamps and\n"
+        "glowing surfaces are never darkened by it. Only solid surfaces: water, glass, particles and\n"
         "the HUD keep their brightness. About 0.5-1 ms at 4K.");
     ImGui::BeginDisabled(!l.ssao);
     ImGui::Indent();
     sDirty |= recomp::menu::SliderFloat("Occlusion intensity", &l.ssaoIntensity, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetItemTooltip("0.30 (default) is subtle, 0.50 the full computed occlusion, higher is darker still.");
     sDirty |= recomp::menu::SliderFloat("Occlusion radius", &l.ssaoRadius, 10.0f, 200.0f, "%.0f units", ImGuiSliderFlags_AlwaysClamp);
     ImGui::SetItemTooltip("How far nearby surfaces darken a point (the player is about 40 units tall).");
     ImGui::Unindent();

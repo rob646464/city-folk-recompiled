@@ -1,0 +1,144 @@
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -10,6 +10,7 @@
+ #include "recording.hpp"
+ #include "resources.hpp"
+ #include "tex_copy_conv.hpp"
++#include "world_fx.hpp"
+ #include "../gx/gx.hpp"
+ #include "../gx/pipeline.hpp"
+ #include "../internal.hpp"
+@@ -3078,10 +3079,12 @@
+ 
+ // 0217: the parts of the configuration that select pipeline variants (see precache_variants).
+ uint32_t precache_bits() noexcept {
++  // 0451: Enhanced world's surface mask (independent of the master switch; a change rebuilds too).
++  const uint32_t world = world_fx::precache_mask() ? PrecacheWorldMask : 0u;
+   std::lock_guard lock{g_cfgMutex};
+   const auto& c = g_pending;
+   if (!c.enabled) {
+-    return 0;
++    return world;
+   }
+   const bool aoRecv = c.ssao && !g_aoPost;
+   uint32_t bits = PrecacheEnabled;
+@@ -3104,7 +3107,7 @@
+   if (c.lightReceivers) {
+     bits |= PrecacheRecv; // 0340
+   }
+-  return bits;
++  return bits | world;
+ }
+ 
+ // 0217: every pipeline config a game draw with config `c` can lead to while enhanced lighting is
+diff --git a/lib/gfx/enhanced.hpp b/lib/gfx/enhanced.hpp
+--- a/lib/gfx/enhanced.hpp
++++ b/lib/gfx/enhanced.hpp
+@@ -89,6 +89,7 @@
+   PrecacheBeam = 1u << 4,    // realistic flashlight (alpha-only cone)
+   PrecacheAo = 1u << 5,      // ambient occlusion receivers (unlit opaque world draws get the world class)
+   PrecacheRecv = 1u << 6,    // 0340: directional-shadow receivers (unlit opaque world draws get the world class)
++  PrecacheWorldMask = 1u << 7, // 0451: Enhanced world's surface-mask re-draws (world_fx, its mask target)
+ };
+ // Render targets a variant is built for (emit's second argument).
+ enum : uint8_t {
+diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -5,6 +5,7 @@
+ #include "enhanced.hpp"
+ #include "frame_packet.hpp"
+ #include "resources.hpp"
++#include "world_fx.hpp"
+ #include "hash.hpp"
+ #include "../gx/pipeline.hpp"
+ #include "../io.hpp"
+@@ -2056,6 +2057,13 @@
+       resolve_pipeline(ShaderType::GX, v, offscreen, PipelinePriority::Background);
+     }
+   };
++  // 0451: Enhanced world's surface-mask re-draw configs, for its mask target (world_fx.cpp).
++  if ((enhBits & enhanced::PrecacheWorldMask) != 0 && world_fx::is_mask_variant(base)) {
++    const auto key = xxh3_hash(base, static_cast<HashType>(ShaderType::GX));
++    if ((seen == nullptr || seen->insert(key ^ 0xB0000000'00000000ull).second) && !is_quarantined(key)) {
++      resolve_pipeline(ShaderType::GX, base, world_fx::mask_target_layout(), PipelinePriority::Background);
++    }
++  }
+   enhanced::precache_variants(base, enhBits, [&](const gx::PipelineConfig& v, uint8_t targets) {
+     queue(v, targets);
+     if ((accuracy & GX_AURORA_ACCURACY_EARLY_Z) != 0 && (targets & enhanced::PrecacheScene) &&
+diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
+--- a/lib/gfx/world_fx.cpp
++++ b/lib/gfx/world_fx.cpp
+@@ -1004,6 +1004,41 @@
+   return g_cfg.enabled;
+ }
+ 
++// 0451: the surface-mask re-draws (note_draw) use configs derived from the game's water / ground
++// draws, drawn into the mask target. find_pipeline remembers them like any config, but the
++// precache built them only for the scene targets, so every launch missed each one at its first
++// water / ground view (Rover's bus 15, the town 7, ...: 1-3.5 ms each from the shader cache, 0.1-0.5 s
++// cold). Now the rebuild also builds every remembered mask-shaped config for the mask target.
++bool precache_mask() noexcept {
++  // Sticky for the session: the application switches the outdoor effects off indoors (wet ground
++  // etc.), which must not rebuild the pipeline set at every door.
++  static std::atomic<bool> sOn{false};
++  if (sOn.load(std::memory_order_relaxed)) {
++    return true;
++  }
++  std::lock_guard lock{g_cfgMutex};
++  const auto& c = g_pending;
++  const bool on = c.enabled && (c.reflections || c.wetGround || c.rainRipples || c.snowSparkle);
++  if (on) {
++    sOn.store(true, std::memory_order_relaxed);
++  }
++  return on;
++}
++
++bool is_mask_variant(const gx::PipelineConfig& c) noexcept {
++  if (c.shaderConfig.depthOnly || c.shaderConfig.lightDepth || c.blendMode != GX_BM_NONE || !c.colorUpdate ||
++      !c.alphaUpdate || !c.depthCompare || c.depthFunc == GX_LESS || c.depthFunc == GX_GREATER) {
++    return false;
++  }
++  // (depth writes not tested: the canonical config may drop them)
++  return c.dstAlpha == 255u || c.dstAlpha == 128u;
++}
++
++const RenderTargetLayout& mask_target_layout() noexcept {
++  static const RenderTargetLayout layout = mask_layout();
++  return layout;
++}
++
+ void note_draw(const gx::PipelineConfig& config, uint8_t kind, const gx::DrawData& data) noexcept {
+   const auto& st = gx::g_gxState;
+   if (st.projType != GX_PERSPECTIVE) {
+diff --git a/lib/gfx/world_fx.hpp b/lib/gfx/world_fx.hpp
+--- a/lib/gfx/world_fx.hpp
++++ b/lib/gfx/world_fx.hpp
+@@ -9,6 +9,10 @@
+ struct PipelineConfig;
+ struct DrawData;
+ } // namespace aurora::gx
++
++namespace aurora::gfx {
++struct RenderTargetLayout;
++} // namespace aurora::gfx
+ 
+ namespace aurora::gfx::world_fx {
+ 
+@@ -22,4 +26,14 @@
+ // New frame recording (drops what the last frame noted without a scene end).
+ void begin_frame() noexcept;
+ 
++// --- precache (any thread), 0451 ---
++// The latest set configuration re-draws surfaces into the mask (reflections / wet ground / rain
++// ripples / snow sparkle switched on, whatever the weather is now).
++bool precache_mask() noexcept;
++// A remembered config is shaped like one note_draw derives for the mask (no blending, colour +
++// alpha writes, depth test, destination alpha 255 for water or 128 for ground); such configs are
++// also built for mask_target_layout (a game draw of that shape gets one pipeline too many).
++bool is_mask_variant(const gx::PipelineConfig& c) noexcept;
++const RenderTargetLayout& mask_target_layout() noexcept;
++
+ } // namespace aurora::gfx::world_fx

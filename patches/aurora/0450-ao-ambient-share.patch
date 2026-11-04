@@ -1,0 +1,73 @@
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -952,7 +952,9 @@
+     ws = ws + w;
+   }
+   let vis = clamp(select(near, sum / ws, ws > 1e-4), 0.0, 1.0);
+-  return vec4f(1.0 - pow(vis, 1.0 + fx.ao.x * 2.0), 0.0, 0.0, 0.0);
++  // 0450: intensity i darkens as visibility^(2 i): 0 nothing, 0.5 the plain horizon-based
++  // occlusion, more is stronger (was ^(1 + 2 i): the slider's lowest value still gave all of it).
++  return vec4f(1.0 - pow(vis, fx.ao.x * 2.0), 0.0, 0.0, 0.0);
+ }
+ 
+ // Downsample (13-tap, as above without threshold).
+@@ -1405,7 +1407,7 @@
+     }
+   }
+   let ao = 1.0 - occ / 12.0;
+-  return vec4f(vec3f(pow(clamp(ao, 0.0, 1.0), 1.0 + fx.ao.x * 2.0)), 1.0);
++  return vec4f(vec3f(pow(clamp(ao, 0.0, 1.0), fx.ao.x * 2.0)), 1.0); // (0450: as the forward mask)
+ }
+ 
+ // Depth-aware 5x5 blur of the occlusion.
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1037,6 +1037,9 @@
+ // darkened toward it: enh_dir_tint, applied at the end of the fragment), box[3] = how much a
+ // surface facing away from the light counts as shadowed (0..1), box[4] = wrap of that terminator.
+ var<private> enh_dir_tint: vec3f = vec3f(1.0);
++// 0450: the tint full shadows of the directional lights reaching the pixel would give (their tints
++// multiplied): what of the pixel's light is not their direct light, the ambient that AO occludes.
++var<private> enh_dir_full: vec3f = vec3f(1.0);
+ fn enh_dir_light(b: u32, p: vec3f, n: vec3f, ghost: bool, frag: vec2f, flags: u32) -> vec3f {
+   let l = normalize(vec3f(enh_ld(b), enh_ld(b + 1u), enh_ld(b + 2u)) + vec3f(0.0, 0.0, 1e-7));
+   let nl = dot(n, l);
+@@ -1056,6 +1059,7 @@
+   let s = select(select(max(sh, away), sh * 0.5, ghost), 0.0, ubuf.enh_material > 1.5);
+   let tint = vec3f(enh_ld(b + 12u), enh_ld(b + 13u), enh_ld(b + 14u));
+   enh_dir_tint = enh_dir_tint * mix(vec3f(1.0), clamp(tint, vec3f(0.0), vec3f(1.0)), s);
++  if (!ghost) { enh_dir_full = enh_dir_full * clamp(tint, vec3f(0.0), vec3f(1.0)); }
+   var ndl = select(max(nl, 0.0), nl * 0.5 + 0.5, ghost);
+   ndl = select(ndl, clamp((nl + 0.45) / 1.45, 0.0, 1.0) * 0.85, ubuf.enh_material > 0.5 && ubuf.enh_material < 1.5 && !ghost);
+   let col = vec3f(enh_ld(b + 4u), enh_ld(b + 5u), enh_ld(b + 6u)) * enh_ld(b + 7u);
+@@ -2584,9 +2588,26 @@
+     // 0032: forward ambient occlusion (opaque world draws: enh_flags bit 16; mask slot 16 since 0187).
+     // 0340: directional-light (sun / moon) shadows darken the pixel toward the light's shadow tint.
+     fragmentFn += "\n    prev = vec4f(prev.rgb * enh_dir_tint, prev.a);";
+-    fragmentFn += "\n    if ((ubuf.enh_flags & 16u) != 0u) { prev = vec4f(prev.rgb * (1.0 - enh_mask(in.pos.xy, 16u)), prev.a); }"
++    // 0450: AO darkens only the ambient (indirect) share of the pixel's light, as real AO does. It
++    // used to multiply the whole colour, so a contact shadow in full sun was as dark as a sun
++    // shadow and the two read alike. Not occluded: the directional lights' direct light (the part
++    // full shadows would take: enh_dir_full against the shadow actually there, enh_dir_tint), the
++    // extra lights' share of channel 0 (enh_s_xl), light-emitting surfaces (enh_material 2). In a
++    // full sun shadow all remaining light is ambient, so AO applies there in full; nothing is
++    // darkened twice (the shadow took the direct part, AO only the ambient one).
++    fragmentFn += "\n    var enh_ao = 0.0;"
++                  "\n    if ((ubuf.enh_flags & 16u) != 0u) {"
++                  "\n      let enh_ao_l = vec3f(0.299, 0.587, 0.114);"
++                  "\n      var enh_ao_share = clamp(dot(enh_dir_full, enh_ao_l) / max(dot(enh_dir_tint, enh_ao_l), 1e-3), 0.0, 1.0);"
++                  "\n      if (enh_s_lit >= 0.0 && enh_s_lit + enh_s_xl > 1e-4) {"
++                  "\n        enh_ao_share = enh_ao_share * clamp(enh_s_lit / (enh_s_lit + enh_s_xl), 0.0, 1.0);"
++                  "\n      }"
++                  "\n      enh_ao_share = select(enh_ao_share, 0.0, ubuf.enh_material > 1.5);"
++                  "\n      enh_ao = enh_mask(in.pos.xy, 16u) * enh_ao_share;"
++                  "\n      prev = vec4f(prev.rgb * (1.0 - enh_ao), prev.a);"
++                  "\n    }"
+                   // 0186 debug (AURORA_ENH_AO_SHOW=1): the occlusion each surface receives, white = none.
+-                  "\n    if ((ubuf.enh_flags & 0x30000u) == 0x30000u) { prev = vec4f(vec3f(1.0 - enh_mask(in.pos.xy, 16u)), prev.a); }";
++                  "\n    if ((ubuf.enh_flags & 0x30000u) == 0x30000u) { prev = vec4f(vec3f(1.0 - enh_ao), prev.a); }";
+   }
+   if (config.wireframe) {
+     // GX_AURORA_SET_WIREFRAME: edges in the override colour (before alpha compare, so
