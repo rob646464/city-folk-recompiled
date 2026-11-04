@@ -573,6 +573,25 @@ bool menuSection() {
     return changed;
 }
 
+// Test aid CF_OPEN_MENU=<frame>:<kind>[;<frame>:<kind>...]: at that guest frame the game's own
+// "open menu" (USA fn_8019B064(kind), what an NPC's menu command calls in fn_8002B3E4) is
+// called on the game thread. Kind 0x3A = Tom Nook's catalog (archives d_paper + d_menu_catalog,
+// table 0x804EBE10), e.g. to look at a moved-in resident's catalog before the house tutorial
+// lets Nook offer it (docs/MOVE_IN.md "Testing").
+void onGuestFrame(Ctx& c, u32 frame) {
+    static const char* e = std::getenv("CF_OPEN_MENU");
+    if (!e) return;
+    for (const char* p = e; *p;) {
+        char* end = nullptr;
+        const u32 f = u32(std::strtoul(p, &end, 10));
+        if (*end != ':') break;
+        const u32 kind = u32(std::strtoul(end + 1, &end, 0));
+        if (f == frame) MVLOG("CF_OPEN_MENU: menu kind 0x%X at frame %u -> %u", kind, frame, guestCall(c, VA(0x8019B064), kind));
+        p = *end == ';' ? end + 1 : end;
+        if (!*end) break;
+    }
+}
+
 }  // namespace recomp::movein
 
 using namespace recomp;

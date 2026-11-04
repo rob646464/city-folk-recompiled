@@ -154,7 +154,8 @@ the last file (`[move_in] last_file`).
 
 ### Test aids
 
-`CF_MOVE_IN=<file>[,<slot 0-3 | -1>]` answers Rover's DS request with that file at once (window
+`CF_OPEN_MENU=<frame>:<kind>[;...]` opens a game menu by kind (0x3A = Nook's catalog,
+src/game/cf_move_in.cpp). `CF_MOVE_IN=<file>[,<slot 0-3 | -1>]` answers Rover's DS request with that file at once (window
 shown, input not blocked), `CF_MOVE_IN_REGION=<0-3>` sets the Game Card region, `CF_MOVE_IN_ANY=1`
 allows every region, `CF_MOVE_IN_LOG=1` / `CF_MP_LOG=1` log the libraries and the protocol.
 `cf_move_in_test` (synthetic saves of every layout, .dsv, 512 KB, damaged copies, conversion
@@ -216,8 +217,40 @@ Second round (2026-11-03, branch move-in-2):
   shop) says "You already finished saying hello to everyone?"; warping into the empty house finds
   no Nook. So the house purchase and the save the game makes after it are still open.
 
-Not verified by script: the house purchase and the game's save after it, the catalog seen in
-Nook's Cranny, other regions' own Wild World saves (only the USA save, converted), files saved by
+Third round (2026-11-03, branch move-in-3):
+
+- **The catalog in the game's own catalog screen.** Tom Nook's catalog is the menu kind 0x3A
+  (`fn_8019B064(kind)` = open a menu, what an NPC's menu command calls in fn_8002B3E4; kind 0x3A
+  loads the archives d_paper + d_menu_catalog, table 0x804EBE10; "Catalog, please." -> message
+  0x16 in NPC_tanukichi.bmg). The moved-in resident's Nook still runs the newcomer dialogue
+  ("You already finished saying hello to everyone?"), so the test aid `CF_OPEN_MENU=<frame>:0x3A`
+  opens that screen in Nook's Cranny (`WARP=nook`). Tabs shown (screenshots): furniture "exotic
+  bureau, exotic wardrobe, regal vanity, blue bureau...", flooring "imperial tile, kitchen tile,
+  stone tile, round carpet...", clothes "six-ball shirt, No. 1 shirt, No. 3 shirt, peachy
+  shirt...", umbrella "blue dot parasol", headgear "moon hairpin", stationery "maple-leaf paper,
+  lined paper, polka-dot paper, four-leaf paper...", gyroids and fossils empty. The same screen for
+  Rob64 (the fixture's own resident) lists his own, different entries (orange chair, tape deck,
+  cardboard box; exotic rug, opulent rug; work uniform, four-ball shirt; lined paper), so the
+  screen shows the resident's own catalog.
+- **The same list from the save file**: the catalog bit index is the item id, and the item.bin
+  record field at +8 is that id (its name); the Wild World block decoded through the game's own
+  tables of fn_800C51D8 (0x80471DC0 +0xF90 / +0x1018 / +0x1BC / +0x10A0) gives 82 candidate
+  items, 80 of which are the 80 catalog bits of the moved-in resident in the save, with exactly
+  the names on the screens above; the game's own checks (fn_800C27E0 / fn_800C20DC) dropped two
+  (work uniform, id 3210). The Wild World block has 152 bits set: the rest have no City Folk item
+  in the table (0xFFFF), e.g. fossils and gyroids, which also stay empty in the catalog.
+  Scratch scripts: wwcatalog.py, cfcat.py (not committed).
+- **Saving**: the HUD's Save button as the moved-in resident answers "Hm... Looks like you can't
+  save just yet." (the game blocks saving before the house). The game's own save at the move
+  ("Preparing saved data.") stores only the move record; the resident is stored by the forced save
+  (`CF_FORCE_SAVE`). **Reload of that save**: Rover's "You are...?" lists "Rob64. / Rob. / I'm
+  new! / Never mind." (the moved-in resident, name capitalised by the game), Rob -> "All righty!
+  I'll get things ready" -> "Preparing saved data." -> "Thanks for waiting!" and the game stays in
+  Rover's room (as docs/NAND.md says of a save forced before the house), so his look after a
+  reload is checked only in the save data (face 5, hair 7, colour 1, 80 catalog bits).
+
+Not verified by script: the house purchase and the game's save after it (the user dropped it:
+too long to script), other regions' own Wild World saves (only the USA save, converted), files saved by
 DeSmuME / No$GBA themselves.
 Earlier finding: with a 3 s download and the DS turned on at once (test aid), the link could come
 and go before Rover's "press B to quit" line was up and he then said he could not find a DS; the

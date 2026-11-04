@@ -13,6 +13,7 @@
 
 #include "game/cf_features.h"
 #include "game/cf_mii.h"
+#include "game/cf_move_in.h"
 #include "game/cf_region.h"
 #include "game/cf_warp.h"
 
@@ -104,6 +105,7 @@ bool onGuestFrame(Ctx& c) {
     const u32 frame = sFrames.fetch_add(1, std::memory_order_relaxed) + 1;
     forceSaveOnFrame(c, frame);
     forceWc24OnFrame(c, frame);
+    movein::onGuestFrame(c, frame);  // cf_move_in.cpp: CF_OPEN_MENU
     region::onGuestFrame(frame);  // cf_region.cpp test aids
     warp::onGuestFrame(c, frame);  // cf_warp.cpp: warps (docs/WARPS.md)
     cf::grassOnFrame(c);  // cf_grass.cpp, cf_skin.cpp (docs/FEATURES.md)
