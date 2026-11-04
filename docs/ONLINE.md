@@ -390,7 +390,6 @@ WiiConnect24 letters.
   letter ("OK, I'll be happy to take your outgoing mail."). Test aids: CF_TOWN_FLAG=<frame>:<hex>
   (now on the town data, not the save file object), CF_TOWN_WC24=<frame> (the setter at a frame),
   CF_MAIL_PROBE=1 (Pelly's / the WiiConnect24 checks' results, scene id and flag 0x1F changes).
-  The letter route: scratchpad letter_tv_other.txt (town test; to be moved to tools/routes).
 - **When the letter leaves (2026-11-03)**: Pelly only keeps it (save letter slots). The game sends
   her outbox in the save flow's WiiConnect24 step (save menu fn_801BC9E4 -> fn_801031B8 reset,
   fn_801031F4 until done: fn_80103064 walks the outbox, fn_8017816C starts one send task per
@@ -401,6 +400,24 @@ WiiConnect24 letters.
   Verified both ways with the real visit pair (tester -> rob64, rob64 -> tester): queued, sent,
   "delivered over the letters link", "received", next start "taken by the game", the mailbox's
   new-mail flag. Not yet seen on screen: the letter opened from the mailbox (route not written).
+- **Dedupe across paths**: a letter has one id whatever path carries it (room, letters link,
+  email). The receiver keeps the ids it took in `<data>/online/mail/seen.txt` (latest 4096), so a
+  later copy by another path, or a resend after a lost acknowledgement, is dropped even after the
+  game has taken the first out of the inbox; the letters link acknowledges duplicates too (the
+  first ack may have been lost). The sender drops a letter from its outbox on the first ack (room
+  or link) or once email has sent it, so the other paths stop.
+- **"Could not access Wii system memory" after a visit**: seen once (2026-11-03, before the
+  WiiConnect24 changes) when the visitor came home. Two complete visits since (user-town2 ->
+  user-town and back, the game's return-home save; console WiiConnect24 on, and A/B with
+  CF_WC24_CONSOLE=0) showed no message: the WiiConnect24 send task at the return
+  (fn_8017C59C -> fn_80178110, entry fn_8017AB90) fails quietly with -39 when WiiConnect24 is off
+  and succeeds when on, and the saves complete. Not reproduced; if a player sees it, CF_SAVE_LOG=1
+  CF_NAND_TRACE=1 CF_MAIL_PROBE=1 show the failing step.
+- **Test runs without Resetti**: start each run from a copy saved by the game (the visit's
+  return-home save, or the fixtures), and let a receiving game stay at the title (the letters link
+  runs from boot, no town needs to load), so its next start is clean.
+- Routes: tools/routes/visit_host.txt + visit_guest.txt (the visit, env in their headers),
+  letter_other_town_test.txt / letter_other_town_frunch.txt (write to the friend, Pelly, send).
 - **Letters link HELLO**: datagram type 3 (sender key, time, its addresses, HMAC with the pair's
   letter key) to every friend's known addresses at start and every 10 minutes; the receiver keeps
   the source address first (a changed port or address is learned without a room) and answers once.
