@@ -1,0 +1,14 @@
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -748,7 +748,10 @@
+          op._p3 == 0;
+ }
+ 
+-bool tex_mtx_ok(uint32_t m) { return m >= GX_TEXMTX0 && m <= GX_IDENTITY && (m - GX_TEXMTX0) % 3 == 0; }
++// A texgen's matrix is a row of XF matrix memory: GX_TEXMTX0-9, GX_IDENTITY, and also a position
++// matrix GX_PNMTX0-9 (0-27; NW4R projects textures with them, e.g. City Folk's text and HUD: the
++// shader reads postex_mtx[mtx / 3] either way). 0392: these rows were rejected from precache lists.
++bool tex_mtx_ok(uint32_t m) { return m <= GX_IDENTITY && m % 3 == 0; }
+ bool pt_tex_mtx_ok(uint32_t m) {
+   return m == GX_PTIDENTITY || (m >= GX_PTTEXMTX0 && m <= GX_PTTEXMTX19 && (m - GX_PTTEXMTX0) % 3 == 0);
+ }
