@@ -12,6 +12,7 @@
 #include "port/settings.h"
 #include "recomp/ios.h"
 #include "recomp/nwc24_dl.h"
+#include "recomp/online.h"
 #include "recomp/menu.h"
 #include "recomp/hle.h"
 #include "recomp/runtime.h"
@@ -407,6 +408,30 @@ void prepareWc24() {
         made++;
     }
     if (made) recomp::log("[sys] WiiConnect24 files created in /shared2/wc24 (%d; WiiConnect24 never set up)", made);
+    // The install's Wii number (online letters between port players, docs/ONLINE.md "Letters"):
+    // the same at all times, from the install's online identity, in the config and its backup
+    // (0x08 user id, 0x14 creation stage 2 = registered, 0x3FC checksum).
+    const u64 id = recomp::online::wiiNumber();
+    for (const char* path : {"/shared2/wc24/nwc24msg.cfg", "/shared2/wc24/nwc24msg.cbk"}) {
+        const fs::path p = ios::hostPath(path);
+        std::ifstream in(p, std::ios::binary);
+        std::vector<u8> b((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        in.close();
+        if (b.size() != 0x400 || std::memcmp(b.data(), "WcCf", 4) != 0) continue;
+        auto be32 = [&](size_t o) { return u32(b[o]) << 24 | u32(b[o + 1]) << 16 | u32(b[o + 2]) << 8 | b[o + 3]; };
+        if ((u64(be32(0x08)) << 32 | be32(0x0C)) == id && be32(0x14) == 2) continue;
+        putBe32(b, 0x08, u32(id >> 32));
+        putBe32(b, 0x0C, u32(id));
+        putBe32(b, 0x14, 2);
+        u32 sum = 0;
+        for (size_t o = 0; o < 0x3FC; o += 4) sum += be32(o);
+        putBe32(b, 0x3FC, sum);
+        writeFile(p, b);
+        recomp::log("[sys] %s: Wii number %04llu-%04llu-%04llu-%04llu", path, (unsigned long long)(id / 1000000000000ull % 10000),
+                    (unsigned long long)(id / 100000000 % 10000), (unsigned long long)(id / 10000 % 10000),
+                    (unsigned long long)(id % 10000));
+    }
+    recomp::online::writeWiiFriends();  // the F1 friends as confirmed Wii friends (letters to other towns)
 }
 
 }  // namespace

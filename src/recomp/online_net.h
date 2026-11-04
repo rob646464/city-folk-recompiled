@@ -45,6 +45,7 @@ struct HostOptions {
     bool allowDirect = true;   // accept joiners that know only IP:port (no room code)
     bool lanVisible = true;    // LAN beacons
     bool portMapping = true;   // UPnP-IGD / NAT-PMP mapping + STUN public address
+    std::string relay;         // optional self-hosted relay "host[:port]" (tools/relay/cf_relay.cpp)
 };
 
 enum class State { Off, Hosting, Connecting, WaitingForHost, Joined, Failed };
@@ -77,6 +78,8 @@ struct Snapshot {
     std::vector<JoinRequest> pending;  // host with "ask before join"
     // Host reachability (port mapping / STUN), human readable.
     std::string lanEndpoint, publicEndpoint, reachability;
+    // Joiner without an answer yet: its public address for the host (hole punching), or empty.
+    std::string replyCode;
 };
 
 // LAN room list entry (beacons heard in the last 6 s) while scanning.
@@ -114,6 +117,8 @@ public:
     bool joinCode(const std::string& code, const std::string& password, std::string* err);
     bool joinAddress(const std::string& hostPort, const std::string& password, std::string* err);
     bool joinLan(const LanRoom& room, const std::string& password, std::string* err);
+    // Host: a joiner's reply code: send packets to it for 30 s (hole punching).
+    bool punch(const std::string& replyCode, std::string* err);
     void leave();
     void kick(u8 memberId);
     void answerJoinRequest(u32 ticket, bool accept);
@@ -138,6 +143,8 @@ private:
 Session& session();
 
 // Room codes: [version/flags][secret 10][endpoints...] in Crockford base32, dash-grouped.
+constexpr u8 kRelayFamily = 0x54;   // room code endpoint through a relay: IPv4 + room id[8]
+constexpr u16 kRelayPort = 29912;
 struct Endpoint {
     u8 family = 4;   // 4 or 6
     u8 addr[16] = {};

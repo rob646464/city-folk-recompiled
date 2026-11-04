@@ -311,46 +311,217 @@ WiiConnect24 letters.
   registration call `cf_RosterRegisterOffline(slot, friendData, info)` (fn_8017C294; only while
   the game is offline, online system state <= 1), friend data = GS profile id entry. The friend
   info (0x78 bytes, save+0x1C8 per slot) is the one the friend's own game sends (room message
-  INFO 0x45): +0x08 player (u16 id, 9 UTF-16 units, kind 0x0A) = its save+0x7ED8, +0x1E town
-  (kind 0x02) = save+0x7EC2, +0x36 0x42 bytes = save+0x10C8 (the fields fn_800AC160 builds the
-  DWC status data from), names terminated and kinds forced on receipt. Registration waits for
+  INFO 0x45), in the layout the host's game itself writes for a visitor during a visit (read
+  from a save after a real visit, 2026-11-03): +0x00 the Wii number letters go to, +0x08 a copy of
+  the town name struct save+0x7EC2 (u16 id, 9 UTF-16 units, byte +0x14 = 0x01), +0x1E a copy of
+  the player name struct save+0x7ED8 (byte +0x14 = 0x00), +0x36 0x42 bytes = save+0x10C8. The
+  letter writer's "Dear <name>," / "To <name>" reads +0x1E. Builds before 2026-11-03 had the two
+  structs the other way round (letters said "Dear Frunch,"): such entries from friends.txt are
+  swapped on receipt. Registration waits for
   the INFO while the friend is in the room; an entry registered without it is updated later.
   Kept in friends.txt (`info <key> <hex>`). To do: removal from the game when removed in F1
   (`DWC_DeleteBuddyFriendData`). Then both can visit each
   other directly when online (presence below), and rooms stay for quick sessions.
-- **Presence without a room**: each friend publishes its current endpoint (signed, encrypted to
-  each friend) where friends look: the BitTorrent mainline DHT (BEP 44 mutable item keyed by a
-  per-friendship value) or a direct UDP ping to the last known endpoint. When both are online the
-  game connects directly (the same transport, a two-member room).
-- **Mail**: the game's letters to Wii friends go through NWC24 (`NWC24CommitMsg`, message box
-  files under `/shared2/wc24/mbox`, MIME with the letter as an attachment; the game's letter
-  format and attached item to be traced in the NWC24 calls of the letter scene). HLE the send:
-  the committed message goes into our outbox (encrypted to the recipient's X25519 key, signed);
-  delivery: directly when both are online; otherwise store-and-forward in the DHT (BEP 44:
-  1000-byte values, signed by the sender's key, keyed by recipient + sequence; the sender
-  re-publishes every ~30 minutes until the recipient acknowledges). Incoming letters are written
-  where the game's WiiConnect24 receive path reads them (`wc24recv.mbx` + control file), so Pete
-  delivers them as he did WiiConnect24 letters. Only friends can mail you; per-friend rate limits;
-  letters never in plain text on the wire.
-- **Traced so far (US addresses)**: the roster code (fn_8017A220/A488/A5A8/A700/ADD0) sends through
-  `fn_800E9B70` (NWC24InitMsgObj, each recipient Wii number checked with NWC24CheckUserId (0 or
-  -0x23 accepted) and added with NWC24SetMsgToId, then fn_800EA2C8 builds the letter and
-  `fn_800E9AC8` attaches it (NWC24SetMsgDWCId + NWC24SetMsgAttached, type 0x30000) and commits);
-  fn_80179D38/79F14/7A368 -> `fn_800E9C74`, fn_8017B164/B214 -> `fn_800E9D34`; receive
-  `fn_800EA0DC` (NWC24SearchMsgs, tag 'RUU', attachments of type 0x30000, NWC24DeleteMsg).
-  NWC24 message object: +0x04 flags, +0x0C tag, +0x20 from id (u64), +0x68 attachment data
-  (NWC24Data, 8 bytes each), +0x78 attachment sizes [2], +0x80 attachment types [2], +0x88 to ids
-  (u64 x 8), +0xC8 recipient count, +0xC9 attachment count, +0xEC DWC id. Recipients are Wii
-  numbers from the roster's friend info (save+0x1C8, 0x78 per friend), which our roster entries
-  do not have yet (registered with info = NULL): the HLE needs a Wii number per F1 friend (derived
-  from the key) in that info and NWC24CheckUserId answering for it.
-- **Reliability, honestly**: direct delivery is reliable whenever both play at the same time.
-  DHT items live about 2 hours unless re-published; a sender's game re-publishes only while it
-  runs, so a letter between two players who are never online at the same time arrives when the
-  recipient starts the game within ~2 hours of the sender's last session, else later when they
-  overlap. Mainline DHT nodes may drop or not store items (it works in practice for BEP 44 users,
-  but nothing guarantees it). A self-hostable mailbox server (any friend group can run one, the
-  F1 setting names it) would make offline delivery dependable; optional, later.
+- **Offline letters (user decision, 2026-11-03)**: no DHT, and the relay stores no letters (it
+  stays an optional route for rooms only). Two paths:
+  - **A. "Always online mail"** (F1 > Online, off by default): each player enters only their own
+    email account; letters go as encrypted, signed attachments by SMTP and are fetched by IMAP
+    (WiiConnect24's own mail model). Friends' addresses travel with the friend data (encrypted, in
+    the room). Credentials only in the OS credential store; TLS with OS certificate checks;
+    presets for the common providers (app passwords with 2-step verification; Microsoft personal
+    accounts not supported, OAuth only). Fixed subject tag, a short human-readable body, the letter
+    as attachment; imported only when signed by a known friend's key; poll at start-up and every
+    few minutes on a background thread; "Send test letter to myself".
+    Implementation (src/recomp/online_email.cpp, online_tls.cpp): subject "[City Folk letter] from
+    <player>", body "This is a letter from <player>, sent by Animal Crossing: City Folk
+    Recompiled", attachment letter.cfl = "CFEM" 1 | from key | to key | the letter sealed for the
+    pair and signed. In: UID SEARCH on that subject, BODY.PEEK[] (stays unread), only an attachment
+    addressed to us from a friend's key that opens is taken; then UID MOVE to "City Folk" (created)
+    when the server has MOVE, else the UID is remembered locally; any other mail is never touched.
+    TLS: SChannel on Windows (system chain + host name checks), implicit TLS on 993/465, STARTTLS on
+    143/587 (refused if not offered). Password: Windows Credential Manager ("CityFolkRecompiled/
+    mail/<address>"); on other systems this build stores nothing and says so (Keychain /
+    libsecret and the TLS there: to do). Friends' addresses: room message EMAIL 0x49 (friends only),
+    kept in friends.txt. F1 > Online "Letters while your friend is away".
+    Tested 2026-11-03 against tools/tests/cf_mail_test_server (in-memory SMTP+IMAP, SChannel TLS
+    with a self-signed CN=localhost certificate; test-only trust override CF_MAIL_TEST_CERT_SHA256,
+    environment only): STARTTLS and implicit TLS (CF_MAIL_TEST_IMPLICIT) both send, fetch, import
+    and move the mail; without the override the self-signed certificate is refused ("not
+    trusted"), with a wrong pin too. Two instances: addresses exchanged in a room, Alice's letter
+    sent while Bob was not running, Bob's game took it in at its next start. Not testable here: a
+    host-name mismatch on a trusted certificate (would need our certificate in the Windows root
+    store) and real providers (the user will try one). Test aids CF_MAIL_PASSWORD, CF_MAIL_ON,
+    CF_MAIL_POLL_S, CF_ONLINE_TEST=<f>:mailself / mailtest (a 64-byte test letter, not a game one).
+  - **B. "Deliver whenever both games are running"** (default without email): friends' games
+    connect in the background whenever both are open and swap outbox letters. Limits: both games
+    must run at the same time, and it needs automatic port opening (UPnP / NAT-PMP) or an earlier
+    direct connection; otherwise letters wait until the next visit.
+    Implementation (online_mail.cpp): UDP letters link on port 29913 (the install keeps the port it
+    used last, link_port.txt), UPnP / NAT-PMP mapped when "Map the port" is on; its addresses (LAN
+    + router public) go to friends in rooms (ENDPOINTS 0x48). An outbox letter for a friend not in
+    a room with us is sealed for the pair and sent in 1000-byte chunks every 20 s until the
+    friend's game acknowledges it; only proved friends' letters that open are taken. Tested
+    2026-11-03 with two instances on one PC: delivered and acknowledged.
+  With email on, both run; a letter id is taken in once.
+- **Pelly's "Other town." (found 2026-11-03)**: Pelly's destination list is built by
+  d_a_npc_sp_perikoNP fn_34_3794: "<town>." (message 0x18), "Other town." (0x19) only when town
+  flag 0x1F is set (fn_801165F4(town data, 0x1F); town flags at town data +0x735C3, town data =
+  fn_8010DD60 / r13-0x2FE0), "Future self." (0x1A), "Never mind." (0x1B). Choosing it then needs:
+  1. The console's WiiConnect24 on (NWC24 check fn_80404BBC: SCGetWCFlags bit 0, else NWC24 error
+     -39 and the game's message "The WiiConnect24 setting is not turned on" <109139>) and a tested
+     network configuration (NCD, else "An Internet connection cannot be established" <109133>).
+     The port now always reports both (SYSCONF NET.WCFG = 1, KD and NCD devices; nwc24_dl.cpp
+     consoleWc24()); KD downloads still run only with Nintendo events on, and nothing goes on the
+     network otherwise. A/B: CF_WC24_CONSOLE=0 (the old behaviour: on only with Nintendo events).
+  2. The town's own WiiConnect24 setting (save +0x735E4, the attic telephone's option; else Pelly:
+     "You can't send letters to people from out of town because your WiiConnect24 settings are
+     turned off"). User decision 2026-11-03: the port turns it on once per town, the first time it
+     sees the town with WiiConnect24 available, with the game's own setter fn_80177DE0, and records
+     the town in `<data>/town_wc24.txt` (town name struct hex), so turning it off on the attic
+     telephone stays off. A/B: CF_TOWN_WC24_DEFAULT=0. Checked with a town without friends and
+     Nintendo events off (user-town fixture): no message, saves complete, no KD download, no
+     network use.
+  3. Flag 0x1F. The game's only setter is in the player-creation scene module
+     (d_a_npc_sp_player_createNP fn_25_BB4, scene 0x3D; a new game is scene 0x3C); no town we have
+     has it and a visit does not set it (a visit sets flag 0x16 in the visitor's town). The port sets
+     it once when an F1 friend is in the town's roster (rosterSync). Not for every town: the extra
+     choice would show for players who cannot address a letter to anyone.
+  With these, Pelly answers "You'd like to send mail to another town, correct?" and takes the
+  letter ("OK, I'll be happy to take your outgoing mail."). Test aids: CF_TOWN_FLAG=<frame>:<hex>
+  (now on the town data, not the save file object), CF_TOWN_WC24=<frame> (the setter at a frame),
+  CF_MAIL_PROBE=1 (Pelly's / the WiiConnect24 checks' results, scene id and flag 0x1F changes).
+- **When the letter leaves (2026-11-03)**: Pelly only keeps it (save letter slots). The game sends
+  her outbox in the save flow's WiiConnect24 step (save menu fn_801BC9E4 -> fn_801031B8 reset,
+  fn_801031F4 until done: fn_80103064 walks the outbox, fn_8017816C starts one send task per
+  letter, fn_8017ADD0 -> ... -> NWC24CommitMsg, our HLE: sealed letter in the outbox). So a letter
+  goes when the player saves (save icon, bed, save and quit). Test aid CF_WC24_SEND=<frame> runs
+  that step. Then path B carries it; the receiver's game takes it in at its next start
+  (NWC24 search/read HLE, the game's own start-up WiiConnect24 job) and Pete delivers it.
+  Verified both ways with the real visit pair (tester -> rob64, rob64 -> tester): queued, sent,
+  "delivered over the letters link", "received", next start "taken by the game", the mailbox's
+  new-mail flag. Not yet seen on screen: the letter opened from the mailbox (route not written).
+- **Dedupe across paths**: a letter has one id whatever path carries it (room, letters link,
+  email). The receiver keeps the ids it took in `<data>/online/mail/seen.txt` (latest 4096), so a
+  later copy by another path, or a resend after a lost acknowledgement, is dropped even after the
+  game has taken the first out of the inbox; the letters link acknowledges duplicates too (the
+  first ack may have been lost). The sender drops a letter from its outbox on the first ack (room
+  or link) or once email has sent it, so the other paths stop.
+- **"Could not access Wii system memory" after a visit**: seen once (2026-11-03, before the
+  WiiConnect24 changes) when the visitor came home. Two complete visits since (user-town2 ->
+  user-town and back, the game's return-home save; console WiiConnect24 on, and A/B with
+  CF_WC24_CONSOLE=0) showed no message: the WiiConnect24 send task at the return
+  (fn_8017C59C -> fn_80178110, entry fn_8017AB90) fails quietly with -39 when WiiConnect24 is off
+  and succeeds when on, and the saves complete. Not reproduced; if a player sees it, CF_SAVE_LOG=1
+  CF_NAND_TRACE=1 CF_MAIL_PROBE=1 show the failing step.
+- **Test runs without Resetti**: start each run from a copy saved by the game (the visit's
+  return-home save, or the fixtures), and let a receiving game stay at the title (the letters link
+  runs from boot, no town needs to load), so its next start is clean.
+- Routes: tools/routes/visit_host.txt + visit_guest.txt (the visit, env in their headers),
+  letter_other_town_test.txt / letter_other_town_frunch.txt (write to the friend, Pelly, send).
+- **Letters link HELLO**: datagram type 3 (sender key, time, its addresses, HMAC with the pair's
+  letter key) to every friend's known addresses at start and every 10 minutes; the receiver keeps
+  the source address first (a changed port or address is learned without a room) and answers once.
+## 10a. Settings while visiting (src/recomp/online_sync.cpp)
+
+User request: a visitor's game uses the HOST's settings for everything that shapes the shared town
+or could make the two games disagree; at home its own settings are back exactly as they were.
+- **Exchange**: the host sends a versioned ini blob (`cfsync 1`, then `[section]` / `key=value`
+  lines as settings.ini has them) right before it accepts the visitor into the match (room
+  message M_SETTINGS, before JOIN_OK, so it is in effect before the game loads the town). The
+  visitor answers with its own `[skin_tone]` lines. Unknown keys of a newer format are ignored.
+- **Override**: `port::beginSettingsOverride` applies the synced keys in memory; `saveSettings`
+  keeps writing the player's own values for them (settings.ini never holds the host's, so a quit
+  or crash mid-visit loses nothing). `endSettingsOverride` puts the own values back when the
+  match ends for any reason: back home, the connection or the room dropped, DWC shut down or
+  logged in again. Changes made during the visit to non-synced options stay.
+- **F1**: while visiting, the synced options (Enhancements > Gameplay: grass wear, hemisphere,
+  real-time weather, region content; Online > Nintendo events) are greyed out under "Using
+  <host>'s settings while visiting"; the skin tone stays editable.
+- **Skin tones**: each player's chosen tone is its own (never synced); the tones travel with the
+  blobs and the other game shows them on that player (cf_skin remote tones, in memory only;
+  the player's own choices win). The host gets every visitor's tone.
+
+| Setting (ini section / key) | While visiting | Why |
+|---|---|---|
+| `[calendar] hemisphere` | host | seasons, events, fish/bugs of the town |
+| `[region]` events, flags, autumn moon, parents' days, villager houses | host | what the town holds and celebrates |
+| `[region] title_screen` | own | title logo only |
+| `[weather]` real_time, place, lat/lon, country | host | the town's weather comes from the host's place (not the visitor's location) |
+| `[gameplay] grass_wear` | host | the ground of the town |
+| `[skin_tone]` | own (shown on the other game) | user rule |
+| `[nintendo_events]` mode, loop period, yearly, other regions | host | event schedule of the town |
+| `[nintendo_events]` live delivery, town WiiConnect24 | own | the player's own save and mailbox |
+| `[system]` clock offset, language, sensor bar, nickname, ... | own | each console keeps its own clock, as on Wii; the game uses the host's town time for the visit |
+| `[video]`, `[rendering]`, `[enhanced_lighting]`, `[enhanced_world]`, `[crt]`, `[texture_packs]` | own | presentation only |
+| `[audio]`, `[controls]`, `[wiimote]`, `[wiimote_hid]`, `[dsu]`, `[interface]`, `[updates]`, `[online]` | own | local |
+| Luigi's Mansion leftovers in the shared table (`[enhancements]`, `[debug]`, other `[gameplay]` keys, `[silly_*]`, `[unused2]`, `[ghost_lights]`, `[world_lights]`) | own | not used by City Folk |
+
+Test (2026-11-03, verified): host settings.ini `grass_wear=1`, `hemisphere=south`, tone 3 for its
+player (F177-8AA5); visitor `grass_wear=2`, `north`, tone 7 (A056-DB16). The visitor logs
+`[sync] visiting Alice: using the host's world settings (1 tones)` with the host's lines
+(CF_ONLINE_LOG=1); both games draw the visitor with palette 6 and the host with palette 2
+(CF_SKIN_LOG=1: the visitor's player data is the copy at USA 0x805D2720, player number 1); the
+visitor walks back into the gatehouse, talks to Copper, goes home: `[sync] visit over: own
+settings back` with `grass_wear=2` / `north`, and its settings.ini never changed.
+
+Saves: the visitor's game saves when it leaves for the trip ("Saving...", result word 1) and
+again when it is home (result words 0 -> 1 after the return), with the DWC layer shut down.
+
+Menu navigation in Copper's online screens (F1 > Controls "Snap pointer to menu items", Auto):
+works with the D-pad: his choices are 'B_msg' panes, the town list (d_menu_friend03NP) is found
+as drawn panes (B_msg_00 row, B_scrlBtn arrows, B_cmnBtnA_00 Quit / _02 Confirm). The first
+press lands on the item nearest the pointer, the next ones move: DOWN (row), A (pick), DOWN,
+DOWN (Quit), RIGHT (Confirm), A visits. The list slides in for a few frames after it opens.
+
+Removing (or blocking) a friend in F1 queues its profile id (`removed <pid>` in friends.txt);
+when a town save is loaded and the game is offline, rosterSync takes it out of the game's roster
+with the roster menu's own delete (`cf_RosterDeleteOffline`, fn_8017C3C0: later entries move up).
+Verified with `CF_ONLINE_TEST=24000:removefriends` after a visit: `profile id ... removed from
+the game roster (slot 0): done`.
+
+## 10d. Hole punching (no server of ours)
+
+For a host that is not reachable (no UPnP / NAT-PMP, no port forward) and a joiner behind an
+ordinary home router: the joiner asks a public STUN server for its own public address while it
+connects; after 3 s without an answer F1 shows it as a **reply code** (the room code format with
+one endpoint and no secret). The joiner sends that code to the host by chat; the host enters it
+under "Let them in": for 30 s the host sends small T_PUNCH packets to that address while the
+joiner keeps sending HELLO to the host's public address (from its STUN, in the room code). Both
+routers then have outgoing traffic to the other side and let the answers in (endpoint-independent
+mapping, the usual home case); the join then proceeds as usual. It does not get through
+symmetric NATs (some mobile and corporate networks): there the relay (10c) or a VPN helps.
+While a reply code is shown the joiner waits 90 s instead of 10 s. Test: cf_online_test checks
+that the host's punch packets arrive at the address of a reply code. Untested between two real
+separate networks (the user will try it with a friend).
+
+## 10c. The optional self-hosted relay (tools/relay/cf_relay.cpp)
+
+Nobody has to run a server; a friend group that wants one runs `cf_relay [--port 29912]
+[--mail-dir <folder>]` on a machine everyone can reach (a VPS, a home server with the port
+forwarded) and enters its address in F1 > Online "Relay (optional)" (`[online] relay`,
+CF_ONLINE_RELAY for tests).
+- **Rooms**: a host with a relay registers its room there under a random 8-byte room id every 10 s
+  and adds a relay endpoint to its room code (family 0x54: relay IPv4 + port + room id), next to
+  its direct endpoints; joiners try all routes at once. Through the relay the members have
+  virtual addresses (100::/64 discard prefix, the relay's peer id in the last four bytes), so the
+  room transport above is unchanged: its sealed packets are wrapped in `CFRL` TO_HOST / TO_PEER
+  datagrams and the relay only forwards them between that room's host and its joiners (it cannot
+  read them; it only knows room ids and addresses). Limits: 256 rooms, 16 joiners per room,
+  600 datagrams/s per address, rooms expire 60 s after their host stops registering.
+- **Letters**: none (user decision): the relay forwards room traffic only.
+- Test (2026-11-03): `cf_online_test` joins a room through an in-process relay with a code that
+  has only the relay route and sends 50 KB.
+
+## 10b. USB keyboard chat (src/recomp/ios_devices.cpp)
+
+City Folk takes chat text from a USB keyboard (its KBD library over IOS `/dev/usb/kbd`). With
+F1 > Online "USB keyboard" (`[online] usb_keyboard`, off by default) the device opens and the PC
+keyboard is that keyboard: the module's async ioctl 0 gets 16-byte messages (public IOS
+interface): `{u32 type: 0 attached, 1 detached, 2 keys; u32 keyboard id; u8 modifiers (HID bits);
+u8 0; u8 keys[6] (HID usages)}`. The host thread polls the SDL keyboard state each frame
+(`ios::usbKeyboardPoll`, SDL scancodes are HID usages) and queues a message on every change.
+Off: as before (the open fails: no keyboard). Keys bound to the Wii Remote act on both, so play
+with a controller while typing.
 
 ## 11. Status and what is left
 
@@ -400,6 +571,6 @@ Left:
 - Friend codes: keep the game's own registration (both type each other's code in the game's
   roster, as on the Wii; works now), or also write F1 friends into the roster automatically
   (section 10)?
-- Mail without a common online time: DHT store-and-forward (best effort) or a hosted mailbox
-  server (dependable, someone runs it)?
+- Mail without a common online time: decided 2026-11-03: the player's own email account (optional) and
+  delivery whenever both games run; no DHT, no letters on the relay (section 10).
 - Who hosts an optional public relay/lobby, if ever (none needed for rooms).

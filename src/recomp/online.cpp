@@ -8,13 +8,18 @@
 #include "recomp/game.h"
 #include "recomp/guest_util.h"
 #include "recomp/hle.h"
+#include "recomp/ios.h"
+#include "recomp/ui_scale.h"
 #include "recomp/menu.h"
 #include "recomp/online_crypto.h"
 #include "recomp/version.h"
 #include "recomp/online_ed25519.h"
 #include "recomp/online_friends.h"
+#include "recomp/online_mail.h"
+#include "recomp/online_email.h"
 #include "recomp/online_net.h"
 
+#include <SDL3/SDL.h>
 #include <imgui.h>
 
 #include <algorithm>
@@ -102,6 +107,7 @@ net::HostOptions hostOptions(const std::string& password) {
     h.allowDirect = o.allowDirect;
     h.lanVisible = o.lanVisible;
     h.portMapping = o.portMapping;
+    h.relay = envOr("CF_ONLINE_RELAY") ? envOr("CF_ONLINE_RELAY") : o.relay;
     return h;
 }
 
@@ -221,6 +227,18 @@ void runAction(Ctx& c, const std::string& a) {
         friends::requestFriend(id);
         return;
     }
+    if (a == "mailself") {
+        email::sendTestLetter();
+        return;
+    }
+    if (a == "mailtest") {
+        std::printf("[online-test] %d test letters queued\n", mail::queueTestLetter());
+        return;
+    }
+    if (a == "removefriends") {  // F1 "Remove" on every friend (the game's roster follows)
+        for (auto& f : friends::list()) friends::remove(f.code);
+        return;
+    }
     if (a == "acceptfriends" || a == "friends") {
         for (auto& f : friends::list()) {
             std::printf("[online-test] friend %s %s state %d pid %u\n", f.name.c_str(), f.code.c_str(), int(f.state), f.pid);
@@ -276,29 +294,6 @@ void runAction(Ctx& c, const std::string& a) {
         return;
     } else if (a == "disconnect") {
         std::printf("[online-test] disconnect -> %u\n", gu::call(c, VA(0x800DCE44)));
-    } else if (a.rfind("friend:", 0) == 0) {
-        // friend:<slot>:<pid or @file>: registers a friend in the save's DWC friend list, as the
-        // game's roster does with a friend code (type 3 profile entry here).
-        const size_t c2 = a.find(':', 7);
-        const int slot = std::atoi(a.c_str() + 7);
-        std::string v = c2 == std::string::npos ? "" : a.substr(c2 + 1);
-        u32 pid = 0;
-        if (!v.empty() && v[0] == '@') {
-            std::ifstream in(v.substr(1));
-            in >> pid;
-        } else {
-            pid = u32(std::strtoul(v.c_str(), nullptr, 10));
-        }
-        const u32 save = gu::call(c, VA(0x80101894));
-        if (!save || !pid || slot < 0 || slot >= 32) {
-            std::printf("[online-test] friend: no save data / pid\n");
-            return;
-        }
-        const u32 e = save + 0x44 + 12u * u32(slot);  // friend list = save+0x44 (user data = save+4)
-        wr32(e, 3u << 11);
-        wr32(e + 4, pid);
-        wr32(e + 8, 0);
-        std::printf("[online-test] friend slot %d = pid %u (save %08X)\n", slot, pid, save);
     }
     // The online system's state (+0x385C: 0 none, 1 set up, 3 connecting, 5 hosting, 6 visiting).
     if (const u32 sys = rd32(VA(0x8074E7B8)); sys >= 0x80000000u && sys < 0x93F00000u) std::printf("[online-test] online system state %u\n", rd32(sys + 0x385C));
@@ -316,6 +311,57 @@ bool active() { return net::session().active(); }
 u32 profileId() {
     ensureIdentity();
     return sPid;
+}
+
+u64 wiiNumber() {
+    ensureIdentity();
+    return friends::myWiiNumber();
+}
+
+static std::vector<u8> cleanGameInfo(std::vector<u8> v, const u8 pub[32]);
+
+// nwc24fl.bin (layout from the NWC24 library's reads: GetCachedFLHeader / iReadFriendInfoRaw /
+// fn_8040E23C): 0x00 "WcFl", 0x04 version 2, 0x08 entries (100), 0x40 Wii numbers u64[100],
+// 0x360 entries 0x140 each: +0 type (1 Wii), +4 status (2 confirmed: City Folk's fn_800E98C0
+// takes only those), +8 name (12 UTF-16 units).
+void writeWiiFriends() {
+    ensureIdentity();
+    std::vector<u8> b(32864, 0);
+    auto be32 = [&](size_t o, u32 v) {
+        b[o] = u8(v >> 24);
+        b[o + 1] = u8(v >> 16);
+        b[o + 2] = u8(v >> 8);
+        b[o + 3] = u8(v);
+    };
+    std::memcpy(b.data(), "WcFl", 4);
+    be32(4, 2);
+    be32(8, 100);
+    int n = 0;
+    for (const auto& f : friends::list()) {
+        if (f.state != friends::State::Friend || n >= 100) continue;
+        const u64 id = friends::wiiNumberOf(f.pub);
+        be32(0x40 + 8 * size_t(n), u32(id >> 32));
+        be32(0x44 + 8 * size_t(n), u32(id));
+        const size_t e = 0x360 + 0x140 * size_t(n);
+        be32(e, 1);
+        be32(e + 4, 2);
+        // The game's own name for that player (its roster entry's player name) when known, else the F1 name.
+        if (f.gameInfo.size() == friends::kGameInfoSize)
+            std::memcpy(b.data() + e + 8, cleanGameInfo(f.gameInfo, f.pub).data() + 0x20, 0x12);
+        else
+            for (size_t i = 0; i < f.name.size() && i < 11; i++) b[e + 8 + 2 * i + 1] = u8(f.name[i]);
+        n++;
+    }
+    const auto p = ios::hostPath("/shared2/wc24/nwc24fl.bin");
+    {
+        std::ifstream in(p, std::ios::binary);
+        const std::vector<u8> cur((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (cur == b) return;
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(p.parent_path(), ec);
+    std::ofstream(p, std::ios::binary | std::ios::trunc).write(reinterpret_cast<const char*>(b.data()), std::streamsize(b.size()));
+    std::printf("[online] Wii friend list: %d F1 friends as confirmed Wii friends\n", n);
 }
 
 u64 friendKey() { return sFriendKey; }
@@ -338,28 +384,32 @@ std::string playerName() {
     return s.empty() ? "Player" : s;
 }
 
-// This player's roster entry as another game stores it (save friend info, 0x78 bytes; layout from
-// fn_8011AD7C, which clears one, and fn_800AC160, which builds the DWC status data from the same
-// save fields): +0x00 u64 (0 here), +0x08 player (u16 id, 9 UTF-16 name units, u8 kind 0x0A),
-// +0x1E town (u16 id, name, u8 kind 0x02), +0x34 u8, +0x36 0x42 bytes (save+0x10C8).
+// This player's roster entry as another game stores it (save friend info, 0x78 bytes), in the
+// game's own layout: what the host's game writes for a visitor during a visit (seen in the save
+// after a real visit) is +0x00 the Wii number letters go to (u64), +0x08 a copy of the town name
+// struct (save+0x7EC2: u16 id, 9 UTF-16 units, u8 at +0x14 = 0x01, pad), +0x1E a copy of the player
+// name struct (save+0x7ED8, +0x14 = 0x00), +0x34 u8, +0x36 0x42 bytes (save+0x10C8). The letter
+// writer's "Dear <name>," reads the player at +0x1E (+0x20 the name).
 static std::vector<u8> myGameInfo(u32 save) {
     std::vector<u8> v(friends::kGameInfoSize, 0);
-    const u32 a = save + 0x7EC2, b = save + 0x7ED8;  // the two 0x16-byte name structs
-    const bool aIsPlayer = rd8(a + 0x14) == 0x0A;
-    const u32 player = aIsPlayer ? a : b, town = aIsPlayer ? b : a;
-    std::memcpy(v.data() + 0x08, hostp(player), 0x16);
-    std::memcpy(v.data() + 0x1E, hostp(town), 0x16);
+    const u64 wii = friends::myWiiNumber();
+    for (int i = 0; i < 8; i++) v[size_t(i)] = u8(wii >> (56 - 8 * i));
+    std::memcpy(v.data() + 0x08, hostp(save + 0x7EC2), 0x16);  // town
+    std::memcpy(v.data() + 0x1E, hostp(save + 0x7ED8), 0x16);  // player
     std::memcpy(v.data() + 0x36, hostp(save + 0x10C8), 0x42);
     return v;
 }
 
-// A friend's entry from the network: names always terminated, kinds as the game sets them.
-static std::vector<u8> cleanGameInfo(std::vector<u8> v) {
+// A friend's entry from the network: names always terminated, the Wii number its key gives. Entries
+// from builds before 2026-11-03 put the player first (+0x08, struct byte 0x00) and the town second
+// (struct byte 0x01): those are turned into the game's order.
+static std::vector<u8> cleanGameInfo(std::vector<u8> v, const u8 pub[32]) {
+    if (v[0x08 + 0x14] == 0x00 && v[0x1E + 0x14] == 0x01)
+        for (size_t i = 0; i < 0x16; i++) std::swap(v[0x08 + i], v[0x1E + i]);
     v[0x08 + 0x12] = v[0x08 + 0x13] = 0;
     v[0x1E + 0x12] = v[0x1E + 0x13] = 0;
-    v[0x08 + 0x14] = 0x0A;
-    v[0x1E + 0x14] = 0x02;
-    std::memset(v.data(), 0, 8);
+    const u64 wii = friends::wiiNumberOf(pub);  // the number that belongs to its key, whatever it sent
+    for (int i = 0; i < 8; i++) v[size_t(i)] = u8(wii >> (56 - 8 * i));
     return v;
 }
 
@@ -391,12 +441,67 @@ static void rosterSync(Ctx& c) {
     const u32 save = gu::call(c, fnSave);
     if (!save || !gu::call(c, fnCheck, {save + 4})) return;
     friends::setMyGameInfo(myGameInfo(save));
+    {
+        std::string sig;
+        for (auto& fr : friends::list())
+            if (fr.state == friends::State::Friend) sig += fr.code + fr.name;
+        static std::string last;
+        if (sig != last) {
+            last = sig;
+            writeWiiFriends();
+        }
+    }
     // The game registers friends only while offline (online system state <= 1).
     if (const u32 sys = rd32(VA(0x8074E7B8)); sys >= 0x80000000u && sys < 0x93F00000u && rd32(sys + 0x385C) > 1) return;
+    // Friends removed or blocked in F1 leave the game's roster the way its roster menu deletes
+    // one (cf_RosterDeleteOffline: later entries move up), one per pass.
+    static const u32 fnDel = guestSymbol("cf_RosterDeleteOffline");
+    const auto current = friends::list();
+    for (u32 pid : friends::pendingRosterRemovals()) {
+        bool again = false;  // a friend again since: its entry stays
+        for (auto& fr : current) again |= fr.pid == pid && fr.state == friends::State::Friend;
+        int slot = -1;
+        if (again) {
+            friends::rosterRemovalDone(pid);
+            continue;
+        }
+        for (int i = 0; i < 32 && slot < 0; i++) {
+            const u32 e = save + 0x44 + 12u * u32(i);
+            const u32 type = (rd32(e) >> 11) & 3;
+            if ((type == 2 || type == 3) && rd32(e + 4) == pid) slot = i;
+        }
+        if (slot < 0 || !fnDel) {
+            friends::rosterRemovalDone(pid);
+            continue;
+        }
+        const u32 ok = gu::call(c, fnDel, {u32(slot)});
+        std::printf("[online] profile id %u removed from the game roster (slot %d): %s\n", pid, slot, ok ? "done" : "refused");
+        if (ok) friends::rosterRemovalDone(pid);
+        return;
+    }
     auto fl = friends::list();
     bool any = false;
     for (auto& fr : fl) any |= fr.state == friends::State::Friend;
     if (!any) return;
+    // Pelly offers "Other town." only when town flag 0x1F is set (d_a_npc_sp_perikoNP fn_34_3794
+    // builds "<town>. / [Other town.] / Future self. / Never mind." and asks fn_801165F4(town, 0x1F)).
+    // The game's only setter is in the player-creation scene module (d_a_npc_sp_player_createNP
+    // fn_25_BB4, scene 0x3D, not the new-game scene 0x3C); none of the towns we have has it, and a
+    // visit does not set it. A town with an F1 friend in its roster can send letters to other towns
+    // in this port, so the flag is set then (once; it stays in the save). docs/ONLINE.md section 10.
+    if (const u32 town = gu::call(c, VA(0x8010DD60)); town >= 0x80000000u && !gu::call(c, VA(0x801165F4), {town, 0x1Fu})) {
+        bool inRoster = false;
+        for (auto& fr : fl)
+            for (int i = 0; i < 32 && !inRoster; i++) {
+                const u32 e = save + 0x44 + 12u * u32(i);
+                const u32 type = (rd32(e) >> 11) & 3;
+                inRoster |= fr.state == friends::State::Friend && (type == 2 || type == 3) && rd32(e + 4) == fr.pid;
+            }
+        if (inRoster) {
+            gu::call(c, VA(0x80116634), {town, 0x1Fu});
+            std::printf("[online] town flag 0x1F set (Pelly: \"Other town.\"): a friend is in the roster\n");
+        }
+    }
     static u32 buf = 0, info = 0;
     if (!buf) buf = hleAlloc(16);
     if (!info) info = hleAlloc(u32(friends::kGameInfoSize));
@@ -411,14 +516,14 @@ static void rosterSync(Ctx& c) {
         }
         const bool haveInfo = fr.gameInfo.size() == friends::kGameInfoSize;
         std::vector<u8> gi;
-        if (haveInfo) gi = cleanGameInfo(fr.gameInfo);
+        if (haveInfo) gi = cleanGameInfo(fr.gameInfo, fr.pub);
         // A friend in the room sends its entry right after proving its key: wait for it, so the
         // roster gets the names at once.
         if (slot < 0 && !haveInfo && friends::inRoom(fr.code)) continue;
         if (slot >= 0) {
             // Registered: refresh the names once the friend's own entry is known.
             const u32 cur = save + 0x1C8 + u32(friends::kGameInfoSize) * u32(slot);
-            if (!haveInfo || std::memcmp(hostp(cur + 8), gi.data() + 8, friends::kGameInfoSize - 8) == 0) continue;
+            if (!haveInfo || std::memcmp(hostp(cur), gi.data(), friends::kGameInfoSize) == 0) continue;
         } else if (empty < 0) {
             static std::string told;
             if (told != fr.code) notice("The game's friend roster is full: " + fr.name + " was not added");
@@ -429,13 +534,13 @@ static void rosterSync(Ctx& c) {
         if (slot >= 0) {
             std::memcpy(hostp(buf), hostp(save + 0x44 + 12u * u32(slot)), 12);
         } else {
-            wr32(buf, 3u << 11);
+            wr32(buf, (3u | 4u) << 11);  // GS profile id entry, buddy (an F1 friendship is mutual)
             wr32(buf + 4, fr.pid);
             wr32(buf + 8, 0);
         }
         if (haveInfo) std::memcpy(hostp(info), gi.data(), gi.size());
         const u32 ok = gu::call(c, fnReg, {u32(at), buf, haveInfo ? info : 0u});
-        const std::string as = haveInfo ? ", as " + utf16Name(gi, 0x0A) + " of " + utf16Name(gi, 0x20) : std::string();
+        const std::string as = haveInfo ? ", as " + utf16Name(gi, 0x20) + " of " + utf16Name(gi, 0x0A) : std::string();
         std::printf("[online] friend %s (profile id %u) -> game roster slot %d%s: %s\n", fr.name.c_str(), fr.pid, at, as.c_str(),
                     ok ? (slot >= 0 ? "updated" : "registered") : "refused");
         if (ok && slot < 0) notice(fr.name + " is now in the game's friend roster");
@@ -443,8 +548,174 @@ static void rosterSync(Ctx& c) {
     }
 }
 
+// CF_GIVE_ITEM=<frame>:<item code hex>[x<n>],... (test aid, letters test): puts items into the first
+// empty pocket slots of the player being played. Pockets: player data + 0x7F22, 15 x u16, empty =
+// 0xFFF1 (fn_8013807C writes them so); item code = 0x9000 + item number * 4 (+ count bits, e.g.
+// stationery), the item number being the record's second field in Item/item.arc item.bin
+// (fn_800C29D0: number = (code - 0x9000) >> 2). Examples: butterfly paper 0x9640 (+3 = 4 sheets),
+// 1,000 Bells 0x91B8.
+static void giveItems(Ctx& c) {
+    static const char* env = std::getenv("CF_GIVE_ITEM");
+    if (!env) return;
+    const u32 f = recomp::game::guestFrames();
+    for (const char* p = env; *p;) {
+        char* e = nullptr;
+        const u32 at = u32(std::strtoul(p, &e, 10));
+        if (*e != ':') break;
+        const u32 code = u32(std::strtoul(e + 1, &e, 16));
+        u32 n = 1;
+        if (*e == 'x') n = u32(std::strtoul(e + 1, &e, 10));
+        if (at == f) {
+            const u32 pd = gu::call(c, VA(0x801017B8), {0});
+            if (pd >= 0x90000000u && pd < 0x94000000u) {
+                u32 given = 0;
+                for (u32 i = 0; i < 15 && given < n; i++)
+                    if (rd16(pd + 0x7F22 + 2 * i) == 0xFFF1) {
+                        wr16(pd + 0x7F22 + 2 * i, u16(code));
+                        given++;
+                    }
+                std::printf("[online-test] frame %u: %u x item %04X into the pockets\n", f, given, code);
+            }
+        }
+        p = *e == ',' ? e + 1 : e;
+        if (*e != ',') break;
+    }
+}
+
+// CF_TOWN_FLAG=<frame>:<n>,... (test aid): sets progress flag n of the save with the game's own
+// setter fn_80116634(save, n) (save + 0x735C3 bits; getter fn_801165F4). Research.
+static void townFlags(Ctx& c) {
+    static const char* env = std::getenv("CF_TOWN_FLAG");
+    if (!env) return;
+    const u32 f = recomp::game::guestFrames();
+    for (const char* p = env; *p;) {
+        char* e = nullptr;
+        const u32 at = u32(std::strtoul(p, &e, 10));
+        if (*e != ':') break;
+        const u32 n = u32(std::strtoul(e + 1, &e, 16));
+        if (at == f) {
+            // The town flags live in the town data (fn_8010DD60, r13-0x2FE0) +0x735C3, not in the save
+            // file object fn_80101894 returns.
+            const u32 town = gu::call(c, VA(0x8010DD60));
+            if (town) gu::call(c, VA(0x80116634), {town, n});
+            std::printf("[online-test] frame %u: town flag %X set\n", f, n);
+        }
+        if (*e != ',') break;
+        p = e + 1;
+    }
+}
+
+// The town's own WiiConnect24 setting (save +0x735E4; the attic telephone's option, Rover's
+// question in a new town) is turned on once per town, the first time the port sees that town
+// with the console's WiiConnect24 available (the game's check state 1 at 0x8074EBCC), with the
+// game's own setter fn_80177DE0. Towns done are remembered in <data>/town_wc24.txt (town id + name),
+// so a player who turns it off on the attic telephone keeps it off. Letters to other towns need it
+// (Pelly: "You can't send letters to people from out of town because your WiiConnect24 settings
+// are turned off"); docs/ONLINE.md section 10. CF_TOWN_WC24_DEFAULT=0 leaves it alone (A/B).
+static void townWc24Default(Ctx& c) {
+    static const bool off = [] {
+        const char* v = std::getenv("CF_TOWN_WC24_DEFAULT");
+        return v && *v == '0';
+    }();
+    if (off) return;
+    static u32 next = 0;
+    const u32 f = recomp::game::guestFrames();
+    if (f < next) return;
+    next = f + 60;
+    const u32 town = rd32(VA(0x8074E960));  // the town data (fn_8010DD60), null before a town is loaded
+    if (town < 0x80000000u || town >= 0x94000000u) return;
+    if (rd32(VA(0x8074EBCC)) != 1) return;  // the game's WiiConnect24 check: not (yet) available
+    // Only once the town is in play: at the title, on the train and in player creation (scenes
+    // 0x44, 0x38, 0x3B, 0x3C) the town data is reloaded from the save afterwards, which undoes it.
+    if (const u32 scene = gu::call(c, VA(0x8016266C)) & 0xFF; scene == 0x44 || scene == 0x38 || scene == 0x3B || scene == 0x3C) return;
+    char key[64];
+    {
+        std::string k;
+        const u32 t = town + 0x7EC2;  // town name struct: u16 id, 9 UTF-16 units
+        char b[8];
+        for (u32 i = 0; i < 0x14; i++) {
+            std::snprintf(b, sizeof b, "%02x", rd8(t + i));
+            k += b;
+        }
+        std::snprintf(key, sizeof key, "%s", k.c_str());
+    }
+    static std::string doneFor;
+    if (doneFor == key) return;
+    const auto path = port::dataDir() / "town_wc24.txt";
+    std::vector<std::string> done;
+    {
+        std::ifstream in(path);
+        for (std::string l; std::getline(in, l);)
+            if (!l.empty() && l[0] != '#') done.push_back(l.substr(0, l.find(' ')));
+    }
+    if (std::find(done.begin(), done.end(), key) == done.end()) {
+        const bool was = rd8(town + 0x735E4) != 0;
+        u32 r = 0;
+        if (!was) r = gu::call(c, VA(0x80177DE0));
+        std::printf("[online] town WiiConnect24 setting: %s (fn_80177DE0 -> %u, now %u)\n",
+                    was ? "already on" : "turned on for this town (first start)", r, rd8(town + 0x735E4));
+        if (!was && !rd8(town + 0x735E4)) return;  // the setter refused: try again later
+        std::error_code ec;
+        std::filesystem::create_directories(path.parent_path(), ec);
+        const bool fresh = !std::filesystem::exists(path, ec);
+        std::ofstream out(path, std::ios::app);
+        if (fresh) out << "# Towns whose WiiConnect24 setting City Folk Recompiled turned on once (town name struct hex).\n";
+        out << key << "\n";
+    }
+    doneFor = key;
+}
+
+// CF_WC24_SEND=<frame> (test aid): the WiiConnect24 step of the game's save flow (save menu state
+// fn_801BC9E4) run from that frame: fn_801031B8 resets it, then fn_801031F4 every frame until it
+// says done. It goes through Pelly's outbox (letters to other towns, fn_80103064) and starts one
+// send task per letter (fn_8017816C -> fn_8017ADD0 -> ... NWC24CommitMsg). Saving in the game (bed,
+// save icon) runs the same step; the aid only spares a route to the save menu.
+static void wc24SendAid(Ctx& c) {
+    static const u32 at = [] {
+        const char* v = std::getenv("CF_WC24_SEND");
+        return v ? u32(std::strtoul(v, nullptr, 10)) : 0u;
+    }();
+    static int state = 0;  // 0 waiting, 1 running, 2 done
+    if (!at || state == 2) return;
+    const u32 f = recomp::game::guestFrames();
+    if (state == 0) {
+        if (f < at) return;
+        gu::call(c, VA(0x801031B8));
+        state = 1;
+        std::printf("[online-test] frame %u: save flow's WiiConnect24 send step started\n", f);
+    }
+    if (gu::call(c, VA(0x801031F4))) {
+        state = 2;
+        std::printf("[online-test] frame %u: save flow's WiiConnect24 send step done\n", f);
+    }
+}
+
 void onGuestFrame(Ctx& c) {
     if (!sEnvDone) envStart();
+    townWc24Default(c);
+    wc24SendAid(c);
+    giveItems(c);
+    townFlags(c);
+    // CF_TOWN_WC24=<frame> (test aid): the town's own WiiConnect24 setting (save +0x735E4) turned on
+    // with the game's setter fn_80177DE0, what the attic telephone's WiiConnect24 option does (it
+    // takes effect only while the console reports WiiConnect24 available).
+    if (static const char* tw = std::getenv("CF_TOWN_WC24"); tw && recomp::game::guestFrames() == u32(std::atoi(tw)))
+        std::printf("[online-test] town WiiConnect24 setting (fn_80177DE0) -> %u\n", gu::call(c, VA(0x80177DE0)));
+    // Research aid (CF_MAIL_PROBE): scene id changes (fn_8016266C) and town flag 0x1F, the flag
+    // Pelly's destination list (d_a_npc_sp_perikoNP fn_34_3794) needs for "Other town.".
+    if (static const bool probe = envOr("CF_MAIL_PROBE") != nullptr; probe) {
+        static u32 lastScene = ~0u, lastFlag = ~0u;
+        const u32 scene = gu::call(c, VA(0x8016266C)) & 0xFF;
+        const u32 town = gu::call(c, VA(0x8010DD60));
+        const u32 flag = town >= 0x80000000u ? (rd8(town + 0x735C3 + 3) >> 7) & 1 : 2;
+        if (scene != lastScene)  // scene names fn_801F6B6C compares (0x3C at +0x770, 0x3D at +0x78C)
+            for (u32 off : {0x770u, 0x78Cu, 0x7A0u})
+                std::printf("[mail-probe] scene name +%X: %.24s\n", off, reinterpret_cast<const char*>(hostp(0x80505D28u + off)  /* USA */));
+        if (scene != lastScene || flag != lastFlag)
+            std::printf("[mail-probe] frame %u: scene %02X, town flag 1F %u\n", recomp::game::guestFrames(), scene, flag);
+        lastScene = scene;
+        lastFlag = flag;
+    }
     rosterSync(c);
     if (sJoinPending) tryJoinFromEnv();
     if (!sCodeFile.empty() && envOr("CF_ONLINE_HOST")) {
@@ -489,7 +760,16 @@ void onGuestFrame(Ctx& c) {
 
 void drawOverlay() {
     watchRoom();
+    email::tick();
     friends::tick();
+    {
+        int n = 0;
+        const bool* keys = SDL_GetKeyboardState(&n);
+        static std::vector<u8> sc;
+        sc.assign(size_t(n), 0);
+        for (int i = 0; i < n && keys; i++) sc[size_t(i)] = keys[i] ? 1 : 0;
+        ios::usbKeyboardPoll(port::settings().online.usbKeyboard, sc.data(), n);
+    }
     const auto snap = net::session().snapshot();
     const auto freq = friends::incoming();
     const bool showReq = !snap.pending.empty() || !freq.empty();
@@ -630,6 +910,13 @@ bool drawTab() {
                                                              : "Not in a room";
     ImGui::Text("Room: %s", stateText);
     if (!snap.message.empty() && snap.state != net::State::Hosting) ImGui::TextWrapped("%s", snap.message.c_str());
+    if (!snap.replyCode.empty()) {
+        ImGui::TextWrapped("No answer from the host yet. Send the host this reply code (they enter it under "
+                           "\"Let them in\"):");
+        ImGui::TextUnformatted(snap.replyCode.c_str());
+        ImGui::SameLine();
+        if (menu::SmallButton("Copy##reply")) ImGui::SetClipboardText(snap.replyCode.c_str());
+    }
     ImGui::Text("Game: %s", dwcStatusText().c_str());
     ImGui::Text("Your friend code: %s", fcText(sFriendKey).c_str());
     ImGui::SetItemTooltip("The game's 12-digit friend code. Others enter it in their game's friend roster,\n"
@@ -658,6 +945,19 @@ bool drawTab() {
             if (!snap.lanEndpoint.empty()) ImGui::Text("On your network: %s", snap.lanEndpoint.c_str());
             if (!snap.publicEndpoint.empty()) ImGui::Text("On the internet: %s", snap.publicEndpoint.c_str());
             ImGui::TextWrapped("Internet: %s", snap.reachability.c_str());
+            // Hole punching: a joiner whose packets do not get through sends its reply code.
+            static char reply[64] = {};
+            ImGui::SetNextItemWidth(260.0f * ui::scale());
+            ImGui::InputTextWithHint("##reply", "a joiner's reply code", reply, sizeof reply);
+            ImGui::SameLine();
+            if (menu::SmallButton("Let them in")) {
+                std::string e;
+                if (net::session().punch(reply, &e)) reply[0] = 0;
+                else sError = e;
+            }
+            ImGui::SetItemTooltip("For a player who cannot reach you (no UPnP, no port forward): they get a reply code\n"
+                                  "while joining. Enter it here and both routers open the way (works with most home\n"
+                                  "routers; not through every mobile or corporate network).");
             memberTable(snap, true);
             for (auto& r : snap.pending) {
                 ImGui::PushID(int(r.ticket));
@@ -696,6 +996,18 @@ bool drawTab() {
         ImGui::SetItemTooltip("Asks your router to forward the UDP port to this PC while you host, and finds\n"
                               "your internet address (STUN, a public service). Without it only players on your\n"
                               "network (or a VPN such as Tailscale, ZeroTier, Hamachi) can join.");
+        {
+            char rb[128];
+            std::snprintf(rb, sizeof rb, "%s", o.relay.c_str());
+            ImGui::SetNextItemWidth(220.0f * ui::scale());
+            if (ImGui::InputTextWithHint("Relay (optional)", "host:29912", rb, sizeof rb)) {
+                o.relay = rb;
+                dirty = true;
+            }
+            ImGui::SetItemTooltip("A relay that your group runs (tools: cf_relay). Joiners whose packets cannot reach\n"
+                                  "you directly come in through it, and friends' letters wait there while you are\n"
+                                  "offline. Room traffic stays end-to-end encrypted; the relay only forwards it.");
+        }
         dirty |= menu::Checkbox("Show on the local network", &o.lanVisible);
         dirty |= menu::Checkbox("Allow direct connections (IP:port, no code)", &o.allowDirect);
         ImGui::SetItemTooltip("For port forwarding / VPN setups: joiners that know only your address may join.\n"
@@ -754,7 +1066,12 @@ bool drawTab() {
                            "use a VPN (Tailscale, ZeroTier, Hamachi) and enter the host's VPN address.");
     }
     friendsSection();
+    dirty |= email::drawSection();
     dirty |= menu::Checkbox("Room notices over the game", &o.notices);
+    dirty |= menu::Checkbox("USB keyboard (PC keyboard for chat)", &o.usbKeyboard);
+    ImGui::SetItemTooltip("The game sees your PC keyboard as a Wii USB keyboard: type chat messages while online. "
+                          "Keys you also use for the Wii Remote act on both, so play with a controller while typing. "
+                          "Turning it on takes effect when the game next looks for a keyboard (at the latest after a restart).");
     return dirty;
 }
 

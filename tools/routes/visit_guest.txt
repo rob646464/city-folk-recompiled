@@ -1,0 +1,33 @@
+# Online visit, visitor side: saved town (CF_FIXTURE=user-town2), Copper -> the friend's town, back home (saves).
+# Env: CF_TELEPORT=10100:1790,84,664;10800:mod66 CF_ONLINE_JOIN=file CF_ONLINE_CODE_FILE=<the host's file>
+#      CF_ONLINE_TEST=1200:addfriend:0;6000:authid (the F1 friend request; the host accepts it)
+include continue.txt
+# Visitor (user-town2), CF_TELEPORT=10100:1790,84,664;10800:mod66 (3500 frames after gate_vis.txt).
+10130:@off
+10150:STICKUP*20
++40:STICKUP+B*60
++80:STICKUP*120
+10810:STICKUP*3
++40:A
++60:A ~20
+12260:A
++60:A ~20
+14500:A
++100:A ~9
+# "Go to which town?" (d_menu_friend03NP): point at the first row, A, then Confirm.
+after link d_menu_friend03NP
++150:@0.0/-0.26
++150:A
++200:@0.66/0.78
++150:A
++60:@off
++60:A ~30
+# In the host town (arrival ~19000): back into the gate, Copper, home.
+20500:@off
++20:STICKUP*150
+after link d_a_npc_sp_gatekeeper_aNP 2
++200:STICKRIGHT*45
++60:STICKUP*75
++100:STICKUP*3
++40:A
++60:A ~40

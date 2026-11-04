@@ -83,13 +83,28 @@ target_include_directories(cf_mii_test PRIVATE src)
 add_test(NAME mii COMMAND cf_mii_test)
 
 # Online room transport (src/recomp/online_net.*, docs/ONLINE.md): host + members over loopback UDP.
-add_executable(cf_online_test tools/tests/online_net_test.cpp src/recomp/online_net.cpp
+add_executable(cf_online_test tools/tests/online_net_test.cpp tools/relay/cf_relay.cpp src/recomp/online_net.cpp
     src/recomp/online_nat.cpp src/recomp/online_crypto.cpp src/recomp/online_ed25519.cpp)
 target_include_directories(cf_online_test PRIVATE src)
+target_compile_definitions(cf_online_test PRIVATE CF_RELAY_AS_LIB)
 if (WIN32)
     target_link_libraries(cf_online_test PRIVATE ws2_32 iphlpapi bcrypt)
 endif ()
 add_test(NAME online_net COMMAND cf_online_test)
+# Test aid: plain local SMTP/IMAP for the email letters (docs/ONLINE.md "Always online mail").
+add_executable(cf_mail_test_server tools/tests/cf_mail_test_server.cpp src/recomp/online_tls.cpp src/recomp/online_net.cpp src/recomp/online_nat.cpp
+    src/recomp/online_crypto.cpp src/recomp/online_ed25519.cpp)
+target_include_directories(cf_mail_test_server PRIVATE src)
+if (WIN32)
+    target_link_libraries(cf_mail_test_server PRIVATE ws2_32 iphlpapi bcrypt secur32 crypt32)
+endif ()
+# The optional self-hosted relay (docs/ONLINE.md "Relay"): rooms behind unreachable routers.
+add_executable(cf_relay tools/relay/cf_relay.cpp src/recomp/online_net.cpp src/recomp/online_nat.cpp
+    src/recomp/online_crypto.cpp src/recomp/online_ed25519.cpp)
+target_include_directories(cf_relay PRIVATE src)
+if (WIN32)
+    target_link_libraries(cf_relay PRIVATE ws2_32 iphlpapi bcrypt)
+endif ()
 
 # Wild World save reader / converter for the move-in (src/game/ww_save.*, docs/MOVE_IN.md "Testing").
 # Synthetic saves; with CF_WW_SAVE=<file> also a real one (never committed).
@@ -119,7 +134,7 @@ function(cf_runtime_target tgt)
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/data/pipelines.bin $<TARGET_FILE_DIR:${tgt}>)
     endif ()
     if (WIN32)
-        target_link_libraries(${tgt} PRIVATE dbghelp winhttp bcrypt ws2_32 iphlpapi)  # winhttp/bcrypt: updater; ws2_32/iphlpapi: online
+        target_link_libraries(${tgt} PRIVATE dbghelp winhttp bcrypt ws2_32 iphlpapi secur32 crypt32 advapi32)  # winhttp/bcrypt: updater; ws2_32/iphlpapi: online
         target_sources(${tgt} PRIVATE ${CMAKE_SOURCE_DIR}/packaging/windows/longpath.manifest)
         add_custom_command(TARGET ${tgt} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:${tgt}> $<TARGET_FILE_DIR:${tgt}>

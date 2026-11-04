@@ -9,6 +9,7 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -335,6 +336,15 @@ std::vector<Field> fields() {
         flag("online", "port_mapping", sSettings.online.portMapping),
         str("online", "last_direct", sSettings.online.lastDirect),
         flag("online", "notices", sSettings.online.notices),
+        flag("online", "usb_keyboard", sSettings.online.usbKeyboard),
+        str("online", "relay", sSettings.online.relay),
+        flag("online", "email_on", sSettings.online.emailOn),
+        str("online", "email_address", sSettings.online.emailAddress),
+        str("online", "email_preset", sSettings.online.emailPreset),
+        str("online", "email_imap_host", sSettings.online.emailImapHost),
+        num("online", "email_imap_port", sSettings.online.emailImapPort),
+        str("online", "email_smtp_host", sSettings.online.emailSmtpHost),
+        num("online", "email_smtp_port", sSettings.online.emailSmtpPort),
         flag("move_in", "any_region", sSettings.moveIn.anyRegion),
         str("move_in", "last_file", sSettings.moveIn.lastFile),
     };
@@ -542,6 +552,93 @@ void resetSettingsToDefaults() {
     saveSettings();
 }
 
+namespace {
+// Each "key=value" line of ini text with its section, split as loadSettings splits them.
+void forEachLine(const std::string& text, const std::function<void(const std::string&, const std::string&, const std::string&)>& f) {
+    std::istringstream in(text);
+    std::string line, section;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == ';' || line[0] == '#') continue;
+        if (line[0] == '[') {
+            section = line.substr(1, line.find(']') - 1);
+            continue;
+        }
+        const auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        f(section, line.substr(0, eq), line.substr(eq + 1));
+    }
+}
+
+struct Override {
+    bool active = false;
+    std::string own;  // this player's settings when the override began
+    std::function<bool(const std::string&, const std::string&)> synced;
+} sOverride;
+
+// What settings.ini gets: the current settings, with this player's own values for the
+// overridden keys.
+std::string fileText() {
+    const std::string cur = settingsText();
+    if (!sOverride.active) return cur;
+    std::map<std::pair<std::string, std::string>, std::string> own;
+    forEachLine(sOverride.own, [&](const std::string& s, const std::string& k, const std::string& v) { own[{s, k}] = v; });
+    std::ostringstream out;
+    std::istringstream in(cur);
+    std::string line, section;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line[0] == '[') section = line.substr(1, line.find(']') - 1);
+        const auto eq = line.find('=');
+        if (!line.empty() && line[0] != '[' && line[0] != ';' && line[0] != '#' && eq != std::string::npos) {
+            const std::string key = line.substr(0, eq);
+            const auto it = own.find({section, key});
+            if (sOverride.synced(section, key) && it != own.end()) line = key + "=" + it->second;
+        }
+        out << line << '\n';
+    }
+    return out.str();
+}
+}  // namespace
+
+std::string settingsText() {
+    std::ostringstream out;
+    writeSettings(out);
+    return out.str();
+}
+
+void applySettingsText(const std::string& text, const std::function<bool(const std::string&, const std::string&)>& want) {
+    auto table = fields();
+    forEachLine(text, [&](const std::string& section, const std::string& key, const std::string& value) {
+        if (!want(section, key)) return;
+        bool known = false;
+        for (auto& f : table)
+            if (section == f.section && key == f.key) {
+                f.set(value);
+                known = true;
+            }
+        if (!known)
+            for (auto& ext : extensions()) ext.load(section, key, value);
+    });
+    sanitize();
+}
+
+void beginSettingsOverride(const std::string& text, const std::function<bool(const std::string&, const std::string&)>& synced) {
+    if (!sOverride.active) sOverride.own = settingsText();
+    sOverride.active = true;
+    sOverride.synced = synced;
+    applySettingsText(text, synced);
+}
+
+void endSettingsOverride() {
+    if (!sOverride.active) return;
+    const auto synced = sOverride.synced;
+    const std::string own = sOverride.own;
+    sOverride = Override{};
+    applySettingsText(own, synced);
+}
+
+bool settingsOverridden() { return sOverride.active; }
+
 void saveSettings() {
     // Written to a temporary file and renamed over settings.ini, so a crash or power loss while
     // saving never leaves a truncated file (which would reset every setting on the next launch).
@@ -549,7 +646,7 @@ void saveSettings() {
     {
         std::ofstream out(tmp, std::ios::trunc);
         if (!out) return;
-        writeSettings(out);
+        out << fileText();
         out.flush();
         if (!out) {
             out.close();
@@ -563,7 +660,7 @@ void saveSettings() {
     if (ec) {  // e.g. settings.ini held open by another program: write it in place instead
         std::filesystem::remove(tmp, ec);
         std::ofstream out(path, std::ios::trunc);
-        if (out) writeSettings(out);
+        if (out) out << fileText();
     }
 }
 

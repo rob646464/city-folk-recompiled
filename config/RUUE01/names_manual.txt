@@ -63,8 +63,10 @@ dol 8033D10C DWC_ReportUserData use:"[pseudo login id]" / "[authentic login id]"
 # friend roster's registration (what the roster menus call after a friend code is entered).
 dol 80101894 cf_SaveData use:the town save (DWC user data +4, friend list +0x44, friend info +0x1C8, 0x78 each)
 dol 8017C294 cf_RosterRegisterOffline use:(slot, friendData*, info* or NULL) while offline -> memcpy into save+0x44 and info at +0x1C8
+dol 8017C3C0 cf_RosterDeleteOffline use:(slot) while offline -> fn_8011AA10 shifts the later save friend list / info entries down
 # IPC client (ipcclt): two more synchronous calls used only by the USB library (Wii Speak device
 # list, online only). Same bodies as IOS_Open / IOS_Close but sending through fn_802221A0 instead
 # of __ios_Ipc2 (real names unknown).
 dol 80222650 IOS_Open2 use:IOS_Open(path, mode) through the second IPC send (USB getDeviceList)
 dol 802228D4 IOS_Close2 use:IOS_Close(fd) through the second IPC send (USB getDeviceList)
+dol 8040B21C NWC24ReadMsgAttached use:(msgObj, index, buf, bufSize) reads attachment index of a received message (City Folk fn_800EA0DC)

@@ -99,16 +99,23 @@ std::string name8(u32 a) {
 }
 std::string keyOf(u32 pd) { return hex4(rd16(pd + kPdTown)) + "-" + hex4(rd16(pd + kPdPlayer)); }
 
-bool validPd(u32 pd) { return pd >= 0x90000000u && pd < 0x94000000u; }
+// Save slots live in MEM2; an online visitor's player data is a copy in MEM1 (the player manager's
+// buffer, USA 0x805D2720 for player 1 while visiting/hosting).
+bool validPd(u32 pd) {
+    return (pd >= 0x90000000u && pd + 0x86C0u <= 0x94000000u) || (pd >= 0x80004000u && pd + 0x86C0u <= 0x81800000u);
+}
 
 // Per-player choices: key -> tone 1..8 (absent = game). Read on the guest thread, written by the
 // menu (host thread).
 std::mutex sMutex;
 std::map<std::string, int>& choices() { return port::settings().gameplay.skinTone; }
+std::map<std::string, int> sRemote;  // other players' tones during an online visit (not saved)
 int fixedFor(const std::string& key) {
     std::lock_guard lk(sMutex);
     const auto it = choices().find(key);
-    return it == choices().end() ? 0 : it->second;
+    if (it != choices().end()) return it->second;
+    const auto r = sRemote.find(key);
+    return r == sRemote.end() ? 0 : r->second;
 }
 
 // What the menu shows: the player being played (player number 0).
@@ -135,10 +142,16 @@ static void skinIndex(Ctx& c) {
     const u32 no = rd32(actor + kActorPlayerNo);
     callOriginal(c, "d_a_playerNP::fn_80_2080");
     const u32 game = c.r[3];
-    if (no >= 4) return;
+    if (no >= 4) {
+        if (logOn()) log("[skin] f%u actor %08X player number %u: not handled", game::guestFrames(), actor, no);
+        return;
+    }
     const u32 pd = guestCall(c, addrs().playerData, no);
     c.r[3] = game;
-    if (!validPd(pd)) return;
+    if (!validPd(pd)) {
+        if (logOn()) log("[skin] f%u actor %08X player %u pd %08X: not a player data address", game::guestFrames(), actor, no, pd);
+        return;
+    }
     const int fixed = fixedFor(keyOf(pd));
     const u32 result = fixed ? u32(fixed - 1) : game;
     c.r[3] = result;
@@ -211,6 +224,13 @@ static void readSwatches(Ctx& c) {
     if (logOn())
         log("[skin] swatches %06X %06X %06X %06X %06X %06X %06X %06X", sSwatch[0], sSwatch[1], sSwatch[2], sSwatch[3],
             sSwatch[4], sSwatch[5], sSwatch[6], sSwatch[7]);
+}
+
+void skinSetRemote(const std::map<std::string, int>& tones) {
+    std::lock_guard lk(sMutex);
+    sRemote.clear();
+    for (const auto& [k, v] : tones)
+        if (v >= 1 && v <= 8 && k.size() <= 16) sRemote[k] = v;
 }
 
 void skinOnFrame(Ctx& c) {

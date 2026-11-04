@@ -19,6 +19,7 @@
 # Build output
 /build/
 /out/
+/test_builds/
 /.claude/
 *.log
 __pycache__/

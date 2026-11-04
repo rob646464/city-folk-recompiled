@@ -85,6 +85,31 @@ fn_80104520
 # stage draw (both ScnRoot passes + effects of the field/room scene) brackets the 3D scene.
 d_s_stageNP::fn_125_C0 all
 
+# Online letters research (src/recomp/online_mail.cpp CF_MAIL_PROBE): Pelly's post office checks.
+fn_80177D78
+fn_801165F4
+fn_80178580
+fn_80013F1C
+fn_800E97E8
+fn_800EA800
+fn_800EA0DC
+fn_800EABAC
+fn_800EAC00
+fn_800EAC74
+fn_800E9878
+fn_800EAF28
+fn_8017856C
+fn_80404BBC
+fn_80404DB8
+fn_803F9D44
+fn_8019B84C
+fn_80178244
+fn_801782A0
+fn_800E9D34
+d_a_npc_sp_perikoNP::fn_34_5E9C
+d_a_npc_sp_perikoNP::fn_34_2C3C
+fn_800FBDA8
+
 # Pointer over the whole window in ultrawide (src/game/cf_pointer.cpp, docs/CONTROLS.md "Pointer in
 # ultrawide"): the game's "pointer on the screen" test, the KPAD pointer getter it reads, and the
 # player's "pointer inside the limits" test before walking to it, widened in x by the pointer range.

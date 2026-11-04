@@ -24,6 +24,7 @@
 #include "recomp/frame.h"
 #include "recomp/interp.h"
 #include "recomp/online.h"
+#include "recomp/online_sync.h"
 #include "recomp/pacing.h"
 #include "recomp/texture_packs.h"
 #include "recomp/ui_scale.h"
@@ -1503,13 +1504,19 @@ void generalEnhancementsTab() {
 // Game features (docs/ROADMAP.md "Feature list", docs/FEATURES.md, docs/CALENDAR.md): every one
 // off / original by default; the controls live with the features in src/game/.
 void gameplayTab() {
+    // While visiting another town its host's world settings are in use (online_sync.cpp): those
+    // options are locked; the skin tone stays this player's own.
+    bool lock = recomp::online::sync::lockBegin();
     recomp::cf::grassMenu(sDirty);
+    recomp::online::sync::lockEnd(lock);
     recomp::cf::skinMenu(sDirty);
     ImGui::SeparatorText("Seasons and weather");
+    lock = recomp::online::sync::lockBegin();
     sDirty |= recomp::calendar::drawHemisphereMenu();  // src/game/cf_calendar.cpp
     sDirty |= recomp::calendar::drawWeatherMenu();     // src/game/cf_weather.cpp
     // Content from other regions (src/game/cf_region.cpp).
     sDirty |= recomp::region::menuSection();
+    recomp::online::sync::lockEnd(lock);
     // Move in from Wild World (src/game/cf_move_in.cpp, docs/MOVE_IN.md).
     sDirty |= recomp::movein::menuSection();
 }
@@ -1838,7 +1845,9 @@ void draw() {
                         ImGui::EndTabItem();
                     }
                     if (ImGui::BeginTabItem("Nintendo events", nullptr, envTab("Nintendo events"))) {
+                        const bool lock = recomp::online::sync::lockBegin();
                         sDirty |= recomp::distrib::drawMenuPage();  // docs/DISTRIBUTIONS.md
+                        recomp::online::sync::lockEnd(lock);
                         ImGui::EndTabItem();
                     }
                     ImGui::EndTabBar();

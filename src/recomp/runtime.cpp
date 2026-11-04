@@ -87,7 +87,7 @@ void setPatch(u32 id, bool on) {
 // ---------------------------------------------------------------------------
 
 namespace {
-enum class TraceMode { Off, Ring, Set, All };
+enum class TraceMode { Off, Ring, Set, All, Unique };
 TraceMode sTraceMode = TraceMode::Off;
 std::unordered_set<u32> sTraceSet;
 constexpr int kRingSize = 64;
@@ -101,6 +101,7 @@ void initTrace() {
     if (!env || !*env) return;
     const std::string v = env;
     if (v == "all") sTraceMode = TraceMode::All;
+    else if (v == "unique") sTraceMode = TraceMode::Unique;  // each function once (per CF_TRACE_FRAMES window)
     else if (v == "ring") sTraceMode = TraceMode::Ring;
     else {
         sTraceMode = TraceMode::Set;
@@ -145,7 +146,7 @@ void trace_enter(u32 addr, Ctx& c) {
         if (const char* v = std::getenv("CF_TRACE_FRAMES")) std::sscanf(v, "%u,%u", &a, &n);
         return std::pair<u32, u32>{a, n};
     }();
-    if (sTraceMode == TraceMode::All && sWindow.second) {
+    if ((sTraceMode == TraceMode::All || sTraceMode == TraceMode::Unique) && sWindow.second) {
         const u32 f = game::guestFrames();
         if (f < sWindow.first || f >= sWindow.first + sWindow.second) return;
     }
@@ -155,6 +156,21 @@ void trace_enter(u32 addr, Ctx& c) {
         return v ? u32(std::strtoul(v, nullptr, 16)) : 0u;
     }();
     if (sThreadFilter && sched::currentGuest() != sThreadFilter) return;
+    if (sTraceMode == TraceMode::Unique) {
+        // CF_TRACE=unique: the first entry of each function (with CF_TRACE_FRAMES: in that window),
+        // with its caller and frame: which code runs at a moment, at a fraction of "all"'s cost.
+        static std::mutex m;
+        static std::unordered_set<u32> seen;
+        bool first;
+        {
+            std::lock_guard lk(m);
+            first = seen.insert(addr).second;
+        }
+        if (first)
+            log("[trace] %08X lr %08X r3 %08X r4 %08X r5 %08X thread %08X frame %u", addr, c.lr, c.r[3], c.r[4], c.r[5],
+                sched::currentGuest(), game::guestFrames());
+        return;
+    }
     if (sTraceMode == TraceMode::All || (sTraceMode == TraceMode::Set && sTraceSet.count(addr)))
         log("[trace] %08X lr %08X r3 %08X r4 %08X r5 %08X thread %08X", addr, c.lr, c.r[3], c.r[4], c.r[5],
             sched::currentGuest());

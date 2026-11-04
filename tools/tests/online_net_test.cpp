@@ -3,6 +3,7 @@
 #include "recomp/online_crypto.h"
 #include "recomp/online_ed25519.h"
 #include "recomp/online_net.h"
+#include "recomp/online_sock.h"
 
 #include <cctype>
 #include <chrono>
@@ -14,6 +15,7 @@
 #include <vector>
 
 using namespace online::net;
+int relayMain(int argc, char** argv);  // tools/relay/cf_relay.cpp (CF_RELAY_AS_LIB)
 
 static int sFails = 0;
 #define CHECK(cond, ...)                                       \
@@ -201,6 +203,69 @@ int main() {
     for (auto& r : scanner.lanRooms())
         std::printf("LAN room: \"%s\" by %s at %s, %d/%d%s\n", r.roomName.c_str(), r.hostName.c_str(), r.address.c_str(),
                     r.members, r.maxMembers, r.hasPassword ? " (password)" : "");
+
+    // Through the relay (tools/relay/cf_relay.cpp, run in a thread): a code whose only route is the
+    // relay; the joiner reaches the host and a big message crosses.
+    {
+        static char a0[] = "cf_relay", a1[] = "--port", a2[] = "39912";
+        static char* av[] = {a0, a1, a2, nullptr};
+        std::thread([] { relayMain(3, av); }).detach();
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        Session rh, rj;
+        rh.setIdentity(ident("RelayHost", 8008));
+        rj.setIdentity(ident("RelayJoiner", 9009));
+        HostOptions o;
+        o.port = 39930;
+        o.portMapping = false;
+        o.relay = "127.0.0.1:39912";
+        CHECK(rh.host(o, &err), "%s", err.c_str());
+        u8 sec[10];
+        std::vector<Endpoint> eps, only;
+        CHECK(decodeCode(rh.snapshot().code, sec, eps), "relay code decodes");
+        for (auto& e : eps)
+            if (e.family == kRelayFamily) only.push_back(e);
+        CHECK(only.size() == 1, "relay endpoint in the code (%zu endpoints)", eps.size());
+        const std::string rcode = encodeCode(sec, only);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));  // the host registers
+        CHECK(rj.joinCode(rcode, "", &err), "%s", err.c_str());
+        CHECK(waitFor([&] { return rj.snapshot().state == State::Joined; }, 6), "join through the relay: %s", rj.snapshot().message.c_str());
+        std::vector<u8> msg(50000, 0x5A);
+        CHECK(rj.sendApp(0, 0x40, msg.data(), msg.size(), true), "send via relay");
+        AppMsg got;
+        CHECK(waitFor([&] { return rh.pollApp(got, 0x40, 0x40) && got.data.size() == msg.size(); }, 6), "big message via relay");
+        std::printf("relay: joined and a %zu-byte message crossed\n", msg.size());
+    }
+
+    // Hole punching: the host sends packets to a joiner's reply code (its public address).
+    {
+        Session ph;
+        ph.setIdentity(ident("PunchHost", 1111));
+        HostOptions o;
+        o.port = 39960;
+        o.portMapping = false;
+        CHECK(ph.host(o, &err), "%s", err.c_str());
+        online::sock::Socket u = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_port = htons(39961);
+        a.sin_addr.s_addr = htonl(0x7F000001u);
+        CHECK(bind(u, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0, "bind");
+        online::sock::setNonBlocking(u);
+        Endpoint e;
+        e.family = 4;
+        e.addr[0] = 127; e.addr[3] = 1;
+        e.port = 39961;
+        const u8 zero[10] = {};
+        CHECK(ph.punch(encodeCode(zero, {e}), &err), "%s", err.c_str());
+        bool got = waitFor([&] {
+            char b[64];
+            const int n = int(recv(u, b, sizeof b, 0));
+            return n >= 4 && b[0] == 'C' && b[1] == 'F' && u8(b[3]) == 0x23;
+        }, 3);
+        CHECK(got, "punch packets arrive at the reply code's address");
+        std::printf("hole punching: packets to the reply code: %s\n", got ? "yes" : "no");
+        online::sock::closeSocket(u);
+    }
 
     std::printf(sFails ? "%d FAILURES\n" : "all online transport checks passed\n", sFails);
     return sFails ? 1 : 0;

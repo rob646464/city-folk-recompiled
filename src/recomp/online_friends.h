@@ -17,7 +17,11 @@ struct Friend {
     uint8_t pub[32] = {};
     uint32_t pid = 0;  // the DWC profile id the key gives (the game's friend code)
     State state = State::Friend;
-    std::vector<uint8_t> gameInfo;  // the friend's own roster entry (0x78 bytes, kGameInfoSize) or empty
+    std::vector<uint8_t> gameInfo;
+    uint8_t xpub[32] = {};  // its X25519 letters key (proved with its Ed25519 key)
+    bool haveX = false;
+    std::string email;      // its own mail address ("Always online mail"), learned in a room
+    std::string endpoints;  // its letters link "ip:port;..." (learned in a room)  // the friend's own roster entry (0x78 bytes, kGameInfoSize) or empty
 };
 
 // The game's roster entry for this player (save friend info, 0x78 bytes: names, town; built by
@@ -44,10 +48,36 @@ void requestFriend(uint8_t memberId);
 std::vector<Friend> list();
 // The friend is in the room now with a proved key (its INFO may still be on its way).
 bool inRoom(const std::string& code);
+// Room member id of a friend's proved key (0xFF: not in the room).
+uint8_t memberOf(const uint8_t pub[32]);
+// A friend (state Friend) with this key / this Wii number.
+bool isFriend(const uint8_t pub[32]);
+bool friendByWiiNumber(uint64_t number, uint8_t pubOut[32]);
+// Wii numbers (letters, docs/ONLINE.md "Letters"): 16 decimal digits from the key.
+uint64_t wiiNumberOf(const uint8_t pub[32]);
+uint64_t myWiiNumber();
+// Letters through a relay: a friend's X25519 key, and the key two friends share for their letters
+// (HMAC("cf-letter", X25519(mine, theirs))).
+// Letters link (online_mail.cpp): this game's addresses, sent to friends in a room; a friend's.
+void setMyEndpoints(const std::string& eps);
+std::string myEndpointsText();
+std::string friendEndpoints(const uint8_t pub[32]);
+// A friend's letters link addresses learned from the link itself (an authenticated HELLO).
+void setFriendEndpoints(const uint8_t pub[32], const std::string& eps);
+bool friendXPub(const uint8_t pub[32], uint8_t out[32]);
+void letterKey(const uint8_t theirX[32], uint8_t out[32]);
+const uint8_t* myXPub();
+// Friends' email addresses (online email letters): exchanged in rooms when email is on.
+std::string friendEmail(const uint8_t pub[32]);
+void setMyEmail(const std::string& address);
 void accept(const std::string& code);
 void decline(const std::string& code);
 void block(const std::string& code);
 void remove(const std::string& code);
+// Friends removed or blocked in F1 whose entry the game's roster still has to lose (kept in
+// friends.txt until done; online.cpp takes them out when a town save is loaded and offline).
+std::vector<uint32_t> pendingRosterRemovals();
+void rosterRemovalDone(uint32_t pid);
 
 // Pending incoming requests for notices (code, name).
 std::vector<Friend> incoming();

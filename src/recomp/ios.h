@@ -65,6 +65,10 @@ using OpenFn = std::unique_ptr<Handle> (*)(const std::string& path, u32 mode, s3
 // Answers a request a device returned kPending for (any thread). `result` goes to the caller.
 void answer(const Reply& reply, s32 result);
 
+// USB keyboard (/dev/usb/kbd, ios_devices.cpp): the PC keyboard as the Wii's USB keyboard while
+// `enabled` (F1 > Online "USB keyboard"); `scancodes` = SDL keyboard state (HID usages). Host thread.
+void usbKeyboardPoll(bool enabled, const u8* scancodes, int count);
+
 // Latency multiplier for every IOS request (CF_IOS_LATENCY, default 1; 0 = instant).
 double latencyScale();
 bool logEnabled(int level = 1);  // CF_IOS_LOG

@@ -16,6 +16,12 @@ bool active();
 // This install's DWC profile id (stable; derived from the identity file), and the game's
 // 12-digit friend code for it once the game logged in (0 before).
 u32 profileId();
+// This install's Wii number (letters; from its identity key, stable): what nwc24msg.cfg holds.
+u64 wiiNumber();
+// The console's Wii friend list (/shared2/wc24/nwc24fl.bin) = the F1 friends as confirmed Wii
+// friends (number from their key, name), so the game's letters to another town find them.
+// Rewritten only when it differs; at start-up (sysconf.cpp) and when the friends change.
+void writeWiiFriends();
 u64 friendKey();
 void setFriendKey(u64 key);
 // This install's 32-byte Ed25519 seed (from <data>/online/identity.bin; never leaves the PC).

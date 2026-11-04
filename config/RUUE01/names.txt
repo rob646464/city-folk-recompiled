@@ -6204,3 +6204,5 @@ dol 80222650 IOS_Open2 manual use:IOS_Open(path,_mode)_through_the_second_IPC_se
 dol 802228D4 IOS_Close2 manual use:IOS_Close(fd)_through_the_second_IPC_send_(USB_getDeviceList) -
 dol 80101894 cf_SaveData manual use:the_town_save_(DWC_user_data_+4,_friend_list_+0x44,_friend_info_+0x1C8,_0x78_each) -
 dol 8017C294 cf_RosterRegisterOffline manual use:(slot,_friendData*,_info*_or_NULL)_while_offline_->_memcpy_into_save+0x44_and_info_at_+0x1C8 -
+dol 8017C3C0 cf_RosterDeleteOffline manual use:(slot)_while_offline_->_fn_8011AA10_shifts_the_later_save_friend_list_/_info_entries_down -
+dol 8040B21C NWC24ReadMsgAttached manual use:(msgObj,_index,_buf,_bufSize)_reads_attachment_index_of_a_received_message_(City_Folk_fn_800EA0DC) -
