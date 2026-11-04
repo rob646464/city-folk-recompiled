@@ -231,6 +231,42 @@ European slots; while an item is chosen the port names them "5 / 4 / 2 moving bo
 bulletin paper's blank Spanish/French/German/Italian slots), in memory only. Stationery is sold
 with the sheet count of the stationery it replaces.
 
+### Buying and selling prices (code read, USA)
+
+- **One price in the table, everything derived from it**: fn_800A5F74(&code) is the item's value:
+  the record's +4 price; stationery (kind 9) by its sheets (code & 3: 1 sheet price/4, 2 price/2,
+  3 price x 3/4, 4 the full price); turnips (kind 0x1A) and kind 0xF have their own rules.
+- **Buying** (Nook's offer d_a_npc_sp_tanukichiNP fn_38_2654 / fn_38_64D8, the catalog
+  d_menu_catalogNP fn_131_1F54): fn_800A60F8 = that value minus Nook's point discount by
+  membership level (fn_80146BC8 -> fn_80146BE4: level 2 -5 %, 3 -10 %, 4 -20 %; floats at r2-0x7638
+  0.05, -0x7634 0.1, -0x7630 0.2). So the player pays 80-100 % of the value.
+- **Selling to Nook** (fn_38_6194): the total is the sum of value / 4 (integer, toward zero) per
+  item (turnips: value x count); a total of 0 gets "I can't buy that" (message 0x0F). No separate
+  sell price exists; City Folk has no Re-Tail. The flea market (d_a_npc_visit_player_house_fleamarketNP)
+  only checks that the value is above 0 (the player sets the price).
+- **Catalog**: every one of these items has the "not orderable" bit (record +0x187 & 0x10), so the
+  catalog refuses to order them (message 0x34) whatever the price: no catalog price edge case.
+
+| Item | Buy (no discount; with -20 %) | Sell while an item is ticked | Sell with nothing ticked |
+|---|---|---|---|
+| Nintendo bench | 2400 (1920) | 600 | 30 (game's 120 / 4) |
+| pikmin | 2400 (1920) | 600 | 256 |
+| Blue Falcon | 2400 (1920) | 600 | 256 |
+| brown pot | 800 (640) | 200 | 200 |
+| white pot | 1200 (960) | 300 | 300 |
+| moth orchid | 2480 (1984) | 620 | 620 |
+| 5 / 4 / 2 moving boxes | 500 / 400 / 200 (400 / 320 / 160) | 125 / 100 / 50 | 0 (Nook declines) |
+| cranny / convenient / supermarket / department wall | 1440 (1152) | 360 | 0 (Nook declines) |
+| cranny / convenient / market / department floor | 1540 (1232) | 385 | 0 (Nook declines) |
+| weathered / bulletin paper, 1-4 sheets | 40 / 80 / 120 / 160 (32 / 64 / 96 / 128) | 10 / 20 / 30 / 40 | the same (game's own price) |
+
+Selling is always a quarter of the value and buying at least 80 % of it, so it never pays more than
+buying. The port's prices apply to every item of the list while any one is ticked (an item bought
+earlier keeps its value while another is ticked); with nothing ticked the disc's prices are back,
+which are never above the port's (120 / 1024 / 1024 / 0 against 2400 / 1440 / 1540 / 500...), so
+an item bought while ticked and sold after unticking brings at most what selling it while ticked
+would, far below what was paid.
+
 ### What the port does
 
 - **Where**: the chosen item goes into one slot of its category (moving boxes: furniture), the
