@@ -119,6 +119,12 @@ struct Dwc {
     struct RecvBuf {
         u32 buf = 0, size = 0;
     } recvBuf[8];
+    // Unreliable data (City Folk: only VCT voice packets) reaches the receive callback in a buffer
+    // of its own, not the game's receive buffer: the game's visit layer reads a reliable message
+    // from that buffer a frame or more after its callback, so a voice packet copied over it in
+    // between was parsed as a visit message ("_VCT" header = lengths 0x4354 / 0x4044); that lost
+    // the host's scene-change request and left the host on a black screen (docs/ONLINE.md 10e).
+    u32 udataBuf[8] = {};
     std::deque<std::function<void(Ctx&)>> later;  // callbacks for the next ProcessFriendsMatch
     struct Delayed {
         int ticks;  // ProcessFriendsMatch calls to wait
@@ -137,16 +143,25 @@ std::mutex sUiMutex;
 std::string sUiStatus = "Not connected";
 
 bool log() { return online::logOn(); }
+// CF_ONLINE_LOG=all: every reliable send / receive (else the first 40 and every 100th).
+bool logAll() {
+    static const bool on = [] {
+        const char* e = std::getenv("CF_ONLINE_LOG");
+        return e && std::strcmp(e, "all") == 0;
+    }();
+    return on;
+}
 
 // First bytes of a message, hex, for the logs.
 std::string hexHead(const u8* p, size_t n) {
     std::string s;
-    for (size_t i = 0; i < n && i < 24; i++) {
+    const size_t lim = logAll() && n <= 256 ? n : 24;  // CF_ONLINE_LOG=all: small messages whole
+    for (size_t i = 0; i < n && i < lim; i++) {
         char b[4];
         std::snprintf(b, sizeof b, "%02X", p[i]);
         s += b;
     }
-    if (n > 24) s += "...";
+    if (n > lim) s += "...";
     return s;
 }
 
@@ -574,15 +589,21 @@ void handle(Ctx& c, const net::AppMsg& m) {
             std::printf("[dwc] data from aid %u: %zu bytes > receive buffer %u, cut\n", src, len, rb.size);
             len = rb.size;
         }
-        std::memcpy(hostp(rb.buf), p, len);
+        u32 dst = rb.buf;
+        if (m.type == M_UDATA) {
+            if (!d.udataBuf[src]) d.udataBuf[src] = hleAlloc(u32(net::kMaxUnreliable), 32);
+            dst = d.udataBuf[src];
+            len = std::min<size_t>(len, size_t(net::kMaxUnreliable));
+        }
+        std::memcpy(hostp(dst), p, len);
         if (log()) {
             static int counts[2] = {0, 0};  // reliable, unreliable (VCT voice) counted apart
             int& n = counts[m.type == M_DATA ? 0 : 1];
-            if (n++ < (m.type == M_DATA ? 40 : 10) || n % (m.type == M_DATA ? 100 : 500) == 0)
+            if (n++ < (m.type == M_DATA ? 40 : 10) || n % (m.type == M_DATA ? 100 : 500) == 0 || (logAll() && m.type == M_DATA))
                 std::printf("[dwc] %.3f receive #%d from aid %u: %zu bytes (%s): %s\n", wall(), n, src, len,
                             m.type == M_DATA ? "reliable" : "unreliable", hexHead(p, len).c_str());
         }
-        call(c, d.recvCb, {src, rb.buf, u32(len), d.recvParam});
+        call(c, d.recvCb, {src, dst, u32(len), d.recvParam});
         break;
     }
     case M_PING: {
@@ -717,9 +738,12 @@ void process(Ctx& c) {
 void resetAll() {
     online::sync::matchEnded();  // a visit never outlives DWC (shutdown, a new login)
     const u32 s1 = d.gStatusStr, s2 = d.gUserData;  // hleAlloc memory is never freed: keep it
+    u32 ud[8];
+    std::memcpy(ud, d.udataBuf, sizeof ud);
     d = Dwc{};
     d.gStatusStr = s1;
     d.gUserData = s2;
+    std::memcpy(d.udataBuf, ud, sizeof ud);
 }
 
 }  // namespace
@@ -1053,7 +1077,10 @@ HLE(DWC_SetTransportTimeout) { c.r[3] = c.r[3] ? 1 : 0; }
 
 HLE(DWC_SetRecvBuffer) {
     const u8 aid = u8(c.r[3]);
-    if (aid < 8) d.recvBuf[aid] = {c.r[4], c.r[5]};
+    if (aid < 8) {
+        if (log() && d.recvBuf[aid].buf != c.r[4]) std::printf("[dwc] SetRecvBuffer aid %u: %08X (%u bytes)\n", aid, c.r[4], c.r[5]);
+        d.recvBuf[aid] = {c.r[4], c.r[5]};
+    }
     c.r[3] = 1;
 }
 
@@ -1083,7 +1110,7 @@ HLE(DWC_SendReliable) {
     const bool ok = aid < 8 && !d.sendBusy[aid] && sendData(aid, buf, size, true);
     if (log()) {
         static int n = 0;
-        if (n++ < 40 || n % 100 == 0)
+        if (n++ < 40 || n % 100 == 0 || logAll())
             std::printf("[dwc] %.3f SendReliable #%d to aid %u: %u bytes: %s%s\n", wall(), n, aid, size, hexHead(hostp(buf), size).c_str(),
                         ok ? "" : " (refused)");
     }
