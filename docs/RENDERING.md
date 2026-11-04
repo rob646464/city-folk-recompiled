@@ -44,12 +44,57 @@ flickers), so every config first met in play is a visible hitch. As in LM:
 | house | precache_house.txt | the player's house: in, round the room, out, the town east |
 | nook | precache_nook.txt | west to Nook's Cranny, in (A at the door), Tom Nook, the shop, out |
 | museum | to_museum.txt | new_game's town, walk to the museum (Blathers' hall) |
+| beach | beach.txt | saved town: the beach and the sea (shore walk east to the river mouth and back) |
+| river | river.txt | saved town: the main river below the waterfall, down the bank |
+| museum_rooms | museum.txt | saved town: museum lobby (Blathers), right wing (empty exhibit room), Brewster's cafe The Roost, the observatory (Celeste) |
+| town_hall | town_hall.txt | saved town: the town hall (Pelly at the counter) |
+| city | city.txt | saved town: Kapp'n's bus (stop, bus, ride, first-trip talk), the city's bus stop, fountain plaza, streets |
+| city_shops | city_shops.txt | the bus, then GracieGrace (Labelle's ground floor), Lyle's HRA office, Club LOL (ticket counter hall) |
+| city_shops2 | city_shops2.txt | the bus, then Shampoodle (Harriet), Katrina's fortune shop, Crazy Redd's door (members only) |
 
 All saved-town routes start with `continue_any.txt` (A with the pointer away, so every Rover
 question takes its first answer, whatever the load timing) and time their walk from the arrival
 (`after link d_bgo_drawNP 2`); continue.txt's pointer clicks land in another dialogue branch when
-"Preparing saved data" takes longer than usual. Not covered yet: town hall / post office, Able
-Sisters, the city (bus at the gate), villager houses, festivals.
+"Preparing saved data" takes longer than usual. The routes of branch routes-2 (beach .. city_shops2,
+also in tools/pipelines/verify.py, not recorded into pipelines.bin yet) put the player in front of
+a place with the `TP=` route action (docs/CONTROLS.md "Test aids"), so they do not depend on a walk
+across the town. Not covered yet: Able Sisters, Nook's later shops (the fixture has the first
+one), villager houses, festivals, the auction house / theatre shows / HRA upstairs (barricaded in
+this town), Crazy Redd's shop (membership), Phineas (not in the city on the route's day).
+
+### Places reached (branch routes-2, 2026-11-03, user-town fixture, Oct 27 10:00, USA)
+
+Every place below rendered with nothing visibly wrong at default settings (contact sheets of
+every 60th frame); none of them was compared with Dolphin: our scripted DSU Wii Remote did not
+reach Dolphin's emulated Remote this time (the device connects, buttons do nothing), so only the
+title screen's town was compared, and its look (the pink and yellow square-tile ground, the
+striped border trees) is the same in Dolphin. Positions are the game's own (actor +0x64), the
+town is about x 600-3000, z 500-3000 (south = +z), upper terrace y 84, lower 28.
+
+| Place | Reached by | Notes |
+|---|---|---|
+| Beach / sea | `TP=1300/28/2860`, walk | sea (m_ocean), surf (m_wave_white), shells; the shallow water over the sand and the stepped sand terraces |
+| River | `TP=1880/28/2000` | river below the waterfall (m_fall, m_hamon spray), banks; bridges at the river mouth |
+| Museum | `TP=mod102t0100:0/60`, walk in | lobby 260,56,484 (Blathers), right door = an exhibit wing (empty: nothing donated), left door = The Roost (Brewster; K.K.'s module is linked there too), stairs at the back left = observatory (Celeste) |
+| Town hall | `TP=mod102t00FE:0/60`, walk in | Pelly at the counter, the room, the ATM-like machine left of the door |
+| City | bus stop `TP=1808/84/700`, A at the sign, "To the city!" | Kapp'n's bus, his first-trip talk (~4000 frames of A), the city (`d_bgt_drawNP`): bus stop, steps, fountain plaza, streets; visitors (town_out NPCs) talk to the player when A is pressed near them |
+| GracieGrace | `TP=mod103t0114:0/60`, walk in | ground floor with Labelle (upstairs needs progress) |
+| Lyle's | `TP=mod103t0111:0/60`, walk in | HRA office (Lyle; d_a_rmobj_barricadeNP linked: another floor closed) |
+| Club LOL | `TP=mod103t0118:0/60`, walk in | ticket counter hall (barricade linked: the show room closed) |
+| Shampoodle | `TP=mod103t0110:0/60`, A at the door | Harriet's first-visit talk; her goodbye at the door needs A |
+| Katrina's | `TP=mod103t0113:0/60`, A at the door | dark fortune room lit by two candles (Katrina at her table) |
+| Crazy Redd's | `TP=mod103t0112:0/60`, A at the door | the doorman turns non-members away (members need an invitation: someone has to refer you) |
+| Phineas, Kicks | - | Phineas was not in the city; Kicks stands by a closed door at 1085,68,386 |
+
+With Enhanced lighting + Enhanced world on (`CF_ENHANCED=1 CF_WFX=1`): the sea and the river now
+reflect (sky, clouds, the banks, the waterfall); near the shore the sea reflects the sand
+terraces' striped side faces as long vertical bands under the player (screen-space hits on real
+surfaces seen from below the water line; looks smeared, unverified whether a planar reflection
+would show the same), and the shallow water over the sand gets a lighter, milkier tint than the
+game's (the sky term at 35 % even at a steep view). Interiors: AO and the room light, nothing off.
+The city: sun shadows on the streets; its pavements and plaza are now ground for wet ground and
+puddles (`m_hodo`, `m_center`, `m_around_ft`; `m_road` already matched); seasonal leaves fall in
+the city too (it has no trees).
 
 ### Numbers (2026-11-02)
 
@@ -160,8 +205,11 @@ stream: frames are byte-identical to the game's.
   m_cliff, m_grass, m_soil, m_verge, m_river_cliff, m_under_grass, m_cliff_slope, m_bridgeA,
   m_sand_sea, m_soil_sand(_side), m_sky, m_moon, m_cloud, m_ocean, m_river2_pattern, m_cross,
   m_river1_edge, m_wave_white, m_z_highLight, m_fall, m_hamon, m_fall_light, m_kemuri, tree /
-  flower / house materials). The city's plaza materials are not classified yet (not reached by a
-  route).
+  flower / house materials). City (routes-2, city.txt): `m_hodo` (pavements), `m_center`,
+  `m_around_ft` (plaza) are ground with `m_road`; world: `m_kadan` (flower beds), `m_busstop1`,
+  `m_fountain`, its water `m_water0-2`, the buildings (`m_grace`, `m_HRA`, `m_auction`,
+  `m_theater`, `m_fortune`, `m_tsunekichi*`, `m_tw_*`), `m_tunnel*`, `m_clock`, `m_lamp`, the
+  `m_shadow*` decals. `CF_WFX_KINDS="<material>=water|ground|world;..."` tries a kind for one run.
 - **Camera**: the main ScnRoot's current camera (u8 [root + 0xF4], CameraData at root + 0xF8 +
   0x10C n; its world -> view MTX34 comes first; the camera position / target fields there are 0 in
   City Folk) goes into Aurora's application XF memory (0x0700) as a plain XF load noted for
@@ -230,8 +278,11 @@ wet ground, puddles, ripples, haze, leaves), snow (Jan 15 11:00: sparkle, snowfl
 
 ### Open
 
-- The sea and rivers were not reached by a route (only the pond by the house); the city's plaza
-  materials are not classified (no route to the city yet).
+- Sea and river reached (routes-2: beach.txt, river.txt; "Places reached" above): they reflect;
+  near the shore the sand terraces' striped side faces reflect as long vertical bands and the
+  shallow water over the sand turns milkier than the game's. Not compared with a reference;
+  candidates: a lower sky weight where the water is shallow (the game's own water alpha), a
+  thickness limit on hits far below the hit surface (tried: no visible change, not kept).
 - Rain streaks are drawn since render-3's Aurora 0304 (not on main yet); the rain ripples /
   puddles here do not depend on it.
 - The surface-mask pipeline variants are compiled on first use (a few per scene), not precached.

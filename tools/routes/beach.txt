@@ -1,0 +1,13 @@
+# The beach and the sea (saved town CF_FIXTURE=user-town, "Frunch"): continue, then the player is
+# moved (TP token, docs/CONTROLS.md "Test aids") to the lower terrace above the beach (town
+# position 1300,28,2860; the sea is the town's south edge, z ~2950), walks down onto the sand and
+# along the shore east to the river mouth and back west. Verified 2026-11-03 (branch routes-2).
+include continue_any.txt
+after link d_bgo_drawNP 2
++1400:TP=1300/28/2860
++100:STICKDOWN*40
++120:STICKRIGHT*200
++230:STICKRIGHT+B*160
++200:STICKDOWN*30
++60:STICKLEFT+B*320
++360:STICKUP*30

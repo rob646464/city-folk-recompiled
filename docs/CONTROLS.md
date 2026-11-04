@@ -392,7 +392,12 @@ run).
   Tokens: `A B 1 2 PLUS MINUS HOME UP DOWN LEFT RIGHT C Z SHAKE NSHAKE STICKUP STICKDOWN STICKLEFT
   STICKRIGHT RECENTER` (`START`/`X`/`Y` = `PLUS`/`1`/`2`), `STICK=x/y` = Nunchuk stick at any position
   (-1..1, up = +y), `@x/y` = pointer at KPAD position (stays until the next one), `@off` = pointing
-  away. Time in retraces, or in guest frames with `CF_INPUT_CLOCK=frames` (matches `CF_SHOT` frame
+  away. `TP=<target>` (route action, fires once when the item starts, so it can follow an
+  `after link` anchor) moves the player like `CF_TELEPORT` (src/game/cf_region.cpp) with `/` in
+  place of `,`: `TP=1300/28/2860` (position x/y/z), `TP=mod102t0100:0/60` (60 units in front of the
+  last actor of REL module 102 whose structure type, +0x8 >> 16, is 0100: the museum),
+  `TP=tortimer`. Structure types and positions per place: tools/routes/*.txt comments and
+  `CF_ACTOR_LOG=<n> CF_ACTOR_MODULES=101,102,103` (lists each actor with its type). Time in retraces, or in guest frames with `CF_INPUT_CLOCK=frames` (matches `CF_SHOT` frame
   numbers). A time `+N` = N after the previous item's start; `~N` after an item repeats it N times
   (`+60:A ~10` = ten presses 60 apart). `after link <REL module> [n]` in a route file: the items
   after it are timed (`+N`) from the n-th time the game links that module (scene changes, e.g.
