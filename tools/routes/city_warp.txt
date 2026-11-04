@@ -1,0 +1,12 @@
+# The city plaza by warp (saved town CF_FIXTURE=user-town; walking version: city.txt via
+# city_bus.txt): continue, WARP=city (the player steps off Kapp'n's bus at the city's bus stop, the
+# game's own bus arrival; no ride), then up the steps to the fountain plaza, along the west street
+# and back east past the plaza. City links: d_bgt_drawNP #1.
+include warp.txt
++1600:WARP=city
+after link d_bgt_drawNP 1
++400:@off
++100:STICKUP*150
++200:STICKLEFT*300
++350:STICKRIGHT*600
++650:STICKDOWN*60

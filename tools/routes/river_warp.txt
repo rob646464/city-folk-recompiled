@@ -1,0 +1,11 @@
+# The river by warp (saved town CF_FIXTURE=user-town; walking version: river.txt): continue,
+# WARP to the east bank of the main river on the lower terrace below the waterfall (user-town
+# position 1880,28,2000; a stage change, the town reloads: link d_bgo_drawNP #3), look at the
+# falls, walk down the bank towards the sea and back.
+include warp.txt
++1600:WARP=town@1880/28/2000
+after link d_bgo_drawNP 3
++300:STICKLEFT*20
++200:STICKDOWN*250
++280:STICKLEFT*15
++120:STICKUP+B*200

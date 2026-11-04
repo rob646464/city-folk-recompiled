@@ -1,0 +1,9 @@
+# The town hall by warp (saved town CF_FIXTURE=user-town; walking version: town_hall.txt):
+# continue, WARP=town_hall (Pelly at the counter, Tortimer's module linked), around the room.
+include warp.txt
++1600:WARP=town_hall
+after link d_bgi_drawNP 2
++300:STICKUP*40
++80:STICKLEFT*150
++200:STICKRIGHT*300
++350:STICKDOWN*60
