@@ -17,7 +17,7 @@
 //   The day's special furniture (seasonal / event items) is written into furniture positions 0/1
 //   (levels 0-2) or 2/7 (level 3).
 // - Item code = 0x9000 + item number * 4 (+ count bits: stationery sheets - 1). The item table in
-//   memory: manager fn_800C24CC(), records at [mgr + 0x78] + number * 0x18C (fn_800C2704), the
+//   memory: manager fn_800C24CC(), record of a code fn_800C27E0(mgr, &code) (code -> table index fn_800C2AA8 -> [mgr + 0x78] + index * 0x18C), the
 //   first 0x18C bytes of each Item/item.arc item.bin record: +4 price, +8 number, +0x12 ten
 //   0x22-byte UTF-16 names (JP, US en/es/fr, EU en/de/it/es/fr, KR), +0x166 kind (1 wall, 2 floor,
 //   3 furniture, 9 stationery), +0x16A source (3/4/5 Nook's pools, 0x2C unused).
@@ -38,7 +38,7 @@
 //   the save always has the day's retail stock (sold flags included), and turning the option off
 //   - with the game running or not - leaves nothing behind.
 // - A new day's stock (fn_801456B4) gets the replacement again at once, before the shop places it.
-// - While the player is inside the shop (d_shop_fgNP linked) a change in the menu waits until they
+// - While the player is inside the shop (stage RM_SHOP*) a change in the menu waits until they
 //   leave, so the shelves and the stock agree. While in an online room the stock stays retail
 //   (visitors get the town data).
 // - Prices: walls, floors and moving boxes have price 0 in the game's table; the Nintendo bench,
@@ -135,18 +135,16 @@ u32 numberOf(u32 code) { return ((code - 0x9000u) >> 2) & 0xFFFF; }
 constexpr u32 kStockOff = 0x630C0;  // shop stock in the save block (d_shop_fgNP fn_119_360)
 constexpr u32 kSlots = 36;
 constexpr u16 kNone = 0xFFF1;
-constexpr u32 kRecSize = 0x18C, kTableCount = 0xA15;
-constexpr u32 kShopModule = 119;  // d_shop_fgNP (the same id in all four versions)
-
 struct Addrs {
     u32 saveBlock;     // r13-0x2FE0: the save block pointer (fn_8010DD60)
     u32 playerMgr;     // player numbers' save slots at +0x34
     u32 saveResult;    // r13-0x6930: save worker result (0 = running)
     u32 itemMgr;       // fn_800C24CC
+    u32 itemRecord;    // fn_800C27E0(mgr, &code) -> record
     u32 countFn[4];    // furniture / wall / floor / stationery counts per shop level
 };
 const Addrs& addrs() {
-    static const Addrs a{VA(0x8074E960), VA(0x805D26C0), VA(0x8074B010), VA(0x800C24CC),
+    static const Addrs a{VA(0x8074E960), VA(0x805D26C0), VA(0x8074B010), VA(0x800C24CC), VA(0x800C27E0),
                          {VA(0x801460E8), VA(0x80146118), VA(0x80146128), VA(0x80146138)}};
     return a;
 }
@@ -197,14 +195,22 @@ std::string utf16Name(u32 a) {
 }
 
 // The item's table record (null when the table is not loaded or the record is not the item).
+// Records are in table order, not by item number: fn_800C27E0(mgr, &code) is the game's lookup
+// (code -> table index fn_800C2AA8 -> fn_800C2704).
 u32 record(Ctx& c, u32 code) {
+    static u32 sCode = 0;
+    if (!sCode) sCode = hleAlloc(4);
     const u32 mgr = guestCall(c, addrs().itemMgr);
-    if (!mgr) return 0;
-    const u32 base = rd32(mgr + 0x78);
-    const u32 num = numberOf(code);
-    if (!base || num >= kTableCount) return 0;
-    const u32 rec = base + num * kRecSize;
-    if (rd16(rec + 8) != num || rd16(rec + 0x10) != 0x1701) return 0;
+    if (!mgr || !rd32(mgr + 0x78)) return 0;
+    wr16(sCode, u16(code));
+    const u32 rec = guestCall(c, addrs().itemRecord, mgr, sCode);
+    if (!rec || rd16(rec + 8) != numberOf(code) || rd16(rec + 0x10) != 0x1701) {
+        static u32 sLogged = 0;
+        if (logOn() && rec && sLogged++ < 4)
+            log("[unused] f%u record of %04X at %08X: +8 %04X +0x10 %04X, not the item", game::guestFrames(), code, rec,
+                rd16(rec + 8), rd16(rec + 0x10));
+        return 0;
+    }
     return rec;
 }
 std::string nameOf(Ctx& c, u32 code) {
@@ -261,7 +267,10 @@ void updateTable(Ctx& c, bool on) {
         for (int l = 0; l < 10; l++) {
             const char* nm = it.names[l];
             const u32 a = rec + 0x12 + 0x22 * l;
-            if (nm && placeholder(a)) writeName(a, nm);  // (again after a reload of the table)
+            if (nm && placeholder(a)) {  // (again after a reload of the table)
+                writeName(a, nm);
+                if (logOn()) log("[unused] f%u name of %04X (language %d) at %08X: %s", game::guestFrames(), it.code, l, a, nm);
+            }
         }
     }
 }
@@ -337,7 +346,15 @@ bool apply(Ctx& c, u32 stock, const Item& it, const char* why) {
 }
 
 bool playerIn() { return rd32(addrs().playerMgr + 0x34) < 4; }
-bool inShop() { return relBase(kShopModule, 1) != 0; }
+// In one of Nook's shop rooms (stage RM_SHOP0 .. RM_SHOP3_F2; the current stage is the byte
+// r13-0x6384, fn_8016266C; names in the 68-entry stage table, cf_warp.cpp). d_shop_fgNP alone is
+// no test: it stays linked in other rooms too.
+bool inShop() {
+    const u32 st = rd8(VA(0x8074B5BC));
+    if (st >= 68) return false;
+    const u32 name = rd32(VA(0x804F0C98) + st * 8);
+    return name >= 0x80000000u && name < 0x81800000u && std::strncmp(gstr(name), "RM_SHOP", 7) == 0;
+}
 
 const Item* wanted() { return find(u32(port::settings().unusedContent.nookItem)); }
 
@@ -425,6 +442,22 @@ void unusedItemsOnFrame(Ctx& c) {
     if (sSuspended && rd32(addrs().saveResult) != 0) {
         sSuspended = false;
         if (logOn()) log("[unused] f%u save finished (result %d): resumed", game::guestFrames(), s32(rd32(addrs().saveResult)));
+    }
+    // Test aid CF_UNUSED_AT=<guest frame>:<item code hex, 0 = none>[,...]: sets the choice at that
+    // frame, as the menu does (not saved).
+    static const std::string sAt = std::getenv("CF_UNUSED_AT") ? std::getenv("CF_UNUSED_AT") : "";
+    if (!sAt.empty()) {
+        const u32 f = game::guestFrames();
+        for (size_t p = 0; p < sAt.size();) {
+            size_t q = sAt.find(',', p);
+            if (q == std::string::npos) q = sAt.size();
+            unsigned af = 0, code = 0;
+            if (std::sscanf(sAt.substr(p, q - p).c_str(), "%u:%x", &af, &code) == 2 && af == f) {
+                port::settings().unusedContent.nookItem = int(code & 0xFFFF);
+                log("[unused] f%u test: chosen item %04X", f, code & 0xFFFF);
+            }
+            p = q + 1;
+        }
     }
     const Item* want = wanted();
     updateTable(c, want != nullptr);

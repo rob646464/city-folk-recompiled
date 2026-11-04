@@ -185,7 +185,9 @@ other); unticking brings back what was for sale.
   (seasonal item, event item: categories 0x29/0x2A/0x2B/0x52/0x53) is written into furniture
   positions 0 and 1 (levels 0-2) or 2 and 7 (level 3).
 - **Item codes**: 0x9000 + item number x 4 (+ sheets - 1 for stationery). Table in memory: manager
-  fn_800C24CC(), records at [mgr + 0x78] + number x 0x18C (fn_800C2704) = the first 0x18C bytes of
+  fn_800C24CC(), a code's record fn_800C27E0(mgr, &code) (code -> table index fn_800C2AA8 ->
+  [mgr + 0x78] + index x 0x18C, fn_800C2704; the index is the file's record order, not the item
+  number: cranny wall #43F is record 0x315) = the first 0x18C bytes of
   each Item/item.arc item.bin record: +4 price, +8 number, +0x10 0x1701, +0x12 ten 0x22-byte UTF-16
   names (JP, US en/es/fr, EU en/de/it/es/fr, KR), +0x166 kind (1 wallpaper, 2 flooring, 3
   furniture, 9 stationery), +0x16A source (3/4/5 Nook's pools, 0x21 Saharah, 0x2C unused).
@@ -319,5 +321,50 @@ such an item appears.
 - `CF_UNUSED_LOG=1`: every stock generated (all 36 slots, `*` = sold), each replacement / restore
   with its reason, the save starters and their end, and once per shop visit the shop room's item
   grid (`(x,z):code`, `<-` = the replacement).
-- The setting through `CF_SETTINGS_AT="<frame>:unused_content.nook_item=C0AC"` or a settings.ini
-  written before the start (`run.ps1 -Settings "[unused_content]|nook_item=C0AC"`).
+- `CF_UNUSED_AT=<guest frame>:<item code hex, 0 = none>[,...]`: sets the choice at that guest
+  frame as the menu does (not saved). Also a settings.ini written before the start
+  (`run.ps1 -Settings "[unused_content]|nook_item=C0AC"`) or `CF_SETTINGS_AT` (display frames).
+- Shop positions (Nook's Cranny, level 0, fixture `user-town-clean`): the room's tiles are 32 units
+  (tile centre 32 t + 16); furniture slot 18 is shown at tile (9,8) (buy from `TP=304/0/306`,
+  facing up), wallpaper (5,8), flooring (5,9), stationery (5,10) (from x = 210, facing left);
+  Tom Nook is talked to from `TP=256/0/410` facing up ("I want to sell!" = first choice).
+
+### Verification (USA, cfrecomp, 2026-11-04)
+
+Sample per category (user request), from copies of `user-town-clean` (Nook's Cranny, level 0;
+clock 2026-10-27 10:00), muted, off screen, scratch APPDATA/NAND; scripted routes and screenshots:
+
+- **Shop and buying** (bells from `CF_GIVE_ITEM` bags): Nintendo bench in furniture slot 18
+  (replacing code B844; level 0 has two furniture positions, both possible seasonal ones, so the last is taken) -> on the
+  shelf, "Yes, a Nintendo bench. It costs 2,400 Bells", bought (91,000 -> 88,600), sold-out sign
+  after; 5 moving boxes 500 (90,500); cranny wall in the wallpaper slot (replacing A044) "A cranny
+  wall, hm? A mere 1,440 Bells!" (89,560); market floor "1,540 Bells" (89,460); weathered paper
+  "Those come four to a pack for just 160 Bells" (90,840; slot code 96DB -> 9673, 4 sheets).
+- **Using them** (items in the pockets, house 1): cranny wall "Hang on Wall" -> the room's wall is
+  the shop's wall, the old wood paneling back in the pockets (twice); all four walls and all four
+  floors drawn in the room through the house's wall / floor codes (save block + 0x6E2BA / 0x6E2BC
+  in this town, the field "Hang on Wall" wrote; poked with `CF_POKE`): department wall + market
+  floor, convenient wall + cranny floor, supermarket wall + convenient floor, cranny wall +
+  department floor. "Spread on Floor" is offered for the floors (not clicked: the scripted pointer
+  did not reach that entry). 5 moving boxes "Place in Room": a stack of cardboard boxes with the
+  leaf logo in the room, pockets and room normal afterwards, a save written with it placed (result
+  1). Weathered paper "Write a Letter" -> address book -> "Dear Bluebear, ... From rob64" on the
+  weathered paper, Confirm. Names in the pockets: "5 moving boxes", "market floor", "pikmin".
+- **Untick**: `CF_UNUSED_AT=7000:0` in town -> "restored slot 25: A0FC -> A044 (option off)", the
+  shop shows A044 again.
+- **Day change**: `CF_CLOCK_JUMP=7000:86400` in town -> fn_801456B4 makes the new day's stock (new
+  wallpaper A060 etc.) and the cranny wall replaces the new wallpaper at once; in the shop.
+- **Save / reload**: every save (the session start's "Preparing saved data", `CF_FORCE_SAVE`) logs
+  "restored ... before the save" and the replacement back after the worker's result; the written
+  rvforest.dat has the original B844 in slot 18 (file + 0x6310C). Reload with the option off: B844
+  on the shelf, nothing applied; with it on: the bench in slot 18 again. Bought, saved, reloaded
+  with the option on: slot 18 "C0AC (sold)", the sold-out sign on the shelf, the wallet kept.
+- **Selling with nothing ticked**: pikmin + market floor (given into the pockets) to Nook: "Ah,
+  for all of that, I'll give you 985 Bells!" = 600 + 385, wallet 0 -> 985.
+- **F1**: the menu-ID sweep (`CF_MENU_ID_CHECK`) through Enhancements > Unused content (two
+  pages) found no ID conflicts.
+- The other items checked by their table records and log entries only (the same code paths).
+- Fixed on the way: item records are in file order (fn_800C27E0 is the lookup, not number x
+  0x18C), and d_shop_fgNP stays linked outside the shop (the shop test is the stage name).
+- Not run: PAL / Japan / Korea (hooks `all`, functions "identical apart from addresses", VA table
+  regenerated), Nookington's levels 1-3 (other slot counts), the bulletin paper's town-hall use.
