@@ -80,6 +80,7 @@ double secs() {
     return duration<double>(steady_clock::now() - t0).count();
 }
 
+std::set<u64> sSeen;  // letter ids taken in (any path); persisted in seen.txt
 fs::path dir(bool out) { return port::dataDir() / "online" / "mail" / (out ? "out" : "in"); }
 
 void put32(std::vector<u8>& b, u32 v) {
@@ -164,9 +165,36 @@ void unstore(bool out, u64 id) {
     fs::remove(dir(out) / name, ec);
 }
 
+// Letter ids taken in, kept across starts (<data>/online/mail/seen.txt, the latest 4096): a copy
+// that arrives later by another path (email after the letters link, a resend after a lost ack,
+// a room after email) is recognised after the game has taken the first one out of the inbox.
+fs::path seenPath() { return port::dataDir() / "online" / "mail" / "seen.txt"; }
+std::vector<u64> sSeenOrder;
+void rememberSeen(u64 id) {
+    if (!sSeen.insert(id).second) return;
+    sSeenOrder.push_back(id);
+    std::error_code ec;
+    fs::create_directories(seenPath().parent_path(), ec);
+    if (sSeenOrder.size() > 4096) {
+        sSeen.erase(sSeenOrder.front());
+        sSeenOrder.erase(sSeenOrder.begin());
+        std::ofstream out(seenPath(), std::ios::trunc);
+        for (u64 v : sSeenOrder) out << std::hex << v << "\n";
+        return;
+    }
+    std::ofstream(seenPath(), std::ios::app) << std::hex << id << "\n";
+}
+
 void load() {
     if (sLoaded) return;
     sLoaded = true;
+    {
+        std::ifstream in(seenPath());
+        for (std::string line; std::getline(in, line);) {
+            const u64 v = std::strtoull(line.c_str(), nullptr, 16);
+            if (v && sSeen.insert(v).second) sSeenOrder.push_back(v);
+        }
+    }
     for (bool out : {true, false}) {
         std::error_code ec;
         for (auto& e : fs::directory_iterator(dir(out), ec)) {
@@ -202,7 +230,6 @@ u32 gameIdOf(u64 letterId) {
 // Sealed for the friend pair (friends::letterKey: X25519 of the two letters keys), signed with our
 // Ed25519 key; only a friend's signed letters open.
 namespace sk = ::online::sock;
-std::set<u64> sSeen;  // letter ids already taken in (direct and relay copies of one letter)
 bool sWake = false;
 
 std::string relayName() {
@@ -465,8 +492,8 @@ void linkReceive(const sk::Addr& from, const u8* p, size_t n) {
         std::printf("[mail] a letters-link letter did not open: dropped\n");
         return;
     }
-    takeIn(std::move(l), fromKey);
-    linkSend(from, ack);
+    takeIn(std::move(l), fromKey);  // a copy we already have is dropped there
+    linkSend(from, ack);  // acknowledged either way: the sender's earlier ack may have been lost
 }
 
 void linkThread() {
@@ -568,7 +595,7 @@ void takeInLocked(Letter&& l) {
         return;
     }
     std::printf("[mail] letter %016llx received (%zu attachments)\n", (unsigned long long)l.id, l.att.size());
-    sSeen.insert(l.id);
+    rememberSeen(l.id);
     store(false, l);
     sIn[l.id] = std::move(l);
     online::postNotice("A letter from a friend has arrived");

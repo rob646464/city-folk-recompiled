@@ -1,0 +1,59 @@
+# Letter to another town, town Frunch (user-town after a visit with test): as letter_other_town_test.txt.
+# Env: CF_GIVE_ITEM=8000:9643x2,8000:91B8x2 CF_TELEPORT=11000:1295,84,1300;11900:298,0,430;15500:260,0,480 CF_WC24_SEND=16300
+include continue.txt
+# Pockets -> the stationery (slot 5 in Frunch, given by CF_GIVE_ITEM) -> Write a Letter.
+8200:@-0.82/0.82
++30:A
++200:@0.56/-0.26
++40:A
++100:@0.58/-0.40
++40:A
+# Addressee: the other-towns tab, the first friend, Confirm.
++300:@-0.40/-0.81
++40:A
++150:@0.0/-0.08
++40:A
++150:@0.66/0.78
++40:A
+# Keyboard: type "hi", Done.
++300:@0.04/0.148
++40:A
++60:@0.47/0.01
++40:A
++80:@0.66/0.78
++40:A
++120:A
++120:A
++120:A
+# To the post office (CF_TELEPORT ...;11000:1295,84,1300;11900:298,0,430), Pelly: Send mail.
+11030:@off
+11100:STICKUP*80
++90:STICKUP+B*80
++100:A
++40:STICKUP*80
+12000:STICKUP*30
++120:A
++90:A ~5
++150:A ~6
+12650:@0.56/0.31
+# Pelly: "Frunch." (the letter carries its own addressee), pick the letter, Confirm.
+# Pelly's last line ("...from reaching its destination.") needs one more A; then the letter picker.
+13950:A
++100:A
+after link d_menu_mslctNP
++90:@-0.41/-0.37
++60:A
++120:@0.66/0.78
++60:A
+# "Do you have any other letters...?" -> "Nope." (pointer stays there), then out of the post office:
+# Pelly starts the WiiConnect24 send task (fn_34_5E9C -> fn_8017B164) when the player leaves.
++60:@0.69/0.68
++90:A ~8
++60:@off
++150:A
++300:STICKDOWN*500
+# Save with the HUD's save button (bottom right): the save path runs the WiiConnect24 step.
++700:@0.84/0.82
++60:A
++200:@off
++100:A ~6
