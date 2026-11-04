@@ -426,7 +426,12 @@ void updateAmounts(bool outdoor) {
     const float light = 1.0f - 0.62f * night;
     a.ambient = mixc(Rgb{light, light, light}, Rgb{0.8f, 0.82f, 0.9f}, overcast * 0.4f);
     if (night > 0.0f) a.ambient = mixc(a.ambient, Rgb{0.30f, 0.34f, 0.48f}, night * 0.6f);
-    if (!outdoor) a.particles = 0;
+    // Seasonal particles only in the town: its outdoor background module d_bgo_drawNP (108) is
+    // linked there, indoors (d_bgi_drawNP 107) and in the city (d_bgt_drawNP 109, which has no
+    // trees or blossoms) it is not. The city's pavements count as ground for the wet-ground
+    // effects, so the surface test alone (outdoor) let leaves fall there (routes-2).
+    const bool town = relBase(108, 1) != 0 && relBase(109, 1) == 0;
+    if (!outdoor || !town) a.particles = 0;
     sAmt = a;
 }
 

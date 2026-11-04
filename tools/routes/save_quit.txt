@@ -1,0 +1,14 @@
+# Makes the clean post-save fixture (tools/routes/make_fixtures.ps1 -Only user-town-clean, from CF_FIXTURE=user-town):
+# continue (A with the pointer away also runs through Mr. Resetti's first-reload talk), then the
+# HUD's Save button (top right, the pointer on it brings the field HUD up) -> "Would you like to
+# quit now?" -> "Save and quit." (the highlighted first choice: pointer away + A) -> "Saving...".
+# A start from that save has no Resetti and no unsaved-session state, so routes do not lose time
+# on him and a killed run never leaves one behind (the fixture copy is fresh every run).
+# Verified 2026-11-03 (branch routes-3).
+include continue_any.txt
+after link d_bgo_drawNP 2
++1400:@0.5/0
++30:@0.88/-0.82
++40:A
++240:@off
++60:A ~12
