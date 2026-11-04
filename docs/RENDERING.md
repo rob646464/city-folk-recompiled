@@ -65,11 +65,14 @@ this town), Crazy Redd's shop (membership), Phineas (not in the city on the rout
 ### Places reached (branch routes-2, 2026-11-03, user-town fixture, Oct 27 10:00, USA)
 
 Every place below rendered with nothing visibly wrong at default settings (contact sheets of
-every 60th frame); none of them was compared with Dolphin: our scripted DSU Wii Remote did not
-reach Dolphin's emulated Remote this time (the device connects, buttons do nothing), so only the
-title screen's town was compared, and its look (the pink and yellow square-tile ground, the
-striped border trees) is the same in Dolphin. Positions are the game's own (actor +0x64), the
-town is about x 600-3000, z 500-3000 (south = +z), upper terrace y 84, lower 28.
+every 60th frame). The beach and the city were compared with Dolphin (routes-3, "Dolphin
+reference runs" below): the beach by the river mouth (sea colour and pattern, the light
+shallow-water band over the sand, surf, the sand steps, the terrace's striped side, the bridge)
+and the city plaza / west street (fountain, plaza stones, GracieGrace, lamps, Kicks at the
+barricaded door, Shampoodle) look the same in both; only the camera position differs a little
+(both runs walk by timed stick input). The other places are unverified. Positions are the game's
+own (actor +0x64), the town is about x 600-3000, z 500-3000 (south = +z), upper terrace y 84,
+lower 28.
 
 | Place | Reached by | Notes |
 |---|---|---|
@@ -87,14 +90,46 @@ town is about x 600-3000, z 500-3000 (south = +z), upper terrace y 84, lower 28.
 | Phineas, Kicks | - | Phineas was not in the city; Kicks stands by a closed door at 1085,68,386 |
 
 With Enhanced lighting + Enhanced world on (`CF_ENHANCED=1 CF_WFX=1`): the sea and the river now
-reflect (sky, clouds, the banks, the waterfall); near the shore the sea reflects the sand
-terraces' striped side faces as long vertical bands under the player (screen-space hits on real
-surfaces seen from below the water line; looks smeared, unverified whether a planar reflection
-would show the same), and the shallow water over the sand gets a lighter, milkier tint than the
-game's (the sky term at 35 % even at a steep view). Interiors: AO and the room light, nothing off.
-The city: sun shadows on the streets; its pavements and plaza are now ground for wet ground and
-puddles (`m_hodo`, `m_center`, `m_around_ft`; `m_road` already matched); seasonal leaves fall in
-the city too (it has no trees).
+reflect (sky, clouds, the banks, the waterfall). Interiors: AO and the room light, nothing off.
+The city: sun shadows on the streets; its pavements and plaza are ground for wet ground and
+puddles (`m_hodo`, `m_center`, `m_around_ft`; `m_road` already matched). Fixed on routes-3:
+
+- **Vertical bands near the shore** (Aurora 0391): not the surface mask (it held only m_ocean,
+  checked with `AURORA_WORLD_FX_SHOW=1`) and not the sky fallback (`=8`: the band pixels were
+  scene hits). Under translucent water the scene depth is the bed: the sea floor and the sand
+  terraces' side faces below the water line. Rays reflected up from the surface "hit" those
+  underwater faces in screen space and returned their stripes. A reflection can only show what is
+  above the reflecting plane, so hits below the ray's origin plane now let the march go on.
+- **Milky shallow water** (Aurora 0391): the game draws the sea over the sand with a low alpha
+  near the shore, but the reflection weight ignored it (35-85 % of sky over a pixel that is mostly
+  sand). The weight now follows how far the bed lies behind the surface (mask depth vs scene
+  depth along the view axis): full from 1.5 "metres", 15 % at the waterline. Shallow water is the
+  game's own plus a faint sheen; deep sea, river and ponds unchanged.
+- **Leaves in the city**: the seasonal particles followed "the frame drew ground or water", and
+  the city's pavements are ground since routes-2. They now also need the town's outdoor module
+  (`d_bgo_drawNP` linked, the city's `d_bgt_drawNP` not; indoors `d_bgi_drawNP`): none in the
+  city or indoors, unchanged in the town (`CF_WFX_LOG` "particles").
+
+### Dolphin reference runs (routes-3)
+
+`tools/dolphin/dolphin_run.ps1 -User <scratch> -Script <dsu script> -Seconds <n> -Out <dir>
+[-Gecko "Beach teleport"|"Bus stop teleport"]` (scripts from `tools/dolphin/make_scripts.py`):
+a scratch Dolphin user folder from the templates in tools/dolphin, a Wii Remote + Nunchuk driven
+by `dsu_server.py` over DSU, window captures. What it took to make Dolphin's input scriptable:
+`[Input] BackgroundInput = True` (Dolphin ignores pads while its window is not focused, and ours
+sits off screen), `[Controls] WiimoteSource0 = 1` (the emulated Remote; without it no Remote
+connected and nothing reacted), the DSU analog face buttons in protocol order Square, Cross,
+Circle, Triangle (Dolphin reads the button pressure bytes: with them reversed Cross = A never
+registered while Circle = B did), and presses of 0.35 s (shorter ones were missed with Dolphin
+below full speed). There is no warp in Dolphin, so a Gecko code does the `TP=`: the player actor
+pointer at 0x805D26E4 (USA rev 1, found in a `CF_MEM_DUMP`; heap and REL addresses match ours),
+written once while the player still stands at the house door (1200, 84, 640). The town is the
+clean post-save fixture `user-town-clean` (tools/routes/save_quit.txt, make_fixtures.ps1),
+copied into Dolphin's NAND before every run, so a killed run never leaves Mr. Resetti waiting at
+the next start; the in-game save before quitting is in the scripts but the HUD Save button was not
+hit through Dolphin's IR mapping yet. Seen on the way: on Dolphin's console the first city trip
+gave Rover's WiiConnect24 talk on the bus instead of ours (Kapp'n's first-trip talk): a save /
+console-state difference (the Dolphin NAND's WiiConnect24 setting), not rendering.
 
 ### Numbers (2026-11-02)
 
@@ -188,7 +223,7 @@ stream: frames are byte-identical to the game's.
 | Rain ripples | on | expanding rings on water and puddles while it rains |
 | Snow sparkle | on | glints on bright snow-covered ground, snow cover dates (Dec 11 - Feb 24) in daylight with the sun out |
 | Haze on grey days | on, strength 1 | depth-based haze beyond the player's distance on cloudy / rainy / snowy days, a trace at dawn and dusk |
-| Seasonal particles | on, density 1 | petals Apr 1-8, leaves Oct 17 - Nov 25, snowflakes Nov 26 - Feb 24 (hemisphere option: +6 months); outdoors only |
+| Seasonal particles | on, density 1 | petals Apr 1-8, leaves Oct 17 - Nov 25, snowflakes Nov 26 - Feb 24 (hemisphere option: +6 months); in the town only (not indoors, not in the city) |
 | Colour preset | Original | New Leaf warmth / Soft film / Vivid (+ strength); grades the 3D, not the HUD |
 | Tilt-shift (diorama) | off | blur above / below the player's row (strength, sharp band) |
 
@@ -278,11 +313,9 @@ wet ground, puddles, ripples, haze, leaves), snow (Jan 15 11:00: sparkle, snowfl
 
 ### Open
 
-- Sea and river reached (routes-2: beach.txt, river.txt; "Places reached" above): they reflect;
-  near the shore the sand terraces' striped side faces reflect as long vertical bands and the
-  shallow water over the sand turns milkier than the game's. Not compared with a reference;
-  candidates: a lower sky weight where the water is shallow (the game's own water alpha), a
-  thickness limit on hits far below the hit surface (tried: no visible change, not kept).
+- Sea and river reached (routes-2: beach.txt, river.txt): they reflect; the shore's vertical
+  bands and milky shallow water are fixed (Aurora 0391, "Places reached" above). A faint
+  reflection of the terrace side above the water line remains (a real reflection).
 - Rain streaks are drawn since render-3's Aurora 0304 (not on main yet); the rain ripples /
   puddles here do not depend on it.
 - The surface-mask pipeline variants are compiled on first use (a few per scene), not precached.

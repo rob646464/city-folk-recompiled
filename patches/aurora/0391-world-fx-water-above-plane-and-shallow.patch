@@ -1,0 +1,35 @@
+diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
+--- a/lib/gfx/world_fx.cpp
++++ b/lib/gfx/world_fx.cpp
+@@ -319,6 +319,16 @@
+       }
+       let qh = p + r * hi;
+       let sh = project(qh);
++      // (0391) a reflection only shows what is above the reflecting plane. Under translucent
++      // water the scene depth is the bed (the sea floor, the terraces' sides below the water
++      // line), so rays from the surface "hit" those underwater faces: the striped terrace sides
++      // came back as long vertical bands. Hits below the ray's origin plane: march on.
++      if (dot(view_pos(sh.xy, load_depth(sh.xy)) - p, up_view()) < -0.01 * dist) {
++        prevT = t;
++        t += stepLen;
++        stepLen *= 1.06;
++        continue;
++      }
+       let uv = sh.xy * u.size.zw;
+       let col = textureSampleLevel(tcolor, samp, uv, 0.0).rgb;
+       // fade near the picture edges and with distance along the ray
+@@ -442,7 +452,13 @@
+         let refl = reflection(pw, n, steps, jitter, true);
+         let v = normalize(-pw);
+         let f = schlick(dot(v, n), 0.04);
+-        let k = u.refl.x * (0.35 + 0.65 * f);
++        // (0391) shallow water: the game draws the sea / river over its bed with a low alpha near
++        // the shore (the sand shows through); the mask keeps only the water's colour, so weight
++        // the reflection by how far the bed lies behind the surface along the view axis (mask
++        // depth = surface, scene depth = bed): full from 1.5 "metres", a trace at the waterline.
++        let bedDepth = max(pw.z - p.z, 0.0);
++        let deep = smoothstep(0.0, 1.5 * ws, bedDepth);
++        let k = u.refl.x * (0.35 + 0.65 * f) * mix(0.15, 1.0, deep);
+         if (u.pp.y > 4.5) { // debug view 5: scene hit share of the reflection, its weight, normal tilt
+           if (u.pp.y > 7.5) { // 8: why the march ends (r: 0.25 behind camera, 0.5 off screen, 0.75 no hit, 1 hit; g: step; b: closest miss)
+             return ssr_why(pw + n * (0.002 * max(-pw.z, 1.0)), reflect(-v, n), steps);
