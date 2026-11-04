@@ -369,6 +369,33 @@ void setMtx(Ctx& c) {
 }
 static HleReg sSetMtxReg("RFLSetMtx", &setMtx);
 
+// RFL's database queries: who asks (CF_MII_LOG; the Shampoodle hint, below).
+std::atomic<u32> sQueryFrame{0};
+void noteQuery(Ctx& c, const char* what) {
+    static u32 sLogged = 0;
+    const bool harriet = relBase(kHarrietModule, 1) != 0;
+    if (harriet) sQueryFrame = game::guestFrames();
+    if (sLog && harriet && sLogged < 200) {
+        sLogged++;
+        log("[mii] %s(%08X, %08X) from %s at frame %u", what, c.r[3], c.r[4], relSymbolize(c.lr).c_str(), game::guestFrames());
+    }
+}
+void isAvailable(Ctx& c) {
+    noteQuery(c, "RFLIsAvailableOfficialData");
+    callOriginal(c, "RFLIsAvailableOfficialData");
+}
+static HleReg sIsAvailableReg("RFLIsAvailableOfficialData", &isAvailable);
+void searchOfficial(Ctx& c) {
+    noteQuery(c, "RFLSearchOfficialData");
+    callOriginal(c, "RFLSearchOfficialData");
+}
+static HleReg sSearchReg("RFLSearchOfficialData", &searchOfficial);
+void additionalInfo(Ctx& c) {
+    noteQuery(c, "RFLGetAdditionalInfo");
+    callOriginal(c, "RFLGetAdditionalInfo");
+}
+static HleReg sAdditionalReg("RFLGetAdditionalInfo", &additionalInfo);
+
 // ---- guest frame: defaults, database sync, hint -------------------------------------------------
 
 void readDefaults(Ctx& c) {
@@ -422,7 +449,7 @@ void miiOnGuestFrame(Ctx& c) {
         }
     }
     static u32 sCheck = 0;
-    const bool countNow = (++sCheck % 30) == 0 || picker;
+    const bool countNow = (++sCheck % 30) == 0;
     if (!needDefaults && image.empty() && !countNow) return;
     RegSave save(c);
     const Syms& s = syms();
@@ -453,9 +480,13 @@ void miiOnGuestFrame(Ctx& c) {
     }
     const int n = countGuestMiis(dbBuf);
     std::lock_guard lk(sh.m);
-    if (picker && n == 0) {
+    // The hint: in Shampoodle (Harriet's module linked) or with the Mii picker open while the
+    // console has no Miis. Harriet's makeover checks the game's own Mii list (built from RFL by
+    // the game's Mii manager) and only says "there are no Miis", so the whole visit counts.
+    if ((picker || harriet) && n == 0) {
         if (!sh.noticeAt || game::guestFrames() > sh.noticeAt + 60)
-            log("[mii] Mii picker open with no Miis: hint shown (frame %u)", game::guestFrames());
+            log("[mii] %s with no Miis on the console: hint shown (frame %u)", picker ? "Mii picker open" : "in Shampoodle",
+                game::guestFrames());
         sh.noticeAt = game::guestFrames();
     }
     if (n != sh.guestCount && sLog) log("[mii] the game's RFL has %d Miis", n);
@@ -1339,8 +1370,8 @@ void miiDrawOverlay() {
         requestPreview(ed.edit.slots[ed.sel]);
         uploadPreview();
     }
-    // The Shampoodle hint: while the Mii picker is open with no Miis on the console, and for 10 s
-    // after it closed (the game's own "no Miis" answer follows).
+    // The Shampoodle hint: while in Shampoodle (or the Mii picker is open) with no Miis on the
+    // console, then fading out over a second.
     u32 at;
     int count;
     {
@@ -1350,7 +1381,7 @@ void miiDrawOverlay() {
     }
     if (!at || count != 0) return;
     const u32 frames = game::guestFrames() - at;  // 0 while the picker is open
-    constexpr u32 kShow = 600;
+    constexpr u32 kShow = 90;  // the count is refreshed every 30 frames
     if (frames > kShow || menu::isOpen()) return;
     const float alpha = frames > kShow - 60 ? float(kShow - frames) / 60.0f : 1.0f;
     const ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -1363,8 +1394,8 @@ void miiDrawOverlay() {
                                         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings |
                                         ImGuiWindowFlags_NoMove;
     if (ImGui::Begin("##mii_hint", nullptr, kFlags)) {
-        ImGui::TextUnformatted("This console has no Miis yet.");
-        ImGui::TextDisabled("Make one in F1 > Miis (or import yours), save, then ask Harriet again.");
+        ImGui::TextUnformatted("Harriet's makeovers need a Mii, and this console has none yet.");
+        ImGui::TextDisabled("Make one in F1 > Miis (or import yours) and save, then ask her again.");
     }
     ImGui::End();
     ImGui::PopStyleVar();

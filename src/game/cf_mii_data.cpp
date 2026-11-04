@@ -118,6 +118,7 @@ std::string Mii::problem() const {
     if (miiId() >> 29 & 1) return "a temporary Mii (not stored on a console)";
     // Unused bits of the words are not checked by RFL; only the fields' ranges are.
     for (int i = 0; i < int(F::Count); i++) {
+        if (F(i) == F::Height || F(i) == F::Weight) continue;  // RFL takes up to 128 (below)
         const FieldInfo& fi = kFields[i];
         const int v = get(F(i));
         if (v < fi.min || v > fi.max) return "a value out of range";
