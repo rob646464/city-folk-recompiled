@@ -37,8 +37,9 @@ F1 > Enhancements > Debug page, ignores `CF_WARP` / `CF_WARP_SWEEP` and the rout
   frames (400), write `<dir>/<name>.ppm`, log `[warp] sweep <name>: ok|LEFT AGAIN|FAILED|TIMEOUT`;
   `LEFT AGAIN` = the game had moved the player elsewhere by the screenshot; `<filter>` =
   substrings of names with `|` between them; demo scenes only when the filter names them). A
-  sweep of all ~90 places takes about an hour on a loaded PC; `CF_FF` makes the loads finish
-  after the dwell, so sweep at normal speed.
+  sweep of all ~90 places takes about an hour on a loaded PC (about 30 minutes on a quieter
+  one); `CF_FF` makes the loads finish after the dwell, so sweep at normal speed.
+  `CF_WARP_SWEEP_QUIT=<frames>`: the game quits normally that many frames after `sweep done`.
 
 ## How the game changes places (USA addresses; VA() maps them on PAL/JP/KR)
 

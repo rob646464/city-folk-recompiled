@@ -538,6 +538,43 @@ Kinds without a controller (bus stop, lamps) glow from dusk to dawn. Off = the o
 (every structure glows). Screenshots (build/runs/win4 of the branch's worktree): a dark villager
 house without / with the old light, lit houses with their light.
 
+**The city** (branch enh-light-3; `cf_light.cpp` "city night lights"). The city's structures
+(d_a_str_townNP; models `obj_tw_*` from `Str/Brres/town<Rgn><Lng>StrBrres<S/W>.arc`: the shops,
+the street lamps `obj_tw_lamp`, the plaza's buildings, the bus stop `obj_busstop1`) have the same
+daSTR_c light controller, so their lights follow the game's own state too (21:30 in the user-town
+fixture: GracieGrace, HRA, Shampoodle and Resetti's center 0 = closed and dark, Redd's, Katrina's,
+the theatre, the auction house, the ATM, the other buildings and all 12 street lamps 1). The
+light positions come from the model's own data instead of a table: the controller names its lit
+materials (**controller + 0x14 + i**, s8 material index per entry of the material table, -1 =
+none), the ResMdl's DrawOpa / DrawXlu byte code (opcode 4: material, shape, node) gives the
+shapes drawn with each, and the shapes' position-array bounding boxes (VtxPos + 0x20 min / + 0x2C
+max, turned into model space by the node's bind matrix at ResNode + 0x70; the lamp's glow sphere
+is a unit sphere under a node scaled 25 at the lamp head) give the glowing part. A flat part
+(a window pane, a sign: thin in x or z) gets a light 14 units in front of it, on the side away
+from the model's centre; a compact one (< 40 units: a lamp head) just below it; a larger volume
+in front of its +z face; a part spanning most of the building in both horizontal directions
+(a facade the game also tints) none. Parts within 40 units merge, at most 3 per model; warm
+windows (radius 210, x1.2), lamps (230, x1.3, shadows). The city has more sources than Aurora's
+64 lights: the nearest 64 to the camera are submitted. Test aid `CF_CITY_LIGHT_LOG=1` (every lit
+part with its material entry, size, centre and light position; per model every 600 frames;
+lit materials drawn per frame); route `tools/routes/city_plaza_warp.txt` (the plaza and the
+shop fronts) with `CF_CLOCK_START="2026-10-27 21:30"`.
+
+**Lit materials are light sources, not receivers** (branch enh-light-3, Aurora 0420): a lit
+material at night is the game's glow (TEV colour 1 lerped to the light colour), but the enhanced
+world shaders darkened it like any surface: the moon's shadow and terminator and AO took a third
+of the glow off the theatre's lit doorway ((185,184,114) plain -> (124,135,113)). The
+ResMatTevColor that fn_99_A40 writes (hook on `ResMatTevColor::GXSetTevColor` while it runs) is
+recorded with its light amount; when g3d loads that material to draw it
+(`G3DState::LoadResMatTevColor`, hooked) the draw gets the material hint
+`AURORA_MATERIAL_EMISSIVE` (no directional shadow / terminator, no AO; extra lights still add;
+uniform only, no pipeline variants). Applies in the town and the city, by day too where the game
+lights a material by day. **The night grade keeps the light sources' colour** (Aurora 0421): the
+moonlit grade (cool gain, less saturation) turned warm windows grey-green; bright, saturated pixels
+(max channel 0.45 -> 0.8, chroma 0.1 -> 0.3) keep their colour by `0.85 x night`. Doorway after
+both: (181,183,121), the plain game's look. Off (master off) nothing changes: the hooks only read
+guest memory and call the original.
+
 ### Fireflies and fireworks (effect lights)
 
 F1 "Fireflies and fireworks" (under Night lights, on). Both are `nw4r::ef` effects, so the lights
