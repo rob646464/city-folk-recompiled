@@ -255,6 +255,67 @@ Original 60 and default settings: the changes only act while interpolating (paci
 slowdown, the detector only with `CF_JUDDER_LOG`), and 0392 only changes which pipelines are built
 ahead; no frame dump comparison was made.
 
+## Stutters at 4K with Enhanced lighting (2026-11-04, branch stutter-ao)
+
+User report (test build, USA, own town, 3840x2131 window on a 120 Hz VRR display, VSync, match
+refresh, Enhanced lighting Ultra + Enhanced world): "harsh stutters"; last_run.log per 60 s: 40
+present intervals over 1.5x, GPU 9.1 / 10.8 / 47.9 ms median / p95 / max, indoors 88.6 fps
+presented / 48.6 game, 5854 pipelines in use vs 5107 configs the hold prepared. Reproduced with
+`tools/routes/perf_user_warp.txt` (town walk, the house, the plaza) and the user's settings.ini at
+3840x2160 (`--window 3840x2160`, VSync off, 120 fps target, `CF_PERF_LOG=10 AURORA_GPU_PROFILE=10
+CF_PIPELINE_LOG=1 AURORA_CREATE_LOG=1`; agent scratch perfrun.py / perfsum.py). Causes found:
+
+1. **World FX surface-mask pipelines missed at every launch** (Aurora 0451). Enhanced world
+   re-draws each water / ground draw into its RGBA8 mask with a derived config (no blending,
+   destination alpha 255 / 128). Those pipelines were built on first use only, never by the hold,
+   so each launch missed them: 15 at once in Rover's bus, 7 at the first town view, more per place
+   (`MISS ... layout 8463b4af895dcd36 (1 color 22 depth 48 x1) ... dA 255`), 1-3.5 ms each from the
+   shader cache (a 20-50 ms frame), 0.1-0.5 s each cold. The rebuild now builds every remembered
+   mask-shaped config for the mask target (`PrecacheWorldMask` in the enhanced bits, `0xef` in the
+   `Pipeline precache:` line), and precache::init sends Enhanced world's configuration before the
+   first rebuild (cf_world.cpp `applyStartupConfig`; it was first sent with the first scene, after
+   the hold). Base vs new, same warm cache and route: 30 MISS -> 2 (the 2 are new scene configs).
+2. **Configs not in the list for these settings**: recorded from these runs into data/pipelines.bin
+   (scene configs of the house / plaza met the first time: 0.3-0.5 s cold compiles each).
+3. **GPU at the 120 fps budget**: town at 4K Ultra busy 7.0-7.8 ms of 8.33 (EFB pass 2.8-3.2,
+   sun shafts 1.06-1.16, World FX surface mask 0.64-1.4, shadow mask 0.5, AO 0.54 + its taps in the
+   EFB shaders), so every heavier view is a late frame and the governor cycles 120 -> 104 fps.
+   Cuts: sun shafts at half resolution (Aurora 0452, ~0.8 ms), AO off by default (~0.6-0.8 ms;
+   "Enhanced lighting (City Folk)" below).
+4. **GPU keep-warm filler in play** (BACKPORT 32): it started whenever a frame took under 75% of
+   the recent heavy level, 30-125 times a minute in play here (user: 92 in the first minute); each
+   time the view got heavier the frame carried scene + filler. Now only after 12 menu-light frames
+   in a row (under 40%); A/B `CF_KEEP_WARM_RULE=old`.
+
+5. **Ambient occlusion's cost at 4K**: with AO on, per frame +0.75 ms in the EFB pass (the AO mask
+   taps), 0.53 ms of AO passes, +0.5 ms mask copies (its plane), more staging: busy 8.2 vs 5.3 ms
+   with it off (same build, back to back). Off by default now (section "Enhanced lighting (City
+   Folk)", AO item); this is most of the gain below.
+
+Results (perf_user_warp, 220 s of play per run from the town arrival, 4K, 120 fps target, VSync off,
+warm caches, runs back to back in the order shown; the PC was shared, other agents' instances ran
+during t1/t3/t4, so absolute interval counts are far above the user's 40/min; `perfsum.py`,
+`gpuprof.py` in the agent scratch):
+
+| run | exe / settings | presented fps (median) | intervals over 1.5x per min | GPU ms median / p95 | GPU busy ms (profile) | MISS | keep-warm starts |
+|---|---|---|---|---|---|---|---|
+| t1 | main, user's settings.ini (AO on 0.4) | 61.6 | 2734 | 15.1 / 19.9 | - | 28 | 360 |
+| t2 | branch, same file (migrated: AO off) | 115.7 | 19 | 8.9 / 12.4 | 5.25 | 0 | 0 |
+| t3 | branch, AO kept on (ao_version=2) | 74.9 | 3016 | 13.3 / 18.0 | 8.16 | 0 | 0 |
+| t4 | main again | 66.5 | 2627 | 14.3 / 20.2 | 8.83 | 28 | 516 |
+| t5 | branch, migrated again | 104.2 | 278 | 9.6 / 12.4 | - | 0 | 0 |
+
+Sun shafts 0.92 -> 0.23 ms per frame (t4 vs t3). With AO on the GPU stays at the budget at 4K /
+120 (t3): the user's PC (same GPU, no other load) should hold ~120 with AO off; with AO on, 60-100
+fps (or a lower render scale) is what fits. Not measured: an idle-PC pass of the same table.
+
+Not seen as causes: render-thread creations in play (`AURORA_CREATE_LOG`: one 6 ms shadow-map
+atlas creation at the first shadowed frame, everything else under 1 ms; the enhanced passes are
+built in the hold, 0223), CPU (host / render worker 1-3 ms median). Furniture / night-light shadow
+slots were not singled out (the house showed no hitches beyond the room load). Shared-PC caveat: other
+agents' game instances ran during most runs (GPU at 100 %), which inflates "Staging copies" and
+"Mask copy to buffer" to 1-3 ms and the intervals into the hundreds; compare A/B pairs only.
+
 ## Performance (2026-11-02)
 
 Measured with `verify.py --presets perf4k120 --routes nook --cache-from <warm cache>`
@@ -499,6 +560,24 @@ unchanged (the hooks call the original and return). Presets Low / Medium / High 
   from the geometry (the tree wall behind the town has upward normals): the horizon AO took them
   and greyed the whole wall out. Where a vertex normal is more than ~60 degrees off a reliable
   depth-derived normal, the depth one is used.
+- **AO only on the ambient light, off by default** (branch stutter-ao, Aurora 0450; user report
+  2026-11-04: "AO overpowers the real-time shadows"). AO multiplied the pixel's whole colour after
+  the sun / moon tint, so a contact shadow in full sun was as dark as a sun shadow (the two read
+  alike), and its intensity curve was visibility^(1 + 2 i): even the slider's lowest value gave the
+  full occlusion. Now (gx/shader.cpp) AO only darkens the share of the light a full shadow of the
+  directional lights would leave (`enh_dir_full`, the product of their shadow tints, against the
+  tint actually there, `enh_dir_tint`), minus the extra lights' share of colour channel 0
+  (`enh_s_xl`), and never light-emitting surfaces: in full sun only the ambient part (~40% at the
+  default sun strength) is occluded, inside a sun shadow all of what is left (that is ambient
+  light: nothing is darkened twice). Intensity i is visibility^(2 i) (0 none, 0.5 the plain
+  horizon-based occlusion). Defaults: off in every preset, intensity 0.30, radius 40 (was on,
+  0.40 = ^1.8, 60). `AURORA_ENH_AO_SHOW=1` shows the occlusion actually applied (share included).
+  **Settings migration** (src/port/settings.cpp `migrateAo`, logged as `[settings] ambient
+  occlusion settings from an older version: ...`): a settings.ini without
+  `[enhanced_lighting] ao_version` (written before this branch) with the intensity at the old
+  default 0.40 (never tuned) gets the new defaults (AO off, 0.30; the user's file: on, 0.40, radius
+  32 -> off, 0.30, 32); a tuned intensity is kept with AO on/off as it was, converted to the same strength on the new curve (i + 0.5); radius 60 (old default)
+  becomes 40, any other radius is kept. Saved with `ao_version=2` afterwards.
 
 ### Time of day (Aurora 0342 grade)
 

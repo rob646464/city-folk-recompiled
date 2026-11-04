@@ -3,6 +3,7 @@
 #include "port/install.h"
 #include "port/recovery.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -172,6 +173,7 @@ std::vector<Field> fields() {
         flag("enhanced_lighting", "ssao", l.ssao),
         num("enhanced_lighting", "ssao_intensity", l.ssaoIntensity),
         num("enhanced_lighting", "ssao_radius", l.ssaoRadius),
+        num("enhanced_lighting", "ao_version", l.aoVersion),
         flag("enhanced_lighting", "sun_shadows", l.sunShadows),
         num("enhanced_lighting", "sun_direction", l.sunDirection),
         num("enhanced_lighting", "sun_shadow_strength", l.sunShadowStrength),
@@ -498,6 +500,34 @@ std::string settingsPath() { return displayPath(configDir() / "settings.ini"); }
 namespace {
 // The file itself: an extended path, so a deep %APPDATA% works without the long path policy.
 std::filesystem::path settingsFile() { return longPath(configDir() / "settings.ini"); }
+
+// Ambient occlusion settings of files written before branch stutter-ao (no ao_version): AO was on
+// by default, intensity i gave visibility^(1 + 2 i) (so even the lowest value was the full
+// occlusion), radius 60. Now AO is off by default and Aurora 0450 uses visibility^(2 i). Values
+// still at the old defaults (never changed by the player) become the new defaults, AO included;
+// values the player set are kept, the intensity converted to the same strength (i + 0.5). Logged
+// once; the file gets ao_version=2 at the next save.
+void migrateAo() {
+    auto& l = sSettings.enhancedLighting;
+    const EnhancedLightingSettings d{};
+    const bool oldOn = l.ssao;
+    const float oldI = l.ssaoIntensity, oldR = l.ssaoRadius;
+    // (intensity at the old default: the player never tuned AO; on was the old default too)
+    const bool untouched = oldI > 0.399f && oldI < 0.401f;
+    if (untouched) {
+        l.ssao = d.ssao;
+        l.ssaoIntensity = d.ssaoIntensity;
+    } else {
+        l.ssaoIntensity = std::min(oldI + 0.5f, 2.0f);
+    }
+    if (oldR > 59.9f && oldR < 60.1f) l.ssaoRadius = d.ssaoRadius;
+    std::fprintf(stderr,
+                 "[settings] ambient occlusion settings from an older version: %s, intensity %.2f, radius %.0f -> %s, intensity "
+                 "%.2f, radius %.0f (%s)\n",
+                 oldOn ? "on" : "off", oldI, oldR, l.ssao ? "on" : "off", l.ssaoIntensity, l.ssaoRadius,
+                 untouched ? "the old defaults: AO is now off by default, F1 > Visuals > Enhanced lighting turns it back on"
+                           : "your values kept, intensity converted to the new curve");
+}
 }  // namespace
 
 bool setSetting(const std::string& section, const std::string& key, const std::string& value) {
@@ -536,6 +566,8 @@ void loadSettings() {
     if (!in) return;
     auto table = fields();
     std::string line, section;
+    bool fileAo = false;  // the file has the AO keys (migrateAo)
+    sSettings.enhancedLighting.aoVersion = 0;  // stays 0 unless the file has ao_version
     while (std::getline(in, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
         if (line.rfind("\xEF\xBB\xBF", 0) == 0) line.erase(0, 3);  // UTF-8 BOM (file saved by an editor)
@@ -553,6 +585,7 @@ void loadSettings() {
             sSettings.video.matchDisplay = old == 2;
             continue;
         }
+        if (section == "enhanced_lighting" && key.rfind("ssao", 0) == 0) fileAo = true;
         bool known = false;
         for (auto& f : table)
             if (section == f.section && key == f.key) {
@@ -562,7 +595,11 @@ void loadSettings() {
         if (!known)
             for (auto& ext : extensions()) ext.load(section, key, value);
     }
+    const bool migrate = fileAo && sSettings.enhancedLighting.aoVersion < 2;
+    if (migrate) migrateAo();
+    sSettings.enhancedLighting.aoVersion = 2;
     sanitize();
+    if (migrate) saveSettings();  // once: the file now has ao_version=2
 }
 
 void resetSettingsToDefaults() {

@@ -25,6 +25,10 @@
 #include <windows.h>
 #endif
 
+namespace recomp::world {
+void applyStartupConfig();  // src/game/cf_world.cpp
+}  // namespace recomp::world
+
 namespace recomp::precache {
 namespace {
 
@@ -72,6 +76,8 @@ void init() {
     // Likewise the enhanced-lighting parts that select shader variants (Aurora 0217): otherwise the
     // first build is for enhanced lighting off and the second frame queues its variants again.
     recomp::enh::applySettings();
+    // And Enhanced world's (its surface mask selects pipelines too, Aurora 0451).
+    recomp::world::applyStartupConfig();
     // CF_PRECACHE=0: no shipped list (cold-cache testing). CF_PIPELINE_LIST=<file>: another list.
     if (const char* p = std::getenv("CF_PRECACHE"); p && std::atoi(p) == 0) return;
     std::string list;

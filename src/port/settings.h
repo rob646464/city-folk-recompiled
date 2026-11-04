@@ -295,10 +295,15 @@ struct EnhancedLightingSettings {
     float bloomScene = 0.12f;          // 0..1: glow of ordinary bright surfaces (above the threshold)
     float bloomEmissive = 0.6f;        // 0..2: glow of light-emitting effects (glows, fire, beams, sparks)
     // Screen-space ambient occlusion (contact darkening in corners and under furniture;
-    // horizon-based since Aurora 0224). On by default, so it comes on with the master switch.
-    bool ssao = true;
-    float ssaoIntensity = 0.4f;        // 0..2
-    float ssaoRadius = 60.0f;          // world units
+    // horizon-based since Aurora 0224). Off by default since branch stutter-ao (user: it
+    // overpowered the real-time shadows); since Aurora 0450 it only darkens the ambient share of
+    // the light and the intensity is visibility^(2 x intensity) (0.5 = the plain occlusion).
+    bool ssao = false;
+    float ssaoIntensity = 0.3f;        // 0..2
+    float ssaoRadius = 40.0f;          // world units
+    // Version of the AO settings above (settings.cpp loadSettings): files without it were written
+    // with AO on by default and the old curve, and are migrated once (logged).
+    int aoVersion = 2;
 
     // ---- City Folk (src/game/cf_light.cpp, docs/RENDERING.md "Enhanced lighting (City Folk)") ----
     // Sun and moon: soft shadow maps from a directional light that follows the game clock.
