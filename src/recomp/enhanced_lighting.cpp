@@ -41,6 +41,7 @@ int sPerfPhase = -1;       // CF_ENH_PERF_AB phase (host thread)
 bool sPerfNoMap = false;
 bool sGhostPass = false;
 bool sCharPass = false;
+bool sEmissive = false;
 u8 sMaterial = 0xFF;  // last material hint sent
 
 // Extra lights submitted for the coming main view (guest thread only). Providers (ghost lights,
@@ -103,6 +104,7 @@ struct Look {
     bool valid = false;
     float gain[3] = {1, 1, 1}, lift[3] = {0, 0, 0};
     float saturation = 1, contrast = 1, shafts = 0;
+    float keepLights = 0;
 };
 std::mutex sLookMutex;
 Look sLook;
@@ -114,6 +116,10 @@ void setGrade(const float gain[3], const float lift[3], float saturation, float 
     for (int k = 0; k < 3; k++) sLook.gain[k] = gain[k], sLook.lift[k] = lift[k];
     sLook.saturation = saturation;
     sLook.contrast = contrast;
+}
+void setGradeKeepLights(float amount) {
+    std::lock_guard lk(sLookMutex);
+    sLook.keepLights = amount;
 }
 void setShafts(float intensity) {
     std::lock_guard lk(sLookMutex);
@@ -551,6 +557,7 @@ void applySettings() {
         for (int k = 0; k < 3; k++) c.gradeGain[k] = sLook.gain[k], c.gradeLift[k] = sLook.lift[k];
         c.gradeSaturation = sLook.saturation;
         c.gradeContrast = sLook.contrast;
+        c.gradeKeepLights = sLook.keepLights;
         c.shafts = l.sunShadows && l.sunShafts && sLook.shafts > 0.0f;
         c.shaftIntensity = sLook.shafts;
     }
@@ -604,7 +611,8 @@ void emitMaterial() {
         return v ? std::atoi(v) : 1;
     }();
     const bool allowed = sMode == 1 || (sMode == 2 && (sSceneCount & 1) == 0);
-    const u8 m = allowed && sInScene && sCharPass && !sGhostPass && !sInCaster ? AURORA_MATERIAL_CHARACTER : AURORA_MATERIAL_WORLD;
+    u8 m = allowed && sInScene && sCharPass && !sGhostPass && !sInCaster ? AURORA_MATERIAL_CHARACTER : AURORA_MATERIAL_WORLD;
+    if (sEmissive && sInScene && !sGhostPass && !sInCaster) m = AURORA_MATERIAL_EMISSIVE;
     if (m == sMaterial) return;
     GXSetMaterialHintAurora(m);
     sMaterial = m;
@@ -615,6 +623,11 @@ void setCharacterPass(bool on) {
     emitMaterial();
 }
 bool characterPass() { return sCharPass; }
+void setEmissive(bool on) {
+    if (sEmissive == on) return;
+    sEmissive = on;
+    emitMaterial();
+}
 
 void setCasterPass(bool on) {
     if (sInCaster == on) return;
@@ -662,6 +675,7 @@ void beginScene() {
 
 void endScene() {
     sInScene = false;
+    sEmissive = false;
     emitClass();
     emitMaterial();
     if (active()) GXSceneEndAurora();

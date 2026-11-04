@@ -377,10 +377,26 @@ WiiConnect24 letters.
      "You can't send letters to people from out of town because your WiiConnect24 settings are
      turned off"). User decision 2026-11-03: the port turns it on once per town, the first time it
      sees the town with WiiConnect24 available, with the game's own setter fn_80177DE0, and records
-     the town in `<data>/town_wc24.txt` (town name struct hex), so turning it off on the attic
-     telephone stays off. A/B: CF_TOWN_WC24_DEFAULT=0. Checked with a town without friends and
-     Nintendo events off (user-town fixture): no message, saves complete, no KD download, no
-     network use.
+     the town in `<data>/town_wc24.txt`, so turning it off on the attic telephone stays off.
+     A/B: CF_TOWN_WC24_DEFAULT=0. Checked with a town without friends and Nintendo events off
+     (user-town fixture): no message, saves complete, no KD download, no network use.
+     **Town key (fixed 2026-11-04, branch distrib-once)**: the town is recorded by its own
+     identity from the save, `<town id>-<town name as UTF-16 hex> <readable name>` per line
+     (`src/recomp/town_id.cpp`, the same key as the Nintendo events record, docs/DISTRIBUTIONS.md
+     "Receive now once per town": town data `rd32(0x8074E960)`, resident slots at +0x20 + slot *
+     0x86C0, town struct at +0x7EC2 of the first resident that exists). Before, the key was read
+     at town data + 0x7EC2, which is empty (0x20 bytes before the first resident's town struct; the
+     residents' data starts at +0x20; `town_wc24.txt` files of earlier runs hold only zeros), so every town got the same all-zero key: the first town seen was recorded, and every
+     other town on that install was then left alone, so one town's choice (left on, or turned off
+     on the attic telephone) counted for all. Old entries (all-zero, or anything not in the
+     `<id>-<name>` form) are ignored, so each town gets its default once again and is then
+     recorded under its own key; a town turned off on the attic telephone before this fix gets
+     turned on once more (the old file cannot tell which town that was). Not done while in an
+     online room (the town data may be another player's town during a visit). Verified
+     (2026-11-04, scratch folders): a `town_wc24.txt` holding only the old all-zero line, Nintendo
+     events off, `user-town2`: "setting of test (A056): turned on for this town (first start)",
+     line `A056-0074006500730074 test (A056)` added; with `user-town-clean` and the same old file
+     `F177-004600720075006E00630068 Frunch (F177)` added, then test's own line in the same file.
   3. Flag 0x1F. The game's only setter is in the player-creation scene module
      (d_a_npc_sp_player_createNP fn_25_BB4, scene 0x3D; a new game is scene 0x3C); no town we have
      has it and a visit does not set it (a visit sets flag 0x16 in the visitor's town). The port sets

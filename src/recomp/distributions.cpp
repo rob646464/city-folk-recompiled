@@ -15,11 +15,14 @@
 #include "port/http.h"
 #include "port/install.h"
 #include "port/settings.h"
+#include "recomp/distrib_record.h"
 #include "recomp/hle.h"
 #include "recomp/menu.h"
 #include "recomp/nwc24_dl.h"
+#include "recomp/online.h"
 #include "recomp/runtime.h"
 #include "recomp/system.h"
+#include "recomp/town_id.h"
 #include "recomp/wc24_crypto.h"
 
 #include <imgui.h>
@@ -363,85 +366,98 @@ bool archiveReady(const Def& d) {
     return (!d.item || file(itemPath(d))) && (!d.design || file(designPath(d)));
 }
 
-// Per-town record (state.ini in the distributions folder): which distributions this town got and
-// when, the last letter id served, a counter for "Receive now" letters.
-struct TownState {
-    std::map<std::string, long long> received;  // key -> console time (s since 2000) the game took it
-    std::map<std::string, int> cycle;           // key -> loop cycle it was received in
-    long long lastDelivery = 0;
-};
-struct State {
-    std::string town = "town";
-    std::map<std::string, TownState> towns;
-    u32 manualCounter = 0;
-    u32 lastStored = 0;  // letter id of the package KD stored last ("not modified" after it)
+// Per-town record (state.ini in the distributions folder, distrib_record.h): which distributions
+// each town got and when (and which through "Receive now", once per town), the last letter id
+// served, a counter for "Receive now" letters. Towns are keyed by their own id + name from the save.
+using record::TownState;
+struct State : record::Book {
     int pending = -1;      // "Receive now": catalogue index waiting for KD
     u32 pendingId = 0;
     std::string pendingLocal;  // "Receive now" of an original .enc from the folder
     bool syncWanted = false;  // a package was stored: run the game's check while playing
-    std::map<u32, int> served;  // letter id -> catalogue index (what each id carried)
 };
 State sState;
 bool sStateLoaded = false;
+std::atomic<bool> sTownSeen{false};  // the current town was identified from the save in this session
+int sNowWaiting = -1;  // "Receive now" package KD stored that the game has not kept yet (this session)
 std::map<std::string, std::string> sLocalResult;  // original file -> KD's verdict
 u32 sPeteDelivered = 0;  // letter id Pete last handed over (this session)
 
-void loadState() {
-    if (sStateLoaded) return;
-    sStateLoaded = true;
-    std::ifstream f(folder() / "state.ini");
-    std::string line, section;
-    while (std::getline(f, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.empty() || line[0] == '#') continue;
-        if (line[0] == '[') {
-            section = line.substr(1, line.find(']') - 1);
-            continue;
-        }
-        const auto eq = line.find('=');
-        if (eq == std::string::npos) continue;
-        const std::string k = line.substr(0, eq), v = line.substr(eq + 1);
-        if (section == "state") {
-            if (k == "town") sState.town = v;
-            else if (k == "manual_counter") sState.manualCounter = u32(std::strtoul(v.c_str(), nullptr, 10));
-            else if (k == "last_stored") sState.lastStored = u32(std::strtoul(v.c_str(), nullptr, 16));
-        } else if (section.rfind("town.", 0) == 0) {
-            TownState& t = sState.towns[section.substr(5)];
-            if (k == "last_delivery") t.lastDelivery = std::atoll(v.c_str());
-            else {
-                long long when = 0;
-                int cyc = 0;
-                std::sscanf(v.c_str(), "%lld,%d", &when, &cyc);
-                t.received[k] = when;
-                t.cycle[k] = cyc;
-            }
-        } else if (section == "served") {
-            sState.served[u32(std::strtoul(k.c_str(), nullptr, 16))] = std::atoi(v.c_str());
-        }
-    }
-}
 void saveState() {
     std::error_code ec;
     fs::create_directories(folder(), ec);
-    std::ofstream f(folder() / "state.ini", std::ios::trunc);
-    f << "# Nintendo events: what each town received (written by the game; docs/DISTRIBUTIONS.md)\n";
+    const fs::path p = folder() / "state.ini", tmp = folder() / "state.ini.tmp";
     {
-        char b[16];
-        std::snprintf(b, sizeof(b), "%08X", sState.lastStored);
-        f << "[state]\ntown=" << sState.town << "\nmanual_counter=" << sState.manualCounter << "\nlast_stored=" << b << "\n";
+        std::ofstream f(tmp, std::ios::trunc);
+        record::write(sState, f);
+        if (!f) return;
     }
-    for (auto& [name, t] : sState.towns) {
-        f << "[town." << name << "]\nlast_delivery=" << t.lastDelivery << "\n";
-        for (auto& [k, when] : t.received) f << k << "=" << when << "," << t.cycle[k] << "\n";
+    fs::rename(tmp, p, ec);  // whole file or nothing: the record must not get lost on a crash
+    if (ec) {
+        fs::remove(p, ec);
+        fs::rename(tmp, p, ec);
     }
-    f << "[served]\n";
-    for (auto& [id, d] : sState.served) {
-        char b[16];
-        std::snprintf(b, sizeof(b), "%08X", id);
-        f << b << "=" << d << "\n";
+}
+void loadState() {
+    if (sStateLoaded) return;
+    sStateLoaded = true;
+    {
+        std::ifstream f(folder() / "state.ini");
+        if (!f) {
+            sState.format = record::kFormat;  // a new record
+            return;
+        }
+        record::parse(sState, f);
+    }
+    // Files from before the "Receive now once" change: what "Receive now" delivered then counts.
+    const bool old = sState.format < record::kFormat;
+    if (record::upgrade(sState, [](int di) { return di >= 0 && di < kDefCount ? kDefs[di].key : nullptr; })) {
+        int n = 0;
+        for (const auto& [k, t] : sState.towns) n += int(t.now.size());
+        if (old) recomp::log("[distrib] record from an older version: %d distribution(s) counted as received through Receive now", n);
+        saveState();
     }
 }
 TownState& town() { return sState.towns[sState.town]; }
+
+// "Receive now" once per town: the time this town kept `key` through it (0 = never).
+long long receivedNowAt(const std::string& key) {
+    const auto& n = town().now;
+    const auto it = n.find(key);
+    return it == n.end() ? 0 : std::max(1LL, it->second);
+}
+std::string encKey(const std::vector<u8>& data) {
+    u8 h[20];
+    wc24crypto::sha1(data.data(), data.size(), h);
+    std::string k = "enc:";
+    char b[4];
+    for (u8 x : h) std::snprintf(b, sizeof b, "%02x", x), k += b;
+    return k;
+}
+
+// The town in the save (town_id.h: town id + name; shared with online.cpp's town_wc24.txt).
+// "" while no town is loaded.
+std::string townInSave(std::string* readable, u32 save = 0) {
+    // In an online room the town data may be another player's town (a visit): keep the last one.
+    if (recomp::online::active()) return "";
+    return recomp::town::keyInSave(readable, save);
+}
+// Called with sM held: the game shows this town (its record becomes the current one).
+void noteTown(const std::string& key, const std::string& readable) {
+    if (key.empty()) return;
+    loadState();
+    const bool first = !sTownSeen || sState.town != key;
+    sTownSeen = true;
+    if (record::identify(sState, key, readable)) saveState();
+    if (first) {
+        std::string got;
+        for (const auto& [k, when] : town().now) got += (got.empty() ? "" : ", ") + k;
+        recomp::log("[distrib] town %s (%s): received through Receive now: %s", readable.c_str(), key.c_str(),
+                    got.empty() ? "none" : got.c_str());
+        nwc24::requestDownload();  // KD's check waits for the town (serve)
+    }
+}
+std::string dateText(long long secs2000);
 
 // ---- original .enc files the player supplies ----------------------------------------------------
 struct LocalEnc {
@@ -491,6 +507,12 @@ const long long kEpoch2000 = daysFromCivil(2000, 1, 1);
 // Console clock (local time, seconds since 2000-01-01) -> day number since 1970.
 long long consoleDay(long long secs2000) { return kEpoch2000 + secs2000 / kDay; }
 long long consoleNow() { return (long long)(double(timeBase()) / kTimerClock); }
+std::string dateText(long long secs2000) {  // the game clock's date, YYYY-MM-DD
+    const Date d = civil(consoleDay(secs2000));
+    char b[16];
+    std::snprintf(b, sizeof b, "%04d-%02d-%02d", d.y, d.m, d.d);
+    return b;
+}
 
 // ---- which distributions are in play --------------------------------------------------------------
 
@@ -813,9 +835,11 @@ bool forceEnv(int& v) {
 }
 
 // Test aid CF_DISTRIB_NOW=<key>[@<seconds>]: "Receive now" for that distribution once the game
-// has registered its task (after <seconds> of play, default at once).
+// has registered its task and the town is known (after <seconds> of play, default at once).
+// Several, comma-separated, are pressed in order (e.g. the same key twice: the second is refused).
 int sTestNow = -2;
 double sTestNowAt = 0;
+std::vector<std::pair<int, double>> sTestNowList;  // the ones after the first
 
 int indexOf(const std::string& key) {
     for (int i = 0; i < kDefCount; i++)
@@ -823,14 +847,50 @@ int indexOf(const std::string& key) {
     return -1;
 }
 
-void receiveNow(int di) {
+// "Receive now": at most once per town (anti-farming; the schedules still bring every
+// distribution again in its slot). Refused for a distribution this town already kept through it.
+bool receiveNow(int di) {
     loadState();
+    if (const long long at = receivedNowAt(kDefs[di].key)) {
+        recomp::log("[distrib] receive now refused: %s was received through Receive now on %s (town %s)", kDefs[di].key,
+                    dateText(at).c_str(), sState.town.c_str());
+        return false;
+    }
+    if (sState.pending == di || sNowWaiting == di) {
+        recomp::log("[distrib] receive now ignored: %s is already on its way", kDefs[di].key);
+        return false;
+    }
     sState.pending = di;
     sState.pendingId = 0x4D000000u | (++sState.manualCounter & 0xFFFFFF);  // 'M'
     saveState();
     recomp::log("[distrib] receive now: %s (letter id %08X)", kDefs[di].key, sState.pendingId);
     nwc24::requestDownload();
+    return true;
 }
+
+// The game kept a "Receive now" letter (USA: fn_8010F194; other bases: KD stored the package).
+void noteReceivedNow(const std::string& key) {
+    sNowWaiting = -1;
+    TownState& t = town();
+    if (t.now.count(key)) return;
+    t.now[key] = consoleNow();
+    recomp::log("[distrib] %s: received through Receive now by town %s (no second time for this town)", key.c_str(),
+                sState.town.c_str());
+}
+
+#ifdef CF_DEV_TOOLS
+// Developer builds only (cfrecomp; never in the shipped CityFolkRecomp): forget this town's
+// "Receive now" record, all of it (key empty) or one distribution.
+void forgetReceivedNow(const std::string& key) {
+    loadState();
+    auto& n = town().now;
+    const size_t before = n.size();
+    if (key.empty()) n.clear();
+    else n.erase(key);
+    saveState();
+    recomp::log("[distrib] dev: forgot %zu Receive now record(s) of town %s", before - n.size(), sState.town.c_str());
+}
+#endif
 
 }  // namespace
 
@@ -854,9 +914,32 @@ Reply serve(const std::string& url) {
     // Original files the player supplied: served first (each once, in file order), as they are.
     // (Which distribution one carries is known only after KD decrypts it.)
     // "Receive now" wins over the schedule.
+    // Whose record decides: the town in the save. Until one is loaded in this session (KD checks
+    // at boot, before the save is read), nothing is served: the last town's record is not
+    // necessarily this one's (another save in the same data folder).
+    {
+        std::string readable;
+        const std::string k = townInSave(&readable);
+        if (!k.empty()) noteTown(k, readable);
+        else if (!sTownSeen) {
+            r.kind = Reply::NotModified;
+            r.what = "waiting for the town to be loaded";
+            return r;
+        }
+    }
     int di = -1;
     u32 id = 0;
     std::string why;
+    // "Receive now" once per town, checked again here (a request from before the town was known).
+    if (sState.pending >= 0 && receivedNowAt(kDefs[sState.pending].key)) {
+        recomp::log("[distrib] receive now dropped: %s was already received through Receive now by this town",
+                    kDefs[sState.pending].key);
+        sState.pending = -1;
+    }
+    if (!sState.pendingLocal.empty() && receivedNowAt(encKey(readFile(sState.pendingLocal)))) {
+        recomp::log("[distrib] receive now dropped: this town already received %s", sState.pendingLocal.c_str());
+        sState.pendingLocal.clear();
+    }
     if (!sState.pendingLocal.empty()) {
         r.body = readFile(sState.pendingLocal);
         r.kind = r.body.empty() ? Reply::NotFound : Reply::Container;
@@ -934,8 +1017,15 @@ void onStored(const Reply& r, bool ok, const std::string& why) {
         if (!r.localFile.empty()) sLocalResult[r.localFile] = why;
         return;
     }
-    if (!r.localFile.empty()) sLocalResult[r.localFile] = "stored";
+    if (!r.localFile.empty()) {
+        sLocalResult[r.localFile] = "stored";
+        // An original file through "Receive now": once per town too (by the file's SHA-1; which
+        // distribution it carries is not known here). Counted when KD stored it.
+        if (r.localFile == sState.pendingLocal) noteReceivedNow(encKey(r.body));
+    }
     if (sState.pending >= 0 && r.letterId == sState.pendingId) sState.pending = -1;
+    // wc24dl.vff holds one package: a "Receive now" one waits there until the game keeps it.
+    sNowWaiting = record::isReceiveNowId(r.letterId) ? r.dist : -1;
     if (r.letterId) sState.lastStored = r.letterId;
     if (!r.localFile.empty() && r.localFile == sState.pendingLocal) sState.pendingLocal.clear();
     sState.syncWanted = true;
@@ -945,6 +1035,7 @@ void onStored(const Reply& r, bool ok, const std::string& why) {
         t.received[kDefs[r.dist].key] = consoleNow();
         t.cycle[kDefs[r.dist].key] = loopSlot(consoleDay(consoleNow())).cycle;
         t.lastDelivery = consoleNow();
+        if (record::isReceiveNowId(r.letterId)) noteReceivedNow(kDefs[r.dist].key);
     }
     saveState();
 }
@@ -952,7 +1043,7 @@ void onStored(const Reply& r, bool ok, const std::string& why) {
 // The game keeps a Nintendo letter (USA fn_8010F194: r3 = the save's letter slot, r4 = letter
 // text, r5 = item, r6 = letter id): Pete will bring it. Recorded for the town.
 HLE(fn_8010F194) {
-    const u32 id = c.r[6];
+    const u32 id = c.r[6], slot = c.r[3];
     callOriginal(c, "fn_8010F194");
     std::lock_guard lk(sM);
     loadState();
@@ -960,10 +1051,18 @@ HLE(fn_8010F194) {
     recomp::log("[distrib] the game took Nintendo letter %08X (%s): Pete brings it at the next town load", id,
                 it != sState.served.end() ? kDefs[it->second].key : "not from this port");
     if (it == sState.served.end()) return;
+    {  // the town whose save keeps the letter (the job runs while the save is loaded, before the
+       // game's town data pointer is set at boot): its data = the letter slot - 0xFC980
+        std::string readable;
+        std::string k = townInSave(&readable, slot - 0xFC980u);
+        if (k.empty()) k = townInSave(&readable);
+        noteTown(k, readable);
+    }
     TownState& t = town();
     t.received[kDefs[it->second].key] = consoleNow();
     t.cycle[kDefs[it->second].key] = loopSlot(consoleDay(consoleNow())).cycle;
     t.lastDelivery = consoleNow();
+    if (record::isReceiveNowId(id)) noteReceivedNow(kDefs[it->second].key);
     saveState();
 }
 
@@ -1000,19 +1099,51 @@ void onGuestFrame(Ctx& c) {
             for (std::string l; std::getline(lines, l);) recomp::log("[distrib] slot %s", l.c_str());
         }
         if (const char* e = std::getenv("CF_DISTRIB_NOW")) {
-            std::string v = e;
-            const auto at = v.find('@');
-            if (at != std::string::npos) sTestNowAt = std::atof(v.c_str() + at + 1), v.resize(at);
-            sTestNow = indexOf(v);
-            if (sTestNow < 0) recomp::log("[distrib] CF_DISTRIB_NOW: unknown key %s", v.c_str());
+            std::istringstream items(e);
+            for (std::string v; std::getline(items, v, ',');) {
+                double when = 0;
+                const auto at = v.find('@');
+                if (at != std::string::npos) when = std::atof(v.c_str() + at + 1), v.resize(at);
+                const int di = indexOf(v);
+                if (di < 0) recomp::log("[distrib] CF_DISTRIB_NOW: unknown key %s", v.c_str());
+                else sTestNowList.push_back({di, when});
+            }
+            if (!sTestNowList.empty()) {
+                sTestNow = sTestNowList[0].first, sTestNowAt = sTestNowList[0].second;
+                sTestNowList.erase(sTestNowList.begin());
+            }
+        }
+    }
+    // Which town is loaded (every version): its record is the one "Receive now" checks.
+    static u32 sIdFrame = 0;
+    if (++sIdFrame % 60 == 0) {
+        std::string readable;
+        const std::string k = townInSave(&readable);
+        if (!k.empty()) {
+            std::lock_guard lk(sM);
+            noteTown(k, readable);
+#ifdef CF_DEV_TOOLS
+            // Test aid (developer builds only) CF_DISTRIB_FORGET=1|<key>: forget the town's
+            // "Receive now" record (all, or one distribution) once, when the town is first seen.
+            static bool sForgot = false;
+            if (const char* e = std::getenv("CF_DISTRIB_FORGET"); e && *e && !sForgot) {
+                sForgot = true;
+                forgetReceivedNow(std::strcmp(e, "1") ? e : "");
+            }
+#endif
         }
     }
     static const auto start = std::chrono::steady_clock::now();
     if (sTestNow >= 0 && std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() >= sTestNowAt &&
-        nwc24::status().taskRegistered) {
+        nwc24::status().taskRegistered && sTownSeen) {
         std::lock_guard lk(sM);
+        recomp::log("[distrib] CF_DISTRIB_NOW: pressing Receive now for %s", kDefs[sTestNow].key);
         receiveNow(sTestNow);
         sTestNow = -1;
+        if (!sTestNowList.empty()) {
+            sTestNow = sTestNowList[0].first, sTestNowAt = sTestNowList[0].second;
+            sTestNowList.erase(sTestNowList.begin());
+        }
     }
     // Live delivery (USA): the game's own WiiConnect24 job (the one it starts when a town is
     // loaded, fn_801783B4 -> fn_8017B6F4) reads the stored package; Pete brings the letter.
@@ -1078,6 +1209,13 @@ std::string describeSchedule(long long secs2000, int n) {
     return o.str();
 }
 
+namespace {
+constexpr const char* kOnceNote =
+    "\"Receive now\" gives each distribution once per town (recorded with your town's id and name\n"
+    "from the save, so a copied data folder keeps it and another town has its own). The delivery\n"
+    "schedule still brings every distribution again in its turn.";
+}  // namespace
+
 bool drawMenuPage() {
     bool dirty = false;
     auto& es = port::settings().events;
@@ -1100,7 +1238,7 @@ bool drawMenuPage() {
         "In turn: every distribution of your region comes once per cycle, evenly spaced by the game's\n"
         "clock (seasonal ones in their month), and the cycle repeats.\n"
         "Original dates: each one on the dates it was sent, by the game's clock (clock offset included).\n"
-        "Only when I choose: just the ones you pick with \"Receive now\" below.\n"
+        "Only when I choose: just the ones you pick with \"Receive now\" below (each once per town).\n"
         "While on, WiiConnect24 is reported on to the game and the archive is downloaded from WiiLink's\n"
         "repository on GitHub (once; cached in the data folder). Turning it on or off applies at the next start.");
     if (es.mode == int(Mode::Loop)) {
@@ -1147,6 +1285,21 @@ bool drawMenuPage() {
         if (sState.pending >= 0) ImGui::Text("Waiting for WiiConnect24: %s", kDefs[sState.pending].name);
     }
     ImGui::Separator();
+    if (es.mode) {
+        const auto n = sState.names.find(sState.town);
+        if (sTownSeen && n != sState.names.end())
+            ImGui::TextDisabled("Town: %s. \"Receive now\" works once per distribution for each town.", n->second.c_str());
+        else
+            ImGui::TextDisabled("\"Receive now\" works once per distribution for each town (load your town first).");
+        ImGui::SetItemTooltip("%s", kOnceNote);
+#ifdef CF_DEV_TOOLS
+        // Developer builds only (cfrecomp): never in the shipped CityFolkRecomp.
+        ImGui::SameLine();
+        if (recomp::menu::SmallButton("Forget received##distrib_dev")) forgetReceivedNow("");
+        ImGui::SetItemTooltip("Developer build only: forgets this town's \"Receive now\" record, so every\n"
+                              "distribution can be received again (testing). The schedule's record is kept.");
+#endif
+    }
     const TownState& t = sState.towns[sState.town];
     if (ImGui::BeginTable("##distribs", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerH,
                           ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * 16))) {
@@ -1160,8 +1313,14 @@ bool drawMenuPage() {
             ImGui::PushID(i);
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
-            ImGui::Text("%s", d.name);
-            ImGui::SetItemTooltip("%s%s", typeName(d.type), d.design && d.item ? " + design" : "");
+            if (const long long at = receivedNowAt(d.key)) {
+                ImGui::TextDisabled("%s", d.name);
+                ImGui::SetItemTooltip("%s%s\nReceived on %s (game clock) through \"Receive now\".", typeName(d.type),
+                                      d.design && d.item ? " + design" : "", dateText(at).c_str());
+            } else {
+                ImGui::Text("%s", d.name);
+                ImGui::SetItemTooltip("%s%s", typeName(d.type), d.design && d.item ? " + design" : "");
+            }
             ImGui::TableNextColumn();
             if (d.unreleased) ImGui::TextDisabled("never distributed");
             else {
@@ -1178,14 +1337,26 @@ bool drawMenuPage() {
             ImGui::TableNextColumn();
             const bool region = distributedIn(d, gameRegion());
             if (!inArchive(d)) ImGui::TextDisabled("not in archive");
+            else if (t.now.count(d.key)) ImGui::TextDisabled("received (Receive now)");
             else if (t.received.count(d.key)) ImGui::Text("received");
             else if (!archiveReady(d)) ImGui::TextDisabled(es.mode ? "downloading" : "available");
             else ImGui::Text("%s", region || d.unreleased ? "available" : "available (other region)");
             ImGui::TableNextColumn();
             if (inArchive(d)) {
-                ImGui::BeginDisabled(!es.mode || !archiveReady(d));
+                const long long nowAt = receivedNowAt(d.key);
+                const bool onItsWay = sState.pending == i || sNowWaiting == i;
+                ImGui::BeginDisabled(!es.mode || !archiveReady(d) || !sTownSeen || nowAt || onItsWay);
                 if (recomp::menu::SmallButton("Receive now")) receiveNow(i);
                 ImGui::EndDisabled();
+                if (nowAt)
+                    ImGui::SetItemTooltip("Received on %s (game clock).\n%s", dateText(nowAt).c_str(), kOnceNote);
+                else if (onItsWay)
+                    ImGui::SetItemTooltip("On its way: the game keeps the letter at its next WiiConnect24 check,\n"
+                                          "Pete brings it when your town is next loaded.\n%s", kOnceNote);
+                else if (es.mode && !sTownSeen)
+                    ImGui::SetItemTooltip("Load your town first: \"Receive now\" is once per town.");
+                else
+                    ImGui::SetItemTooltip("Sends this distribution now. %s", kOnceNote);
             }
             ImGui::PopID();
         }
@@ -1197,12 +1368,15 @@ bool drawMenuPage() {
     for (const auto& l : localFiles()) {
         const std::string p = l.path.string();
         ImGui::PushID(p.c_str());
-        ImGui::BeginDisabled(!es.mode);
+        const long long at = receivedNowAt(encKey(l.data));
+        ImGui::BeginDisabled(!es.mode || !sTownSeen || at || sState.pendingLocal == p);
         if (recomp::menu::SmallButton("Receive now")) {
             sState.pendingLocal = p;
             nwc24::requestDownload();
         }
         ImGui::EndDisabled();
+        if (at) ImGui::SetItemTooltip("Received on %s (game clock).\n%s", dateText(at).c_str(), kOnceNote);
+        else if (es.mode && !sTownSeen) ImGui::SetItemTooltip("Load your town first: \"Receive now\" is once per town.");
         ImGui::SameLine();
         auto res = sLocalResult.find(p);
         ImGui::Text("%s%s%s", port::displayPath(l.path.filename()).c_str(), res != sLocalResult.end() ? ": " : "",

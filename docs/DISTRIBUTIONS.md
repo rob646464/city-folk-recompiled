@@ -8,7 +8,7 @@ and letters**, used with WiiLink's permission. Credit line in the menu: "Distrib
 courtesy of WiiLink".
 
 Code: `src/recomp/distributions.cpp` (catalogue, archive download/cache, schedules, packages, F1
-page), `src/recomp/nwc24_dl.cpp` (KD, NCD, the NAND files; the download side of WiiConnect24),
+page), `src/recomp/distrib_record.cpp` (the per-town record in state.ini), `src/recomp/nwc24_dl.cpp` (KD, NCD, the NAND files; the download side of WiiConnect24),
 `src/recomp/vff.cpp` (VFF volumes), `src/recomp/wc24_crypto.cpp` (SHA-1, AES-128-OFB, RSA-2048),
 `src/port/http_get.cpp` (one HTTP GET). Settings: `[nintendo_events]` in settings.ini
 (`src/port/settings.h` NintendoEventSettings). Tests: `cf_distrib_test`.
@@ -167,7 +167,10 @@ cycle repeats forever:
   distribution; missed slots are skipped (their distributions come again next cycle).
 - Each town's record (`<data folder>/distributions/state.ini`): the distribution and the cycle it
   came in. A slot whose distribution the town already got in this cycle (e.g. by "Receive now")
-  delivers nothing; a new cycle delivers it again.
+  delivers nothing; a new cycle delivers it again. This rule is unchanged by "Receive now once"
+  (below): a "Receive now" still counts as this cycle's delivery of that distribution and uses up
+  its slot, exactly as before, and the next cycle brings it again (a duplicate, so an item that was
+  sold comes back in its turn, at most one letter per 7 days).
 - Letter ids: `4C` + slot number (stable per slot: the game does not take the same letter twice).
   KD's "If-Modified-Since": the package stored last is not stored again.
 - Example (USA, weekly, from 2026-10-26): Kapp'n model, shopping cart, anniversary cake, creepy
@@ -183,7 +186,58 @@ first, at most one per 7 days; a town gets a distribution once per year. Letter 
 **Only when I choose**: only "Receive now".
 
 **Receive now** (every mode except Off): the chosen distribution is served at KD's next check
-(at once), with a fresh letter id (`4D` + counter), then the schedule continues.
+(at once), with a fresh letter id (`4D` + counter), then the schedule continues. **Once per
+distribution per town** (user decision, anti-cheat): a fresh letter id every time let players
+receive the same item over and over and sell it at Nook's. See "Receive now once per town" below.
+
+### Receive now once per town
+
+- A distribution this town has received through "Receive now" is greyed out in the F1 table
+  (name and button; state "received (Receive now)"), its tooltip says "Received on <date>" (the
+  game clock's date when the game kept the letter). The others stay available, one time each.
+  "Receive now" is also off while the same one is on its way (requested, or stored in
+  `wc24dl.vff` and not yet kept by the game) and until the town has been seen in this session
+  ("Load your town first").
+- Checked three times: the F1 button, `receiveNow` (refused, `[distrib] receive now refused: ...`)
+  and KD's request (`serve`: a request for a distribution the town already has is dropped).
+- Counted when the game keeps the letter: USA through the `fn_8010F194` hook (letter id `4D...`),
+  other bases when KD stored the package (as their "received" record). Original `.enc` files
+  from the folder count per file (SHA-1 of the file, `enc:<sha1>`), when KD stored them.
+- **The schedules are independent**: "In turn" and "Original dates" deliveries never write or
+  clear the "Receive now" record, and "Receive now" affects the schedules only as before (it
+  counts as this cycle's delivery and uses up the slot: see "In turn" above). The schedule keeps
+  bringing duplicates in their turn (pacing unchanged), so nobody loses an item for good.
+- **Where it is stored**: `state.ini`, per town, keyed by the town's own identity from the save:
+  the town id (u16, made when the town was created) + the town name, read from the first
+  resident's copy of them in the town data (`rd32(0x8074E960)` = the save's contents, resident
+  slots at +0x20 + slot * 0x86C0, town struct at +0x7EC2 of each: u16 id + UTF-16 name; in the
+  user-town fixture's save file at 0x7EE2: `F177`, "Frunch"). Key `<id>-<name as UTF-16 hex>`
+  (`town_id.cpp keyInSave` + `distrib_record.cpp townKey`; the same key as `town_wc24.txt`, docs/ONLINE.md), section `[received_now.<key>]` (`<distribution>=<time>`),
+  readable names in `[towns]`. The data folder (incl. portable mode and F1 > Game > Data folder
+  moves) carries the file, so a copied or renamed data folder keeps the record, restarting keeps
+  it, and a different town (another save) gets its own record. The town is identified every 60
+  frames while a town is loaded (all four versions; not while in an online room, where the town
+  data may be another player's), at each KD check, and when the game keeps a letter (from the
+  letter slot's save, r3 - 0xFC980: the game's job runs at boot while the save is being read,
+  before the town data pointer is set). Until a town has been identified in a session KD serves
+  nothing ("waiting for the town to be loaded"; found in testing: a boot-time check used the
+  previous town's record and a schedule delivery was recorded for the wrong town), then checks
+  at once. `state.ini` is written whole (temporary file + rename).
+- **Records from before this change** (`format` missing in `[state]`): one record `[town.town]`
+  for the install. At the first start a distribution counts as received through "Receive now"
+  when that record has it and a "Receive now" letter id (`4D...`) was served for it
+  (`[served]`), logged as `[distrib] record from an older version: N ...`. The first town
+  identified on that install takes the old record (its received/cycle entries and the "Receive
+  now" ones), since City Folk has one town per console.
+- **Limits**: an offline game cannot fully stop save editing or someone editing / deleting
+  `state.ini` (or using another data folder with a copy of the save). The goal is closing the easy
+  loop (press, sell, press again), not a tamper-proof record. A letter the game kept counts even
+  if the player then quits without saving (the schedule brings it again). Older builds of the port
+  that rewrite `state.ini` drop the `[received_now.*]` sections.
+- **Developer builds only** (`CF_DEV_TOOLS`, cfrecomp; never in the shipped CityFolkRecomp):
+  "Forget received" next to the town line in F1 > Online > Nintendo events (clears this town's
+  "Receive now" record; the schedule's record stays) and `CF_DISTRIB_FORGET=1|<key>` (the same,
+  all or one distribution, once when the town is first seen).
 
 **Deliver while playing** (USA, on by default): when KD has stored a package while a town is in
 play, the port starts the game's own WiiConnect24 job (`fn_801783B4`, the call player select
@@ -212,9 +266,12 @@ stored the package.
 F1 > Online > Nintendo events (next to Play together): Delivery mode, How often (In turn), Every
 year (Original dates), Include other regions' distributions, Turn WiiConnect24 on for my town and
 Deliver while playing (USA); status (archive files, task / key / download box, last check, next
-delivery date and item); the table of every distribution with its original dates per region, its
-state (available / available (other region) / received / not in archive / downloading) and
-"Receive now"; the folder for original `.enc` files with "Receive now" per file and KD's verdict.
+delivery date and item); the town line ("Town: Frunch (F177). "Receive now" works once per
+distribution for each town."; dev builds: "Forget received"); the table of every distribution
+with its original dates per region, its state (available / available (other region) / received /
+received (Receive now) / not in archive / downloading) and "Receive now" (greyed with "Received on
+<date>" once this town got it that way); the folder for original `.enc` files with "Receive now"
+per file and KD's verdict.
 Credit line: "Distribution archive courtesy of WiiLink". `CF_MENU_ID_CHECK` sweep: 0 conflicts.
 
 ## 5. Files and network
@@ -223,20 +280,26 @@ Credit line: "Distribution archive courtesy of WiiLink". `CF_MENU_ID_CHECK` swee
   checked against the SHA-1 pinned in `distributions_archive.inc`, from commit 402566bc of
   WiiLink24/ACDLCPicker; a changed file is not used). Downloaded from raw.githubusercontent.com,
   only while the feature is on, once (141 files, ~1 MB).
-- State: `<data folder>/distributions/state.ini` (town, received distributions with time and
-  cycle, last stored letter id, "Receive now" counter).
+- State: `<data folder>/distributions/state.ini` (`src/recomp/distrib_record.cpp`): format, the
+  current town's key, per town (keyed by town id + name) the received distributions with time and
+  cycle and the ones received through "Receive now", town names, last stored letter id, "Receive
+  now" counter, served letter ids.
 - Original files: `<data folder>/distributions/*.enc`.
 - Nothing from the archive is in this repository.
 
 ## 6. Testing
 
 - `cf_distrib_test` (ctest `distrib`): SHA-1, AES-128-OFB (SP 800-38A), RSA modexp, VFF write /
-  read / remove with long names on FAT12 and FAT16; `cf_distrib_test <file.enc> <wc24pubk.mod>`
-  checks one file.
+  read / remove with long names on FAT12 and FAT16, the per-town record (town keys, an older
+  `state.ini` upgraded and adopted by the first town, a second town on its own, round trip);
+  `cf_distrib_test <file.enc> <wc24pubk.mod>` checks one file.
 - `CF_DISTRIB=off|loop|original|manual` overrides the mode; `CF_NWC24_LOG=1` logs every KD / NCD
   request and, every 600 frames, the town's WiiConnect24 flag, the task state, the game's
-  WiiConnect24 check and the Nintendo-letter slot; `CF_DISTRIB_NOW=<key>[@<s>]` presses "Receive
-  now" once the task is registered; `CF_DISTRIB_DESCRIBE=<n>` logs the per-region counts and the
+  WiiConnect24 check and the Nintendo-letter slot; `CF_DISTRIB_NOW=<key>[@<s>][,<key>[@<s>]...]`
+  presses "Receive now" once the task is registered and the town is known, several in order (the
+  same key twice: the second is refused); `[distrib] town ...` logs the identified town and what it
+  received through "Receive now"; `CF_DISTRIB_FORGET=1|<key>` (developer builds) forgets that
+  record; `CF_DISTRIB_DESCRIBE=<n>` logs the per-region counts and the
   next n loop slots; `CF_DISTRIB_SAVE_DUMP=<frame>` dumps the save data (research).
 - Route `tools/routes/mailbox.txt` (user-town fixture): continue, walk to the mailbox, open it,
   pockets, letters, read the first one.
@@ -261,6 +324,28 @@ Credit line: "Distribution archive courtesy of WiiLink". `CF_MENU_ID_CHECK` swee
    feature, `wc24dl.vff` byte-identical to the fixture's, no distribution task; the save completed
    (result word 1).
 
+### Verified: "Receive now" once per town (2026-11-04, branch distrib-once, USA, cfrecomp)
+
+Scratch APPDATA/NAND per run, copies of the `user-town-clean` (town "Frunch", F177) and
+`user-town2` (town "test", A056) fixtures, continue route, muted, off screen, controllers hidden,
+console clock 2026-10-27 unless noted; checked in `[distrib]` log lines and `state.ini`.
+
+1. Same session: `CF_DISTRIB_NOW=creepy_clock,creepy_clock@180`: the first gives letter
+   `4D000001`, the game keeps it; the second is refused ("received through Receive now on
+   2026-10-27"), no second letter; the save completes.
+2. Restart with the same data folder and save: creepy clock refused at once, red Pikmin
+   (`4D000002`) delivered; Pete hands over the creepy clock letter from the first run.
+3. Another town (`user-town2` with the same data folder): its own record, creepy clock delivered
+   (`4D000003`); both towns in `state.ini`.
+4. Schedule duplicate: "In turn", clock 2027-06-22 = creepy clock's slot in the next cycle (28):
+   KD serves it (`4C000599`), the game keeps it, it is recorded for Frunch (cycle 28) while the
+   "Receive now" record stays, and "Receive now" for it is still refused.
+5. Older record: a format-1 `state.ini` (`[town.town]` creepy clock + `4D000001` served) is
+   upgraded ("1 distribution(s) counted"), adopted by Frunch, creepy clock refused, red Pikmin
+   delivered.
+6. Developer aid `CF_DISTRIB_FORGET=creepy_clock`: forgotten, then delivered again.
+7. `cf_distrib_test`: record checks pass.
+
 ## 7. Gaps
 
 - Letters in languages other than English: the archive has only the North American English text;
@@ -277,6 +362,6 @@ Credit line: "Distribution archive courtesy of WiiLink". `CF_MENU_ID_CHECK` swee
   load (save first). Received tracking and live delivery are USA-only (game hooks); other bases
   deliver at the next town load and count a stored package as received. Not tested on PAL /
   Japan / Korea.
-- Per-town tracking uses one town key ("town"); a second town on the same install shares the
-  record (City Folk has one town per console).
+- Per-town tracking: keyed by the town id + name from the save since "Receive now once" (before:
+  one key "town" for the install, adopted by the first town identified).
 - The F1 page itself was not screenshotted (frame shots capture the game image only).
