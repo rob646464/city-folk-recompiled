@@ -246,6 +246,7 @@ struct Request {
     bool hasPos = false;
     float pos[3] = {};
     u32 frame = 0;               // 0 = as soon as possible
+    bool second = false;         // second step of a two-step warp (city spot after the bus)
     std::string text;
 };
 
@@ -358,26 +359,39 @@ bool roomArrival(u32 s, float pos[3], u32& type, u32& angle) {
 // River mouth: not stored as a spot anywhere; see riverMouth() below.
 bool riverMouth(Ctx& c, float pos[3]);
 
-bool execute(Ctx& c, const Request& r, std::string& why, u32& dst) {
+bool execute(Ctx& c, const Request& r, std::string& why, u32& dst, bool& again) {
     const u32 cur = curStage();
     u32 stage = r.stage, type = 0xB, angle = 0;
     float pos[3] = {0, 0, 0};
     bool demo = false;
     const Dest* d = r.dest;
-    if (d && d->kind == Kind::Bus) {
-        // Kapp'n's end of the ride (d_a_npc_sp_kappeiNP fn_54_824): fn_80169950(fn_80169AF0(),
-        // 0 = city / 1 = town, 0, 0, 0) puts the player at that end's bus stop with the bus
-        // arrival (its own fn_80163064 call). The ride's flag 0x26 (set before the ride home) is
-        // left alone: the warp is not a ride.
+    again = false;
+    // Kapp'n's end of the ride (d_a_npc_sp_kappeiNP fn_54_824): fn_80169950(fn_80169AF0(),
+    // 0 = city / 1 = town, 0, 0, 0) puts the player at that end's bus stop with the bus arrival
+    // (its own fn_80163064 call). The ride's flag 0x26 (set before the ride home) is left alone:
+    // the warp is not a ride.
+    auto bus = [&](u32 toTown) {
         log("[warp] f%u warp %s: off the bus in the %s, from %u %s", game::guestFrames(), r.text.c_str(),
-            d->stage ? "town" : "city", cur, stageName(cur).c_str());
-        dst = d->stage ? kField : kCity;
-        const u32 bus = guestCall(c, VA(0x80169AF0));
+            toTown ? "town" : "city", cur, stageName(cur).c_str());
+        dst = toTown ? kField : kCity;
+        const u32 b = guestCall(c, VA(0x80169AF0));
         c.r[7] = 0;
-        if (!guestCall(c, VA(0x80169950), bus, d->stage, 0, 0)) {
+        if (!guestCall(c, VA(0x80169950), b, toTown, 0, 0)) {
             why = "the game refused the stage change";
             return false;
         }
+        return true;
+    };
+    if (d && d->kind == Kind::Bus) return bus(d->stage);
+    // The city's streets are only entered by bus or from one of its rooms: a player put there
+    // from the town (fn_80163064 to TOWN at a position) waits hidden and is sent home after 292
+    // frames (d_a_playerNP fn_80_1A5F4 -> fn_80_1B304). So a city spot from outside the city is
+    // two warps: off the bus, then (90 frames after the arrival) the spot within the city.
+    // fn_80162990 = "stage belongs to the city" (table 0x8047A190: the city rooms).
+    const bool citySpot = d ? (d->kind == Kind::Door || d->kind == Kind::Pos) && d->stage == kCity : stage == kCity;
+    if (citySpot && cur != kCity && !guestCall(c, VA(0x80162990), cur)) {
+        if (!bus(0)) return false;
+        again = true;
         return true;
     }
     if (d) {
@@ -498,7 +512,26 @@ bool execute(Ctx& c, const Request& r, std::string& why, u32& dst) {
 // more than one (user-town: columns 1-3). The one with the river's bridge (m_bridgeA: 077, 078,
 // 082-084, 087, 088, 091, 092, 095, 096) is taken first, else the westernmost; the player stands at
 // the acre's centre, 2800 (in user-town: beside the bridge over the mouth, 1792,28,2800).
+// Indoors the block objects hold the room, so the spot found in the town is remembered.
+bool sMouthKnown = false;
+float sMouth[3];
+bool riverMouthLive(float pos[3]);
 bool riverMouth(Ctx&, float pos[3]) {
+    if (curStage() == kField && riverMouthLive(pos)) return true;
+    if (!sMouthKnown) return false;
+    for (int i = 0; i < 3; i++) pos[i] = sMouth[i];
+    log("[warp] river mouth: %.0f %.0f %.0f (found while in the town)", pos[0], pos[1], pos[2]);
+    return true;
+}
+// Once per arrival in the town (onGuestFrame).
+void noteRiverMouth() {
+    float p[3];
+    if (riverMouthLive(p)) {
+        for (int i = 0; i < 3; i++) sMouth[i] = p[i];
+        sMouthKnown = true;
+    }
+}
+bool riverMouthLive(float pos[3]) {
     const u32 arr = VA(0x80574A0C);
     if (!arr) return false;
     auto isMouth = [](u32 m) { return (m >= 75 && m <= 96) || m == 226; };
@@ -522,7 +555,7 @@ bool riverMouth(Ctx&, float pos[3]) {
     pos[0] = float(bestCol) * 512 + 256;
     pos[1] = 28;
     pos[2] = 2800;
-    log("[warp] river mouth: acre column %d (model %03u)", bestCol, bestModel);
+    if (sLog) log("[warp] river mouth: acre column %d (model %03u)", bestCol, bestModel);
     return true;
 }
 
@@ -629,7 +662,15 @@ void sweep(u32 frame, bool ready) {
     case 0:
         while (w.next < std::size(kDests)) {
             const Dest& d = kDests[w.next++];
-            const bool match = w.filter.empty() ? d.kind != Kind::Demo : std::strstr(d.name, w.filter.c_str()) != nullptr;
+            // <filter>: substrings of names, '|' between alternatives.
+            bool match = w.filter.empty() && d.kind != Kind::Demo;
+            for (size_t p = 0; !w.filter.empty() && p <= w.filter.size() && !match;) {
+                size_t q = w.filter.find('|', p);
+                if (q == std::string::npos) q = w.filter.size();
+                const std::string part = w.filter.substr(p, q - p);
+                match = !part.empty() && std::strstr(d.name, part.c_str()) != nullptr;
+                p = q + 1;
+            }
             if (!match) continue;
             w.cur = &d;
             break;
@@ -735,6 +776,7 @@ void onGuestFrame(Ctx& c, u32 frame) {
         sStageSince = frame;
     }
     if (!firstPlayable && playable(s)) firstPlayable = frame;
+    if (s == kField && frame == sStageSince + 60) noteRiverMouth();  // the town's acres are loaded
     if (!envDone) {
         envDone = true;
         if (const char* v = std::getenv("CF_WARP")) {
@@ -775,10 +817,12 @@ void onGuestFrame(Ctx& c, u32 frame) {
     // Only between scenes' worth of normal play: a playable stage, no change in progress, and a
     // short while after the last arrival (the fade-in and the arrival walk).
     if (!canWarp(frame)) return;
-    if (!sKeepTime && !(r.dest && r.dest->kind == Kind::Demo)) jumpToHour(sHour);
+    if (!sKeepTime && !r.second && !(r.dest && r.dest->kind == Kind::Demo)) jumpToHour(sHour);
     std::string why;
     u32 dst = 0;
-    if (execute(c, r, why, dst)) {
+    bool again = false;
+    Request next = r;
+    if (execute(c, r, why, dst, again)) {
         sLastResult = "Warped to " + r.text;
         sIssuedAt = frame;
         sIssuedDst = dst;
@@ -791,6 +835,11 @@ void onGuestFrame(Ctx& c, u32 frame) {
         log("[warp] %s", sLastResult.c_str());
     }
     sPending.erase(sPending.begin());
+    if (again) {  // the second step (a city spot after the bus): next, once the bus has arrived
+        next.second = true;
+        next.frame = 0;
+        sPending.insert(sPending.begin(), next);
+    }
 }
 
 // ---- F1 > Enhancements > Debug --------------------------------------------------------------------------

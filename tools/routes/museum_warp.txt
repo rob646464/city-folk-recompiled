@@ -8,7 +8,7 @@ after link d_bgi_drawNP 2
 +300:STICKUP*50
 +120:WARP=museum.art
 after link d_bgi_drawNP 3
-+300:STICKLEFT*60
++300:STICKRIGHT*60
 +120:WARP=museum.cafe
 after link d_bgi_drawNP 4
 +300:STICKLEFT*60
