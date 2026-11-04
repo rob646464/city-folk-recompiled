@@ -1,0 +1,15 @@
+# The city plaza (saved town CF_FIXTURE=user-town): Kapp'n's bus (city_bus.txt), then up the
+# steps from the bus stop to the fountain plaza (GracieGrace behind it), along the west street and
+# back east past the plaza. City structures (d_a_str_townNP, type: city position; the TP token's
+# mod103t<type> targets): 0111 Lyle's (auction house / HRA, 592,56,208), 0114 GracieGrace
+# (752,56,144), 0118 Club LOL theatre (400,56,368), 0110 Shampoodle (1168,56,624), 0113 Katrina's
+# (1424,56,592), 0112 Crazy Redd's back door (112,56,624), 0119 the fountain (752,56,464), 0117
+# (976,56,240), bus stop 752,14,828; Kicks (d_a_npc_sp_kutsumigakiNP) by a closed door at
+# 1085,68,386. Verified 2026-11-03 (branch routes-2).
+include city_bus.txt
+after link d_bgt_drawNP 1
++1300:@off
++100:STICKUP*150
++200:STICKLEFT*300
++350:STICKRIGHT*600
++650:STICKDOWN*60

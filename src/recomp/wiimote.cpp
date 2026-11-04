@@ -195,6 +195,7 @@ struct ScriptItem {
     float sx = 0, sy = 0;
     bool pointer = false, pointerOff = false;
     float px = 0, py = 0;
+    std::string action;  // TP=... (test aid actions, takeScriptActions)
 };
 
 std::vector<ScriptItem> parseScript(const std::string& script) {
@@ -243,6 +244,11 @@ std::vector<ScriptItem> parseScript(const std::string& script) {
                 {"C", kBtnC}, {"Z", kBtnZ}, {"SHAKE", kBtnShake}, {"NSHAKE", kBtnShakeNunchuk}, {"RECENTER", kBtnRecenter}};
             for (const auto& [name, bit] : kNames)
                 if (b == name) p.buttons |= bit;
+            if (b.rfind("TP=", 0) == 0) {  // TP=<target>: player teleport (cf_region.cpp, CF_TELEPORT syntax, '/' for ',')
+                p.action = b;
+                p.frames = 1;
+                continue;
+            }
             if (b.rfind("STICK=", 0) == 0) {  // STICK=x/y: Nunchuk stick at any position (-1..1, up +)
                 std::sscanf(b.c_str() + 6, "%f/%f", &p.sx, &p.sy);
                 continue;
@@ -572,6 +578,25 @@ void noteScriptEvent(const std::string& name) {
     auto& v = sEvents[name];
     v.push_back(clk);
     if (std::getenv("CF_INPUT_LOG")) log("[input] event %s #%zu at %u", name.c_str(), v.size(), clk);
+}
+
+std::vector<std::string> takeScriptActions() {
+    std::vector<std::string> out;
+    if (script().empty()) return out;
+    static std::mutex m;
+    static std::vector<bool> fired;
+    std::lock_guard lk(m);
+    const auto& s = script();
+    fired.resize(s.size());
+    const u32 clk = scriptClock();
+    for (size_t i = 0; i < s.size(); i++) {
+        u32 start = 0;
+        if (s[i].action.empty() || fired[i] || !itemStart(s[i], start) || clk < start) continue;
+        fired[i] = true;
+        out.push_back(s[i].action);
+        if (std::getenv("CF_INPUT_LOG")) log("[input] action %s at %u", s[i].action.c_str(), clk);
+    }
+    return out;
 }
 
 void sample(int chan, State& out) {

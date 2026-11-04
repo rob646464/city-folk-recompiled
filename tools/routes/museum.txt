@@ -1,0 +1,35 @@
+# The museum (saved town CF_FIXTURE=user-town): continue, the player is moved (TP token) in front of
+# the museum (structure type 0100 of d_a_str_fieldNP, town position 2800,84,1168) and walks in.
+# Lobby (Blathers) -> right wing (an exhibit room, empty in this town) -> lobby -> left door =
+# Brewster's cafe "The Roost" (Brewster, K.K.'s module linked) -> lobby -> stairs at the back left
+# = the observatory (Celeste). Lobby positions: entry 260,56,484; side doors at x 126 / 394,
+# z ~370; stairs 143,56,95. Verified 2026-11-03 (branch routes-2).
+include continue_any.txt
+after link d_bgo_drawNP 2
++1400:TP=mod102t0100:0/60
++60:STICKUP*60
+# Lobby: up past the mat, right into the right wing.
+after link d_bgi_drawNP 2
++200:STICKUP*50
++70:STICKRIGHT*250
+# Right wing: look, walk around, back out to the left.
+after link d_bgi_drawNP 3
++250:STICKUP*60
++100:STICKDOWN*60
++100:STICKLEFT*200
+# Lobby (at the right door): across to the left door = the cafe.
+after link d_bgi_drawNP 4
++250:STICKLEFT*300
+# The Roost: around the room, out through the door on the right.
+after link d_bgi_drawNP 5
++300:STICKLEFT*60
++100:STICKRIGHT*200
+# Lobby (at the left door): up and left to the stairs = the observatory.
+after link d_bgi_drawNP 6
++300:STICKUP*120
++150:STICKLEFT*120
++150:STICKUP*200
+# Observatory (Celeste), stays there.
+after link d_bgi_drawNP 7
++300:STICKRIGHT*40
++80:STICKLEFT*40
