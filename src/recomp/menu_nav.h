@@ -21,6 +21,8 @@ namespace recomp::menunav {
 struct Item {
     float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
     u32 key = 0;      // stable identity while the screen is up (the pane's guest address)
+    u32 group = 0;    // the layout / gui manager it belongs to (rows of a grid are one group)
+    u16 layer = 0;    // draw order of its layout this frame (higher = drawn later = in front), 0 unknown
     bool hud = false; // part of the always-present field HUD (toolbar): navigable, but alone it
                       // does not take the D-pad / stick from the game
     bool tested = true; // the game hit-tested it this frame (false: only seen drawn). While tested

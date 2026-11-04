@@ -137,6 +137,8 @@ reads 0 (that was the boot stand-in's message in the bus).
 Pointer mapping: KPAD position = screen position (checked on the game's own cursor: (0, 0) is the
 centre, (+-1, +-1) the corners, at 4:3 and at native 16:9). The mouse pointer maps the window to
 [-1, 1] (divided by the widescreen factor when the port's widescreen keeps 2D at the game's aspect).
+Wider than 16:9 with "Keep HUD at 16:9" off the pointer spans the whole window: "Pointer in
+ultrawide" below.
 
 ## F1 > Controls
 
@@ -265,19 +267,124 @@ Verified (USA, fixture `user-town` and the new-game route, scripted D-pad presse
 - Name keyboard (new game): keys, "More" (symbol page), "Confirm" reached; "@", "=", "m" typed.
 - Mouse unchanged: with Auto the first mouse movement switches snapping off (not run with a real
   mouse in a scripted test: the scripted pointer counts as a free move, not as the mouse).
-Not tried yet: shops / catalog / museum, the letter writing screen, the design editor, the HOME
-Menu (hooked, unverified), PAL / Japan / Korea (the hooks are USA-only: hooks.txt lines untagged).
+- (menu-nav-2) Letters list (pockets > envelope), designs list + its submenu, chat keyboard (toolbar),
+  Nook's offer choice box ("I'll take it! / How do I use it? / Never mind."): moved through by
+  D-pad, checked by the trace checker below.
+Not tried yet: shops' buy / sell screens, catalog, museum, the letter writing screen, the design
+editor, the HOME Menu (its gui hook reported no items in a run with the HOME Menu open), PAL /
+Japan / Korea.
 
-Direction search: candidates beyond the selected item's middle in the pressed direction (8 ways with
-the stick), cost = gap along + 0.25 x centre distance along + 3 x gap across + 0.35 x centre
-distance across (isotropic screen units), so items in line win and a grid moves cell by cell; at the
-edge the selection stays. Item boxes are clipped to the screen (the toolbar slots reach below it);
-the target is the clipped box's centre. Auto-repeat while held: 0.36 s, then every 0.11 s.
+**The screen in front is modal** (menu_nav.cpp `navigable()`): besides the tested/drawn rule above,
+of two menu layouts that both hit-test and overlap (the design list's "Wear / Display on Ground /
+Edit Design / Quit" submenu over the patterns; the letters over the pockets) the one drawn later is
+in front and every item of the one behind is left out. Draw order = the order of the root panes'
+draws in the frame (`Item::layer`, from `cf::navLayoutDrawn`). Only layouts of several items count
+as "in front" (the town map's house markers are one-item layouts that may touch each other), and
+the HUD toolbar is never left out (it stays reachable below every screen, as before).
+
+Direction search (branch menu-nav-2, `moveCardinal`; 8 directions, the stick snapped to the nearest
+of them; isotropic screen units). Candidates lie past the selected item (centre beyond its centre,
+far edge beyond its far edge), are not a box that contains the selected item's centre (a panel
+behind it) and not a **container** (a box holding the centre of a smaller item: list backgrounds,
+the pockets' player circle around letter slots; containers stay clickable under the pointer, the
+first press / Recenter takes them only when nothing else is near). Then, for left / right / up /
+down:
+1. **In line** (overlapping the selected item's row band for left / right, its column band for up /
+   down, by 20 % of the smaller): the nearest by edge gap, then the one closest to the kept
+   column / row (moving down through the wide Space key and back keeps the column).
+2. Else items **near the direction**: gap across under the distance along *and* centres within 35
+   degrees; the nearest by gap along + 2 x gap across.
+3. **Grids with a short last row** (up / down only): the next row of the selected item's own
+   layout, right after it (gap under one item height, items wholly past it), its item closest to the
+   kept column. Taken when 1 and 2 find nothing, and instead of an item of another layout that is
+   further away (a short last row above the toolbar). Left / right at the end of a short row stays.
+4. Nothing: **no move**, never a jump along the other axis, no wrapping (the game's pointer menus do
+   not wrap either). Diagonals (stick) take items in that quadrant only.
+A selection that vanishes (a list rebuilt its panes, the item scrolled away) moves to the item now
+nearest where it was (its own layout first, within 0.3 KPAD units), so the place in the list is
+kept. Item boxes are clipped to the screen (the toolbar slots reach below it); the target is the
+clipped box's centre. Auto-repeat while held: 0.36 s, then every 0.11 s. `CF_NAV_OLD=1` = the first
+version (cost search over everything beyond the middle) for A/B.
+
+**Checking the moves** (`CF_NAV_TRACE=<file>`, `tools/nav/check.py`): the trace has every distinct
+item set of a run (keys + geometry stable for 6 frames) with all visible items, whether each is
+navigable after the modal rules (`nav`), its layout (`g`), draw order (`l`), and the move chosen from
+every navigable item in 8 directions (JSON lines). `py tools/nav/check.py <trace>... [--summary
+[--cardinal]] [--warn]` checks each move against rules written from the user's point of view: wrong
+way, left the row / column although an item is in line, skipped an in-line item, axis jump (not in
+line and not within 40 degrees: "left moved the cursor down"), left a grid past its own next row,
+landed on a container, stuck although an item is in line or within 30 degrees, a diagonal outside
+its quadrant, and two overlapping navigable layouts (the screen behind not modal). `--replay new|old`
+rebuilds `tools/nav/replay.cpp` with the current `src/recomp/menu_nav.cpp` (clang++ from Visual
+Studio's LLVM) and recomputes the modal set and every move of every logged set offline, so the
+selection code is checked against all screens without a game run; `tools/nav/synthetic.jsonl` is a
+hand-made grid with a ragged last row, a panel behind it and the toolbar below. `--warn` adds
+unreachable items and not-reversible moves (honeycomb rows are not reversible by nature).
+
+Found and fixed (branch menu-nav-2; USA, fixture `user-town` + new-game route; 135 logged sets of
+pockets, item submenu, letters, designs + submenu, town map, toolbar, choice boxes, chat keyboard,
+name / town-name keyboard incl. the symbol page, the OK button screen): the first version made 913
+distinct illogical moves (screen, direction, from -> to), every one of the kinds the user reported:
+- pockets: LEFT from the left column (BC_00, BC_09) -> toolbar slot below (B_tb_01 / B_tb_00); RIGHT
+  from the right column -> toolbar (BC_03 -> B_tb_03); UP from the top row into the player circle;
+  DOWN on the hovered toolbar slot (it grows when pointed at) -> the next slot sideways;
+- town map: RIGHT from the resident list -> toolbar Close / Map slot (B_msg_02 -> B_tb_07), LEFT from
+  the map buttons -> toolbar (B_mapBtn_08 -> B_tb_01), UP from the toolbar's hovered slot sideways;
+- keyboards: LEFT / RIGHT between staggered rows (B_key_31 -> B_key_21), UP from the top row to the
+  "change keyboard" button off to the side, RIGHT from the sign switch to Confirm, DOWN from the last
+  row past the keys to the toolbar;
+- designs: the submenu not modal (moves went to the patterns behind it), LEFT from the player circle
+  -> a pattern below, UP from the Mii button into the player circle;
+- letters: moves onto the pockets behind the letter list and onto container panes;
+- toolbar: UP from a slot -> the memo button at the top right (B_tb_00 -> B_tbBtn_00).
+After the fix the checker reports **0 errors** on every logged set, both for the moves made in the
+game runs of the final build (74 sets) and for the offline replay of all 135 sets (the one set
+recorded before draw order was logged cannot show the submenu rule; the final run of that screen
+passes). Screenshots checked: pockets grid / submenu, letters, designs submenu, map, keyboards.
+Not reached by script: shops (Nook's buy / sell, catalogue), museum, Able's, Copper's gate, letter
+writing + address book, stationery picker, the design editor itself, HOME Menu (its gui hook
+reports no items: open), title file select (Rover's choices are covered).
 
 Test aids: script tokens `UP DOWN LEFT RIGHT STICK*` drive it like a pad, `RECENTER` presses
 "Recenter pointer"; a scripted `@x/y` counts as a free pointer move. `CF_NAV_LOG=1` (each item set
 as it becomes navigable, every selection change, toolbar enter/leave), `CF_NAV_DUMP=1` (every hit-test
-source with its scale and items, every 30 frames).
+source with its scale and items, every 30 frames), `CF_NAV_TRACE=<file>` (above), `CF_NAV_OLD=1`.
+
+## Pointer in ultrawide
+
+With a window wider than the game's 16:9 and F1 > Visuals "Keep HUD at 16:9" off, `cf_hud.cpp`
+moves the clock to the left edge and the Save button (top right) and the camera-adjust icon to the
+right edge by shifting their panes' global matrices, so the game's own hit tests (which read those
+matrices) find them where they are drawn. The pointer then covers the whole window:
+
+- KPAD x runs over +-1 / factor (`ws::pointerRangeX()`: 1.3125 at 21:9, 2 at 32:9; y stays +-1).
+  The mouse maps the window onto that range as before (x / factor) and now stays valid up to the
+  window edge (it went invalid past 1.1, i.e. still inside the side areas); the stick and gyro
+  pointer are clamped to the range instead of +-1, the absolute stick pointer is scaled to it.
+- The game's cursor is drawn at any KPAD x already; what kept it out was the game's "pointer on the
+  screen" test fn_8017FF4C (|x| <= 1.05, |y| <= 1.075 of the KPAD position from fn_800FA6AC): past
+  it the field HUD goes (toolbar down, Save button hidden), as when the Remote points away. It is
+  run with the x it reads divided by the range (hooks on both). The player's own test before
+  walking to the pointer (d_a_playerNP fn_80_2DB28, limits in f1/f2) gets its x limit times the
+  range, so the player also walks toward the pointer in the side areas (the 3D is Hor+ there, and
+  the game's 16:9 unprojection extends linearly). `src/game/cf_pointer.cpp`, hooks.txt `all`.
+- Snap to menu items: items are read from the same pane matrices, so the anchored Save button is an
+  item at its drawn place; the screen edge of the item clipping / targets (menu_nav.cpp `edgeX`)
+  follows the range.
+
+Nothing changes at 16:9 or 4:3, or with "Keep HUD at 16:9" on (range 1: the same tests and
+clamps as before). Test aid `CF_POINTER_LOG=1`: each change of fn_8017FF4C's answer, with the range.
+
+Verified (USA, fixture `user-town`, scripted `@x/y` pointer, screenshots; 1680x720 = 21:9 and
+2560x720 = 32:9 with the HUD anchored, 1280x720 and 21:9 with "Keep HUD at 16:9" on unchanged):
+field toolbar stays up with the pointer at the window edges, Save button hover ("Save") and click
+("Would you like to quit now?" with its choices) at 21:9 (x 1.17) and 32:9 (x 1.855), the snap
+from the toolbar (Recenter, right along the slots) onto the anchored Save button and A, dialogue
+choices, pockets and the letters panel, town map, Nook's Cranny's buy choices with the pointer
+moved through both side areas (nothing reacts there, no misplaced hits). Not tried: the design
+editor, the HOME Menu, a real mouse in the side areas (the mapping is the scripted one's), the
+camera-adjust icon (not seen on screen in these routes), PAL / Japan / Korea (hooks mapped by `all`, not
+run).
 
 ## Test aids
 
@@ -285,7 +392,16 @@ source with its scale and items, every 30 frames).
   Tokens: `A B 1 2 PLUS MINUS HOME UP DOWN LEFT RIGHT C Z SHAKE NSHAKE STICKUP STICKDOWN STICKLEFT
   STICKRIGHT RECENTER` (`START`/`X`/`Y` = `PLUS`/`1`/`2`), `STICK=x/y` = Nunchuk stick at any position
   (-1..1, up = +y), `@x/y` = pointer at KPAD position (stays until the next one), `@off` = pointing
-  away. Time in retraces, or in guest frames with `CF_INPUT_CLOCK=frames` (matches `CF_SHOT` frame
+  away. `TP=<target>` (route action, fires once when the item starts, so it can follow an
+  `after link` anchor) moves the player like `CF_TELEPORT` (src/game/cf_region.cpp) with `/` in
+  place of `,`: `TP=1300/28/2860` (position x/y/z), `TP=mod102t0100:0/60` (60 units in front of the
+  last actor of REL module 102 whose structure type, +0x8 >> 16, is 0100: the museum),
+  `TP=tortimer`. Structure types and positions per place: tools/routes/*.txt comments and
+  `CF_ACTOR_LOG=<n> CF_ACTOR_MODULES=101,102,103` (lists each actor with its type).
+  `WARP=<target>` (route action, same timing as `TP=`) loads another place through the game's
+  own stage change: `WARP=museum.cafe`, `WARP=city`, `WARP=town@1880/28/2000`, `WARP=stage:0x25`
+  (docs/WARPS.md: every destination, `CF_WARP`, the F1 page; it waits until the game can change
+  stage). Time in retraces, or in guest frames with `CF_INPUT_CLOCK=frames` (matches `CF_SHOT` frame
   numbers). A time `+N` = N after the previous item's start; `~N` after an item repeats it N times
   (`+60:A ~10` = ten presses 60 apart). `after link <REL module> [n]` in a route file: the items
   after it are timed (`+N`) from the n-th time the game links that module (scene changes, e.g.

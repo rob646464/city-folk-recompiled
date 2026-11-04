@@ -7,6 +7,7 @@ void init();                              // loads settings, applies window opti
 void handleEvent(const SDL_Event& ev);    // host event loop
 void draw();                              // host thread, inside an Aurora frame
 bool isOpen();                            // game input is suppressed while open
+void openPage(const char* tab);           // opens the menu on a top-level tab (test aids)
 bool quitRequested();                     // "Quit game" chosen in the menu
 void requestQuit();                       // ends the host loop like "Quit game" (the game left: Wii Menu, power off)
 void shutdown();                          // saves changes not yet written (window closed with the menu open)

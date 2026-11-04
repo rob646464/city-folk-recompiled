@@ -409,6 +409,8 @@ std::string passwordFor(const std::string& address) {
 
 }  // namespace
 
+bool sFieldsStale = true;  // the F1 text fields are refilled from the settings
+
 const std::vector<Preset>& presets() {
     static const std::vector<Preset> v = {
         {"Gmail", "imap.gmail.com", 993, "smtp.gmail.com", 465, true, "needs 2-step verification and an app password"},
@@ -455,8 +457,15 @@ void forgetPassword(const std::string& address) {
 #endif
 }
 
+static bool presetSupported(const std::string& name) {
+    for (const auto& p : presets())
+        if (name == p.name) return p.supported;
+    return true;  // "Other" / older settings: the servers typed in
+}
+
 void tick() {
-    const bool on = port::settings().online.emailOn || std::getenv("CF_MAIL_ON");
+    const auto& o = port::settings().online;
+    const bool on = (o.emailOn && presetSupported(o.emailPreset)) || std::getenv("CF_MAIL_ON");
     friends::setMyEmail(on ? port::settings().online.emailAddress : std::string());
     if (on && !sRunning) {
         sRunning = true;
@@ -476,8 +485,17 @@ bool drawSection() {
     auto& o = port::settings().online;
     bool dirty = false;
     ImGui::SeparatorText("Letters while your friend is away");
-    ImGui::TextWrapped("Without email, letters to a friend go when both games are running (it needs automatic port opening "
-                       "on the router, UPnP / NAT-PMP, or an earlier connection); otherwise they wait for your next visit.");
+    ImGui::TextWrapped("Without email, a letter to a friend goes when both games are running at the same time "
+                       "(\"Deliver whenever both games are running\"); until then it waits on your PC.");
+    ImGui::SetItemTooltip("How it works: your game and your friend's find each other directly, without a server.\n"
+                          "- Both games must be running at the same time (any screen, no room needed).\n"
+                          "- You must have been in a room together once (that is how the games learn each other's\n"
+                          "  addresses); after that a changed address is picked up automatically.\n"
+                          "- Over the internet it needs automatic port opening on one router (UPnP / NAT-PMP, F1 >\n"
+                          "  Online \"Map the port\") or both PCs on the same network; strict mobile / carrier\n"
+                          "  networks may block it.\n"
+                          "- A letter is sent when you save (as on the Wii) and kept until your friend's game confirms it.\n"
+                          "For letters while your friend's game is closed, use \"Always online mail\" below.");
     dirty |= menu::Checkbox("Always online mail (use my email account)", &o.emailOn);
     ImGui::SetItemTooltip("Letters travel as encrypted attachments through your own email account, like WiiConnect24 did.\n"
                           "Your friends' games learn your address from you automatically (never typed by anyone).\n"
@@ -497,6 +515,7 @@ bool drawSection() {
                     o.emailSmtpHost = ps[size_t(i)].smtpHost;
                     o.emailSmtpPort = ps[size_t(i)].smtpPort;
                 }
+                sFieldsStale = true;  // the server fields show the preset's servers
                 dirty = true;
             }
         ImGui::EndCombo();
@@ -505,12 +524,15 @@ bool drawSection() {
     if (!p.supported) ImGui::TextColored(ImVec4(1, 0.55f, 0.4f, 1), "%s", p.note);
     else ImGui::TextDisabled("%s", p.note);
     static char addr[128], imap[128], smtp[128], pw[128];
-    static bool init = false;
-    if (!init) {
+    if (sFieldsStale) {
         std::snprintf(addr, sizeof addr, "%s", o.emailAddress.c_str());
         std::snprintf(imap, sizeof imap, "%s", o.emailImapHost.c_str());
         std::snprintf(smtp, sizeof smtp, "%s", o.emailSmtpHost.c_str());
-        init = true;
+        sFieldsStale = false;
+    }
+    if (!p.supported) {
+        ImGui::TextWrapped("Choose another provider: this one cannot be used, so no mail is sent or fetched.");
+        return dirty;
     }
     if (ImGui::InputText("Your address", addr, sizeof addr)) o.emailAddress = addr, dirty = true;
     if (ImGui::InputText("IMAP server", imap, sizeof imap)) o.emailImapHost = imap, dirty = true;
@@ -532,7 +554,13 @@ bool drawSection() {
     ImGui::SetItemTooltip("Kept only in the system's credential store, never in settings.ini.");
     if (!pwMsg.empty()) ImGui::TextDisabled("%s", pwMsg.c_str());
     else if (!o.emailAddress.empty()) ImGui::TextDisabled("%s", havePassword(o.emailAddress) ? "Password stored" : "No password stored yet");
+    const bool ready = !o.emailAddress.empty() && !o.emailImapHost.empty() && !o.emailSmtpHost.empty() && havePassword(o.emailAddress);
+    ImGui::BeginDisabled(!ready);
     if (menu::SmallButton("Send test letter to myself")) sendTestLetter();
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip(ready ? "Sends a sealed test letter to your own address and fetches it back: checks the servers, TLS\n"
+                                  "and the password. Your game takes it like a friend's letter (it is not a game letter)."
+                                : "Enter your address and servers and save the password first.");
     {
         std::lock_guard<std::mutex> g(sMutex);
         ImGui::TextWrapped("Mail: %s", sStatus.c_str());

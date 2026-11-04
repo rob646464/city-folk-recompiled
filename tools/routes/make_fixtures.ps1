@@ -19,14 +19,17 @@ if (-not $Out) {
 # NOTE (2026-10-28): tools\routes\first_save.txt (new game -> town hall -> Tom Nook's house -> HUD
 # Save -> "Save and quit") is not written yet; until it is, this script stops with "no route".
 $fixtures = @(
-    # name, route, seconds
+    # name, route, seconds[, base fixture]
+    # user-town-clean: the user's town "Frunch" (user-town) after Mr. Resetti and a HUD "Save and
+    # quit" (save_quit.txt): starts with no Resetti and no unsaved session (routes, Dolphin runs).
+    @{ Name = "user-town-clean"; Route = "tools\routes\save_quit.txt"; Seconds = 170; Base = "user-town" },
     @{ Name = "town-new"; Route = "tools\routes\first_save.txt"; Seconds = 900 }
 )
 foreach ($f in $fixtures) {
     if ($Only -and $f.Name -ne $Only) { continue }
     if (-not (Test-Path (Join-Path $root $f.Route))) { throw "$($f.Name): no route $($f.Route) yet" }
     $run = "fixture-$($f.Name)"
-    & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "run.ps1") -Name $run -Route (Join-Path $root $f.Route) -Seconds $f.Seconds -Env "CF_SAVE_LOG=1"
+    & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "run.ps1") -Name $run -Route (Join-Path $root $f.Route) -Seconds $f.Seconds -Env $(if ($f.Base) { "CF_SAVE_LOG=1;CF_FIXTURE=$($f.Base)" } else { "CF_SAVE_LOG=1" })
     $nand = Join-Path $root "build\runs\$run\nand"
     $save = Join-Path $nand "title\00010000\52555545\data\rvforest.dat"
     if (-not (Test-Path $save)) { throw "$($f.Name): no rvforest.dat written (see build\runs\$run\log.txt)" }

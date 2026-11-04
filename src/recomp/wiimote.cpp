@@ -195,6 +195,7 @@ struct ScriptItem {
     float sx = 0, sy = 0;
     bool pointer = false, pointerOff = false;
     float px = 0, py = 0;
+    std::string action;  // TP=... (test aid actions, takeScriptActions)
 };
 
 std::vector<ScriptItem> parseScript(const std::string& script) {
@@ -243,6 +244,13 @@ std::vector<ScriptItem> parseScript(const std::string& script) {
                 {"C", kBtnC}, {"Z", kBtnZ}, {"SHAKE", kBtnShake}, {"NSHAKE", kBtnShakeNunchuk}, {"RECENTER", kBtnRecenter}};
             for (const auto& [name, bit] : kNames)
                 if (b == name) p.buttons |= bit;
+            // TP=<target>: player teleport (cf_region.cpp, CF_TELEPORT syntax, '/' for ',');
+            // WARP=<target>: stage warp (cf_warp.cpp, docs/WARPS.md).
+            if (b.rfind("TP=", 0) == 0 || b.rfind("WARP=", 0) == 0) {
+                p.action = b;
+                p.frames = 1;
+                continue;
+            }
             if (b.rfind("STICK=", 0) == 0) {  // STICK=x/y: Nunchuk stick at any position (-1..1, up +)
                 std::sscanf(b.c_str() + 6, "%f/%f", &p.sx, &p.sy);
                 continue;
@@ -422,7 +430,7 @@ public:
                 }
                 if (ps.last == PortState::MouseDev) {
                     mouseToPointer(m, ps.px, ps.py);
-                    ps.valid = m.inside && std::fabs(ps.px) <= 1.1f && std::fabs(ps.py) <= 1.1f;
+                    ps.valid = m.inside && std::fabs(ps.px) <= ws::pointerRangeX() + 0.1f && std::fabs(ps.py) <= 1.1f;
                 }
             }
             if (rc.pointer & kPtrStick) {
@@ -432,7 +440,7 @@ public:
                     // While the snap holds the pointer on an item, a centred stick does not take it back.
                     if (m > 0.02f || (ps.last == PortState::StickDev && !ps.snapped)) {
                         ps.last = PortState::StickDev;
-                        ps.px = ptrX;
+                        ps.px = ptrX * ws::pointerRangeX();  // the whole window in ultrawide
                         ps.py = -ptrY;
                         ps.valid = true;
                     }
@@ -503,7 +511,10 @@ public:
                 pointerMoved = true;
             }
             if (ps.last != PortState::MouseDev) {
-                ps.px = std::clamp(ps.px, -1.0f, 1.0f);
+                // The whole window while the HUD is anchored to its edges (ultrawide), else the
+                // game's 16:9 frame.
+                const float rx = ws::pointerRangeX();
+                ps.px = std::clamp(ps.px, -rx, rx);
                 ps.py = std::clamp(ps.py, -1.0f, 1.0f);
             }
         }
@@ -572,6 +583,25 @@ void noteScriptEvent(const std::string& name) {
     auto& v = sEvents[name];
     v.push_back(clk);
     if (std::getenv("CF_INPUT_LOG")) log("[input] event %s #%zu at %u", name.c_str(), v.size(), clk);
+}
+
+std::vector<std::string> takeScriptActions() {
+    std::vector<std::string> out;
+    if (script().empty()) return out;
+    static std::mutex m;
+    static std::vector<bool> fired;
+    std::lock_guard lk(m);
+    const auto& s = script();
+    fired.resize(s.size());
+    const u32 clk = scriptClock();
+    for (size_t i = 0; i < s.size(); i++) {
+        u32 start = 0;
+        if (s[i].action.empty() || fired[i] || !itemStart(s[i], start) || clk < start) continue;
+        fired[i] = true;
+        out.push_back(s[i].action);
+        if (std::getenv("CF_INPUT_LOG")) log("[input] action %s at %u", s[i].action.c_str(), clk);
+    }
+    return out;
 }
 
 void sample(int chan, State& out) {

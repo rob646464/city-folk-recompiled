@@ -77,6 +77,10 @@ add_test(NAME wiimote_hid COMMAND cf_wiimote_hid_test)
 add_executable(cf_distrib_test tools/tests/distrib_test.cpp src/recomp/wc24_crypto.cpp src/recomp/vff.cpp)
 target_include_directories(cf_distrib_test PRIVATE src)
 add_test(NAME distrib COMMAND cf_distrib_test)
+# Mii data / database checks (docs/MIIS.md).
+add_executable(cf_mii_test tools/tests/mii_test.cpp src/game/cf_mii_data.cpp)
+target_include_directories(cf_mii_test PRIVATE src)
+add_test(NAME mii COMMAND cf_mii_test)
 
 # Online room transport (src/recomp/online_net.*, docs/ONLINE.md): host + members over loopback UDP.
 add_executable(cf_online_test tools/tests/online_net_test.cpp tools/relay/cf_relay.cpp src/recomp/online_net.cpp
@@ -101,6 +105,12 @@ target_include_directories(cf_relay PRIVATE src)
 if (WIN32)
     target_link_libraries(cf_relay PRIVATE ws2_32 iphlpapi bcrypt)
 endif ()
+
+# Wild World save reader / converter for the move-in (src/game/ww_save.*, docs/MOVE_IN.md "Testing").
+# Synthetic saves; with CF_WW_SAVE=<file> also a real one (never committed).
+add_executable(cf_move_in_test tools/tests/move_in_test.cpp src/game/ww_save.cpp)
+target_include_directories(cf_move_in_test PRIVATE src)
+add_test(NAME move_in COMMAND cf_move_in_test)
 
 # Runtime shared by both executables: memory/CPU helpers, scheduler, HLE SDK, frame driver,
 # audio, menu, and the game-specific parts in src/game. module_rt.cpp belongs to the game

@@ -667,9 +667,35 @@ static void townWc24Default(Ctx& c) {
     doneFor = key;
 }
 
+// CF_WC24_SEND=<frame> (test aid): the WiiConnect24 step of the game's save flow (save menu state
+// fn_801BC9E4) run from that frame: fn_801031B8 resets it, then fn_801031F4 every frame until it
+// says done. It goes through Pelly's outbox (letters to other towns, fn_80103064) and starts one
+// send task per letter (fn_8017816C -> fn_8017ADD0 -> ... NWC24CommitMsg). Saving in the game (bed,
+// save icon) runs the same step; the aid only spares a route to the save menu.
+static void wc24SendAid(Ctx& c) {
+    static const u32 at = [] {
+        const char* v = std::getenv("CF_WC24_SEND");
+        return v ? u32(std::strtoul(v, nullptr, 10)) : 0u;
+    }();
+    static int state = 0;  // 0 waiting, 1 running, 2 done
+    if (!at || state == 2) return;
+    const u32 f = recomp::game::guestFrames();
+    if (state == 0) {
+        if (f < at) return;
+        gu::call(c, VA(0x801031B8));
+        state = 1;
+        std::printf("[online-test] frame %u: save flow's WiiConnect24 send step started\n", f);
+    }
+    if (gu::call(c, VA(0x801031F4))) {
+        state = 2;
+        std::printf("[online-test] frame %u: save flow's WiiConnect24 send step done\n", f);
+    }
+}
+
 void onGuestFrame(Ctx& c) {
     if (!sEnvDone) envStart();
     townWc24Default(c);
+    wc24SendAid(c);
     giveItems(c);
     townFlags(c);
     // CF_TOWN_WC24=<frame> (test aid): the town's own WiiConnect24 setting (save +0x735E4) turned on

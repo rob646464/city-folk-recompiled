@@ -213,7 +213,36 @@ std::string matName(u32 resMatPtr) {
     return buf;
 }
 
+// CF_WFX_KINDS="<material>=water|ground|world;...": test aid, overrides the classification below
+// (to try a material's kind before adding it to the list).
+const std::unordered_map<std::string, u8>& kindOverrides() {
+    static const std::unordered_map<std::string, u8> m = [] {
+        std::unordered_map<std::string, u8> out;
+        if (const char* v = std::getenv("CF_WFX_KINDS")) {
+            std::string s = v;
+            size_t p = 0;
+            while (p < s.size()) {
+                size_t e = s.find_first_of(";,", p);
+                if (e == std::string::npos) e = s.size();
+                const std::string item = s.substr(p, e - p);
+                const size_t eq = item.find('=');
+                if (eq != std::string::npos) {
+                    const std::string k = item.substr(eq + 1);
+                    out[item.substr(0, eq)] = k == "water"    ? u8(AURORA_SURFACE_WATER)
+                                              : k == "ground" ? u8(AURORA_SURFACE_GROUND)
+                                                              : u8(AURORA_SURFACE_WORLD);
+                }
+                p = e + 1;
+            }
+        }
+        return out;
+    }();
+    return m;
+}
+
 u8 kindOf(const std::string& n) {
+    if (const auto& o = kindOverrides(); !o.empty())
+        if (auto it = o.find(n); it != o.end()) return it->second;
     // Water: the sea, rivers and ponds (their pattern layer). Not: the river's foam edge, the sea's
     // white surf, wave shadows, the additive highlight layer, waterfalls and their ripples / spray.
     if (n == "m_ocean" || n == "m_river" || n == "m_river2_pattern" || n == "m_pond" || n == "m_water")
@@ -223,6 +252,11 @@ u8 kindOf(const std::string& n) {
         n == "m_Es_G_soil" || n == "m_outgrass" || n == "m_buildsite" || n.rfind("m_plaza", 0) == 0 ||
         n.rfind("m_road", 0) == 0 || n.rfind("m_ground", 0) == 0)
         return AURORA_SURFACE_GROUND;
+    // The city (d_bgt_drawNP, branch routes-2): pavements (hodo), the plaza's centre and the ring
+    // round the fountain (surface mask checked with AURORA_WORLD_FX_SHOW=1: the plaza, the
+    // streets and pavements). Not: flower beds (m_kadan), the bus stop, the fountain's water
+    // m_water0-2 (tried as water with CF_WFX_KINDS: only the small top bowl is such a surface).
+    if (n == "m_hodo" || n == "m_center" || n == "m_around_ft") return AURORA_SURFACE_GROUND;
     return AURORA_SURFACE_WORLD;
 }
 
@@ -392,7 +426,12 @@ void updateAmounts(bool outdoor) {
     const float light = 1.0f - 0.62f * night;
     a.ambient = mixc(Rgb{light, light, light}, Rgb{0.8f, 0.82f, 0.9f}, overcast * 0.4f);
     if (night > 0.0f) a.ambient = mixc(a.ambient, Rgb{0.30f, 0.34f, 0.48f}, night * 0.6f);
-    if (!outdoor) a.particles = 0;
+    // Seasonal particles only in the town: its outdoor background module d_bgo_drawNP (108) is
+    // linked there, indoors (d_bgi_drawNP 107) and in the city (d_bgt_drawNP 109, which has no
+    // trees or blossoms) it is not. The city's pavements count as ground for the wet-ground
+    // effects, so the surface test alone (outdoor) let leaves fall there (routes-2).
+    const bool town = relBase(108, 1) != 0 && relBase(109, 1) == 0;
+    if (!outdoor || !town) a.particles = 0;
     sAmt = a;
 }
 

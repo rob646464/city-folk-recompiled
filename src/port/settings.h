@@ -321,6 +321,8 @@ struct EnhancedLightingSettings {
     bool nightLights = true;
     float nightLightIntensity = 1.0f;  // 0..3
     bool nightLightShadows = true;     // the strongest night lights cast shadows
+    bool nightLightsGameState = true;  // windows follow the game's own lights-on state (off: every building glows at night)
+    bool effectLights = true;          // fireflies and fireworks are small coloured lights (game particle positions/colours)
     // Sun shafts: light scattered in the air, cut by the shadows of trees and houses.
     bool sunShafts = true;
     float sunShaftIntensity = 1.0f;    // 0..3
@@ -428,8 +430,16 @@ struct OnlineSettings {
     bool micEchoSuppression = true;  // the game's Wii Speak echo suppressor (half duplex); off = full duplex (headphones)
 };
 
+// Move in from Wild World (F1 > Enhancements > Gameplay; src/game/cf_move_in.cpp, docs/MOVE_IN.md):
+// Rover's "Move from the DS!" reads a Wild World save file through the game's own DS receive path.
+struct MoveInSettings {
+    bool anyRegion = false;  // accept Wild World saves of every region (a Wii accepts only its own region's)
+    std::string lastFile;    // the save file picked last time (offered again in the window)
+};
+
 struct Settings {
     InterfaceSettings ui;  // (not "interface": a macro in the Windows headers)
+    MoveInSettings moveIn;
     VideoSettings video;
     RenderingSettings rendering;
     GhostLightSettings ghostLights;

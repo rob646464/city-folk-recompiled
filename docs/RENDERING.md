@@ -44,12 +44,128 @@ flickers), so every config first met in play is a visible hitch. As in LM:
 | house | precache_house.txt | the player's house: in, round the room, out, the town east |
 | nook | precache_nook.txt | west to Nook's Cranny, in (A at the door), Tom Nook, the shop, out |
 | museum | to_museum.txt | new_game's town, walk to the museum (Blathers' hall) |
+| beach | beach.txt | saved town: the beach and the sea (shore walk east to the river mouth and back) |
+| river | river.txt | saved town: the main river below the waterfall, down the bank |
+| museum_rooms | museum.txt | saved town: museum lobby (Blathers), right wing (empty exhibit room), Brewster's cafe The Roost, the observatory (Celeste) |
+| town_hall | town_hall.txt | saved town: the town hall (Pelly at the counter) |
+| city | city.txt | saved town: Kapp'n's bus (stop, bus, ride, first-trip talk), the city's bus stop, fountain plaza, streets |
+| city_shops | city_shops.txt | the bus, then GracieGrace (Labelle's ground floor), Lyle's HRA office, Club LOL (ticket counter hall) |
+| city_shops2 | city_shops2.txt | the bus, then Shampoodle (Harriet), Katrina's fortune shop, Crazy Redd's door (members only) |
 
 All saved-town routes start with `continue_any.txt` (A with the pointer away, so every Rover
 question takes its first answer, whatever the load timing) and time their walk from the arrival
 (`after link d_bgo_drawNP 2`); continue.txt's pointer clicks land in another dialogue branch when
-"Preparing saved data" takes longer than usual. Not covered yet: town hall / post office, Able
-Sisters, the city (bus at the gate), villager houses, festivals.
+"Preparing saved data" takes longer than usual. The routes of branch routes-2 (beach .. city_shops2,
+also in tools/pipelines/verify.py, not recorded into pipelines.bin yet) put the player in front of
+a place with the `TP=` route action (docs/CONTROLS.md "Test aids"), so they do not depend on a walk
+across the town. Not covered yet: Able Sisters, Nook's later shops (the fixture has the first
+one), villager houses, festivals, the auction house / theatre shows / HRA upstairs (barricaded in
+this town), Crazy Redd's shop (membership), Phineas (not in the city on the route's day).
+
+### Places reached (branch routes-2, 2026-11-03, user-town fixture, Oct 27 10:00, USA)
+
+Every place below rendered with nothing visibly wrong at default settings (contact sheets of
+every 60th frame). The beach and the city were compared with Dolphin (routes-3, "Dolphin
+reference runs" below): the beach by the river mouth (sea colour and pattern, the light
+shallow-water band over the sand, surf, the sand steps, the terrace's striped side, the bridge)
+and the city plaza / west street (fountain, plaza stones, GracieGrace, lamps, Kicks at the
+barricaded door, Shampoodle) look the same in both; only the camera position differs a little
+(both runs walk by timed stick input). Since routes-4 the river, the museum rooms, the town hall
+and every shop interior (Nook's, Able Sisters, the city shops) are compared too: all the same. Positions are the game's
+own (actor +0x64), the town is about x 600-3000, z 500-3000 (south = +z), upper terrace y 84,
+lower 28.
+
+| Place | Reached by | Notes |
+|---|---|---|
+| Beach / sea | `TP=1300/28/2860`, walk | sea (m_ocean), surf (m_wave_white), shells; the shallow water over the sand and the stepped sand terraces |
+| River | `TP=1880/28/2000` | river below the waterfall (m_fall, m_hamon spray), banks; bridges at the river mouth |
+| Museum | `TP=mod102t0100:0/60`, walk in | lobby 260,56,484 (Blathers), right door = an exhibit wing (empty: nothing donated), left door = The Roost (Brewster; K.K.'s module is linked there too), stairs at the back left = observatory (Celeste) |
+| Town hall | `TP=mod102t00FE:0/60`, walk in | Pelly at the counter, the room, the ATM-like machine left of the door |
+| City | bus stop `TP=1808/84/700`, A at the sign, "To the city!" | Kapp'n's bus, his first-trip talk (~4000 frames of A), the city (`d_bgt_drawNP`): bus stop, steps, fountain plaza, streets; visitors (town_out NPCs) talk to the player when A is pressed near them |
+| GracieGrace | `TP=mod103t0114:0/60`, walk in | ground floor with Labelle (upstairs needs progress) |
+| Lyle's | `TP=mod103t0111:0/60`, walk in | HRA office (Lyle; d_a_rmobj_barricadeNP linked: another floor closed) |
+| Club LOL | `TP=mod103t0118:0/60`, walk in | ticket counter hall (barricade linked: the show room closed) |
+| Shampoodle | `TP=mod103t0110:0/60`, A at the door | Harriet's first-visit talk; her goodbye at the door needs A |
+| Katrina's | `TP=mod103t0113:0/60`, A at the door | dark fortune room lit by two candles (Katrina at her table) |
+| Crazy Redd's | `TP=mod103t0112:0/60`, A at the door | the doorman turns non-members away (members need an invitation: someone has to refer you) |
+| Phineas, Kicks | - | Phineas was not in the city; Kicks stands by a closed door at 1085,68,386 |
+
+With Enhanced lighting + Enhanced world on (`CF_ENHANCED=1 CF_WFX=1`): the sea and the river now
+reflect (sky, clouds, the banks, the waterfall). Interiors: AO and the room light, nothing off.
+The city: sun shadows on the streets; its pavements and plaza are ground for wet ground and
+puddles (`m_hodo`, `m_center`, `m_around_ft`; `m_road` already matched). Fixed on routes-3:
+
+- **Vertical bands near the shore** (Aurora 0391): not the surface mask (it held only m_ocean,
+  checked with `AURORA_WORLD_FX_SHOW=1`) and not the sky fallback (`=8`: the band pixels were
+  scene hits). Under translucent water the scene depth is the bed: the sea floor and the sand
+  terraces' side faces below the water line. Rays reflected up from the surface "hit" those
+  underwater faces in screen space and returned their stripes. A reflection can only show what is
+  above the reflecting plane, so hits below the ray's origin plane now let the march go on.
+- **Milky shallow water** (Aurora 0391): the game draws the sea over the sand with a low alpha
+  near the shore, but the reflection weight ignored it (35-85 % of sky over a pixel that is mostly
+  sand). The weight now follows how far the bed lies behind the surface (mask depth vs scene
+  depth along the view axis): full from 1.5 "metres", 15 % at the waterline. Shallow water is the
+  game's own plus a faint sheen; deep sea, river and ponds unchanged.
+- **Leaves in the city**: the seasonal particles followed "the frame drew ground or water", and
+  the city's pavements are ground since routes-2. They now also need the town's outdoor module
+  (`d_bgo_drawNP` linked, the city's `d_bgt_drawNP` not; indoors `d_bgi_drawNP`): none in the
+  city or indoors, unchanged in the town (`CF_WFX_LOG` "particles").
+
+### Dolphin reference runs (routes-3)
+
+`tools/dolphin/dolphin_run.ps1 -User <scratch> -Script <dsu script> -Seconds <n> -Out <dir>
+[-Gecko "Beach teleport"|"Bus stop teleport"]` (scripts from `tools/dolphin/make_scripts.py`):
+a scratch Dolphin user folder from the templates in tools/dolphin, a Wii Remote + Nunchuk driven
+by `dsu_server.py` over DSU, window captures. What it took to make Dolphin's input scriptable:
+`[Input] BackgroundInput = True` (Dolphin ignores pads while its window is not focused, and ours
+sits off screen), `[Controls] WiimoteSource0 = 1` (the emulated Remote; without it no Remote
+connected and nothing reacted), the DSU analog face buttons in protocol order Square, Cross,
+Circle, Triangle (Dolphin reads the button pressure bytes: with them reversed Cross = A never
+registered while Circle = B did), and presses of 0.35 s (shorter ones were missed with Dolphin
+below full speed). There is no warp in Dolphin, so a Gecko code does the `TP=`: the player actor
+pointer at 0x805D26E4 (USA rev 1, found in a `CF_MEM_DUMP`; heap and REL addresses match ours),
+written once while the player still stands at the house door (1200, 84, 640). The town is the
+clean post-save fixture `user-town-clean` (tools/routes/save_quit.txt, make_fixtures.ps1),
+copied into Dolphin's NAND before every run, so a killed run never leaves Mr. Resetti waiting at
+the next start. The in-game save before quitting stays out (routes-4): the HUD Save button needs
+the Wii pointer on it, and Dolphin's IR position for a given DSU stick value is not the KPAD
+position (calibrating it means screenshots of the cursor per value); the NAND restore already
+gives every run the clean town, so it was not worth it.
+
+**Every place (routes-4)**: `-Gecko "Places warps"` (tools/dolphin/make_warps.py; `--nocall`
+builds the same code without the call, for testing the code alone) does in Dolphin what
+`tools/routes/dolphin_places_warp.txt` does in the port: from the house-door arrival, every 900
+frames the game's own stage change fn_80163064(stage manager 0x805FB218, stage, &pos, type,
+angle, 2, 2) with the arguments the port's warps pass (copied from its `CF_WARP_LOG=1` "go to
+stage" lines): river below the waterfall, museum lobby, paintings room, aquarium, The Roost,
+observatory, town hall, Nook's Cranny, Able Sisters, GracieGrace, Shampoodle, Katrina's, Crazy
+Redd's (inside), the HRA office, Lyle's auction house, Club LOL's ticket hall. A C0 (execute)
+code: it saves r3-r31, CR and LR in its own stack frame (the first version saved too little and
+wrote above its frame; Dolphin's code handler then read through a broken pointer every frame and
+no frame was drawn), keeps its counter and table inside the code block (bl / mflr), and waits for
+the player at the door before counting. All 16 places side by side with the port
+(screenshots in the agent scratch area, 2026-11-03): **the same in every room**: geometry,
+materials, lighting and the dark room edges, characters (Blathers, Brewster, Celeste, Pelly,
+Tom Nook, Mabel, Labelle, Harriet, Katrina, Redd, Lyle, Lloid), dialogue boxes and text. Only
+timing differs: the wallet (Bells) HUD fades in a moment after the arrival and Dolphin, below
+full speed, was captured earlier; one Dolphin frame shows the camera-adjust icon (pointer
+position). Nothing to fix.
+
+**The first city trip: Rover instead of Kapp'n (routes-4).** Not a rendering or save difference
+but what the console reports about WiiConnect24. On the first ride Rover sits on the bus and
+explains WiiConnect24 (letters to friends, Message Board, villagers moving between towns) when the
+game's boot check (`fn_80178640`, docs/DISTRIBUTIONS.md) found WiiConnect24 available (state 1 at
+r13-0x2D74); otherwise Kapp'n gives his first-trip talk. The town's own WiiConnect24 setting
+(save +0x735E4) does not decide it: it is 0 in the fixture and Dolphin still showed Rover.
+Dolphin's generated SYSCONF has `NET.WCFG` = 1 (WiiConnect24 on, as a Wii set up for it); main's
+port writes `NET.WCFG` = 0 unless F1 > Online > Nintendo events is on. Verified both ways in the
+port: with `CF_DISTRIB=manual` (WCFG 1, the check's state 1) the same fixture's first ride gives
+Rover's WiiConnect24 talk, as in Dolphin; with the default, Kapp'n. A real Wii with WiiConnect24
+on behaves like Dolphin; one with it off (or never set up) like main's port. The online-1 branch
+(not on main yet) reports WiiConnect24 on by default (`nwc24_dl.cpp consoleWc24()`, opt-out
+`CF_WC24_CONSOLE=0`; letters to other towns need it), so after that merge the port's first ride
+will be Rover's, like Dolphin's; routes that time Kapp'n's talk (city_bus.txt: A until the city)
+work either way.
 
 ### Numbers (2026-11-02)
 
@@ -143,7 +259,7 @@ stream: frames are byte-identical to the game's.
 | Rain ripples | on | expanding rings on water and puddles while it rains |
 | Snow sparkle | on | glints on bright snow-covered ground, snow cover dates (Dec 11 - Feb 24) in daylight with the sun out |
 | Haze on grey days | on, strength 1 | depth-based haze beyond the player's distance on cloudy / rainy / snowy days, a trace at dawn and dusk |
-| Seasonal particles | on, density 1 | petals Apr 1-8, leaves Oct 17 - Nov 25, snowflakes Nov 26 - Feb 24 (hemisphere option: +6 months); outdoors only |
+| Seasonal particles | on, density 1 | petals Apr 1-8, leaves Oct 17 - Nov 25, snowflakes Nov 26 - Feb 24 (hemisphere option: +6 months); in the town only (not indoors, not in the city) |
 | Colour preset | Original | New Leaf warmth / Soft film / Vivid (+ strength); grades the 3D, not the HUD |
 | Tilt-shift (diorama) | off | blur above / below the player's row (strength, sharp band) |
 
@@ -160,8 +276,11 @@ stream: frames are byte-identical to the game's.
   m_cliff, m_grass, m_soil, m_verge, m_river_cliff, m_under_grass, m_cliff_slope, m_bridgeA,
   m_sand_sea, m_soil_sand(_side), m_sky, m_moon, m_cloud, m_ocean, m_river2_pattern, m_cross,
   m_river1_edge, m_wave_white, m_z_highLight, m_fall, m_hamon, m_fall_light, m_kemuri, tree /
-  flower / house materials). The city's plaza materials are not classified yet (not reached by a
-  route).
+  flower / house materials). City (routes-2, city.txt): `m_hodo` (pavements), `m_center`,
+  `m_around_ft` (plaza) are ground with `m_road`; world: `m_kadan` (flower beds), `m_busstop1`,
+  `m_fountain`, its water `m_water0-2`, the buildings (`m_grace`, `m_HRA`, `m_auction`,
+  `m_theater`, `m_fortune`, `m_tsunekichi*`, `m_tw_*`), `m_tunnel*`, `m_clock`, `m_lamp`, the
+  `m_shadow*` decals. `CF_WFX_KINDS="<material>=water|ground|world;..."` tries a kind for one run.
 - **Camera**: the main ScnRoot's current camera (u8 [root + 0xF4], CameraData at root + 0xF8 +
   0x10C n; its world -> view MTX34 comes first; the camera position / target fields there are 0 in
   City Folk) goes into Aurora's application XF memory (0x0700) as a plain XF load noted for
@@ -230,8 +349,9 @@ wet ground, puddles, ripples, haze, leaves), snow (Jan 15 11:00: sparkle, snowfl
 
 ### Open
 
-- The sea and rivers were not reached by a route (only the pond by the house); the city's plaza
-  materials are not classified (no route to the city yet).
+- Sea and river reached (routes-2: beach.txt, river.txt): they reflect; the shore's vertical
+  bands and milky shallow water are fixed (Aurora 0391, "Places reached" above). A faint
+  reflection of the terrace side above the water line remains (a real reflection).
 - Rain streaks are drawn since render-3's Aurora 0304 (not on main yet); the rain ripples /
   puddles here do not depend on it.
 - The surface-mask pipeline variants are compiled on first use (a few per scene), not precached.
@@ -329,14 +449,108 @@ a flat grey look. On top of the game's own hourly colours. Strength slider; off 
 ### Night lights
 
 Lit windows and lamps as warm extra lights (LM's ExtraLight path, interpolated by id): sources by
-model name (obj_myhome*, obj_house*, obj_shop*, obj_museum*, obj_police*, obj_townhall*,
-obj_busstop*, obj_lamp* / obj_light*, obj_cafe*), placed in front of the model at window height
-(model space offset through its world matrix), from dusk (sun below +1 degree) to dawn. Shadows
-for the house / shop / lamp kinds ("Night light shadows", cube maps). Collected from frame N's
-draws, submitted with frame N+1 (static sources). **Open**: whether a villager's window is really
-lit (the game's own window state is not read: every house glows at night); fireflies and
-fireworks are not light sources yet (their particle emitters are not identified); only names seen
-in the user's town were verified (obj_myhome0, obj_house0/2, obj_busstop0).
+model name, placed in front of the model at window height (model space offset through its world
+matrix), from dusk (sun below +1 degree) to dawn. The structure models of a town (disc archive
+`Str/Brres/field<Rgn><Lng>StrBrres<S/W>.arc`): players' houses `obj_myhome0-4`, villagers' houses
+`obj_house0-4` (`TN_obj_house*.brres`), Nook's stores `obj_nc` / `obj_nk` / `obj_nw` / `obj_ng`,
+Able Sisters `obj_tailor`, town hall `obj_office`, `obj_museum`, `obj_lighthouse`, `obj_windmill`,
+`obj_busstop0` (the earlier names obj_shop / obj_townhall / obj_police / obj_cafe do not exist).
+Window offsets of obj_nk / obj_nw / obj_ng / obj_lighthouse / obj_windmill are estimates (none
+of them is in the user's town).
+Shadows for the house / shop / lamp kinds ("Night light shadows", cube maps). Collected from frame
+N's draws, submitted with frame N+1 (static sources).
+
+**The game's own lights-on state** (branch enh-light-2; F1 "Follow the game's lights", on): every
+structure with lit materials has a `daSTR_c` light controller (d_a_strNP). Its material table
+(d_a_strNP .data + 0x140, 17 entries: `m_letter`, `m_light`, `m_board`, `m_special`, `m_bus_ind`,
+`m_museum`, `m_spotlight`, `m_window`, `m_tw_light`, `m_tw_light_00..07`) names the materials of a
+model that glow; **d_a_strNP fn_99_A40** (hooked, `all`) sets TEV colour 1 of each of them to a
+lerp of two colours by the controller's **light amount** (controller + 0, float 0..1; the ScnMdl at
+controller + 0x2C, through `ScnMdl::CopiedMatAccess` / `ResMatTevColor::GXSetTevColor`). The
+actors decide the amount and call fn_99_A40 only when it changes (and at creation), so the hook
+records it per ScnMdl and the night light's intensity is multiplied by it. What the game decides
+(USA user-town fixture): players' houses 0 while nobody is inside, villagers' houses 1 or 0 (at
+21:30 three of six were dark; that is what the game draws), Nook's Cranny fades 1 -> 0 over ten
+frames at 22:00 (closing time; `[window]` log), town hall / Able Sisters / museum / gate / bus 1.
+Kinds without a controller (bus stop, lamps) glow from dusk to dawn. Off = the old behaviour
+(every structure glows). Screenshots (build/runs/win4 of the branch's worktree): a dark villager
+house without / with the old light, lit houses with their light.
+
+### Fireflies and fireworks (effect lights)
+
+F1 "Fireflies and fireworks" (under Night lights, on). Both are `nw4r::ef` effects, so the lights
+come from the game's own particles (cf_light.cpp `noteEffectDraw`, hook on
+`nw4r::ef::DrawOrder::Draw(Effect*, const DrawInfo&)`, which draws an effect's particle managers):
+
+- Layout (USA rev 1; NW4R, so the same on every disc): Effect + 0x90 its ParticleManagers
+  (`ut::List`, link offset at list + 0xA); ParticleManager + 0x24 its EmitterResource, whose first
+  word points at the emitter's name; + 0x38 its particles (`ut::List` of 0xE4-byte Particles, link
+  at + 0x14); + 0x8C the effect's root matrix (`Effect::SetRootMtx` copies it to Effect + 0x54; the
+  emitters' world matrix). Particle + 0x20 primary colour (RGBA; the colour animation and the
+  alpha fade / blink are applied there every frame), + 0x24 secondary colour, + 0x28 a modulation
+  colour (white), + 0xA0 velocity, + 0xAC position (emitter space), + 0xB8 previous position,
+  + 0xDC age. Positions were checked against the matrix the billboard strategy loads with
+  `GXLoadPosMtxImm` for the quad (identical to 0.1 unit) and a visible firefly glow on screen sat
+  exactly where its light's projection put it.
+- **Fireflies**: emitters `af_ins_hotaru_glow` + `af_ins_hotaru_glow_child` (one particle each, two
+  managers per firefly at one place: merged), `af_hotaru_glow`. One green light per firefly
+  (colour from the particle, ~(0.6, 1, 0.5)), radius 110, intensity 1.6 x the glow's alpha (it
+  blinks with it). Seen in June at 21:30 in the user-town fixture: 5-10 fireflies around the
+  player, along the river.
+- **Fireworks** (the August Sunday show, also `af_itm_firework*` items): `af_fld_firework`,
+  `_top`, `00`-`02`, `_child`, `_st_child`. The show is a **sky backdrop**: its effects are drawn
+  with their own camera (DrawInfo + 0 view matrix: identity rotation, translation (0, 110, -1300)),
+  not the town's, so a burst has no place in the town. Its light is placed where the burst appears:
+  the backdrop's view-space position taken as the main camera's view space (same projection), i.e.
+  up and ahead of the scene; radius 1100-1800 (with the burst's spread), intensity 2.5 x the
+  burst's brightness (alpha-weighted particle count / 8), colour = alpha-weighted mean of the
+  particles' primary and secondary colours with the hue pushed (bursts are green, orange, teal,
+  pale yellow). The game flashes the scene's ambient colour itself during the show; this adds the
+  burst's coloured light from above. Effects drawn with the main camera use world positions
+  (submitted with the next frame through the main camera, like night lights).
+- Budget: at most 12 firefly and 8 firework lights (strongest first, sources of one kind closer
+  than 25 / 200 units merged), then the shared ranking in enhanced_lighting.cpp into Aurora's 64
+  extra lights; no shadows. Outdoors scaled by darkness (0.25 + 0.75 x night), indoors full.
+- Ids `0x5A000000 ^ manager address` (stable while the effect lives) for interpolation; backdrop
+  lights are view-space fixed, so a camera move between game frames shifts them slightly (not
+  checked at 120 fps).
+- Test aids: `CF_EFL_LOG=1` (every emitter name with its kind once, per manager every 30 frames:
+  particles, brightness, world / backdrop, centre; the lights every 60 frames), `CF_EFL_AS=<emitter
+  name prefix>` (that emitter lights like a test firefly: white, radius 400, to check placement on
+  an easy effect such as `af_fsh_shadow`), `CF_EFL_AB=1` with `CF_ENHANCED_AB=1` (effect lights
+  only in dump frames 4k+1, not 4k+3: neighbouring shots compare them), `CF_WINDOW_LOG=1` (light
+  amount changes per structure model, controller call counts, every 1200 frames the list with
+  world positions). Routes: `CF_CLOCK_START="2026-06-20 21:30"` (fireflies), `"2026-08-02 20:00"`
+  (Sunday: fireworks), `CF_TELEPORT=6600:tortimer` (the plaza during the show),
+  `"2026-08-03 21:57"` (Nook's closes at 22:00).
+- World vs actor coordinates (for teleports): world x = actor x; the town is a cylinder about X, a
+  ground point's world (y, z) = r (sin p, cos p) with p = 0.3526 - (actor z - 697) / 573 (radians,
+  fitted in the user-town fixture; r ~ 700). A structure in front of its door: actor z of its centre
+  + ~130.
+
+### Indoor places (branch enh-light-2)
+
+Checked with A/B shots (user-town fixture, `CF_TELEPORT` in front of the door, then walking in):
+town hall (Pelly), museum (Blathers' hall), Able Sisters (Mabel) besides the house, Nook's and
+Rover's bus from enh-light: `[sky] indoors` in each (d_bgi_drawNP linked, d_bgo_drawNP not), the
+room key light's soft shadows and AO, no sun / grade / night lights, nothing broken. Not reached:
+the city (bus), the museum's other rooms, the café.
+
+### Other versions (branch enh-light-2)
+
+Dev builds per version (`tools\build.ps1 -Game <id>`), the user-town save with its title folder
+renamed (docs/SETUP.md), continue route:
+
+| Check (2026-11-03) | USA | PAL | Japan | Korea |
+|---|---|---|---|---|
+| Light-controller hook (`[window]`: 31 structure models with their light amounts) | yes | yes | yes | yes |
+| Fireflies (June 21:30: `af_ins_hotaru_glow*` found, 5-10 firefly lights) | yes (shots) | yes (shot) | yes | yes |
+| Fireworks show (Aug 2 20:00 at the plaza: backdrop bursts, firework lights) | yes (shots) | yes | yes | yes |
+| Nook's Cranny closing at 22:00 (light amount 1 -> 0) | yes | - | - | - |
+| Indoors (town hall, museum, Able Sisters) | yes (shots) | - | - | - |
+
+Korea's continue route needs its own choice-box positions (`@0.44/0.14`, `@0.56/0.33`). The town in
+the save is a USA town, so its events (the August fireworks) follow the US calendar on every disc.
 
 ### Bloom and sun shafts (Aurora 0342 shafts)
 
@@ -381,3 +595,13 @@ hour 16:50 (long warm shadows, golden grade, shafts), dusk 17:45 (moon rising, b
 flatter), snow (Jan 15, state 5), indoors (Rover's bus stage: the room key light, no sun/grade).
 Not compared with Dolphin (these are enhancements: the plain frames are the reference and stay
 byte-identical with the master off).
+
+Branch enh-light-2 (agent scratch, not in the repo; plain | enhanced pairs unless noted): a dark
+villager house at 21:30 with "Follow the game's lights" on (no light) and off (the old warm light
+on a house the game shows dark), lit villager houses with their light; fireworks at the plaza
+(Aug 2 20:00, `CF_EFL_AB`: with | without the burst's light, orange flash on the plaza); a firefly
+by a tree (with | without: the leaves beside it turn green); a firefly glow on screen exactly at its
+light's projection; town hall / museum / Able Sisters interiors; a PAL firefly scene (date shown
+20/6). An enhanced-off frame was not pixel-compared with main: two runs are not frame-identical
+(the HUD appears at different frames), so "off = original" rests on the hooks only reading guest
+memory and calling the original.

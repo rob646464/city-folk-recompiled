@@ -151,9 +151,9 @@ items done as they land.
 - **Hor+ / ultrawide** (21:9 checked at 1680x720): the 3D widens (Hor+), the 2D stays a centred
   16:9 frame. With F1 > Visuals "Keep HUD at 16:9" off, `src/game/cf_hud.cpp` (hook on
   nw4r::lyt::Pane::Draw) anchors the clock to the left edge and the memo / camera-adjust buttons to
-  the right edge; the toolbar, dialogue, keyboards and menus stay centred. Limitation: only the
-  picture moves, the game hit-tests the pointer at the 16:9 position (so the option stays off by
-  default). Test aid `CF_LYT_LOG=<first>,<last>` (pane tree per frame).
+  the right edge; the toolbar, dialogue, keyboards and menus stay centred. The anchored buttons are
+  clicked where they are drawn and the pointer covers the whole window (docs/CONTROLS.md "Pointer
+  in ultrawide"); "Keep HUD at 16:9" stays on by default. Test aid `CF_LYT_LOG=<first>,<last>` (pane tree per frame).
 - Test aids: `AURORA_DRAW_SKIP_SWEEP=1` (with AURORA_DRAW_LOG_FRAMES and CF_SHOT per frame: draw k
   dropped in frame first+k, which pixels each draw makes), `CF_LYT_LOG`, `[interp] raw XF matrix
   loads ...` line once a minute while interpolating. Scripted route: `tools/routes/gen_town.py`
@@ -223,13 +223,12 @@ items done as they land.
 - **Original 60**: every change is behind interp::capturing() or the anchoring option: frame dumps
   identical to the render-2 build for every still frame of the title/Rover route (the frames that
   differ also differ between two runs of the same build: animation timing vs. load).
-- **Ultrawide clicks** (open): anchoring now moves the HUD elements' pane global matrices
-  (`Pane::CalculateMtx` hook, dx = (1/f - 1) x half the layout width; clock -217 -> -312, camera
-  icon 274 -> 369 at 21:9; `CF_HUD_ANCHOR=picture` the old picture-only shift). But the game treats a
-  pointer beyond the 16:9 frame (|KPAD x| > 1) as off the screen: the memo button hides as soon as
-  the pointer leaves the toolbar, so an element at the window edge cannot be clicked either way.
-  The fix needs the pointer remapped into the 16:9 frame over an anchored element (and the cursor
-  drawn at the mouse); "Keep HUD at 16:9" stays on by default.
+- **Ultrawide clicks** (fixed, branch ultrawide-pointer): anchoring moves the HUD elements' pane
+  global matrices (`Pane::CalculateMtx` hook, dx = (1/f - 1) x half the layout width; clock -217 ->
+  -312, camera icon 274 -> 369 at 21:9; `CF_HUD_ANCHOR=picture` the old picture-only shift), the
+  pointer spans the whole window (KPAD x +-1/f) and the game's "pointer on the screen" tests are
+  widened by the same factor (src/game/cf_pointer.cpp): the Save button at the window edge is
+  hovered and clicked where it is drawn at 21:9 and 32:9. docs/CONTROLS.md "Pointer in ultrawide".
 
 ## IOS (Starlet)
 
@@ -251,7 +250,7 @@ the CPU given up).
 | USB (`/dev/usb/kbd`, `oh0`) | USB keyboard (letters), Wii Speak | absent (no keyboard; USB host with no devices) |
 | SD (`/dev/sdio`) | photos, design/letter backup | slot with no card for now; plan: SD host over a FAT image (docs/NAND.md "Not done") |
 | Network (NCD/SO/SSL/NWC24/DWC/KD) | Nintendo WFC online play, WiiConnect24 letters/events | offline: `/dev/net/*` not running (opens fail); later host sockets + TLS, revival servers (docs/ONLINE.md); real-time weather lookups are host-side |
-| Miis (RFL) | Mii masks | the game's own parts (`Face/RFLRes01.arc`); no `RFL_DB.dat` = RFL's empty-database fallback; a player's own database can be copied in |
+| Miis (RFL) | Mii masks | the game's own parts (`Face/RFLRes01.arc`); no `RFL_DB.dat` = RFL's empty-database fallback; F1 > Miis makes / imports the database and hands it to the running game (docs/MIIS.md) |
 | RTC / OS time | everything (the game runs on the real clock) | **done**: host local time + F1 clock offset (time travel), applied at start |
 
 ## Input: Wii Remote
@@ -328,7 +327,8 @@ door opens on stick-up (when exactly varies: route with `after link d_bgi_drawNP
 - **OSLink/OSUnlink**, OSThread/alarms/messages, cache ops: LM's HLE + REL support.
 - **WiiConnect24**: some content was distributed by Nintendo through it (event letters, items):
   see docs/REGION_CONTENT.md for whether we can deliver it offline.
-- **DS transfer** (DSApp, Wild World characters): needs a real DS; out of scope for now.
+- **DS transfer** (DSApp, Wild World characters): the move-in works with a Wild World save file
+  and a virtual DS behind the MP/MPDL libraries (docs/MOVE_IN.md); the DS Suitcase has no DS side.
 
 ## Order of work
 

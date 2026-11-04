@@ -12,7 +12,9 @@
 #include <cstring>
 
 #include "game/cf_features.h"
+#include "game/cf_mii.h"
 #include "game/cf_region.h"
+#include "game/cf_warp.h"
 
 #include "recomp/distributions.h"
 
@@ -103,10 +105,12 @@ bool onGuestFrame(Ctx& c) {
     forceSaveOnFrame(c, frame);
     forceWc24OnFrame(c, frame);
     region::onGuestFrame(frame);  // cf_region.cpp test aids
+    warp::onGuestFrame(c, frame);  // cf_warp.cpp: warps (docs/WARPS.md)
     cf::grassOnFrame(c);  // cf_grass.cpp, cf_skin.cpp (docs/FEATURES.md)
     cf::skinOnFrame(c);
     distrib::onGuestFrame(c);  // Nintendo events (docs/DISTRIBUTIONS.md)
     online::onGuestFrame(c);  // CF_ONLINE_* test aids (online.cpp)
+    cf::miiOnGuestFrame(c);   // Mii maker: saved Miis to the game's RFL (cf_mii.cpp)
     return cf::devOnGuestFrame(c);  // CF_FF fast-forward and other test aids (cf_devaids.cpp)
 }
 u32 guestFrames() { return sFrames.load(std::memory_order_relaxed); }
@@ -229,8 +233,8 @@ bool splitScreen() { return false; }
 bool textBoxShown() { return false; }
 int textMode() { return 0; }
 bool viewerOpen() { return false; }
-void drawOverlay() {}
-void debugMenu() {}
+void drawOverlay() { cf::miiDrawOverlay(); }
+void debugMenu() { warp::debugMenu(); }
 s32 overlayEntry(const char* path) { return region::overlayEntry(path); }
 bool isOverlayEntry(s32 e) { return region::isOverlayEntry(e); }
 u32 overlayLength(s32 e) { return region::overlayLength(e); }

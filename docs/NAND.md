@@ -144,7 +144,7 @@ French.
 | `/dev/sdio/slot0`, `slot1` | **SD slot with no card**: GetStatus (0x0B) = 0, card commands fail. Photos to SD: later (see "Not done"). |
 | `/dev/usb/kbd` | **absent** (open fails, `-6`): no USB keyboard. A device version (open succeeds, the event request waits forever = no keyboard attached) exists behind `CF_USB_KBD_DEVICE=1`. |
 | `/dev/usb/oh0` | USB host with no devices (Wii Speak absent); not opened by the game so far. |
-| `/dev/net/*` (KD = WiiConnect24, NCD, IP, SSL, WD = DS wireless) | **not running** (open fails, `-6`): the game is offline. NWC24 retries `/dev/net/kd/request` every ~2 s at the title (logged once). Online play: docs/ONLINE.md. |
+| `/dev/net/*` (KD = WiiConnect24, NCD, IP, SSL, WD = DS wireless) | **not running** (open fails, `-6`): the game is offline. NWC24 retries `/dev/net/kd/request` every ~2 s at the title (logged once). Online play: docs/ONLINE.md. WD is never opened: the MP/MPDL libraries above it are HLE'd (docs/MOVE_IN.md). |
 
 Leaving the game: OSShutdownSystem, OSRestart, OSResetSystem, OSReturnToMenu (and the
 data-management / settings / error variants), `__OSHotReset`, `__OSShutdownToSBY` end the program
@@ -153,13 +153,15 @@ the way "Quit game" does (`menu::requestQuit`); the calling thread never returns
 ## Miis
 
 The game ships its own Mii parts (`files/Face/RFLRes01.arc`, passed to RFLInitRes), so only the
-**database** `/shared2/menu/FaceLib/RFL_DB.dat` comes from the NAND. We leave it absent: the RFL
-library's own fallback for that case (RFLiBootLoadDatabaseAsync: open fails with
-NAND_RESULT_NOEXISTS -12 -> RFLiClearDBBuffer, an empty database, no error) is what a console
-whose Mii Channel was never used does. A player's own database copied there
-(`nand\shared2\menu\FaceLib\RFL_DB.dat`, from their Wii) is read as on the console. Character
-creation in City Folk does not use Miis (Rover's questions); Mii masks at Shampoodle read the
-database (empty: none offered). Not reached in a test yet (no input past the title, see below).
+**database** `/shared2/menu/FaceLib/RFL_DB.dat` comes from the NAND. Without it the RFL library's
+own fallback for that case (RFLiBootLoadDatabaseAsync: open fails with NAND_RESULT_NOEXISTS -12 ->
+RFLiClearDBBuffer, an empty database, RFL's "not found" flag) is what a console whose Mii Channel
+was never used does: Harriet's makeover at Shampoodle then says there are no Miis. The port's Mii
+maker (F1 > Miis, **docs/MIIS.md**) makes, edits, imports and exports the Miis of this file; saving
+writes it (atomically, never while the game has it open) and hands it to the running game's RFL. A
+player's own database copied there (`nand\shared2\menu\FaceLib\RFL_DB.dat`, from their Wii or
+Dolphin) is read as on the console, or can be imported in F1 > Miis. Character creation in City Folk
+does not use Miis (Rover's questions).
 
 ## Clock
 

@@ -1,0 +1,31 @@
+# City shops, part 2 (saved town CF_FIXTURE=user-town): Kapp'n's bus (city_bus.txt), then the
+# player is moved (TP token) to each door, presses A to open it (these doors need A): Shampoodle
+# (Harriet's greeting) -> Katrina's fortune shop -> Crazy Redd's back door (his doorman turns a
+# non-member away: the shop itself needs a membership this town does not have).
+# Verified 2026-11-03 (branch routes-2).
+include city_bus.txt
+# Shampoodle (0110).
+after link d_bgt_drawNP 1
++1300:@off
++100:TP=mod103t0110:0/60
++60:STICKUP*30
++50:A
+after link d_bgi_drawNP 3
+# Harriet talks for a varying time, then says goodbye at the door: walk down and press A
+# together, again and again (A advances her text, the walk takes the player out once free).
++150:STICKDOWN+A*20
++60:STICKDOWN+A*20 ~30
+# Katrina's (0113).
+after link d_bgt_drawNP 2
++600:TP=mod103t0113:0/60
++60:STICKUP*30
++50:A
+after link d_bgi_drawNP 4
++300:STICKUP*40
++100:STICKDOWN*250
+# Crazy Redd's door (0112).
+after link d_bgt_drawNP 3
++600:TP=mod103t0112:0/60
++60:STICKUP*30
++50:A
++60:A ~12

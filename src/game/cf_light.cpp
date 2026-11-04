@@ -309,6 +309,7 @@ void submitSky() {
 }
 
 void submitNightLights();
+void submitEffectLights();
 
 void endScene() {
     if (!sSceneOpen) return;
@@ -335,6 +336,7 @@ void onCamera(Ctx& c, u32 data) {
             sSceneOpen = true;
             submitSky();
             submitNightLights();
+            submitEffectLights();
             enh::beginScene();
         } else if (sSceneOpen) {
             // (ScnRoot::DrawOpa loads all 32 cameras up front: the last one set is not the current one)
@@ -398,12 +400,18 @@ const ModelInfo& modelInfo(u32 obj) {
 const bool sModelLog = std::getenv("CF_MODEL_LOG") != nullptr;
 
 // ---- night lights ----
-// Sources by model name: lit windows of houses and shops (a warm light in front of the house at
+// Sources by model name: lit windows of houses and shops (a warm light in front of the building at
 // window height), lamps. Collected from the draws of game frame N (their world matrix, g3d
-// ScnObj + 0x3C), submitted with frame N+1's scene (the sources do not move). World -> view comes
-// from the objects themselves: ScnObj + 0x6C is the view matrix g3d drew the object with, so
-// V = view x world^-1 is exactly the transform of the geometry (the camera data's rotation is
-// not, see submitSky), and V for the next frame = V x camera^-1(N) x camera(N+1).
+// ScnObj + 0x3C), submitted with frame N+1's scene (the sources do not move); world -> view is the
+// main camera (ScnObj view = camera x world, checked).
+//
+// Whether a window is lit is the game's own state: every structure with lit materials (m_light,
+// m_window, m_spotlight, m_museum, ... : d_a_strNP's material table) has a daSTR_c light
+// controller, and d_a_strNP fn_99_A40 sets those materials' TEV colour 1 from the controller's
+// light amount (controller + 0, 0..1; ScnMdl at + 0x2C). The actors decide the amount (villager
+// home and awake, shop open, someone in the player's house, ...); the hook records it per ScnMdl
+// and the light follows it ("Follow the game's lights"). Kinds without a controller (bus stop,
+// lamps) glow from dusk to dawn.
 struct NightKind {
     const char* prefix;
     float offset[3];  // model space (y up, +z = the model's front)
@@ -412,46 +420,55 @@ struct NightKind {
     bool shadow;
 };
 constexpr NightKind kNightKinds[] = {
-    {"obj_myhome", {0.0f, 22.0f, 75.0f}, {1.0f, 0.70f, 0.38f}, 220.0f, 1.4f, true},
-    {"obj_house", {0.0f, 22.0f, 70.0f}, {1.0f, 0.70f, 0.38f}, 200.0f, 1.2f, true},
-    {"obj_shop", {0.0f, 32.0f, 50.0f}, {1.0f, 0.78f, 0.50f}, 230.0f, 1.3f, true},
+    {"obj_myhome", {0.0f, 22.0f, 75.0f}, {1.0f, 0.70f, 0.38f}, 220.0f, 1.4f, true},   // players' houses
+    {"obj_house", {0.0f, 22.0f, 70.0f}, {1.0f, 0.70f, 0.38f}, 200.0f, 1.2f, true},    // villagers' houses
+    {"obj_nc", {0.0f, 30.0f, 55.0f}, {1.0f, 0.78f, 0.50f}, 230.0f, 1.3f, true},       // Nook's Cranny
+    {"obj_nk", {0.0f, 34.0f, 65.0f}, {1.0f, 0.80f, 0.55f}, 260.0f, 1.3f, true},       // Nook 'n' Go
+    {"obj_nw", {0.0f, 36.0f, 70.0f}, {1.0f, 0.80f, 0.55f}, 270.0f, 1.3f, true},       // Nookway
+    {"obj_ng", {0.0f, 40.0f, 75.0f}, {1.0f, 0.80f, 0.55f}, 280.0f, 1.3f, true},       // Nookington's
+    {"obj_tailor", {0.0f, 30.0f, 55.0f}, {1.0f, 0.76f, 0.52f}, 230.0f, 1.2f, true},   // Able Sisters
+    {"obj_office", {0.0f, 40.0f, 70.0f}, {1.0f, 0.78f, 0.52f}, 260.0f, 1.1f, false},  // town hall
     {"obj_museum", {0.0f, 40.0f, 70.0f}, {1.0f, 0.78f, 0.52f}, 260.0f, 1.1f, false},
-    {"obj_police", {0.0f, 35.0f, 55.0f}, {1.0f, 0.80f, 0.55f}, 220.0f, 1.1f, false},
-    {"obj_townhall", {0.0f, 40.0f, 70.0f}, {1.0f, 0.78f, 0.52f}, 260.0f, 1.1f, false},
+    {"obj_lighthouse", {0.0f, 120.0f, 0.0f}, {1.0f, 0.88f, 0.66f}, 300.0f, 1.0f, false},
+    {"obj_windmill", {0.0f, 30.0f, 40.0f}, {1.0f, 0.76f, 0.48f}, 180.0f, 1.0f, false},
     {"obj_busstop", {0.0f, 45.0f, 5.0f}, {1.0f, 0.86f, 0.66f}, 120.0f, 0.9f, false},
     {"obj_lamp", {0.0f, 60.0f, 0.0f}, {1.0f, 0.84f, 0.60f}, 200.0f, 1.2f, true},
     {"obj_light", {0.0f, 60.0f, 0.0f}, {1.0f, 0.84f, 0.60f}, 200.0f, 1.2f, true},
-    {"obj_cafe", {0.0f, 32.0f, 50.0f}, {1.0f, 0.74f, 0.44f}, 220.0f, 1.2f, false},
 };
 struct NightSource {
     float world[3];
+    float glow;  // the game's light amount (1 for kinds without a controller)
     u32 id;
     const NightKind* kind;
 };
 std::vector<NightSource> sNightCur, sNightNext;  // collected in the frame being drawn / to submit
-float sTrueView[12] = {};   // geometry world -> view of the frame the sources were seen in
-float sTrueViewCam[12] = {};  // sView of that frame
-bool sTrueViewValid = false;
 
-void mul34(const float* a, const float* b, float* o) {  // o = a x b (3x4 affine)
-    for (int r = 0; r < 3; r++) {
-        for (int k = 0; k < 4; k++) o[r * 4 + k] = a[r * 4] * b[k] + a[r * 4 + 1] * b[4 + k] + a[r * 4 + 2] * b[8 + k];
-        o[r * 4 + 3] += a[r * 4 + 3];
-    }
-}
-bool inv34(const float* m, float* o) {
-    const float a = m[0], b = m[1], c = m[2], d = m[4], e = m[5], f = m[6], g = m[8], h = m[9], i = m[10];
-    const float det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
-    if (!(std::fabs(det) > 1e-12f)) return false;
-    const float id = 1.0f / det;
-    o[0] = (e * i - f * h) * id, o[1] = (c * h - b * i) * id, o[2] = (b * f - c * e) * id;
-    o[4] = (f * g - d * i) * id, o[5] = (a * i - c * g) * id, o[6] = (c * d - a * f) * id;
-    o[8] = (d * h - e * g) * id, o[9] = (b * g - a * h) * id, o[10] = (a * e - b * d) * id;
-    for (int r = 0; r < 3; r++) o[r * 4 + 3] = -(o[r * 4] * m[3] + o[r * 4 + 1] * m[7] + o[r * 4 + 2] * m[11]);
-    return true;
-}
 void readMtx(u32 a, float* m) {
     for (int k = 0; k < 12; k++) m[k] = rdf32(a + 4 * k);
+}
+
+// The game's own light amount per structure model (daSTR_c light controller, fn_99_A40).
+// Test aid CF_WINDOW_LOG=1: every change.
+const bool sWindowLog = std::getenv("CF_WINDOW_LOG") != nullptr;
+std::unordered_map<u32, float> sGlow;  // ScnMdl -> light amount 0..1
+void noteGlow(u32 mdl, float amount) {
+    if (!std::isfinite(amount)) return;
+    amount = std::clamp(amount, 0.0f, 1.0f);
+    auto [it, fresh] = sGlow.try_emplace(mdl, amount);
+    if (sWindowLog && (fresh || std::fabs(it->second - amount) > 0.1f || (amount == 0.0f) != (it->second == 0.0f)))
+        log("[window] f%u glow %08X '%s' %.2f -> %.2f at %.1f %.1f %.1f", copyDispCount(), mdl, modelInfo(mdl).name.c_str(),
+            fresh ? -1.0f : it->second, amount, rdf32(mdl + 0x48), rdf32(mdl + 0x58), rdf32(mdl + 0x68));
+    if (sWindowLog) {
+        static u32 sCalls = 0, sFrame = 0;
+        sCalls++;
+        if (copyDispCount() / 600 != sFrame) {
+            sFrame = copyDispCount() / 600;
+            log("[window] f%u %u light-controller calls since the last report, %zu models", copyDispCount(), sCalls, sGlow.size());
+            sCalls = 0;
+        }
+    }
+    it->second = amount;
+    if (sGlow.size() > 4096) sGlow.clear();
 }
 
 void noteNightSource(u32 obj, const std::string& name) {
@@ -459,39 +476,44 @@ void noteNightSource(u32 obj, const std::string& name) {
     for (const auto& k : kNightKinds)
         if (name.compare(0, std::strlen(k.prefix), k.prefix) == 0) kind = &k;
     if (!kind) return;
-    float w[12], v[12];
-    readMtx(obj + 0x3C, w);
-    readMtx(obj + 0x6C, v);
-    float wi[12], tv[12];
-    if (!inv34(w, wi)) return;
-    mul34(v, wi, tv);
-    if (!std::isfinite(tv[3] + tv[7] + tv[11])) return;
-    std::memcpy(sTrueView, tv, sizeof tv);
-    std::memcpy(sTrueViewCam, sView, sizeof sView);
-    sTrueViewValid = true;
     NightSource s{};
+    s.glow = 1.0f;
+    if (port::settings().enhancedLighting.nightLightsGameState)
+        if (auto it = sGlow.find(obj); it != sGlow.end()) s.glow = it->second;
+    if (s.glow <= 0.01f) return;
+    float w[12];
+    readMtx(obj + 0x3C, w);
     for (int r = 0; r < 3; r++)
         s.world[r] = w[r * 4] * kind->offset[0] + w[r * 4 + 1] * kind->offset[1] + w[r * 4 + 2] * kind->offset[2] + w[r * 4 + 3];
+    if (!std::isfinite(s.world[0] + s.world[1] + s.world[2])) return;
     s.id = 0x57000000u ^ (obj & 0x00FFFFFFu);  // interp keys world lights by "emitter" ids
     s.kind = kind;
     if (sNightCur.size() < 64) sNightCur.push_back(s);
+}
+
+void toView(const float* world, float* view) {
+    const float* v = sView;  // the camera data is the geometry's world -> view (ScnObj view = camera x world)
+    for (int r = 0; r < 3; r++) view[r] = v[r * 4] * world[0] + v[r * 4 + 1] * world[1] + v[r * 4 + 2] * world[2] + v[r * 4 + 3];
 }
 
 // Submits last frame's night sources (guest thread, before enh::beginScene).
 void submitNightLights() {
     sNightNext.swap(sNightCur);
     sNightCur.clear();
+    if (sWindowLog && copyDispCount() % 1200 == 0)
+        for (const auto& [m, a] : sGlow)
+            log("[window] f%u   %08X '%s' light %.2f, world %.1f %.1f %.1f", copyDispCount(), m, modelInfo(m).name.c_str(), a, rdf32(m + 0x48),
+                rdf32(m + 0x58), rdf32(m + 0x68));
     const auto& s = port::settings().enhancedLighting;
     if (!s.nightLights || sNight <= 0.01f || !sViewValid || sNightNext.empty()) return;
-    const float* v = sView;  // the camera data is the geometry's world -> view (ScnObj view = camera x world)
     std::array<aurora::gfx::ExtraLight, 64> out{};
     uint32_t n = 0;
     for (const auto& src : sNightNext) {
         aurora::gfx::ExtraLight l{};
-        for (int r = 0; r < 3; r++) l.pos[r] = v[r * 4] * src.world[0] + v[r * 4 + 1] * src.world[1] + v[r * 4 + 2] * src.world[2] + v[r * 4 + 3];
+        toView(src.world, l.pos);
         std::memcpy(l.color, src.kind->color, sizeof l.color);
         l.radius = src.kind->radius;
-        l.intensity = src.kind->intensity * sNight * std::clamp(s.nightLightIntensity, 0.0f, 3.0f);
+        l.intensity = src.kind->intensity * sNight * src.glow * std::clamp(s.nightLightIntensity, 0.0f, 3.0f);
         l.flags = aurora::gfx::ExtraLightTranslucent | (src.kind->shadow && s.nightLightShadows ? aurora::gfx::ExtraLightCastShadows : 0u);
         l.id = src.id;
         out[n++] = l;
@@ -500,6 +522,216 @@ void submitNightLights() {
     if (logNow() && n)
         log("[night] f%u %u lights (night %.2f), first at view %.1f %.1f %.1f I %.2f r %.0f", copyDispCount(), n, sNight, out[0].pos[0],
             out[0].pos[1], out[0].pos[2], out[0].intensity, out[0].radius);
+}
+
+// ---- effect lights: fireflies and fireworks ----
+// nw4r::ef: DrawOrder::Draw(Effect*, DrawInfo&) draws an effect's ParticleManagers (ut::List at
+// Effect + 0x90, link offset at list + 0xA). A ParticleManager: + 0x24 its EmitterResource (whose
+// first word points at the emitter's name, e.g. af_ins_hotaru_glow), + 0x38 its particles (ut::List
+// of 0xE4-byte Particles, link at + 0x14), + 0x8C the emitter's world matrix (MTX34). A Particle:
+// + 0x20 its primary colour (RGBA: the colour animation and the alpha fade / blink are applied
+// there every frame; + 0x24 the secondary colour, + 0x28 a modulation colour, usually white),
+// + 0xA0 velocity, + 0xAC position (emitter space), + 0xDC age (u16). One source per
+// ParticleManager at the brightness-weighted centre of its particles, in their mean colour;
+// sources of one kind closer than a merge distance become one light (a firefly is two emitters,
+// glow + glow_child, at one place; a burst several). Collected while frame N's effects draw,
+// submitted with frame N + 1 (like the night lights).
+const bool sEflLog = std::getenv("CF_EFL_LOG") != nullptr;  // test aid: emitters and effect lights
+std::string readStr(u32 s, u32 max = 48) {
+    std::string r;
+    if (!guestPtr(s)) return r;
+    for (u32 k = 0; k < max; k++) {
+        const char ch = char(rd8(s + k));
+        if (!ch) break;
+        r += (ch >= 32 && ch < 127) ? ch : '?';
+    }
+    return r;
+}
+enum FxKind : u8 { FxNone = 0, FxFirefly, FxFirework, FxTest };
+std::unordered_map<u32, u8> sResKind;  // EmitterResource -> FxKind
+u8 fxKindOf(u32 pm) {
+    const u32 res = rd32(pm + 0x24);
+    if (!guestPtr(res) || (res & 3)) return FxNone;
+    if (auto it = sResKind.find(res); it != sResKind.end()) return it->second;
+    const std::string n = readStr(rd32(res), 40);
+    u8 k = FxNone;
+    if (n.rfind("af_ins_hotaru", 0) == 0 || n.rfind("af_hotaru", 0) == 0) k = FxFirefly;
+    else if (n.rfind("af_fld_firework", 0) == 0 || n.rfind("af_itm_firework", 0) == 0) k = FxFirework;
+    // Test aid CF_EFL_AS=<emitter name prefix>: that emitter's particles light like fireflies (to
+    // check light placement against an effect that is easy to see, e.g. af_fsh_shadow).
+    static const char* sAs = std::getenv("CF_EFL_AS");
+    if (sAs && *sAs && n.rfind(sAs, 0) == 0) k = FxTest;
+    if (sResKind.size() > 4096) sResKind.clear();
+    sResKind[res] = k;
+    if (sEflLog) log("[efl] f%u emitter %08X '%s' kind %u", copyDispCount(), res, n.c_str(), k);
+    return k;
+}
+struct FxSource {
+    float pos[3];    // world (world == true) or view space of the main camera (backdrop effects)
+    float color[3];  // 0..1
+    float amount;    // brightness: alpha x max channel, summed over the manager's particles
+    float spread;    // half the extent of the particle cloud (units of its space)
+    u32 id;
+    u8 kind;
+    bool world;
+};
+std::unordered_map<u32, FxSource> sFxCur;  // ParticleManager -> source (this frame's draws)
+std::vector<FxSource> sFxNext;
+
+// One colour layer of a particle (RGBA) -> weighted colour and brightness.
+void addLayer(u32 rgba, float* col, float& bright) {
+    const float c[3] = {float(rgba >> 24) / 255.0f, float((rgba >> 16) & 0xFF) / 255.0f, float((rgba >> 8) & 0xFF) / 255.0f};
+    const float a = float(rgba & 0xFF) / 255.0f;
+    for (int k = 0; k < 3; k++) col[k] += c[k] * a;
+    bright = std::max(bright, a * std::max({c[0], c[1], c[2]}));
+}
+
+void noteEffectDraw(u32 effect, u32 drawInfo) {
+    const auto& s = port::settings().enhancedLighting;
+    if (!enh::masterOn() || !s.nightLights || !s.effectLights || !sInStage || sInPass2 || !sViewValid) return;
+    // The view matrix the effect is drawn with (DrawInfo + 0, MTX34). Fireflies use the main
+    // camera; the fireworks show is a sky backdrop drawn with its own fixed camera (identity
+    // rotation, ~1300 units back): its bursts have no place in the town, so their light goes where
+    // they appear on screen (the backdrop's view space taken as the main camera's: same projection).
+    float D[12];
+    readMtx(drawInfo, D);
+    bool mainCam = true;
+    for (int k = 0; k < 12 && mainCam; k++) mainCam = std::fabs(D[k] - sView[k]) < ((k & 3) == 3 ? 1.0f : 0.01f);
+    const u32 list = effect + 0x90;
+    const u32 off = rd16(list + 0xA);
+    u32 pm = rd32(list);
+    for (int guard = 0; guard < 256 && guestPtr(pm); guard++, pm = rd32(pm + off + 4)) {
+        const u8 kind = fxKindOf(pm);
+        if (kind == FxNone) continue;
+        float M[12];
+        readMtx(pm + 0x8C, M);
+        if (!std::isfinite(M[3] + M[7] + M[11])) continue;
+        const u32 plist = pm + 0x38;
+        const u32 poff = rd16(plist + 0xA);
+        float acc[3] = {}, col[3] = {}, wsum = 0.0f;
+        float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+        u32 p = rd32(plist), n = 0;
+        for (; guestPtr(p) && n < 512; n++, p = rd32(p + poff + 4)) {
+            const float loc[3] = {rdf32(p + 0xAC), rdf32(p + 0xB0), rdf32(p + 0xB4)};
+            if (!std::isfinite(loc[0] + loc[1] + loc[2])) continue;
+            float w[3];
+            for (int r = 0; r < 3; r++) w[r] = M[r * 4] * loc[0] + M[r * 4 + 1] * loc[1] + M[r * 4 + 2] * loc[2] + M[r * 4 + 3];
+            if (!mainCam) {
+                float v[3];
+                for (int r = 0; r < 3; r++) v[r] = D[r * 4] * w[0] + D[r * 4 + 1] * w[1] + D[r * 4 + 2] * w[2] + D[r * 4 + 3];
+                std::memcpy(w, v, sizeof v);
+            }
+            float c[3] = {}, b = 0.0f;
+            if (kind == FxTest) c[0] = c[1] = c[2] = 1.0f, b = 1.0f;
+            else addLayer(rd32(p + 0x20), c, b), addLayer(rd32(p + 0x24), c, b);
+            const float cm = std::max({c[0], c[1], c[2]});
+            if (b <= 0.01f || cm <= 0.0f) continue;
+            for (int k = 0; k < 3; k++) {
+                acc[k] += w[k] * b;
+                lo[k] = std::min(lo[k], w[k]), hi[k] = std::max(hi[k], w[k]);
+                col[k] += c[k] / cm * b;
+            }
+            wsum += b;
+        }
+        if (sEflLog) {
+            static std::unordered_map<u32, u32> sSeen;
+            if (sSeen[pm]++ % 30 == 0)
+                log("[efl] f%u fx pm %08X kind %u %s particles %u bright %.2f centre %.1f %.1f %.1f", copyDispCount(), pm, kind,
+                    mainCam ? "world" : "backdrop", n, wsum, wsum > 0 ? acc[0] / wsum : 0.0f, wsum > 0 ? acc[1] / wsum : 0.0f,
+                    wsum > 0 ? acc[2] / wsum : 0.0f);
+        }
+        if (wsum <= 0.01f) continue;
+        FxSource src{};
+        for (int k = 0; k < 3; k++) src.pos[k] = acc[k] / wsum, src.color[k] = col[k] / wsum;
+        src.amount = wsum;
+        src.spread = 0.5f * std::max({hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]});
+        src.id = 0x5A000000u ^ (pm & 0x00FFFFFFu);
+        src.kind = kind;
+        src.world = mainCam;
+        if (sFxCur.size() < 128) sFxCur[pm] = src;
+    }
+}
+
+// Light budget: at most this many firefly / firework lights (strongest first); together with the
+// night lights they go through enhanced_lighting.cpp's ranking into Aurora's 64 extra lights.
+constexpr u32 kMaxFireflyLights = 12, kMaxFireworkLights = 8;
+
+void submitEffectLights() {
+    sFxNext.clear();
+    for (const auto& [pm, src] : sFxCur) sFxNext.push_back(src);
+    sFxCur.clear();
+    const auto& s = port::settings().enhancedLighting;
+    if (!s.nightLights || !s.effectLights || !sViewValid || sFxNext.empty()) return;
+    // Test aid CF_EFL_AB=1 (with CF_ENHANCED_AB=1): effect lights only in every other enhanced
+    // frame (dump numbers 4k+1 with, 4k+3 without), so neighbouring shots compare them.
+    static const bool sAb = std::getenv("CF_EFL_AB") != nullptr;
+    if (sAb && ((copyDispCount() + 1) / 2) % 2 == 1) return;
+    std::sort(sFxNext.begin(), sFxNext.end(), [](const FxSource& a, const FxSource& b) { return a.amount > b.amount; });
+    // Merge sources of one kind that sit together (strongest first keeps its id: stable pairing).
+    std::vector<FxSource> merged;
+    for (const auto& src : sFxNext) {
+        const float near = src.kind == FxFirefly ? 25.0f : 200.0f;
+        FxSource* into = nullptr;
+        for (auto& m : merged) {
+            const float dx = m.pos[0] - src.pos[0], dy = m.pos[1] - src.pos[1], dz = m.pos[2] - src.pos[2];
+            if (m.kind == src.kind && m.world == src.world && dx * dx + dy * dy + dz * dz < near * near) into = &m;
+        }
+        if (!into) {
+            merged.push_back(src);
+            continue;
+        }
+        const float t = src.amount / (into->amount + src.amount);
+        for (int k = 0; k < 3; k++) into->pos[k] += (src.pos[k] - into->pos[k]) * t, into->color[k] += (src.color[k] - into->color[k]) * t;
+        into->spread = std::max(into->spread, src.spread);
+        into->amount += src.amount;
+    }
+    sFxNext.swap(merged);
+    // Outdoors the effects light the scene in proportion to the darkness (a firework at dusk barely
+    // shows); indoors (a firefly in its jar) at full strength.
+    const bool indoor = relBase(107, 1) != 0 && relBase(108, 1) == 0;
+    const float dark = indoor ? 1.0f : 0.25f + 0.75f * sNight;
+    const float k = std::clamp(s.nightLightIntensity, 0.0f, 3.0f) * dark;
+    std::array<aurora::gfx::ExtraLight, kMaxFireflyLights + kMaxFireworkLights> out{};
+    u32 n = 0, flies = 0, works = 0;
+    for (const auto& src : sFxNext) {
+        aurora::gfx::ExtraLight l{};
+        // Particle colours are often pastel: push toward the hue so the light reads as coloured.
+        const float mx = std::max({src.color[0], src.color[1], src.color[2], 1e-3f});
+        for (int c = 0; c < 3; c++) l.color[c] = std::pow(src.color[c] / mx, src.kind == FxFirework ? 2.5f : 1.5f);
+        if (src.kind == FxTest) {
+            l.radius = 400.0f;
+            l.intensity = 3.0f;
+        } else if (src.kind == FxFirefly) {
+            if (flies >= kMaxFireflyLights) continue;
+            flies++;
+            // A firefly floats 30-60 units up: a pool of soft green light on the ground below it.
+            l.radius = 110.0f;
+            l.intensity = 1.6f * std::min(src.amount, 1.0f) * k;
+        } else {
+            if (works >= kMaxFireworkLights) continue;
+            works++;
+            // A burst high over the town (the show is a sky backdrop, see noteEffectDraw): a wide,
+            // soft coloured flash over the visible scene, following the burst's brightness.
+            l.radius = std::clamp(1100.0f + src.spread, 1100.0f, 1800.0f);
+            l.intensity = 2.5f * std::min(src.amount / 8.0f, 1.0f) * k;
+        }
+        if (!(l.intensity > 0.01f)) continue;
+        if (src.world) toView(src.pos, l.pos);
+        else std::memcpy(l.pos, src.pos, sizeof l.pos);
+        l.flags = aurora::gfx::ExtraLightTranslucent;
+        l.id = src.id;
+        out[n++] = l;
+        if (n == out.size()) break;
+    }
+    submitExtraLights(out.data(), n);
+    if (sEflLog && copyDispCount() % 60 == 0)
+        for (u32 i = 0; i < n; i++)
+            log("[efl] f%u light %u view %.1f %.1f %.1f colour %.2f %.2f %.2f I %.2f r %.0f", copyDispCount(), i, out[i].pos[0], out[i].pos[1],
+                out[i].pos[2], out[i].color[0], out[i].color[1], out[i].color[2], out[i].intensity, out[i].radius);
+    if ((logNow() || sEflLog) && n)
+        log("[efl] f%u %u effect lights (%u fireflies, %u fireworks), first at view %.1f %.1f %.1f colour %.2f %.2f %.2f I %.2f r %.0f",
+            copyDispCount(), n, flies, works, out[0].pos[0], out[0].pos[1], out[0].pos[2], out[0].color[0], out[0].color[1], out[0].color[2],
+            out[0].intensity, out[0].radius);
 }
 }  // namespace
 
@@ -585,6 +817,23 @@ static void stageDraw(Ctx& c) {
     if (cflight::logNow()) log("[scene] f%u stage draw ends after %u passes", copyDispCount(), cflight::sPass);
 }
 static HleReg sStageReg("d_s_stageNP::fn_125_C0", &stageDraw);
+
+// d_a_strNP fn_99_A40: a structure's window-glow controller (r3) sets its lit materials' TEV
+// colour 1 from the light amount at +0 (ScnMdl at +0x2C).
+static void strLight(Ctx& c) {
+    const u32 ctl = c.r[3];
+    const u32 mdl = rd32(ctl + 0x2C);
+    const float amount = rdf32(ctl);
+    if (mdl) cflight::noteGlow(mdl, amount);
+    callOriginal(c, "d_a_strNP::fn_99_A40");
+}
+static HleReg sStrLightReg("d_a_strNP::fn_99_A40", &strLight);
+
+// nw4r::ef::DrawOrder::Draw(Effect*, const DrawInfo&): an effect's particle managers are drawn.
+HLE(Draw__Q34nw4r2ef9DrawOrderFPQ34nw4r2ef6EffectRCQ34nw4r2ef8DrawInfo) {
+    if (enh::masterOn()) cflight::noteEffectDraw(c.r[4], c.r[5]);
+    callOriginal(c, "Draw__Q34nw4r2ef9DrawOrderFPQ34nw4r2ef6EffectRCQ34nw4r2ef8DrawInfo");
+}
 
 namespace game {
 bool enhViewMatrix(float m[12]) {

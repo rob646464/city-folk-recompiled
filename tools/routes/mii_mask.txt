@@ -1,0 +1,38 @@
+# A Mii mask from Harriet (saved town CF_FIXTURE=user-town; docs/MIIS.md "The game's makeover"):
+# continue, warp to Shampoodle, Harriet's first-visit greeting, walk up and talk, "Makeover!"
+# (D-pad down twice from the pointer's choice, A), "Yeah!" (free for first-timers), "take a seat
+# in front of the mirror": the player is put beside the lower barber chair, on its mirror side
+# (room position 352,0,380), and walks into it (sits), Harriet asks for a model: the Mii list
+# (d_menu_miiNP) -> the first Mii (pointer + A) -> Confirm -> the makeover. The console needs Miis:
+# make them first, e.g. -Env "CF_MII_AT=5400:random|5410:name=Robo|5600:save" (F1 > Miis test aid).
+# Without Miis Harriet says there are none (and the port's hint shows).
+include warp.txt
++1600:WARP=city.shampoodle
+after link d_bgi_drawNP 2
++300:A
++90:A ~12
++100:STICKUP*25
++80:A
++120:A ~3
++60:DOWN
++10:DOWN
++10:A
++50:DOWN
++10:DOWN
++10:A
++120:A ~14
++200:@off
++100:TP=352/0/380
++60:STICKLEFT*40
++60:A
++120:A
++60:STICKLEFT*40
++60:A
++120:A ~2
+# The Mii list: the first Mii, then Confirm.
++150:@-0.46/-0.28
++10:A
++90:@0.66/0.76
++10:A
++60:@off
++120:A ~25

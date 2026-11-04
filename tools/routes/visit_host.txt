@@ -1,0 +1,29 @@
+# Online visit, host side (docs/ONLINE.md section 9): saved town (CF_FIXTURE=user-town), Copper opens the gate.
+# Env: CF_TELEPORT=7600:1790,84,664 CF_ONLINE_HOST=29910 CF_ONLINE_CODE_FILE=<file> CF_ONLINE_TEST=3000:acceptfriends;6000:authid
+include continue.txt
+# Host (user-town "Frunch"), with CF_TELEPORT=7600:1790,84,664 (in front of the gate door).
+7630:@off
++20:STICKUP*20
++40:STICKUP+B*60
++80:STICKUP*120
+# Gatehouse (Copper's module links): walk to Copper (right, up), talk.
+after link d_a_npc_sp_gatekeeper_aNP
++200:STICKRIGHT*45
++60:STICKUP*75
++100:STICKUP*3
++40:A
++60:A ~20
+# Copper's menu: the pointer hovers "Invite guests!" (second line); A shows the menu, A picks it.
++150:@0.44/0.14
++300:A
++100:A
+# "Nintendo WFC. / DS Suitcase. / Never mind.": hover the first line, pick it.
++250:@0.46/0.32
++250:A
++100:A
++60:@off
++60:A ~11
+# Gate open (~11560): leave the gatehouse into town, then answer prompts.
+11800:STICKDOWN*200
+16000:A
++150:A ~30

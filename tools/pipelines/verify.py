@@ -44,6 +44,8 @@ def main_checkout() -> Path:
 # user-town fixture (continue.txt: in town at the house by ~frame 5000).
 def routes():
     fx = {"CF_FIXTURE": "user-town"}
+    # clean post-save copy (no Mr. Resetti; make_fixtures.ps1 -Only user-town-clean)
+    fxc = {"CF_FIXTURE": "user-town-clean"}
     day = {"CF_CLOCK_START": "2026-10-27 10:00"}
     return {
         # Boot, strap screen, title (its town flyover), the new-game bus scene, name/town keyboards,
@@ -61,6 +63,16 @@ def routes():
         "house": ("precache_house.txt", 7800, {**fx, **day}),
         "nook": ("precache_nook.txt", 7800, {**fx, **day}),
         "museum": ("to_museum.txt", 18500, {**day}),
+        # Places reached with the TP route token (branch routes-2, docs/RENDERING.md "Routes"):
+        # beach + sea, the river below the waterfall, the museum's lobby / wing / cafe /
+        # observatory, the town hall, the city by Kapp'n's bus (plaza; shops in two parts).
+        "beach": ("beach.txt", 7300, {**fxc, **day}),
+        "river": ("river.txt", 7300, {**fxc, **day}),
+        "museum_rooms": ("museum.txt", 9600, {**fxc, **day}),
+        "town_hall": ("town_hall.txt", 7300, {**fxc, **day}),
+        "city": ("city.txt", 15000, {**fxc, **day}),
+        "city_shops": ("city_shops.txt", 22500, {**fxc, **day}),
+        "city_shops2": ("city_shops2.txt", 18500, {**fxc, **day}),
     }
 
 

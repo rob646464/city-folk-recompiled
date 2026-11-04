@@ -8,8 +8,11 @@
 // (nodes at child + 4), +0x84 global matrix (MTX34; x translation +0x90, y +0xA0, layout units:
 // origin at the screen centre, y up), +0xBA alpha, +0xBB flags (bit 0 visible), +0xBC name.
 //
-// Limitation: only the picture moves. The game hit-tests the pointer against the panes'
-// own positions, so an anchored button (the memo button) is clicked where it would be at 16:9.
+// Clicks: the default anchoring moves the panes' global matrices (CalculateMtx hook below), which
+// the game's hit tests read, so an anchored button (the Save button at the top right) is hit where
+// it is drawn; the pointer reaches it because it spans the whole window then and the game's
+// "pointer on the screen" tests are widened (cf_pointer.cpp, docs/CONTROLS.md "Pointer in
+// ultrawide"). With CF_HUD_ANCHOR=picture only the picture moves and clicks stay at 16:9.
 //
 // Test aid CF_LYT_LOG=<first>,<last>: every visible pane drawn in those guest frames (depth,
 // name, position, the caller of the layout's root draw).

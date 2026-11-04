@@ -155,6 +155,11 @@ int hudAnchor() {
     return sAnchorStack[std::min(sAnchorDepth, int(std::size(sAnchorStack))) - 1];
 }
 
+float pointerRangeX() {
+    const float f = factor();
+    return sAnchorHud.load(std::memory_order_relaxed) && f < 0.9999f && f > 0.05f ? 1.0f / f : 1.0f;
+}
+
 bool inHudScope() {
     return sRttDepth == 0 && ((sAnchorDepth > 0 && active()) || hudShift() != 0);
 }

@@ -3,6 +3,9 @@
 /PAL DATA/
 /JAPAN DATA/
 /KOREA DATA/
+/WILD WORLD DATA/
+*.sav
+*.dsv
 /orig/
 *.iso
 *.wbfs
@@ -21,3 +24,4 @@
 *.log
 __pycache__/
 *.pyc
+/test_builds/
