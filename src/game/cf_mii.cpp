@@ -945,7 +945,7 @@ bool nameField(const char* label, Mii& m, bool creator) {
 
 bool editAttributes(Mii& m) {
     bool ch = false;
-    if (!ImGui::BeginTabBar("##miiparts")) return false;
+    if (!ImGui::BeginTabBar("##miiparts", ImGuiTabBarFlags_FittingPolicyScroll)) return false;
     if (ImGui::BeginTabItem("Profile")) {
         ch |= nameField("Name", m, false);
         ImGui::SetItemTooltip("Up to 10 characters. A Mii needs a name.");
@@ -1197,7 +1197,6 @@ bool miiMenu() {
         if (menu::Button("Cancel##delete")) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
-    ImGui::SameLine();
     if (menu::Button("Import...")) {
         static const SDL_DialogFileFilter kFilters[] = {
             {"Wii Miis and Mii databases", "mii;miigx;rsd;dat"},
@@ -1395,7 +1394,7 @@ void miiDrawOverlay() {
                                         ImGuiWindowFlags_NoMove;
     if (ImGui::Begin("##mii_hint", nullptr, kFlags)) {
         ImGui::TextUnformatted("Harriet's makeovers need a Mii, and this console has none yet.");
-        ImGui::TextDisabled("Make one in F1 > Miis (or import yours) and save, then ask her again.");
+        ImGui::TextDisabled("Make one in F1 > Miis (or import yours) and save, then leave the shop and come back.");
     }
     ImGui::End();
     ImGui::PopStyleVar();

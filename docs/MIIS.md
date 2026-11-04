@@ -56,6 +56,11 @@ its heap and answers everything later from that buffer; City Folk never opens th
    to the game's RFL at frame ... (2 Miis; RFL flags 01 -> 00)` and Harriet offers the makeover with
    those Miis without a restart (without the hand-over she says there are no Miis).
 
+The game's own Mii list (its Mii manager at USA 0x80587980, filled from RFL by a worker thread,
+fn_8008B740) is refreshed when a scene loads: Miis saved while the player is already in Shampoodle
+reach Harriet after leaving the shop and coming back (seen: saved after the warp into the shop ->
+"there are no Miis"; saved before entering -> the Mii list with them). The hint says so.
+
 A Mii mask the player already owns is a copy of the Mii in the town save (the game's Mii manager
 keeps RFL store data, fn_8008B3A8 -> RFLAddMiddleDBStoreData), as on the console: editing or
 deleting the Mii later does not change a mask already made.
@@ -111,17 +116,31 @@ Harriet's makeover asks the game's own Mii list; with no Miis she says "there ar
 your makeover on ... create a Mii in the Mii Channel". The port does not change that text: while the
 player is in Shampoodle (Harriet's module `d_a_npc_sp_catherineNP` linked) or the Mii list is open
 and the console has no Miis, a small notice at the top of the screen says the makeover needs a Mii
-and points to F1 > Miis. Hidden while the F1 menu is open. (Harriet's "no Miis" decision comes
+and points to F1 > Miis ("... and save, then leave the shop and come back"). Hidden while the F1 menu is open. (Harriet's "no Miis" decision comes
 from the game's Mii manager, which builds its list from RFL outside her code, so the hint covers
 the whole visit rather than that one line.)
 
 ## The game's makeover (what was verified)
 
-Route (user-town fixture): Kapp'n's bus to the city (`tools/routes/city_bus.txt`), Shampoodle
-(`TP=mod103t0110`), Harriet: "Hairstyle! / Makeover! / Never mind." -> Makeover (D-pad down twice
-from the pointer's choice, A) -> "free to first timers! Wanna try?" -> Yeah! -> "take a seat in front
-of the mirror" -> the barber chair -> the Mii list (`d_menu_miiNP`) -> the mask. See "Status" in
-CLAUDE.md for what was reached by script.
+Route `tools/routes/mii_mask.txt` (user-town fixture, `CF_INPUT_CLOCK=frames`): continue, warp to
+Shampoodle (`WARP=city.shampoodle`), Harriet's first-visit greeting, talk: "Hairstyle! / Makeover! /
+Never mind." -> Makeover (D-pad down twice from the pointer's choice, A) -> "free to first timers!
+Wanna try?" -> Yeah! -> "take a seat in front of the mirror": the barber chairs face the mirror on
+the right wall; the route puts the player on that side of the lower chair (room position
+352,0,380) and walks into it (sits) -> "Can you pick out a makeover model from the album?" -> the
+game's Mii list "Choose a Mii" (`d_menu_miiNP`) shows the console's Miis with icons the game's
+RFLMakeIcon drew from our database -> the first Mii (pointer + A), Confirm -> "So, you'd like to try
+the Robo style?" -> "That's the one!" -> the makeover -> "Ta-daaa! All finished!": the player
+wears the Mii head (`RFLGetAdditionalInfo` from d_a_playerNP fn_80_2B238). Verified 2026-11-03 on
+USA with two Miis made by `CF_MII_AT` before the warp (Robo = the same random Mii as the preview
+shots: same face in the preview, the list icon and the mask). Without Miis the same route ends in
+Harriet's "there are no Miis ... create a Mii in the Mii Channel" and the hint. Run:
+`tools/routes/run.ps1 -Name mask -Route tools/routes/mii_mask.txt -Seconds 560 -Shots 9500,14500,40
+outes
+un.ps1 -Name mask -Route tools
+outes\mii_mask.txt -Seconds 560 -Shots 9500,14500,40
+-Env "CF_FIXTURE=user-town;CF_MII_SEED=7;CF_MII_AT=4000:random|4010:name=Robo|4100:random|4200:save"`
+(on a loaded PC give it more seconds; the makeover is ~frame 11300).
 
 ## Test aids
 
