@@ -118,3 +118,8 @@ fn_800E3EE4 all
 # "Imported resident exists" (Rover's resident list): with one resident picked in the port's
 # window only that one is offered.
 fn_80085894 all
+
+# Warps (src/game/cf_warp.cpp, docs/WARPS.md): the stage manager's "go to stage, arrive at
+# pos/angle" (every door) and its change request, logged with CF_WARP_LOG; warps call them.
+fn_80163064 all
+fn_80162EC8 all

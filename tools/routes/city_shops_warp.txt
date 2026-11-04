@@ -1,0 +1,21 @@
+# City shops by warps, part 1 (saved town CF_FIXTURE=user-town; walking version: city_shops.txt):
+# continue, then GracieGrace (Labelle's greeting) -> Lyle's HRA office -> Club LOL ticket hall ->
+# the Club LOL stage, each loaded by WARP straight from the room before (docs/WARPS.md). B advances
+# the shopkeepers' greetings. Room loads: d_bgi_drawNP #2..#5 (#1 = Rover's bus in the continue).
+include warp.txt
++1600:WARP=city.gracie
+after link d_bgi_drawNP 2
++300:B ~6
++200:STICKUP*60
++100:WARP=city.hra
+after link d_bgi_drawNP 3
++300:B ~6
++200:STICKUP*60
++100:WARP=city.theatre
+after link d_bgi_drawNP 4
++300:B ~6
++200:STICKUP*60
++100:WARP=city.theatre_show
+after link d_bgi_drawNP 5
++300:B ~6
++200:STICKDOWN*30

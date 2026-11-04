@@ -27,6 +27,7 @@
 // their date rule reads the town's language nibble. The hook runs them with the chosen
 // language in that nibble for the duration of the call.
 #include "game/cf_region.h"
+#include "game/cf_warp.h"
 
 #include "recomp/hle.h"
 #include "recomp/menu.h"
@@ -732,6 +733,8 @@ void actorAids(u32 frame) {
         if (act.rfind("TP=", 0) == 0) {
             std::replace(act.begin(), act.end(), '/', ',');
             teleport(frame, act.c_str() + 3);
+        } else if (act.rfind("WARP=", 0) == 0) {
+            warp::requestFromScript(act.substr(5));  // cf_warp.cpp (docs/WARPS.md)
         }
     static const char* tp = std::getenv("CF_TELEPORT");
     if (!tp) return;

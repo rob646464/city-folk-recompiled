@@ -1,0 +1,21 @@
+# City shops by warps, part 2 (saved town CF_FIXTURE=user-town; walking version: city_shops2.txt):
+# continue, then Shampoodle (Harriet) -> Katrina's -> Crazy Redd's -> Lyle's auction house, each
+# loaded by WARP straight from the room before (docs/WARPS.md); B advances the greetings. Room
+# loads: d_bgi_drawNP #2..#5 (#1 = Rover's bus in the continue).
+include warp.txt
++1600:WARP=city.shampoodle
+after link d_bgi_drawNP 2
++300:B ~6
++200:STICKUP*40
++100:WARP=city.katrina
+after link d_bgi_drawNP 3
++300:B ~6
++200:STICKUP*40
++100:WARP=city.redd
+after link d_bgi_drawNP 4
++300:B ~6
++200:STICKUP*40
++100:WARP=city.auction
+after link d_bgi_drawNP 5
++300:B ~6
++200:STICKDOWN*30
