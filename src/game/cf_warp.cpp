@@ -697,8 +697,14 @@ void sweepIssue(const char* name) {
     queue(r);
 }
 
+u32 sQuitAt = 0;
+
 void sweep(u32 frame, bool ready) {
     Sweep& w = sSweep;
+    if (sQuitAt && frame >= sQuitAt) {
+        sQuitAt = 0;
+        menu::requestQuit();
+    }
     if (!w.on || !ready || w.phase == 4) return;
     {
         std::lock_guard lk(sMu);
@@ -724,6 +730,9 @@ void sweep(u32 frame, bool ready) {
         if (!w.cur) {
             log("[warp] sweep done");
             w.phase = 4;
+            // Test aid CF_WARP_SWEEP_QUIT=<frames>: quit normally that long after the sweep (the
+            // last screenshot is written; caches are kept as after any normal exit).
+            if (const char* q = std::getenv("CF_WARP_SWEEP_QUIT")) sQuitAt = frame + u32(std::max(std::atoi(q), 1));
             return;
         }
         w.t0 = frame;

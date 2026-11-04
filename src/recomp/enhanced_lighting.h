@@ -41,6 +41,10 @@ bool ghostPass();
 // glossy highlights, soft wrap-around response to the colored lights.
 void setCharacterPass(bool on);
 bool characterPass();
+// A light-emitting material is being drawn (City Folk: a structure material the game's light
+// controller has lit, cf_light.cpp): Aurora's emissive hint (0420), no sun / moon shadow and no
+// AO on it. Reset by the provider before other draws.
+void setEmissive(bool on);
 // Shadow-map caster pass (shadows.cpp: fn_8005D984 .. fn_8005D8CC): draws in it are class OTHER.
 void setCasterPass(bool on);
 // Main view bracket (fn_8000BB98 hook): sends the frame's extra lights / the scene-end marker.
@@ -72,6 +76,8 @@ void onGhostInBeam(uint32_t actor);
 // sun-shaft brightness (0 off).
 void setGrade(const float gain[3], const float lift[3], float saturation, float contrast);
 void setShafts(float intensity);
+// 0..1: bright coloured pixels (light sources) keep their colour through the grade (Aurora 0421).
+void setGradeKeepLights(float amount);
 // A GX light object was loaded (GXLoadLightObjImm HLE, guest thread): Aurora's GXLightObj layout
 // (color u32, a0 a1 a2 k0 k1 k2, pos xyz, dir xyz; view space as loaded), light id mask.
 void noteGameLight(const float* obj, uint32_t idMask);

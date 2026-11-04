@@ -1,0 +1,10 @@
+# The city plaza by warp (night lights of the city: CF_CLOCK_START="... 21:30"): continue,
+# WARP=city.plaza (in front of the fountain), then a loop around the plaza past the street lamps,
+# GracieGrace's front and the shops on its sides.
+include warp.txt
++1600:WARP=city.plaza
+after link d_bgt_drawNP 1
++600:STICKLEFT*120
++400:STICKUP*90
++400:STICKRIGHT*240
++500:STICKDOWN*200

@@ -258,6 +258,9 @@ void submitSky() {
         sky.on = true;
     } else {
         enh::setGrade(sky.gain, sky.lift, sky.saturation, sky.contrast);
+        // The cool night look leaves the light sources (lit windows, street lamps, signs) their
+        // warm colour (Aurora 0421; branch enh-light-3).
+        enh::setGradeKeepLights(0.85f * sNight);
         enh::setShafts(sky.shafts * std::clamp(s.sunShaftIntensity, 0.0f, 3.0f) * 0.5f);
     }
     if (!sViewValid || !(s.sunShadows || s.sunLight) || !sky.on) return;
@@ -442,6 +445,7 @@ struct NightSource {
     const NightKind* kind;
 };
 std::vector<NightSource> sNightCur, sNightNext;  // collected in the frame being drawn / to submit
+constexpr size_t kMaxNightSources = 128;         // collected; the nearest 64 are submitted
 
 void readMtx(u32 a, float* m) {
     for (int k = 0; k < 12; k++) m[k] = rdf32(a + 4 * k);
@@ -471,7 +475,10 @@ void noteGlow(u32 mdl, float amount) {
     if (sGlow.size() > 4096) sGlow.clear();
 }
 
+bool noteCityNightSource(u32 obj, const std::string& name);  // city section below
+
 void noteNightSource(u32 obj, const std::string& name) {
+    if (noteCityNightSource(obj, name)) return;
     const NightKind* kind = nullptr;
     for (const auto& k : kNightKinds)
         if (name.compare(0, std::strlen(k.prefix), k.prefix) == 0) kind = &k;
@@ -488,7 +495,244 @@ void noteNightSource(u32 obj, const std::string& name) {
     if (!std::isfinite(s.world[0] + s.world[1] + s.world[2])) return;
     s.id = 0x57000000u ^ (obj & 0x00FFFFFFu);  // interp keys world lights by "emitter" ids
     s.kind = kind;
-    if (sNightCur.size() < 64) sNightCur.push_back(s);
+    if (sNightCur.size() < kMaxNightSources) sNightCur.push_back(s);
+}
+
+// ---- city night lights (branch enh-light-3) ----------------------------------------------------
+// The city's structures (d_a_str_townNP, models obj_tw_* from Str/Brres/town*StrBrres*.arc, the
+// bus stop obj_busstop1, Kapp'n's bus obj_bus) have the same daSTR_c light controller as the
+// town's: d_a_strNP fn_99_A40 lerps the TEV colour 1 of up to 17 materials by the controller's
+// light amount (controller + 0), and the controller names those materials itself: controller
+// + 0x14 + i (s8, -1 = none) is the model's material index for entry i of the material table
+// (m_letter .. m_tw_light_07). So the lights are placed from the model's own data: for every lit
+// material, the shapes drawn with it (the ResMdl's DrawOpa / DrawXlu byte code) and the bounding
+// boxes of their position arrays give the glowing part in model space; flat parts (windows, signs)
+// get a light just in front of them, compact ones (lamp heads) one just below. Parts covering most
+// of the building (the material of a whole facade that the game also tints) give no light of their
+// own. The light amount is the game's (shops close, lamps follow the evening).
+struct LitPart {
+    float pos[3];  // model space
+    float size;    // largest extent
+    bool lamp;     // compact part (a lamp head): light below it
+};
+struct LitModel {
+    std::vector<LitPart> parts;
+    bool done = false;
+};
+std::unordered_map<u32, std::array<s8, 17>> sLitMats;  // ScnMdl -> lit material indices (controller + 0x14)
+std::unordered_map<u64, LitModel> sLitModels;          // (ResMdl, material set hash) -> parts
+const int sCityLog = [] {
+    const char* v = std::getenv("CF_CITY_LIGHT_LOG");  // test aid: lit parts per model, lights
+    return v ? std::max(std::atoi(v), 1) : 0;
+}();
+
+void noteLitMaterials(u32 mdl, u32 ctl) {
+    std::array<s8, 17> m{};
+    for (u32 i = 0; i < 17; i++) m[i] = s8(rd8(ctl + 0x14 + i));
+    sLitMats[mdl] = m;
+    if (sLitMats.size() > 4096) sLitMats.clear();
+}
+
+// A ResDic (g3d index group) entry by index: the data pointer (group-relative offsets).
+u32 resDicData(u32 group, u32 index) {
+    if (!guestPtr(group)) return 0;
+    const u32 n = rd32(group + 4);
+    if (index >= n) return 0;
+    const s32 off = s32(rd32(group + 8 + 16 * (index + 1) + 12));
+    return off ? group + u32(off) : 0;
+}
+u32 resDicFind(u32 group, const char* name) {
+    if (!guestPtr(group)) return 0;
+    const u32 n = std::min(rd32(group + 4), 256u);
+    for (u32 i = 1; i <= n; i++) {
+        const u32 e = group + 8 + 16 * i;
+        const s32 no = s32(rd32(e + 8));
+        if (!no) continue;
+        bool same = true;
+        for (u32 k = 0; same; k++) {
+            const char ch = char(rd8(group + u32(no) + k));
+            same = ch == name[k];
+            if (!ch || k > 32) break;
+        }
+        if (same) return group + u32(s32(rd32(e + 12)));
+    }
+    return 0;
+}
+
+const LitModel& litModel(u32 resMdl, const std::array<s8, 17>& mats) {
+    u64 key = u64(resMdl) << 32;
+    for (s8 m : mats) key = key * 31 + u8(m);
+    LitModel& lm = sLitModels[key];
+    if (lm.done) return lm;
+    lm.done = true;
+    if (sLitModels.size() > 1024) sLitModels.clear();
+    const u32 rev = rd32(resMdl + 8);
+    const u32 ns = rev >= 10 ? 14 : 11;
+    auto sec = [&](u32 i) -> u32 {
+        const s32 o = s32(rd32(resMdl + 0x10 + 4 * i));
+        return o > 0 ? resMdl + u32(o) : 0;
+    };
+    const u32 defs = sec(0), boneSec = sec(1), posSec = sec(2), shpSec = sec(10);
+    (void)ns;
+    // Bounding box of a shape's positions in model space: a rigid shape's positions are in its
+    // node's space, turned into the model by the node's bind matrix (ResNode + 0x70, MTX34; e.g. the
+    // city lamp's glow sphere, a unit sphere scaled 25 at the lamp head).
+    auto shapeBox = [&](u32 shp, u32 node, float lo[3], float hi[3]) {
+        const u32 s = resDicData(shpSec, shp);
+        if (!s) return false;
+        const s16 pid = s16(rd16(s + 0x48));
+        const u32 p = pid >= 0 ? resDicData(posSec, u32(pid)) : 0;
+        if (!p) return false;
+        float M[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+        if (const u32 b = node != ~0u ? resDicData(boneSec, node) : 0) {
+            float B[12];
+            readMtx(b + 0x70, B);
+            if (std::isfinite(B[0] + B[5] + B[10] + B[3] + B[7] + B[11])) std::memcpy(M, B, sizeof M);
+        }
+        float bl[3], bh[3];
+        for (int k = 0; k < 3; k++) bl[k] = rdf32(p + 0x20 + 4 * k), bh[k] = rdf32(p + 0x2C + 4 * k);
+        for (int corner = 0; corner < 8; corner++) {
+            const float v[3] = {corner & 1 ? bh[0] : bl[0], corner & 2 ? bh[1] : bl[1], corner & 4 ? bh[2] : bl[2]};
+            for (int r = 0; r < 3; r++) {
+                const float w = M[r * 4] * v[0] + M[r * 4 + 1] * v[1] + M[r * 4 + 2] * v[2] + M[r * 4 + 3];
+                lo[r] = std::min(lo[r], w), hi[r] = std::max(hi[r], w);
+            }
+        }
+        return true;
+    };
+    // Whole-model box (every drawn shape), and per lit material the union of its shapes.
+    float mlo[3] = {1e30f, 1e30f, 1e30f}, mhi[3] = {-1e30f, -1e30f, -1e30f};
+    struct Acc {
+        float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+        bool any = false;
+    };
+    std::array<Acc, 17> acc{};
+    for (const char* list : {"DrawOpa", "DrawXlu"}) {
+        u32 o = resDicFind(defs, list);
+        for (int guard = 0; o && guard < 512 && rd8(o) == 4; guard++, o += 8) {
+            const u32 mat = rd16(o + 1), shp = rd16(o + 3), node = rd16(o + 5);
+            shapeBox(shp, node, mlo, mhi);
+            for (u32 e = 0; e < 17; e++)
+                if (mats[e] >= 0 && u32(mats[e]) == mat) acc[e].any |= shapeBox(shp, node, acc[e].lo, acc[e].hi);
+        }
+    }
+    if (!(mhi[0] > mlo[0])) return lm;
+    float mext[3], mc[3];
+    for (int k = 0; k < 3; k++) mext[k] = mhi[k] - mlo[k], mc[k] = 0.5f * (mlo[k] + mhi[k]);
+    for (u32 e = 0; e < 17; e++) {
+        const Acc& a = acc[e];
+        if (!a.any) continue;
+        float ext[3], c[3];
+        for (int k = 0; k < 3; k++) ext[k] = a.hi[k] - a.lo[k], c[k] = 0.5f * (a.lo[k] + a.hi[k]);
+        // A part that spans most of the building in both horizontal directions is a facade tint.
+        const bool whole = ext[0] > 0.6f * mext[0] && ext[2] > 0.6f * mext[2] && mext[0] > 40.0f;
+        LitPart p{};
+        p.size = std::max({ext[0], ext[1], ext[2]});
+        // Flat part (a window pane, a sign): thin in x or z. The light goes a little in front of it,
+        // on the side away from the model's centre.
+        const int thin = ext[0] < ext[2] ? 0 : 2;
+        const float other = thin == 0 ? ext[2] : ext[0];
+        const bool flat = ext[thin] < 0.2f * std::max(other, 1.0f) && other > 8.0f;
+        std::memcpy(p.pos, c, sizeof c);
+        if (whole && !flat) {
+            if (sCityLog) log("[citylight] mdl %08X entry %u: whole-building part (%.0f x %.0f x %.0f), no light", resMdl, e, ext[0], ext[1], ext[2]);
+            continue;
+        }
+        if (flat) {
+            float d = c[thin] - mc[thin];
+            if (std::fabs(d) < 1.0f) d = 1.0f;
+            p.pos[thin] += (d > 0 ? 1.0f : -1.0f) * (0.5f * ext[thin] + 14.0f);
+        } else if (p.size < 40.0f) {
+            p.lamp = true;  // lamp head: just below it (lights the street, not hidden in the glass)
+            p.pos[1] = a.lo[1] - 4.0f;
+        } else {
+            // A lit volume (a shop's glowing front block): in front of its +z face, as the town's
+            // houses (+z = the model's front).
+            p.pos[2] = a.hi[2] + 14.0f;
+        }
+        // Merge with a part nearby (several materials of one window).
+        bool merged = false;
+        for (auto& q : lm.parts) {
+            const float dx = q.pos[0] - p.pos[0], dy = q.pos[1] - p.pos[1], dz = q.pos[2] - p.pos[2];
+            if (dx * dx + dy * dy + dz * dz < 40.0f * 40.0f) {
+                for (int k = 0; k < 3; k++) q.pos[k] = 0.5f * (q.pos[k] + p.pos[k]);
+                q.size = std::max(q.size, p.size);
+                merged = true;
+                break;
+            }
+        }
+        if (!merged && lm.parts.size() < 3) lm.parts.push_back(p);
+        if (sCityLog)
+            log("[citylight] mdl %08X entry %u mat %d: part %.0f x %.0f x %.0f at %.1f %.1f %.1f -> light %.1f %.1f %.1f (%s)", resMdl, e,
+                mats[e], ext[0], ext[1], ext[2], c[0], c[1], c[2], p.pos[0], p.pos[1], p.pos[2], flat ? "flat" : p.lamp ? "lamp" : "volume");
+    }
+    return lm;
+}
+
+// ---- lit materials are light sources, not shadow receivers (branch enh-light-3) ----------------
+// At night a lit window / sign / lamp head is the game's glow (TEV colour 1 lerped to the light
+// colour by the controller), but the enhanced world shaders darkened it like any surface: the
+// moon's shadow and its terminator (a shop doorway facing away from the moon lost half its glow),
+// AO. The lit materials are known from fn_99_A40 itself: the ResMatTevColor it writes (copied
+// material data of that ScnMdl) is recorded with the light amount, and when g3d loads that
+// material for drawing (G3DState::LoadResMatTevColor) the draw gets Aurora's emissive hint.
+std::unordered_map<u32, float> sLitTev;  // ResMatTevColorData -> light amount
+bool sInStrLight = false;
+float sStrAmount = 0.0f;
+void noteLitTev(u32 data) {
+    if (!sInStrLight || !data) return;
+    sLitTev[data] = sStrAmount;
+    if (sLitTev.size() > 8192) sLitTev.clear();
+}
+void onLoadTevColor(u32 data) {
+    if (!sInStage || sPass != 1 || sInPass2) return;
+    const auto it = sLitTev.find(data);
+    const bool lit = it != sLitTev.end() && it->second > 0.05f;
+    enh::setEmissive(lit);
+    if (sCityLog) {
+        static u32 sFrame = 0, sLit = 0, sAll = 0;
+        if (copyDispCount() != sFrame) {
+            if (copyDispCount() % 600 == 0) log("[citylight] f%u lit materials drawn %u of %u (%zu known)", sFrame, sLit, sAll, sLitTev.size());
+            sFrame = copyDispCount(), sLit = sAll = 0;
+        }
+        sAll++, sLit += lit;
+    }
+}
+
+// Colour / reach by model (our numbers): warm shop windows, a cooler white for the street lamps.
+constexpr NightKind kCityKinds[] = {
+    {"obj_tw_lamp", {}, {1.0f, 0.86f, 0.62f}, 230.0f, 1.3f, true},
+    {"obj_tw_", {}, {1.0f, 0.76f, 0.48f}, 210.0f, 1.2f, true},
+    {"obj_busstop1", {}, {1.0f, 0.86f, 0.66f}, 140.0f, 0.9f, false},
+};
+
+bool noteCityNightSource(u32 obj, const std::string& name) {
+    const NightKind* kind = nullptr;
+    for (const auto& k : kCityKinds)
+        if (!kind && name.compare(0, std::strlen(k.prefix), k.prefix) == 0) kind = &k;
+    if (!kind) return false;
+    const auto lit = sLitMats.find(obj);
+    if (lit == sLitMats.end()) return true;  // no light controller: nothing of it glows
+    float glow = 1.0f;
+    if (auto it = sGlow.find(obj); it != sGlow.end()) glow = it->second;
+    if (!port::settings().enhancedLighting.nightLightsGameState) glow = 1.0f;
+    if (glow <= 0.01f) return true;
+    const LitModel& lm = litModel(modelInfo(obj).mdl, lit->second);
+    float w[12];
+    readMtx(obj + 0x3C, w);
+    u32 part = 0;
+    for (const auto& p : lm.parts) {
+        NightSource s{};
+        for (int r = 0; r < 3; r++) s.world[r] = w[r * 4] * p.pos[0] + w[r * 4 + 1] * p.pos[1] + w[r * 4 + 2] * p.pos[2] + w[r * 4 + 3];
+        if (!std::isfinite(s.world[0] + s.world[1] + s.world[2])) continue;
+        s.glow = glow;
+        s.id = 0x56000000u ^ ((obj & 0x000FFFFFu) << 2) ^ part++;
+        s.kind = kind;
+        if (sNightCur.size() < kMaxNightSources) sNightCur.push_back(s);
+    }
+    if (sCityLog && copyDispCount() % 600 == 0)
+        log("[citylight] f%u %08X '%s' glow %.2f, %zu lights", copyDispCount(), obj, name.c_str(), glow, lm.parts.size());
+    return true;
 }
 
 void toView(const float* world, float* view) {
@@ -508,6 +752,16 @@ void submitNightLights() {
     if (!s.nightLights || sNight <= 0.01f || !sViewValid || sNightNext.empty()) return;
     std::array<aurora::gfx::ExtraLight, 64> out{};
     uint32_t n = 0;
+    if (sNightNext.size() > out.size()) {
+        // More sources than Aurora's lights (the city: shop windows + street lamps): the nearest.
+        auto dist = [](const NightSource& a) {
+            float v[3];
+            toView(a.world, v);
+            return v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+        };
+        std::sort(sNightNext.begin(), sNightNext.end(), [&](const NightSource& a, const NightSource& b) { return dist(a) < dist(b); });
+        sNightNext.resize(out.size());
+    }
     for (const auto& src : sNightNext) {
         aurora::gfx::ExtraLight l{};
         toView(src.world, l.pos);
@@ -756,6 +1010,7 @@ bool onModel(Ctx& c, u32 obj) {
         }
     }
     if (!enh::masterOn() || !sInStage || sPass != 1) return true;
+    enh::setEmissive(false);  // (set again by the model's lit materials)
     // The game's own round / footprint shadows (sdw_* models, drawn in their own task): kept,
     // hidden while real shadows are strong (fade), or hidden.
     const u32 proc = task & 0xFFFF;  // G3DPROC: 6 draw opa, 7 draw xlu (bit 16 a flag)
@@ -825,13 +1080,28 @@ static void strLight(Ctx& c) {
     const u32 mdl = rd32(ctl + 0x2C);
     const float amount = rdf32(ctl);
     if (mdl) cflight::noteGlow(mdl, amount);
+    if (mdl) cflight::noteLitMaterials(mdl, ctl);
+    cflight::sInStrLight = true;
+    cflight::sStrAmount = std::isfinite(amount) ? amount : 0.0f;
     callOriginal(c, "d_a_strNP::fn_99_A40");
+    cflight::sInStrLight = false;
 }
 static HleReg sStrLightReg("d_a_strNP::fn_99_A40", &strLight);
 
+// ResMatTevColor::GXSetTevColor (r3 = ResMatTevColor*, its data pointer first): fn_99_A40 sets a
+// lit material's colour; G3DState::LoadResMatTevColor (r3 likewise): g3d loads a material to draw.
+HLE(GXSetTevColor__Q34nw4r3g3d14ResMatTevColorF11_GXTevRegID8_GXColor) {
+    if (cflight::sInStrLight) cflight::noteLitTev(rd32(c.r[3]));
+    callOriginal(c, "GXSetTevColor__Q34nw4r3g3d14ResMatTevColorF11_GXTevRegID8_GXColor");
+}
+HLE(LoadResMatTevColor__Q34nw4r3g3d8G3DStateFQ34nw4r3g3d14ResMatTevColor) {
+    if (enh::masterOn()) cflight::onLoadTevColor(rd32(c.r[3]));
+    callOriginal(c, "LoadResMatTevColor__Q34nw4r3g3d8G3DStateFQ34nw4r3g3d14ResMatTevColor");
+}
+
 // nw4r::ef::DrawOrder::Draw(Effect*, const DrawInfo&): an effect's particle managers are drawn.
 HLE(Draw__Q34nw4r2ef9DrawOrderFPQ34nw4r2ef6EffectRCQ34nw4r2ef8DrawInfo) {
-    if (enh::masterOn()) cflight::noteEffectDraw(c.r[4], c.r[5]);
+    if (enh::masterOn()) cflight::noteEffectDraw(c.r[4], c.r[5]), enh::setEmissive(false);
     callOriginal(c, "Draw__Q34nw4r2ef9DrawOrderFPQ34nw4r2ef6EffectRCQ34nw4r2ef8DrawInfo");
 }
 
