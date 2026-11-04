@@ -84,3 +84,7 @@ fn_80104520
 # Enhanced lighting (src/game/cf_light.cpp, docs/RENDERING.md "Enhanced lighting (City Folk)"): the
 # stage draw (both ScnRoot passes + effects of the field/room scene) brackets the 3D scene.
 d_s_stageNP::fn_125_C0 all
+# The structures' window glow (daSTR_c light controller, d_a_strNP fn_99_A40: lerps TEV colour 1
+# of m_light / m_window / m_spotlight / m_museum ... by the light amount at controller +0, ScnMdl
+# at +0x2C): night lights follow the game's own lights-on state.
+d_a_strNP::fn_99_A40 all

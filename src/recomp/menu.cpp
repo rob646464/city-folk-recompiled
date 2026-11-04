@@ -1040,6 +1040,13 @@ void enhancedLightingTab() {
     sDirty |= recomp::menu::SliderFloat("Night light intensity", &l.nightLightIntensity, 0.0f, 3.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
     sDirty |= recomp::menu::Checkbox("Night light shadows", &l.nightLightShadows);
     ImGui::SetItemTooltip("The strongest night lights cast shadows (cube shadow maps; the preset sets how many).");
+    sDirty |= recomp::menu::Checkbox("Follow the game's lights", &l.nightLightsGameState);
+    ImGui::SetItemTooltip("A window only lights its surroundings while the game itself shows it lit: villagers at\n"
+                          "home and awake, shops while open, your house while someone is in. Off: every building\n"
+                          "glows from dusk to dawn.");
+    sDirty |= recomp::menu::Checkbox("Fireflies and fireworks", &l.effectLights);
+    ImGui::SetItemTooltip("Fireflies (summer nights) and the fireworks show are small coloured lights at the game's\n"
+                          "own particles, in their colours. Shares the light budget with the other night lights.");
     sDirty |= recomp::menu::SliderFloat("Light color vibrance", &l.extraLightSaturation, 0.0f, 2.5f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
     ImGui::Unindent();
     ImGui::EndDisabled();
