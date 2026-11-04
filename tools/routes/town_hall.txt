@@ -1,0 +1,14 @@
+# The town hall (saved town CF_FIXTURE=user-town): continue, the player is moved (TP token) in front
+# of the town hall (structure type 00FE of d_a_str_fieldNP, town position 1296,84,1200), walks in
+# (Pelly at the counter, Tortimer's module linked) and around the room. Verified 2026-11-03
+# (branch routes-2).
+include continue_any.txt
+after link d_bgo_drawNP 2
++1400:TP=mod102t00FE:0/60
++60:STICKUP*60
++80:A
+after link d_bgi_drawNP 2
++300:STICKUP*40
++80:STICKLEFT*150
++200:STICKRIGHT*300
++350:STICKDOWN*60

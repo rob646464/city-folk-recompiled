@@ -61,6 +61,16 @@ def routes():
         "house": ("precache_house.txt", 7800, {**fx, **day}),
         "nook": ("precache_nook.txt", 7800, {**fx, **day}),
         "museum": ("to_museum.txt", 18500, {**day}),
+        # Places reached with the TP route token (branch routes-2, docs/RENDERING.md "Routes"):
+        # beach + sea, the river below the waterfall, the museum's lobby / wing / cafe /
+        # observatory, the town hall, the city by Kapp'n's bus (plaza; shops in two parts).
+        "beach": ("beach.txt", 7300, {**fx, **day}),
+        "river": ("river.txt", 7300, {**fx, **day}),
+        "museum_rooms": ("museum.txt", 9600, {**fx, **day}),
+        "town_hall": ("town_hall.txt", 7300, {**fx, **day}),
+        "city": ("city.txt", 15000, {**fx, **day}),
+        "city_shops": ("city_shops.txt", 22500, {**fx, **day}),
+        "city_shops2": ("city_shops2.txt", 18500, {**fx, **day}),
     }
 
 

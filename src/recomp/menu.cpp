@@ -7,6 +7,7 @@
 #include "recomp/system.h"
 #include "recomp/game.h"
 #include "recomp/gx_bridge.h"
+#include "game/cf_move_in.h"
 #include "game/cf_region.h"
 
 #include "port/install.h"
@@ -1041,6 +1042,13 @@ void enhancedLightingTab() {
     sDirty |= recomp::menu::SliderFloat("Night light intensity", &l.nightLightIntensity, 0.0f, 3.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
     sDirty |= recomp::menu::Checkbox("Night light shadows", &l.nightLightShadows);
     ImGui::SetItemTooltip("The strongest night lights cast shadows (cube shadow maps; the preset sets how many).");
+    sDirty |= recomp::menu::Checkbox("Follow the game's lights", &l.nightLightsGameState);
+    ImGui::SetItemTooltip("A window only lights its surroundings while the game itself shows it lit: villagers at\n"
+                          "home and awake, shops while open, your house while someone is in. Off: every building\n"
+                          "glows from dusk to dawn.");
+    sDirty |= recomp::menu::Checkbox("Fireflies and fireworks", &l.effectLights);
+    ImGui::SetItemTooltip("Fireflies (summer nights) and the fireworks show are small coloured lights at the game's\n"
+                          "own particles, in their colours. Shares the light budget with the other night lights.");
     sDirty |= recomp::menu::SliderFloat("Light color vibrance", &l.extraLightSaturation, 0.0f, 2.5f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
     ImGui::Unindent();
     ImGui::EndDisabled();
@@ -1342,8 +1350,9 @@ void visualsTab() {
                           "window. Match window: fills the window. The fixed ratios add black bars as needed.");
     sDirty |= recomp::menu::Checkbox("Keep HUD at 16:9###hudKeep", &v.hudKeep4x3);
     ImGui::SetItemTooltip("On: in a window wider than 16:9 the HUD stays where it is on a 16:9 TV, centred.\n"
-                          "Off: the clock moves to the left edge and the memo / camera buttons to the right\n"
-                          "edge (src/game/cf_hud.cpp); the toolbar, dialogue and menus stay centred.");
+                          "Off: the clock moves to the left edge and the Save / camera buttons to the right\n"
+                          "edge, where they are clicked, and the pointer reaches the whole window. The\n"
+                          "toolbar, dialogue and menus stay centred.");
     sDirty |= recomp::menu::SliderFloat("Field of view", &v.fovScale, 0.75f, 1.5f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
     ImGui::SetItemTooltip("Scales the camera's field of view (1 = original). Higher shows more of the room.");
 
@@ -1507,6 +1516,8 @@ void gameplayTab() {
     // Content from other regions (src/game/cf_region.cpp).
     sDirty |= recomp::region::menuSection();
     recomp::online::sync::lockEnd(lock);
+    // Move in from Wild World (src/game/cf_move_in.cpp, docs/MOVE_IN.md).
+    sDirty |= recomp::movein::menuSection();
 }
 
 // Debug: the game's debug entries (src/game).
@@ -1573,7 +1584,7 @@ void openTreesForCheck() {
     if (idcheck::active() || click::due()) ImGui::SetNextItemOpen(true, ImGuiCond_Always);
 }
 
-bool isOpen() { return sOpen; }
+bool isOpen() { return sOpen || recomp::movein::windowOpen(); }
 bool quitRequested() { return sQuit; }
 void requestQuit() { sQuit = true; }
 
@@ -1744,6 +1755,7 @@ void draw() {
     }
     recomp::game::drawOverlay();
     recomp::online::drawOverlay();
+    recomp::movein::drawWindow();  // src/game/cf_move_in.cpp (Rover asks for the Moving Van DS)
     // CF_FRAME_TAG=1 (testing, tools/interp/screen_run.py): the replay shown in this present as a
     // bar code in the top-left corner: a white and a black reference cell, then 32 bits (present
     // number low 16, tape seq low 8, alpha x 255), most significant first, 16 px cells.

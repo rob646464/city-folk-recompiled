@@ -1,0 +1,16 @@
+# Warp test of the demo scenes (saved town CF_FIXTURE=user-town; docs/WARPS.md): continue, then
+# WARP=bus.to_city (Kapp'n's bus ride, his talk advanced with A; at its end he drops the player
+# in the city: d_bgt_drawNP #1), then WARP=bus.to_town from the city (the ride home, A again; the
+# town: d_bgo_drawNP #3), then WARP=title. The first ride took ~3500 frames (routes-2).
+include warp.txt
++1600:WARP=bus.to_city
+after link d_bgi_drawNP 2
++300:A
++40:A ~95
+after link d_bgt_drawNP 1
++600:WARP=bus.to_town
+after link d_bgi_drawNP 3
++300:A
++40:A ~95
+after link d_bgo_drawNP 3
++600:WARP=title

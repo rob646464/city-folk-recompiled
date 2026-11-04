@@ -27,11 +27,13 @@
 // their date rule reads the town's language nibble. The hook runs them with the chosen
 // language in that nibble for the duration of the call.
 #include "game/cf_region.h"
+#include "game/cf_warp.h"
 
 #include "recomp/hle.h"
 #include "recomp/menu.h"
 #include "recomp/runtime.h"
 #include "recomp/version.h"
+#include "recomp/wiimote.h"
 
 #include "port/disc_folder.h"
 #include "port/settings.h"
@@ -642,6 +644,53 @@ std::vector<ActorHit> findActors(std::initializer_list<u32> modules) {
     return out;
 }
 
+// Moves the player (CF_TELEPORT target syntax, below; route token TP=<target> with '/' for ',').
+void teleport(u32 frame, const char* arg) {
+    float x = 0, y = 0, z = 0;
+    bool ok = false;
+    const auto hits = findActors({80});
+    u32 mod = 0;
+    float dx = 0, dz = 48;
+    if (!std::strncmp(arg, "tortimer", 8)) mod = 36;
+    int pick = -1;
+    u32 pickType = 0;
+    if (!std::strncmp(arg, "mod", 3)) {  // mod<N>[#k][:dx,dz]
+        char* e2 = nullptr;
+        mod = u32(std::strtoul(arg + 3, &e2, 10));
+        for (int n = 0; n < 2; n++) {  // "#k" and "t<type>" (structure type, +0x8) in either order
+            if (*e2 == '#') pick = int(std::strtol(e2 + 1, &e2, 10));
+            if (*e2 == 't') pickType = u32(std::strtoul(e2 + 1, &e2, 16));
+        }
+        if (*e2 == ':') std::sscanf(e2 + 1, "%f,%f", &dx, &dz);
+    }
+    if (mod) {
+        int k = 0;
+        for (const ActorHit& h : findActors({mod})) {
+            if (pickType && rd32(h.addr + 8) >> 16 != pickType) continue;
+            if (pick < 0 || k++ == pick) {
+                x = rdf32(h.addr + 0x64) + dx;
+                y = rdf32(h.addr + 0x68);
+                z = rdf32(h.addr + 0x6C) + dz;
+                ok = true;
+                log("[actor] f%u target %08X id %X type %04X", frame, h.addr, rd32(h.addr), rd32(h.addr + 8) >> 16);
+            }
+        }
+    } else {
+        ok = std::sscanf(arg, "%f,%f,%f", &x, &y, &z) == 3;
+    }
+    for (const ActorHit& h : hits)
+        if (ok && h.module == 80 && rd32(h.addr + 0x60) == relBase(80, 5) + 0x1280) {  // the player class vtable
+            for (u32 o : {0x64u, 0x70u}) {
+                wrf32(h.addr + o, x);
+                wrf32(h.addr + o + 4, y);
+                wrf32(h.addr + o + 8, z);
+            }
+            log("[actor] f%u player %08X moved to %.1f %.1f %.1f", frame, h.addr, x, y, z);
+            break;
+        }
+    if (!ok) log("[actor] f%u teleport target not found (%s)", frame, arg);
+}
+
 // CF_ACTOR_LOG=<every n frames>: player / holiday Tortimer actors and positions.
 // CF_TELEPORT=<frame>:<x>,<y>,<z>|tortimer|mod<N>[:dx,dz][;...]: the player moved there
 // (tortimer = 48 units in front of the holiday Tortimer; mod<N>[#k][t<type>][:dx,dz] = next to the k-th / last actor of
@@ -669,8 +718,8 @@ void actorAids(u32 frame) {
         for (u32 m : mods)
             for (const ActorHit& h : findActors({m})) hits.push_back(h);
         for (const ActorHit& h : hits)
-            log("[actor] f%u module %u %08X id %X pos %.1f %.1f %.1f", frame, h.module, h.addr, rd32(h.addr),
-                rdf32(h.addr + 0x64), rdf32(h.addr + 0x68), rdf32(h.addr + 0x6C));
+            log("[actor] f%u module %u %08X id %X type %04X pos %.1f %.1f %.1f", frame, h.module, h.addr, rd32(h.addr),
+                rd32(h.addr + 8) >> 16, rdf32(h.addr + 0x64), rdf32(h.addr + 0x68), rdf32(h.addr + 0x6C));
         // Today's event list (fn_80089D3C, USA 0x805855E8 via VA: 10 x {event, active}).
         if (addrs()) {
             std::string s;
@@ -679,6 +728,14 @@ void actorAids(u32 frame) {
             log("[actor] f%u today's events:%s", frame, s.empty() ? " none" : s.c_str());
         }
     }
+    // Route actions: TP=<target> (docs/CONTROLS.md "Test aids").
+    for (std::string act : wiimote::takeScriptActions())
+        if (act.rfind("TP=", 0) == 0) {
+            std::replace(act.begin(), act.end(), '/', ',');
+            teleport(frame, act.c_str() + 3);
+        } else if (act.rfind("WARP=", 0) == 0) {
+            warp::requestFromScript(act.substr(5));  // cf_warp.cpp (docs/WARPS.md)
+        }
     static const char* tp = std::getenv("CF_TELEPORT");
     if (!tp) return;
     for (const char* p = tp; *p;) {
@@ -687,51 +744,7 @@ void actorAids(u32 frame) {
         if (*end != ':') break;
         const char* arg = end + 1;
         const char* next = std::strchr(arg, ';');
-        if (f == frame) {
-            float x = 0, y = 0, z = 0;
-            bool ok = false;
-            const auto hits = findActors({80});
-            u32 mod = 0;
-            float dx = 0, dz = 48;
-            if (!std::strncmp(arg, "tortimer", 8)) mod = 36;
-            int pick = -1;
-            u32 pickType = 0;
-            if (!std::strncmp(arg, "mod", 3)) {  // mod<N>[#k][:dx,dz]
-                char* e2 = nullptr;
-                mod = u32(std::strtoul(arg + 3, &e2, 10));
-                for (int n = 0; n < 2; n++) {  // "#k" and "t<type>" (structure type, +0x8) in either order
-                    if (*e2 == '#') pick = int(std::strtol(e2 + 1, &e2, 10));
-                    if (*e2 == 't') pickType = u32(std::strtoul(e2 + 1, &e2, 16));
-                }
-                if (*e2 == ':') std::sscanf(e2 + 1, "%f,%f", &dx, &dz);
-            }
-            if (mod) {
-                int k = 0;
-                for (const ActorHit& h : findActors({mod})) {
-                    if (pickType && rd32(h.addr + 8) >> 16 != pickType) continue;
-                    if (pick < 0 || k++ == pick) {
-                        x = rdf32(h.addr + 0x64) + dx;
-                        y = rdf32(h.addr + 0x68);
-                        z = rdf32(h.addr + 0x6C) + dz;
-                        ok = true;
-                        log("[actor] f%u target %08X id %X type %04X", frame, h.addr, rd32(h.addr), rd32(h.addr + 8) >> 16);
-                    }
-                }
-            } else {
-                ok = std::sscanf(arg, "%f,%f,%f", &x, &y, &z) == 3;
-            }
-            for (const ActorHit& h : hits)
-                if (ok && h.module == 80 && rd32(h.addr + 0x60) == relBase(80, 5) + 0x1280) {  // the player class vtable
-                    for (u32 o : {0x64u, 0x70u}) {
-                        wrf32(h.addr + o, x);
-                        wrf32(h.addr + o + 4, y);
-                        wrf32(h.addr + o + 8, z);
-                    }
-                    log("[actor] f%u player %08X moved to %.1f %.1f %.1f", frame, h.addr, x, y, z);
-                    break;
-                }
-            if (!ok) log("[actor] f%u teleport target not found (%s)", frame, arg);
-        }
+        if (f == frame) teleport(frame, std::string(arg, next ? size_t(next - arg) : std::strlen(arg)).c_str());
         if (!next) break;
         p = next + 1;
     }

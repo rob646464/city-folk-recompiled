@@ -180,6 +180,8 @@ std::vector<Field> fields() {
         flag("enhanced_lighting", "night_lights", l.nightLights),
         num("enhanced_lighting", "night_light_intensity", l.nightLightIntensity),
         flag("enhanced_lighting", "night_light_shadows", l.nightLightShadows),
+        flag("enhanced_lighting", "night_lights_game_state", l.nightLightsGameState),
+        flag("enhanced_lighting", "effect_lights", l.effectLights),
         flag("enhanced_lighting", "sun_shafts", l.sunShafts),
         num("enhanced_lighting", "sun_shaft_intensity", l.sunShaftIntensity),
         num("enhanced_lighting", "sun_shaft_quality", l.sunShaftQuality),
@@ -343,6 +345,8 @@ std::vector<Field> fields() {
         num("online", "email_imap_port", sSettings.online.emailImapPort),
         str("online", "email_smtp_host", sSettings.online.emailSmtpHost),
         num("online", "email_smtp_port", sSettings.online.emailSmtpPort),
+        flag("move_in", "any_region", sSettings.moveIn.anyRegion),
+        str("move_in", "last_file", sSettings.moveIn.lastFile),
     };
 }
 

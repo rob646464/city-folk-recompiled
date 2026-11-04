@@ -133,7 +133,7 @@ struct Pending {
     float x0, y0, x1, y1;
 };
 
-void publish(const std::vector<Pending>& v, const menunav::Scale& s, bool hud, bool tested = true) {
+void publish(const std::vector<Pending>& v, const menunav::Scale& s, u32 group, bool hud, bool tested = true, u16 layer = 0) {
     for (const auto& p : v) {
         menunav::Item it;
         float ax, ay, bx, by;
@@ -144,8 +144,10 @@ void publish(const std::vector<Pending>& v, const menunav::Scale& s, bool hud, b
         it.y0 = std::min(ay, by);
         it.y1 = std::max(ay, by);
         it.key = p.pane;
+        it.group = group;
         it.hud = hud;
         it.tested = tested;
+        it.layer = layer;
         std::snprintf(it.name, sizeof it.name, "%s", p.name.c_str());
         menunav::report(it);
     }
@@ -181,7 +183,7 @@ HLE(fn_802B5598) {
             lr, layout, filter, qx, qy, qs, s.sx, s.sy, found.size(), hud ? " (hud)" : "");
         for (const auto& p : found) log("[navdump]   %s %.1f,%.1f .. %.1f,%.1f", p.name.c_str(), p.x0, p.y0, p.x1, p.y1);
     }
-    publish(found, s, hud && !found.empty());
+    publish(found, s, rd32(layout + 0x20), hud && !found.empty());  // group = root pane, as in 1b
     c.r[3] = ret;
 }
 
@@ -202,13 +204,22 @@ void cf::navLayoutDrawn(Ctx& c, u32 root) {
         found.push_back(pd);
     });
     if (found.empty()) return;
+    // Draw order of the layouts with items this frame: a layout drawn later is in front (a submenu
+    // over the design list; menu_nav.cpp leaves out the screen behind it).
+    static u32 seqFrame = 0;
+    static u16 seq = 0;
+    if (seqFrame != game::guestFrames()) {
+        seqFrame = game::guestFrames();
+        seq = 0;
+    }
+    if (seq < 0xFFFF) seq++;
     if (dumpFrame()) {
         log("[navdump] f%u drawn root %08X: %zu items%s", game::guestFrames(), root, found.size(), hud ? " (hud)" : "");
         for (const auto& p : found)
             log("[navdump]   %s %.1f,%.1f .. %.1f,%.1f alpha %u/%u", p.name.c_str(), p.x0, p.y0, p.x1, p.y1, rd8(p.pane + 0xB8),
                 rd8(p.pane + 0xB9));
     }
-    publish(found, sLastWalkScale, hud, false);
+    publish(found, sLastWalkScale, root, hud, false, seq);
 }
 
 // 2. The game's gui::Manager::update (keyboards).
@@ -239,7 +250,7 @@ HLE(fn_80314AF4) {
             found.size());
         for (const auto& p : found) log("[navdump]   %s %.1f,%.1f .. %.1f,%.1f", p.name.c_str(), p.x0, p.y0, p.x1, p.y1);
     }
-    publish(found, s, false);
+    publish(found, s, mgr, false);
     c.r[3] = ret;
 }
 
@@ -269,7 +280,7 @@ HLE(update__Q310homebutton3gui7ManagerFiffUlUlUlPv) {
             s.sy, found.size());
         for (const auto& p : found) log("[navdump]   %s %.1f,%.1f .. %.1f,%.1f", p.name.c_str(), p.x0, p.y0, p.x1, p.y1);
     }
-    publish(found, s, false);
+    publish(found, s, mgr, false);
     c.r[3] = ret;
 }
 

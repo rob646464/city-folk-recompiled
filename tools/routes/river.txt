@@ -1,0 +1,11 @@
+# The river (saved town CF_FIXTURE=user-town): continue, then the player is moved (TP token) to
+# the east bank of the main river on the lower terrace below the waterfall (town position
+# 1880,28,2000), looks at the falls, walks down the bank towards the sea and back. Verified
+# 2026-11-03 (branch routes-2).
+include continue_any.txt
+after link d_bgo_drawNP 2
++1400:TP=1880/28/2000
++100:STICKLEFT*20
++200:STICKDOWN*250
++280:STICKLEFT*15
++120:STICKUP+B*200

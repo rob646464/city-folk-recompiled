@@ -1,0 +1,31 @@
+# City shops, part 1 (saved town CF_FIXTURE=user-town): Kapp'n's bus (city_bus.txt), then the
+# player is moved (TP token) to the door of each shop and walks in, then walks (runs) down to the
+# door pressing B again and again: B advances the greeting and closes the goodbye the shopkeeper
+# says at the door, whatever their length (each exit relinks d_bgt_drawNP). GracieGrace (Labelle's
+# greeting; ground floor) -> Lyle's (HRA office) -> Club LOL (the theatre's ticket counter hall).
+# The presses end before the next TP (+900 after the exit), or they would walk the player back out.
+# Verified 2026-11-03 (branch routes-2).
+include city_bus.txt
+# GracieGrace (0114).
+after link d_bgt_drawNP 1
++1300:@off
++100:TP=mod103t0114:0/60
++60:STICKUP*90
+after link d_bgi_drawNP 3
++400:STICKDOWN+B*20
++60:STICKDOWN+B*20 ~15
+# Lyle's (0111).
+after link d_bgt_drawNP 2
++900:TP=mod103t0111:0/60
++60:STICKUP*90
+after link d_bgi_drawNP 4
++400:STICKDOWN+B*20
++60:STICKDOWN+B*20 ~15
+# Club LOL (0118).
+after link d_bgt_drawNP 3
++900:TP=mod103t0118:0/60
++60:STICKUP*90
+after link d_bgi_drawNP 5
++400:STICKUP*120
++200:STICKDOWN+B*20
++60:STICKDOWN+B*20 ~20
