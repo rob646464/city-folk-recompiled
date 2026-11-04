@@ -41,10 +41,12 @@
 // - While the player is inside the shop (d_shop_fgNP linked) a change in the menu waits until they
 //   leave, so the shelves and the stock agree. While in an online room the stock stays retail
 //   (visitors get the town data).
-// - Prices: walls, floors and moving boxes have price 0 in the game's table; while an item is
-//   chosen their records get the prices below (also the Nintendo bench, pikmin and Blue Falcon:
-//   2400, the user's price over the game's 120 / 1024 / 1024) (and the moving boxes and the bulletin paper names
-//   in the languages that only have a placeholder); with nothing chosen the table is the disc's.
+// - Prices: walls, floors and moving boxes have price 0 in the game's table; the Nintendo bench,
+//   pikmin and Blue Falcon get 2400 (the user's price over the game's 120 / 1024 / 1024). The
+//   value function fn_800A5F74 (every buy / sell / price reader) answers with these at all times,
+//   so a bought item sells for the same after unticking; the table records carry them while an
+//   item is chosen (for any direct reader). The moving boxes' and the bulletin paper's
+//   placeholder names are replaced at all times (in memory).
 #include "game/cf_features.h"
 
 #include "port/settings.h"
@@ -164,10 +166,7 @@ struct Applied {
 };
 Applied sApplied;
 bool sSuspended = false;   // a save is being written: the stock is retail until it finishes
-bool sTableTouched = false;
 u32 sOrigPrice[kItemCount] = {};
-u16 sOrigNames[kItemCount][10][17] = {};
-bool sNamesTouched[kItemCount][10] = {};
 
 struct Status {
     bool inGame = false, inShop = false, suspended = false, online = false;
@@ -238,9 +237,11 @@ void writeName(u32 a, const char* utf8) {
     for (; n < 17; n++) wr16(a + 2 * n, 0);
 }
 
-// Prices and names in the item table: ours while an item is chosen, the disc's otherwise.
+// Prices in the item table: ours while an item is chosen, the disc's otherwise (the value every
+// price reader uses comes from fn_800A5F74, answered with ours at all times below; the table
+// price is for any reader of the record that does not go through it). Names: the placeholder
+// names ("not used" / blank) are replaced at all times, so an owned box never shows "not used".
 void updateTable(Ctx& c, bool on) {
-    if (!on && !sTableTouched) return;
     for (int i = 0; i < kItemCount; i++) {
         const Item& it = kItems[i];
         const u32 rec = record(c, it.code);
@@ -260,18 +261,20 @@ void updateTable(Ctx& c, bool on) {
         for (int l = 0; l < 10; l++) {
             const char* nm = it.names[l];
             const u32 a = rec + 0x12 + 0x22 * l;
-            if (on && nm && placeholder(a)) {  // (again after a reload of the table)
-                if (!sNamesTouched[i][l])
-                    for (u32 k = 0; k < 17; k++) sOrigNames[i][l][k] = u16(rd16(a + 2 * k));
-                writeName(a, nm);
-                sNamesTouched[i][l] = true;
-            } else if (!on && sNamesTouched[i][l]) {
-                for (u32 k = 0; k < 17; k++) wr16(a + 2 * k, sOrigNames[i][l][k]);
-                sNamesTouched[i][l] = false;
-            }
+            if (nm && placeholder(a)) writeName(a, nm);  // (again after a reload of the table)
         }
     }
-    sTableTouched = on;
+}
+
+// The item's value for buying, selling and every other price reader (fn_800A5F74(&code); the
+// game: record +4, stationery scaled by its sheets). The port's prices for these items at all
+// times, chosen or not: retail never values these codes (no shop, gift, prize or villager pool
+// has them; catalog ordering refuses them), so only items the player owns are affected, and a
+// bought item keeps its value after unticking (docs/FEATURES.md "Buying and selling prices").
+s32 portValue(u32 code) {
+    for (const Item& it : kItems)
+        if (it.price && it.cat != Cat::Stationery && it.code == (code & ~3u)) return s32(it.price);
+    return -1;
 }
 
 void logStock(u32 stock, const char* why) {
@@ -360,6 +363,16 @@ void reconcile(Ctx& c, bool fromGenerator) {
 }
 
 }  // namespace
+
+// fn_800A5F74(&code): the item's value.
+HLE(fn_800A5F74) {
+    const s32 v = portValue(rd16(c.r[3]));
+    if (v < 0) {
+        callOriginal(c, "fn_800A5F74");
+        return;
+    }
+    c.r[3] = u32(v);
+}
 
 // fn_801456B4(S): the day's stock.
 HLE(fn_801456B4) {

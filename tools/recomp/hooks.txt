@@ -183,6 +183,9 @@ fn_80229D08 all
 # save's checksum and starts the save worker: the replacement is taken out of the stock first, so
 # it never reaches the save file).
 fn_801456B4 all
+# The item value every buy / sell / price reader uses (record price, stationery by sheets): the
+# port's prices for the unused walls, floors, boxes, bench, pikmin and Blue Falcon at all times.
+fn_800A5F74 all
 fn_800D256C all
 fn_800D25D8 all
 fn_800D2648 all

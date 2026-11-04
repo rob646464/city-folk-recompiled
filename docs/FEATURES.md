@@ -227,8 +227,8 @@ slot differs on the Korean disc). Names are the game's (US English).
 | 974C-974F | 1D3 | bulletin paper (1-4 sheets) | stationery | 160 | 160 | same |
 
 The moving boxes are "not used" in the English table and a blank placeholder in the other
-European slots; while an item is chosen the port names them "5 / 4 / 2 moving boxes" (also the
-bulletin paper's blank Spanish/French/German/Italian slots), in memory only. Stationery is sold
+European slots; the port names them "5 / 4 / 2 moving boxes" at all times (also the bulletin
+paper's blank Spanish/French/German/Italian slots), in memory only. Stationery is sold
 with the sheet count of the stationery it replaces.
 
 ### Buying and selling prices (code read, USA)
@@ -247,25 +247,49 @@ with the sheet count of the stationery it replaces.
 - **Catalog**: every one of these items has the "not orderable" bit (record +0x187 & 0x10), so the
   catalog refuses to order them (message 0x34) whatever the price: no catalog price edge case.
 
-| Item | Buy (no discount; with -20 %) | Sell while an item is ticked | Sell with nothing ticked |
-|---|---|---|---|
-| Nintendo bench | 2400 (1920) | 600 | 30 (game's 120 / 4) |
-| pikmin | 2400 (1920) | 600 | 256 |
-| Blue Falcon | 2400 (1920) | 600 | 256 |
-| brown pot | 800 (640) | 200 | 200 |
-| white pot | 1200 (960) | 300 | 300 |
-| moth orchid | 2480 (1984) | 620 | 620 |
-| 5 / 4 / 2 moving boxes | 500 / 400 / 200 (400 / 320 / 160) | 125 / 100 / 50 | 0 (Nook declines) |
-| cranny / convenient / supermarket / department wall | 1440 (1152) | 360 | 0 (Nook declines) |
-| cranny / convenient / market / department floor | 1540 (1232) | 385 | 0 (Nook declines) |
-| weathered / bulletin paper, 1-4 sheets | 40 / 80 / 120 / 160 (32 / 64 / 96 / 128) | 10 / 20 / 30 / 40 | the same (game's own price) |
+| Item | Buy (no discount; with -20 %) | Sell, ticked or not |
+|---|---|---|
+| Nintendo bench | 2400 (1920) | 600 |
+| pikmin | 2400 (1920) | 600 |
+| Blue Falcon | 2400 (1920) | 600 |
+| brown pot | 800 (640) | 200 |
+| white pot | 1200 (960) | 300 |
+| moth orchid | 2480 (1984) | 620 |
+| 5 / 4 / 2 moving boxes | 500 / 400 / 200 (400 / 320 / 160) | 125 / 100 / 50 |
+| cranny / convenient / supermarket / department wall | 1440 (1152) | 360 |
+| cranny / convenient / market / department floor | 1540 (1232) | 385 |
+| weathered / bulletin paper, 1-4 sheets | 40 / 80 / 120 / 160 (32 / 64 / 96 / 128) | 10 / 20 / 30 / 40 |
 
-Selling is always a quarter of the value and buying at least 80 % of it, so it never pays more than
-buying. The port's prices apply to every item of the list while any one is ticked (an item bought
-earlier keeps its value while another is ticked); with nothing ticked the disc's prices are back,
-which are never above the port's (120 / 1024 / 1024 / 0 against 2400 / 1440 / 1540 / 500...), so
-an item bought while ticked and sold after unticking brings at most what selling it while ticked
-would, far below what was paid.
+Selling is always a quarter of the value and buying at least 80 % of it, so selling never pays
+more than buying. The value is the same whether an item is ticked or not (below), so a bought
+item sells for the same quarter after unticking.
+
+**Always-on value (fn_800A5F74 hooked, `all`)**: for the 14 items whose price the port sets
+(bench, pikmin, Blue Falcon, boxes, walls, floors; the pots, orchid and papers keep the game's
+price, so nothing changes for them) the value function returns the port's price at all times,
+also with nothing ticked. Every reader of an item's value goes through that function (the only
+direct reader of the record's +4 found next to the record lookups fn_800C27E0 / fn_800C2704 is
+fn_800A5F74 itself). Its 68 call sites, audited:
+
+| Reader | Values what | Effect for these items |
+|---|---|---|
+| Nook: buy offer, sell total (tanukichi fn_38_2654 / 64D8 / 6194), catalog price (d_menu_catalogNP) | the shelf item, the items the player sells; the catalog refuses these items first (+0x187 bit) | the prices above |
+| pocket / menu code (d_menu_itemNP, item00NP, itemxxNP; main fn_8003F8E0 pockets loop, fn_80138BEC.. fn_80138F9C bell-bag money functions) | the player's own pocket items (money functions only take bell bags, fn_800A5F20 first) | an owned item shows / counts our value |
+| villagers (fn_8002F1A0: kind 3 / 0xB, not the +0x187 bit, value 1..9999; fn_80120B74 with the +0x187 check; fn_80037BE0 / fn_80037F1C offers on an item of the player; fn_80120E24 / fn_80128AD4 / fn_8005BCCC / fn_8005BD4C: items of the player's house / pockets) | the player's items | the two +0x187 filters still exclude them; a villager offer on an owned unused item uses our value |
+| flea market (d_a_npc_visit_player_house_fleamarketNP) | an item the player puts out | "value > 0" now true for an owned wall, floor or box, so it can be put out (the player sets the price) |
+| Nat, Chip, Redd, Mabel/Sable shops, other NPCs (bugNP, uomasaNP, tunekichiNP, kinuyoNP, pyontaroNP, jijyoNP), d_fgobj_managerNP, fn_8009C678, fn_8014224C / fn_801422EC | bugs, fish, art, clothes, bell amounts they build themselves (fn_800A5D3C / fn_800A5D6C), kind-checked items | none (never these codes) |
+
+Not readers at all: the HRA (d_a_npc_sp_honmaNP), Gracie (graceNP), the museum, the recycle box,
+the auction: none calls fn_800A5F74 or reads the price. Retail never values these codes (no
+shop, gift, prize or villager pool holds them; the catalog refuses them), so the always-on value
+only shows on items the player owns. The table records' +4 prices are still written only while an
+item is ticked (for any direct reader not found), so with nothing ticked the item table's prices
+are the disc's.
+
+Names: the moving boxes' and the bulletin paper's placeholder names ("not used", blank) are
+replaced in memory at all times, so an owned box never shows "not used". With nothing ticked this
+is the only difference in the item table's bytes (the name strings of four records), visible only where
+such an item appears.
 
 ### What the port does
 
@@ -284,9 +308,11 @@ would, far below what was paid.
   (d_shop_fgNP linked) it waits until the player leaves, so the shelves and the stock agree.
   While in an online room the stock stays retail (visitors receive the town data).
 - **Prices**: walls, floors and moving boxes have price 0 in the game's table, and the user set
-  the Nintendo bench, pikmin and Blue Falcon to 2400; while an item is chosen these table records
-  carry the prices above (and the names); with nothing chosen the table is the disc's.
-- Default (nothing ticked): no stock, table or save byte is touched.
+  the Nintendo bench, pikmin and Blue Falcon to 2400; the value function answers with these at
+  all times (above); the table records carry them only while an item is chosen.
+- Default (nothing ticked): no stock or save byte is touched; the item table differs only in the
+  four placeholder names; the value of the 14 priced items is the port's, which shows only on
+  items the player owns (retail never has them).
 
 ### Test aids
 
