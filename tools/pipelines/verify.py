@@ -108,6 +108,14 @@ PRESETS = {
     # Performance: 2400p (resolution_scale 5 = 5 x 480p, more pixels than 4K) at 120 fps, no VSync.
     "perf4k120": {"video": {"target_fps": 120, "match_display_refresh": "false", "vsync": "false", "resolution_scale": 5}},
     "perf4k": {"video": {"resolution_scale": 5, "vsync": "false"}},
+    "fps144": {"video": {"target_fps": 144, "match_display_refresh": "false", "vsync": "false"}},
+    "fps120nv": {"video": {"target_fps": 120, "match_display_refresh": "false", "vsync": "false"}},
+    "enh120": {"video": {"target_fps": 120, "match_display_refresh": "false", "vsync": "false"},
+               "enhanced_lighting": {"enabled": 1, "preset": 3}, "world_lights": {"enabled": 1},
+               "enhanced_world": {"enabled": 1}},
+    "enh144": {"video": {"target_fps": 144, "match_display_refresh": "false", "vsync": "false"},
+               "enhanced_lighting": {"enabled": 1, "preset": 3}, "world_lights": {"enabled": 1},
+               "enhanced_world": {"enabled": 1}},
     "perf120": {"video": {"target_fps": 120, "match_display_refresh": "false", "vsync": "false"}},
 }
 
@@ -147,7 +155,7 @@ def run_once(a, d: Path, route, frames, extra, ini, cache: Path, tag: str):
     elif a.list:
         e["CF_PIPELINE_LIST"] = a.list
     e.update({k: v.replace("{dir}", str(d)) for k, v in extra.items()})
-    e.update(dict(kv.split("=", 1) for kv in a.env if "=" in kv))
+    e.update({k: v.replace("{dir}", str(d)) for k, v in (kv.split("=", 1) for kv in a.env if "=" in kv)})
     cmd = [a.exe, "--disc", a.disc, "--input", "@" + str(ROUTES / route)]
     log_path = d / f"log{tag}.txt"
     t0 = time.time()
