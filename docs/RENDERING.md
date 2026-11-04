@@ -167,16 +167,33 @@ on behaves like Dolphin; one with it off (or never set up) like main's port. The
 will be Rover's, like Dolphin's; routes that time Kapp'n's talk (city_bus.txt: A until the city)
 work either way.
 
-### Numbers (2026-11-02)
+### Numbers (2026-11-04, quiet PC, RTX 3090 Ti, branch perf-2)
 
-- Recorded so far: town day/night/rain/snow, house, Nook's, new_game: **300 configs** (6.7 KB
-  zstd). Per route a fresh cache met 135-186 configs.
-- Warm start, 2400p/120 fps settings, 238 pipelines (list + derived variants): **hold 0.17 s**
-  (1.5 s after startup). Cold hold of the same set on the loaded PC: ~26 s (476 shaders compiled
-  on 8 threads); a quiet-PC cold measurement is pending (cold runs held, see above).
-- Coverage: a fully warm cache of one nook run still missed 9-12 configs in the next nook run
-  (Rover's dialogue, the shop): see "Vertex-format variants". The fresh-cache verification pass
-  (every route with the list, target ~0 misses) is pending a quiet window.
+- **Recorded** (fresh cache, no list, one game at a time on an otherwise idle PC): the warp sweep
+  (`sweep`: all 88 destinations of docs/WARPS.md, 400 frames each, from the town) by day and at
+  night, the sweep again with every enhancement on (`enh_all`: Enhanced lighting Ultra + world
+  lights + Enhanced world with reflections, wet ground, ripples, sparkle, haze, particles,
+  tilt-shift), the warp routes (beach, river, town hall, museum rooms through the sweep, city
+  streets, city shops in two parts, beach and city at night), town rain/snow, new_game; enh_all
+  also for beach, city at night, town rain and snow. Union exported in canonical form
+  (`CF_PIPELINE_EXPORT`): **2517 configs** (39 KB zstd). Per run a fresh cache met 138-209
+  configs (sweeps 726-779).
+- **Aurora 0392** (generic, LM/SMS too): list rows whose texgen reads a position matrix row
+  (`GX_PNMTX0-9`, mtx 0-27: NW4R's projected textures in Rover's dialogue and the HUD) were rejected
+  at load ("row N rejected: texgen", 12 rows), so every run missed the same 7 configs at the first
+  dialogue (frame ~1694). The validator now accepts every XF matrix row (the shader reads
+  `postex_mtx[mtx / 3]` either way).
+- **Verified, default settings** (fresh cache with the list): beach_warp 0, river_warp 0,
+  city_warp_night 0, town_snow 0, new_game 2, the 88-place sweep 13 misses (before 0392 with a
+  default-only list: 8 / 3 / 7 / 9 / 18). Cold hold **12.7-13.5 s** (default: 1184 pipelines on 8
+  threads), warm hold **0.17-0.22 s**.
+- **Enhanced lighting/world (enh_all)**: cold hold 70-81 s (4934 pipelines). Measured only with a
+  default-only list (29-98 misses per route: enh class 1 draws the canonical config does not show
+  as lit, built at first draw as documented in Aurora's precache_variants); the shipped list now
+  holds the enh_all recordings too (a recorded class-1 config builds class 1 when the enhancement
+  is on and plain class 0 when it is off, deduplicated), but a fresh-cache enh_all pass with it was
+  not run (user decision: step closed). Not recorded: MSAA layouts (rebuilt from the same list),
+  festivals/holidays, other regions' discs, the shipped exe (warps are dev-only).
 
 ### Vertex-format variants (open, generic)
 
@@ -192,6 +209,51 @@ several fracs): pass frac (and stride) through the vertex uniform block and keep
 pipeline key; component type could follow with a switch in the fetch helper. It changes the config
 layout (bump `GXPipelineConfigVersion`, re-record the list) and touches shared shader generation,
 so it is left for a coordinated change (docs/BACKPORT.md).
+
+## Performance on a quiet PC (2026-11-04, branch perf-2)
+
+RTX 3090 Ti, nothing else running, 1280x720 window off screen on a 60 Hz display, VSync off,
+warm shader cache (`verify.py --cache-from`), `[perf]` every 10 s (`CF_PERF_LOG=10`), the windows
+after the arrival; tools in the agent scratch (perfsum.py / juddersum.py over the run logs).
+
+**Game logic holds its native 60 at 120 presented fps everywhere**: the old "42-60 game fps"
+(render-3) was CPU contention from ~15 other game instances, not capture cost.
+
+| place (route) | settings | presented fps median | game fps median | host ms med / p95 | worker ms med / p95 | over 1.5x / 2 min |
+|---|---|---|---|---|---|---|
+| town (town_day) | 120 | 120.0 | 59.9 | 1.6 / 2.9 | 0.7 / 1.3 | 1 |
+| city streets (city_warp) | 120 | 120.0 | 59.9 | 1.5-1.6 / 3.1-4.5 | 0.5-0.6 / 1.0-1.2 | 3-4 |
+| city shops (city_shops_warp) | 120 | 120.0 | 59.9 | 1.2 / 2.3 | 0.4 / 0.8 | 3 |
+| museum rooms (museum_warp) | 120 | 120.0 | 59.9 | 0.9 / 2.2-2.3 | 0.4 / 0.8-1.0 | 1-2 |
+| town hall | 120 | 120.0 | 59.9 | 1.1 / 2.4 | 0.5 / 1.2 | 2 |
+| beach + sea | 120 | 120.0 | 59.9 | 1.6 / 2.6 | 0.5 / 1.0 | 2 |
+| town, city, museum | Enhanced lighting Ultra + world lights + Enhanced world, 120 | 120.0 (min 115-116) | 59.9 | 1.1-1.7 / 2.3-3.5 | 0.7-0.9 / 1.2-2.0 | 2-7 |
+| town at night, city at night, beach, rain | the same | 120.0 | 59.9 | 1.7-2.1 / 3.4-5.9 | 0.9-1.2 / 1.5-2.0 | 2-6 |
+| town, city, museum, shops, town hall | 144 | 119.7-120.0 | 59.9 | 0.6-1.5 / 1.5-4.6 | 0.3-0.5 / 0.6-1.3 | 1-6 (before the pacing fix 14-20) |
+
+(The only game-fps dip, 53-54 in one window of every run, is the continue's "Preparing saved data"
+load before the town, the same in every setting.) **144 cannot be measured here**: the off-screen
+window on a 60 Hz display delivers at most ~120 presents/s (Mailbox), while a frame costs 1-3 ms;
+measure 144+ on a high-refresh display. That cap made the pacing governor cycle 124 -> 116 -> 124
+fps every ~10 s (its floor was released because the frames were cheap); now a slowdown right after
+such a release is taken as a display-chain limit and held for 60 s (BACKPORT 30): slowdowns per
+2-minute run 13-17 -> 7, present intervals over 1.5x 14-20 -> 2-6.
+
+**Judder detector**: in the town it reported ~16 "blend defects" per in-between frame (100-500 px,
+identical at every alpha, g3d draws whose position slot the slot table had wrong: texture
+matrices that material / texture-SRT display lists load into PNMTX rows, envelope loads the table
+does not see). A draw is now judged only when its slot holds exactly what the replay wrote for the
+noted patch (BACKPORT 31; the summary line counts the skipped draws; A/B `CF_JUDDER_SLOTCHECK=0`);
+positive control `CF_INTERP_NOBLEND=1` (no matrix blending) still flags ~3100 per 5 s. With it,
+**0 defects** (blend / camera / other, visible or not) at 120 and 144 in the town, city streets,
+city shops, museum rooms, town hall, beach/sea, and with every enhancement on (night town with
+fireflies, night city with window lights, beach, rain). Policy switches (shown at the game frame,
+not defects): ef particles re-born elsewhere in their slot (the sea's spray at the beach: ~0.7 per
+in-between frame, 3000-4000 px2 each), a few dozen turns in the museum.
+
+Original 60 and default settings: the changes only act while interpolating (pacing governor after a
+slowdown, the detector only with `CF_JUDDER_LOG`), and 0392 only changes which pipelines are built
+ahead; no frame dump comparison was made.
 
 ## Performance (2026-11-02)
 

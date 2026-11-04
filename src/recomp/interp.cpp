@@ -3691,6 +3691,10 @@ struct ProbeReplay {
     std::shared_ptr<const Tape> a, b;
     float alpha;
     u32 present;
+    // The values this replay actually wrote for each position matrix the slot table names
+    // (patch index -> 12 floats, read back from the replay buffer). A draw whose slot does not hold
+    // them was drawn with a matrix the table does not know (see probeJudge).
+    std::shared_ptr<std::unordered_map<s32, std::array<f32, 12>>> replayed;
 };
 std::deque<ProbeReplay> sProbeIssued;  // under sProbeIssuedM (host pushes, the judge thread pops)
 std::mutex sProbeIssuedM;
@@ -3779,9 +3783,19 @@ void probeBeforeReplay(const Tape* a, const Tape& b, float alpha, std::vector<u8
         GXSetProbeTagAurora(id << 20 | 0xFFFFF);  // not judged
         return;
     }
+    auto replayed = std::make_shared<std::unordered_map<s32, std::array<f32, 12>>>();
+    for (const auto& slots : b.bundleSlots)
+        for (const s32 pi : slots) {
+            if (pi < 0 || u32(pi) >= b.patches.size() || replayed->count(pi)) continue;
+            const Patch& P = b.patches[pi];
+            if (P.count < 12 || P.offset + 48 > buf.size()) continue;
+            std::array<f32, 12> m;
+            for (int e = 0; e < 12; e++) m[e] = loadBE(buf.data() + P.offset + 4 * e);
+            replayed->emplace(pi, m);
+        }
     {
         std::lock_guard lk(sProbeIssuedM);
-        sProbeIssued.push_back({id, nullptr, nullptr, alpha, sProbeNextId});
+        sProbeIssued.push_back({id, nullptr, nullptr, alpha, sProbeNextId, std::move(replayed)});
     }
     sProbeFill = true;  // the tapes are filled in by the caller, which holds them (probeFill)
     static std::vector<std::pair<u32, u32>> marks;  // offset, tag
@@ -3826,6 +3840,23 @@ void probeJudge(const ProbeReplay& pr, std::vector<ProbeRec>& recs) {
         if (pb < 0 || u32(pb) >= b.patches.size()) continue;  // matrix not noted (stream/indexed loads)
         const Patch& P = b.patches[pb];
         if (P.role != 0 || P.view >= b.views.size() || b.viewToA[P.view] < 0) continue;
+        // The slot must hold what this replay wrote for that patch. g3d's material and texture-SRT
+        // display lists load 3x4 texture matrices into position matrix rows (City Folk's texgens on
+        // GX_PNMTX rows, Aurora 0392), skinned draws' envelope loads come from the matrix array:
+        // when the draw's actual matrix is not the noted one, the table is stale for this draw and
+        // there is no truth to judge it against (these were ~16 "blend defects" per in-between
+        // frame in the town, 100-500 px, identical at every alpha). CF_JUDDER_SLOTCHECK=0: off (A/B).
+        static const bool sSlotCheck = [] { const char* v = std::getenv("CF_JUDDER_SLOTCHECK"); return !(v && *v == '0'); }();
+        if (sSlotCheck && pr.replayed) {
+            const auto it = pr.replayed->find(pb);
+            bool same = it != pr.replayed->end();
+            for (int e = 0; same && e < 12; e++)
+                same = std::fabs(it->second[e] - r.mtx[e]) <= 1e-3f * (1.0f + std::fabs(it->second[e]));
+            if (!same) {
+                sProbeTotals.cause[3]++, sProbeWindow.cause[3]++;
+                continue;
+            }
+        }
         const s32 qv = b.viewToA[P.view];
         M34 vt, ib, ia;
         if (!idealCamera(a->views[qv], b.views[P.view], pr.alpha, vt) || !invertAffine(b.views[P.view].data(), ib.data()) ||
@@ -5909,11 +5940,11 @@ bool replay(bool final) {
         sTapeBytes = sArrayBytes = sTexBytes = sPairedSum = sUnpairedSum = sUntaggedSum = sGuestUs = sReplayUs = 0;
         if (sProbeOut && sProbeWindow.replays) {
             const auto& w = sProbeWindow;
-            log("[judder] %llu in-between frames, %llu tagged draws judged. DEFECTS (off the ideal by more than %.1f px): blend %llu, "
+            log("[judder] %llu in-between frames, %llu tagged draws judged (%llu skipped: slot not the noted matrix). DEFECTS (off the ideal by more than %.1f px): blend %llu, "
                 "camera %llu, other %llu; visible (full view, >= %.0f px2): blend %llu, camera %llu, other %llu. Game-frame switches "
                 "(policy): turn %llu, switch %llu, jump %llu (visible %llu / %llu / %llu). Worst %.1f px (visible %.1f); identity check: "
                 "%llu of %llu tagged matrices and %llu of %llu CPU-built blocks jumped there and back",
-                (unsigned long long)w.replays, (unsigned long long)w.judged, sProbeThresh, (unsigned long long)w.cause[0],
+                (unsigned long long)w.replays, (unsigned long long)w.judged, (unsigned long long)w.cause[3], sProbeThresh, (unsigned long long)w.cause[0],
                 (unsigned long long)w.cause[2], (unsigned long long)w.cause[4], kVisiblePx2, (unsigned long long)w.visCause[0],
                 (unsigned long long)w.visCause[2], (unsigned long long)w.visCause[4], (unsigned long long)w.cause[1],
                 (unsigned long long)w.cause[5], (unsigned long long)w.cause[6], (unsigned long long)w.visCause[1],
