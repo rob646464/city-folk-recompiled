@@ -512,7 +512,8 @@ void migrateAo() {
     const EnhancedLightingSettings d{};
     const bool oldOn = l.ssao;
     const float oldI = l.ssaoIntensity, oldR = l.ssaoRadius;
-    const bool untouched = l.ssao && oldI > 0.399f && oldI < 0.401f;
+    // (intensity at the old default: the player never tuned AO; on was the old default too)
+    const bool untouched = oldI > 0.399f && oldI < 0.401f;
     if (untouched) {
         l.ssao = d.ssao;
         l.ssaoIntensity = d.ssaoIntensity;
@@ -594,9 +595,11 @@ void loadSettings() {
         if (!known)
             for (auto& ext : extensions()) ext.load(section, key, value);
     }
-    if (fileAo && sSettings.enhancedLighting.aoVersion < 2) migrateAo();
+    const bool migrate = fileAo && sSettings.enhancedLighting.aoVersion < 2;
+    if (migrate) migrateAo();
     sSettings.enhancedLighting.aoVersion = 2;
     sanitize();
+    if (migrate) saveSettings();  // once: the file now has ao_version=2
 }
 
 void resetSettingsToDefaults() {
