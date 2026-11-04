@@ -686,6 +686,15 @@ void noteLitTev(u32 data) {
     sLitTev[data] = sStrAmount;
     if (sLitTev.size() > 8192) sLitTev.clear();
 }
+}  // namespace
+// Furniture glow parts (cf_furniture_light.cpp: lp_m / tv_m / ... at their game amount) are lit
+// materials too.
+void markLitMaterial(u32 tevColorData, float amount) {
+    if (!tevColorData) return;
+    sLitTev[tevColorData] = amount;
+    if (sLitTev.size() > 8192) sLitTev.clear();
+}
+namespace {
 void onLoadTevColor(u32 data) {
     if (!sInStage || sPass != 1 || sInPass2) return;
     const auto it = sLitTev.find(data);

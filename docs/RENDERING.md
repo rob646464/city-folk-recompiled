@@ -685,9 +685,57 @@ Budget: up to 48 per frame into enhanced_lighting.cpp's shared ranking (64 light
 screens may cast shadows (they share the night lights' shadow slots, `shadowLightCap`), lamps
 never: the light sits inside the shade, which would hide it from the cube map.
 
-Test aid `CF_FURN_LOG=1`: every model analysed (`[furn] model ...` kind, centre, colour, radius,
-intensity), every furniture actor (`[furn] actor ... item ...`), the lights every 120 frames;
-`=2` also every helper amount change. Compare with the scanner: out/furniture_lights/candidates.json.
+Details: a small flame (fire whose glowing part is under 20 units across: the candle) lights from
+the part's top + 2 units, not its centre (the wax around the light hid it from its own cube map);
+the glowing material gets Aurora 0420's emissive hint while lit (cf_light.cpp `markLitMaterial`,
+as the structures' lit materials), so the moon / AO do not darken a lit lamp shade; models with a
+helper material that no helper drives (e.g. the robo series' small lights, never switched) count
+as on, as the game draws them (konst alpha 255 from the file); every cache keyed by guest
+addresses (analyses, item map, amounts) is cleared at a stage change (the next place reuses the
+heap: a villager's blue clock and the next house's brown drum had the same MDL0 address).
+The lights are submitted at the scene begin from the furniture drawn the frame before, at the
+ScnObjs' current world matrices (computed before the stage draw), so moving furniture has no lag.
+
+**Coverage**: the scanner writes `out/furniture_lights/final_lights.txt`: one line per sheet
+candidate, `LIGHT` (kind, model-space position, colour, radius, intensity, flicker, shadows) or
+`NO LIGHT` (water / dropped), with the runtime's rules and exceptions (86 lights).
+`py tools/research/furniture_lights_check.py <run log>` compares a run's `[furn] model` lines with
+the scanner's numbers per item: every item met in the game runs matched (position within 0.05,
+colour within 0.006, same radius / intensity); the candle's light is 10 units higher on purpose
+(flame tip).
+
+**Checked in the game** (2026-11-04, USA, user-town-clean, 21:00, Enhanced lighting on; sample by
+the user's request, the rest through the table above). Shots in out/furniture_lights/game/:
+- Player's house: the candle off at arrival (helper amount 0), switched on and off through its
+  on byte (actor + 0x409, `CF_POKE`): the game fades its helper 0 -> 1 in ten frames and back, the
+  light follows (`[furn] ... amount`), and the game's own room light comes up with it (a light-kind
+  2 lamp); with | without (`CF_FURN_AB=1`): warm light on the walls, the box, the player.
+- A retro TV, a blue lava lamp and the tall lantern (addition) placed by poking the house's item
+  grid before the warp (u16 item codes, rows of 16, 0xFFF1 empty, the layer on top 0x200 after;
+  with this fixture the main room's floor row of the box is at 0x90E94B80 (box 0x90E94B98, tape deck
+  0x90E94B9E, the row in front + 0x20); codes 0x9000 + item number x 4, + rotation 0-3): lava lamp light on the floor and walls, the TV
+  switched on through its glow helper's target (+4 = 1.0) fades in and lights the room cool blue,
+  the tall lantern's warm flickering light with its shadows.
+- Moving: the candle and its box moved 32 units in x (actor + 0x64 poked): the light moved with
+  them (view x -48 -> -16). Rotating: the TV placed with rotation 1: its light (10.7 units in
+  front of the screen) turned with it.
+- Villager houses 1-4: green lamp (off at 21:00, no light), robo-dresser (always lit), jukebox and
+  hi-fi stereo (screens on), lights placed; Nook's Cranny and the museum lobby: no furniture lights
+  there that day, nothing broken.
+- 120 fps (`target_fps=120`, `CF_INTERP_TEST=2` + `CF_FRAME_DUMP`): the in-between frames carry
+  the lights at their place (in-between vs game frame: only the player differs).
+- Enhanced lighting off: frame dumps of this branch and main in the house differ only in the
+  player (two runs of main differ the same way: the player's idle animation).
+- Not done: switching furniture with the real A button by script (the pointer on the TV + A did
+  not switch it; the switch paths were driven through the game's own state instead), PAL / JP /
+  KR runs (hooks are `all`, d_a_ftrNP by hash), visits online.
+
+Test aids `CF_FURN_LOG=1`: every model analysed (`[furn] model ...` kind, centre, colour, radius,
+intensity), every furniture actor with its position and vtable (`[furn] actor ... item ...`), the
+lights every 120 frames; `=2` also every helper amount change. `CF_FURN_AB=1`: furniture lights
+only in dump frames 4k+1, not 4k+3. Routes: `tools/routes/house_furniture_warp.txt` (house),
+`house_tv_warp.txt`, `furniture_places_warp.txt` (villager houses, Nook's, museum); the on byte /
+helper target / item grid pokes are in the route comments and above.
 
 ### Indoor places (branch enh-light-2)
 

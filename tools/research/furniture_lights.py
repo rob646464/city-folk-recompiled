@@ -32,6 +32,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import nwfmt  # noqa: E402
 
 GAME_GLOW = {"lp_m": "lamp", "mn_m": "screen", "tv_m": "screen", "wa_m": "water", "wb_m": "water", "fr_m": "fire"}
+# The runtime's exceptions table (src/game/cf_furniture_light.cpp kExceptions; user review
+# 2026-11-04), by item number: our numbers only.
+EXCEPTIONS = {
+    0xBE3: dict(drop=True),  # stove (kitchen range): name match only
+    0xBD5: dict(drop=True),  # propane stove: name match only
+    0xBED: dict(drop=True),  # doghouse: additive part is only a shine
+    0xBF2: dict(drop=True),  # beach table: same
+    0xB5D: dict(mat=None, height=0.62, color=[1.0, 0.739, 0.486], radius=246, intensity=1.6, kind="fire", flicker=True),  # tall lantern
+    0xC1A: dict(mat="ev_m", height=None, color=[0.6, 1.0, 0.42], radius=205, intensity=0.7, kind="neon", flicker=False),  # glow clock
+    0xC16: dict(mat="df_1_m", height=None, color=None, radius=205, intensity=0.7, kind="neon", flicker=False),  # kitschy clock
+}
 
 
 def item_records(arc):
@@ -365,6 +376,9 @@ def main():
                 found.append(("", "model / item name '%s' (whole model)" % model_hint, "b", model_hint))
             if rec and rec["light_kind"] and not any(s == "a" for _, _, s, _ in found):
                 found.append(("", "item record light kind %d (no lp_m material)" % rec["light_kind"], "a", "lamp"))
+            ex = EXCEPTIONS.get(rec["number"]) if rec else None
+            if ex and not ex.get("drop") and not found:
+                found.append((ex.get("mat") or "", "exception table: addition (user review)", "x", ex["kind"]))
             if not found:
                 continue
             parts = collect(mdl, tex)
@@ -383,13 +397,30 @@ def main():
                 kind = "water"
             else:
                 kind = next((k for mn, _, s, k in found if s == "a"), found[0][3])
+            if ex and not ex.get("drop"):
+                kind = ex["kind"]
             prop = propose(kind, st, mdl.bbox, rec)
             bbox = (np.minimum(allst["lo"], mdl.bbox[0]), np.maximum(allst["hi"], mdl.bbox[1]))
+            # the light the runtime gives it (src/game/cf_furniture_light.cpp): None = no light
+            final = None
+            if kind != "water" and not (ex and ex.get("drop")):
+                final = dict(prop, model_pos=list(prop["model_pos"]))
+                if kind == "fire" and max(st["hi"][0] - st["lo"][0], st["hi"][2] - st["lo"][2]) < 20:
+                    final["model_pos"][1] = float(st["hi"][1]) + 2.0  # small flame: from its tip
+                if ex:
+                    if ex.get("height") is not None:
+                        final["model_pos"] = [float((bbox[0][0] + bbox[1][0]) / 2), float(bbox[0][1] + ex["height"] * (bbox[1][1] - bbox[0][1])),
+                                              float((bbox[0][2] + bbox[1][2]) / 2)]
+                    if ex.get("color"):
+                        final["color"] = ex["color"]
+                    final.update(radius=ex["radius"], intensity=ex["intensity"], flicker=ex["flicker"], kind=ex["kind"])
+            if ex and found and found[0][2] == "x":
+                prop = final  # an addition: shown with its final light
             tag = "Ftr%d" % n
             render(parts, glow_names, False, prop, bbox=bbox).save(out / "img" / (tag + "_off.png"))
             render(parts, glow_names, True, prop, bbox=bbox).save(out / "img" / (tag + "_on.png"))
             src = "".join(sorted({s for _, _, s, _ in found}))
-            rows.append(dict(n=n, tag=tag, model=mdl.name, rec=rec, found=found, prop=prop, src=src,
+            rows.append(dict(n=n, tag=tag, model=mdl.name, rec=rec, found=found, prop=prop, src=src, final=final,
                              anims=anim_names, size=[round(float(x), 1) for x in (np.array(mdl.bbox[1]) - np.array(mdl.bbox[0]))]))
             print("%s %-28s %-24s %s %s" % (tag, mdl.name, rec["name"] if rec else "?", src, [w for _, w, _, _ in found]))
     write_html(out, rows, n_files)
@@ -398,7 +429,22 @@ def main():
     (out / "candidates.json").write_text(json.dumps([dict(ftr=r["n"], model=r["model"], item=r["rec"]["number"] if r["rec"] else None,
                                                           name=r["rec"]["name"] if r["rec"] else None, **r["prop"]) for r in rows], indent=1),
                                          encoding="utf-8")
-    print("%d candidates of %d models -> %s" % (len(rows), n_files, out / "index.html"))
+    # the final set: one line per item that gets a light in the game (same rules and exceptions
+    # as the runtime), and the items listed on the sheet that do not
+    lines = []
+    for r in rows:
+        rec, f = r["rec"], r["final"]
+        ident = "item %04X %-22s Ftr%-4d %-30s" % (rec["number"] if rec else 0, rec["name"] if rec else "?", r["n"], r["model"])
+        if f is None:
+            why = "water" if r["prop"]["kind"] == "water" else "dropped (exception table)"
+            lines.append("NO LIGHT  %s %s" % (ident, why))
+        else:
+            lines.append("LIGHT     %s %-6s at %6.1f %6.1f %6.1f colour %.2f %.2f %.2f r %3d I %.2f%s%s" % (
+                ident, f["kind"], *f["model_pos"], *f["color"], f["radius"], f["intensity"], " flicker" if f["flicker"] else "",
+                " shadows" if f["kind"] in ("fire", "screen") else ""))
+    (out / "final_lights.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    n_light = sum(1 for r in rows if r["final"])
+    print("%d candidates of %d models -> %s; %d get a light (final_lights.txt)" % (len(rows), n_files, out / "index.html", n_light))
 
 
 def write_html(out, rows, n_files):

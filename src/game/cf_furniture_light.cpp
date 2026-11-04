@@ -21,6 +21,7 @@
 //   d_a_ftrNP fn_15_3100 (daFTR_c's per-frame update, hooked) maps each furniture actor's model
 //   (virtual +0x210: its MDL0) to its item record (+0x3A0) for the exceptions and item names.
 #include "game/cf_furniture_light.h"
+#include "game/cf_light.h"
 
 #include "port/settings.h"
 #include "recomp/enhanced_lighting.h"
@@ -256,6 +257,7 @@ struct Light {
     float radius = 0, intensity = 0;
     std::vector<std::string> gameMats;  // glow-helper materials: their amount switches the light
     bool shadow = false;
+    std::string model;  // the model it was made for (addresses are reused)
 };
 struct ItemInfo {
     u16 number = 0;
@@ -265,6 +267,9 @@ struct ItemInfo {
 std::unordered_map<u32, ItemInfo> sItemOf;         // MDL0 -> item (from the furniture actors)
 std::unordered_map<u64, Light> sLights;            // (MDL0, item number) -> analysis
 std::unordered_map<u64, std::pair<float, u32>> sAmount;  // hash(MDL0, material) -> amount, frame
+std::unordered_map<u32, u32> sDone;                     // actor -> record already mapped
+u32 sR13 = 0;                                           // the game's r13 (current stage byte at r13 - 0x6384)
+int sStage = -1;
 
 u64 key2(u32 a, u32 b) { return (u64(a) << 32) | b; }
 u64 matKey(u32 mdl, const std::string& mat) { return key2(mdl, u32(std::hash<std::string>{}(mat))); }
@@ -488,6 +493,7 @@ void accumulateObject(u32 mdl, u32 obj, const std::vector<u32>& verts, const std
 
 Light analyse(u32 mdl, const std::string& modelName, const ItemInfo* item) {
     Light L;
+    L.model = modelName;
     if (!gptr(mdl) || rd32(mdl) != 0x4D444C30u) return L;
     const u32 ver = rd32(mdl + 8);
     const u32 ns = ver >= 10 ? 14 : 11;
@@ -730,6 +736,16 @@ void noteModel(u32 obj, u32 mdl, const std::string& name) {
 void submit(const float* view, bool viewValid) {
     sPrev.swap(sCur);
     sCur.clear();
+    // A new place reuses the heap: other models (and actors) at the same addresses. Every cache
+    // keyed by guest addresses starts over at a stage change.
+    if (sR13) {
+        const int stage = rd8(sR13 - 0x6384);
+        if (stage != sStage) {
+            if (sLog && sStage >= 0) log("[furn] f%u stage %d -> %d: caches cleared", copyDispCount(), sStage, stage);
+            sStage = stage;
+            sLights.clear(), sItemOf.clear(), sAmount.clear(), sDone.clear();
+        }
+    }
     if (!enabled() || !viewValid || sPrev.empty()) return;
     // Test aid CF_FURN_AB=1: furniture lights only in every other frame pair (dump numbers 4k+1
     // with, 4k+3 without), so neighbouring shots compare them.
@@ -748,6 +764,7 @@ void submit(const float* view, bool viewValid) {
         if (auto it = sItemOf.find(d.mdl); it != sItemOf.end()) item = &it->second;
         const u64 k = key2(d.mdl, item ? item->number : 0u);
         auto it = sLights.find(k);
+        if (it != sLights.end() && it->second.model != d.name) sLights.erase(it), it = sLights.end();
         if (it == sLights.end()) {
             if (sLights.size() > 2048) sLights.clear();
             it = sLights.emplace(k, analyse(d.mdl, d.name, item)).first;
@@ -811,11 +828,17 @@ void noteHelper(u32 h) {
         log("[furn] f%u helper %08X model %08X '%s' amount %.2f -> %.2f", copyDispCount(), h, mdl, name.c_str(), e.first, a);
     e = {std::clamp(a, 0.0f, 1.0f), copyDispCount()};
     if (sAmount.size() > 4096) sAmount.clear();
+    // The lit part glows by itself (no moon shadow / AO on it): Aurora 0420's emissive hint, as
+    // cf_light.cpp gives the structures' lit materials. Not for water (wa_m / wb_m).
+    if (name != "wa_m" && name != "wb_m") {
+        const s32 dl = s32at(mat + 0x3C);
+        if (dl) cflight::markLitMaterial(mat + u32(dl) + 0x20, e.first);
+    }
 }
 
 // d_a_ftrNP fn_15_3100 (daFTR_c per-frame update, r3 = actor): its model -> its item record.
 void noteActor(Ctx& c, u32 actor) {
-    static std::unordered_map<u32, u32> sDone;  // actor -> record already mapped
+    sR13 = c.r[13];
     const u32 rec = rd32(actor + 0x3A0);
     if (!gptr(rec)) return;
     if (auto it = sDone.find(actor); it != sDone.end() && it->second == rec) return;
