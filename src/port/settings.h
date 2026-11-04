@@ -437,9 +437,18 @@ struct MoveInSettings {
     std::string lastFile;    // the save file picked last time (offered again in the window)
 };
 
+// F1 > Enhancements > Unused content (src/game/cf_unused_items.cpp, docs/FEATURES.md "Unused items
+// at Nook's"): every option off by default.
+struct UnusedContentSettings {
+    // The one unused item Nook's sells in place of one of the day's items of its category (item
+    // code, e.g. 0xC0AC Nintendo bench; 0 = none, retail stock).
+    int nookItem = 0;
+};
+
 struct Settings {
     InterfaceSettings ui;  // (not "interface": a macro in the Windows headers)
     MoveInSettings moveIn;
+    UnusedContentSettings unusedContent;
     VideoSettings video;
     RenderingSettings rendering;
     GhostLightSettings ghostLights;

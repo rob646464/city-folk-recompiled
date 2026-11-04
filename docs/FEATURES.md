@@ -161,3 +161,101 @@ was added for them (the recompiler now puts hooked REL functions' original bodie
 Rover's "Move from the DS!" with a Wild World save file instead of a DS: a virtual DS behind the
 DS wireless libraries feeds the game's own receive path and import. F1 > Enhancements > Gameplay
 "Move in from Wild World". Everything (protocol, data, region rules, tests): docs/MOVE_IN.md.
+
+## Unused items at Nook's
+
+F1 > Enhancements > Unused content > "Unused items at Nook's" (off; settings.ini
+`[unused_content] nook_item=<item code>`, 0000 = none; src/game/cf_unused_items.cpp). One of the
+game's unused items is sold in place of one of the day's items of the same kind; the shop, its
+prices, buying and the catalog are the game's own. One item at a time (ticking one unticks the
+other); unticking brings back what was for sale.
+
+### What the game does (USA rev 1; PAL/JP/KR: the same functions, hash matches "identical apart from addresses")
+
+- **Shop stock**: save block (fn_8010DD60, r13-0x2FE0) + 0x630C0 = S. S+0 shop level (0 Nook's
+  Cranny .. 3 Nookington's), S+8: 36 slots of 4 bytes (u16 item code, 0xFFF1 = none; u8 sold flag,
+  fn_80146524; u8 unused). fn_801456B4(S) fills the day's stock; called by the daily update
+  fn_8014406C (when the date at save + 0x631FC is not today; from fn_800939E8 at the session start
+  and fn_80155074) and by d_shop_fgNP fn_119_A8 when the shop's level changed, right before the
+  shop room places the stock on its display points (fn_119_360: fn_8015F994(kind) finds a free
+  point on the room's 16 x 16 tile grid, fn_119_2F0 puts the item there).
+- **Slot groups**: 0-16 clothes, tools, plants and the rest; 17-24 furniture (count per level
+  fn_801460E8: 2/3/5/8); 25-27 wallpaper (fn_80146118: 1/1/2/3); 28-30 flooring (fn_80146128:
+  1/1/2/3); 31-34 stationery (fn_80146138: 1/2/3/4); 35 one more. The day's special furniture
+  (seasonal item, event item: categories 0x29/0x2A/0x2B/0x52/0x53) is written into furniture
+  positions 0 and 1 (levels 0-2) or 2 and 7 (level 3).
+- **Item codes**: 0x9000 + item number x 4 (+ sheets - 1 for stationery). Table in memory: manager
+  fn_800C24CC(), records at [mgr + 0x78] + number x 0x18C (fn_800C2704) = the first 0x18C bytes of
+  each Item/item.arc item.bin record: +4 price, +8 number, +0x10 0x1701, +0x12 ten 0x22-byte UTF-16
+  names (JP, US en/es/fr, EU en/de/it/es/fr, KR), +0x166 kind (1 wallpaper, 2 flooring, 3
+  furniture, 9 stationery), +0x16A source (3/4/5 Nook's pools, 0x21 Saharah, 0x2C unused).
+- **Models**: Item/Ftr/Ftr<n>.brres, n = the furniture's ordinal (numbers 0x9C4.. -> 0..717, then
+  0xE07.. -> 718..): the moving boxes #E08-E0A are Ftr719-721 (`int_itd_mov_box_L/M/S`); walls and
+  floors Item/Wall/Wall<n>, Item/Carpet/Carpet<n> (cranny wall Wall87 .. department floor
+  Carpet88): every item has its model / texture on the disc.
+- **Save writes**: the starters fn_800D256C, fn_800D25D8, fn_800D2648, fn_800D26B0, fn_800D2720,
+  fn_800D2780 (HUD save / "Save and quit"), fn_800D27E0, fn_800D2830 compute what they need
+  (checksums over the block: fn_8010E1CC, fn_80115D0C, fn_80115F00) and start the save worker
+  (fn_800D284C, thread 0x805A3000), which writes the block from memory and leaves its result in
+  r13-0x6930 (0 while it runs, then 1 done or an error).
+
+### The items
+
+Every code checked in item.bin of all four discs (same number, kind, price; only the Korean name
+slot differs on the Korean disc). Names are the game's (US English).
+
+| Code | Item no. | Name in the game | Category | Game's price | Price sold at | Why |
+|---|---|---|---|---|---|---|
+| C0AC | C2B | Nintendo bench | furniture | 120 | 120 | the game's own (non-zero; cheap but inside Nook's range, lowest 100) |
+| C178 | C5E | pikmin | furniture | 1024 | 1024 | the game's own |
+| C17C | C5F | Blue Falcon | furniture | 1024 | 1024 | the game's own |
+| C23C | C8F | brown pot | furniture | 800 | 800 | the game's own |
+| C240 | C90 | white pot | furniture | 1200 | 1200 | the game's own |
+| C244 | C91 | moth orchid | furniture | 2480 | 2480 | the game's own |
+| C820 | E08 | "not used" (JP: moving cardboard L) | furniture (5 moving boxes) | 0 | 500 | 100 per box = the cardboard box's price (#C42) |
+| C824 | E09 | "not used" (JP: moving cardboard M) | furniture (4 moving boxes) | 0 | 400 | same |
+| C828 | E0A | "not used" (JP: moving cardboard S) | furniture (2 moving boxes) | 0 | 200 | same |
+| A0FC | 43F | cranny wall | wallpaper | 0 | 1440 | median of Nook's 54 regular wallpapers (sources 3/4/5, 800-2660: 1435), rounded to 10 like every game price |
+| A100 | 440 | convenient wall | wallpaper | 0 | 1440 | same |
+| A104 | 441 | supermarket wall | wallpaper | 0 | 1440 | same |
+| A108 | 442 | department wall | wallpaper | 0 | 1440 | same |
+| A414 | 505 | cranny floor | flooring | 0 | 1540 | median of Nook's 51 regular floors (720-3200) |
+| A418 | 506 | convenient floor | flooring | 0 | 1540 | same |
+| A41C | 507 | market floor | flooring | 0 | 1540 | same |
+| A420 | 508 | department floor | flooring | 0 | 1540 | same |
+| 9670-9673 | 19C | weathered paper (1-4 sheets) | stationery | 160 | 160 | the game's own = all 53 of Nook's regular papers |
+| 974C-974F | 1D3 | bulletin paper (1-4 sheets) | stationery | 160 | 160 | same |
+
+The moving boxes are "not used" in the English table and a blank placeholder in the other
+European slots; while an item is chosen the port names them "5 / 4 / 2 moving boxes" (also the
+bulletin paper's blank Spanish/French/German/Italian slots), in memory only. Stationery is sold
+with the sheet count of the stationery it replaces.
+
+### What the port does
+
+- **Where**: the chosen item goes into one slot of its category (moving boxes: furniture), the
+  same one every time for a day's stock: the last position that is not a special-furniture
+  position, sold or not, so reloading or saving gives the same slot and an item bought once stays
+  bought (if the slot's own item was bought before ticking, the replacement shows sold out).
+  Stationery keeps the slot's sheet count. The original code is kept to put back.
+- **The save never holds it**: each save starter puts the original back before its checksum
+  (sold flag kept); the replacement returns once the worker's result word is set. So every save
+  file has the day's own stock whether the option is on or off, and turning it off (with the game
+  running or not) leaves nothing behind. A reload with the option on gives the same slot again.
+- **New day**: the hook on fn_801456B4 places the item in the new stock at once (also when the
+  shop is rebuilt for a new level, before its shelves are filled).
+- **Live changes**: ticking / unticking changes the stock at the next frame; inside the shop
+  (d_shop_fgNP linked) it waits until the player leaves, so the shelves and the stock agree.
+  While in an online room the stock stays retail (visitors receive the town data).
+- **Prices**: walls, floors and moving boxes have price 0 in the game's table; while an item is
+  chosen their table records carry the prices above (and the names); with nothing chosen the table
+  is the disc's.
+- Default (nothing ticked): no stock, table or save byte is touched.
+
+### Test aids
+
+- `CF_UNUSED_LOG=1`: every stock generated (all 36 slots, `*` = sold), each replacement / restore
+  with its reason, the save starters and their end, and once per shop visit the shop room's item
+  grid (`(x,z):code`, `<-` = the replacement).
+- The setting through `CF_SETTINGS_AT="<frame>:unused_content.nook_item=C0AC"` or a settings.ini
+  written before the start (`run.ps1 -Settings "[unused_content]|nook_item=C0AC"`).
