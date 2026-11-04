@@ -206,9 +206,9 @@ slot differs on the Korean disc). Names are the game's (US English).
 
 | Code | Item no. | Name in the game | Category | Game's price | Price sold at | Why |
 |---|---|---|---|---|---|---|
-| C0AC | C2B | Nintendo bench | furniture | 120 | 120 | the game's own (non-zero; cheap but inside Nook's range, lowest 100) |
-| C178 | C5E | pikmin | furniture | 1024 | 1024 | the game's own |
-| C17C | C5F | Blue Falcon | furniture | 1024 | 1024 | the game's own |
+| C0AC | C2B | Nintendo bench | furniture | 120 | 2400 | the user's price (the game's is far too cheap), set over the game's |
+| C178 | C5E | pikmin | furniture | 1024 | 2400 | the user's price, set over the game's |
+| C17C | C5F | Blue Falcon | furniture | 1024 | 2400 | the user's price, set over the game's |
 | C23C | C8F | brown pot | furniture | 800 | 800 | the game's own |
 | C240 | C90 | white pot | furniture | 1200 | 1200 | the game's own |
 | C244 | C91 | moth orchid | furniture | 2480 | 2480 | the game's own |
@@ -247,9 +247,9 @@ with the sheet count of the stationery it replaces.
 - **Live changes**: ticking / unticking changes the stock at the next frame; inside the shop
   (d_shop_fgNP linked) it waits until the player leaves, so the shelves and the stock agree.
   While in an online room the stock stays retail (visitors receive the town data).
-- **Prices**: walls, floors and moving boxes have price 0 in the game's table; while an item is
-  chosen their table records carry the prices above (and the names); with nothing chosen the table
-  is the disc's.
+- **Prices**: walls, floors and moving boxes have price 0 in the game's table, and the user set
+  the Nintendo bench, pikmin and Blue Falcon to 2400; while an item is chosen these table records
+  carry the prices above (and the names); with nothing chosen the table is the disc's.
 - Default (nothing ticked): no stock, table or save byte is touched.
 
 ### Test aids

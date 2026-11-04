@@ -42,7 +42,8 @@
 //   leave, so the shelves and the stock agree. While in an online room the stock stays retail
 //   (visitors get the town data).
 // - Prices: walls, floors and moving boxes have price 0 in the game's table; while an item is
-//   chosen their records get the prices below (and the moving boxes and the bulletin paper names
+//   chosen their records get the prices below (also the Nintendo bench, pikmin and Blue Falcon:
+//   2400, the user's price over the game's 120 / 1024 / 1024) (and the moving boxes and the bulletin paper names
 //   in the languages that only have a placeholder); with nothing chosen the table is the disc's.
 #include "game/cf_features.h"
 
@@ -77,14 +78,16 @@ struct Item {
     const char* names[10];  // names for placeholder slots ("not used" / "ブランク...") or null
 };
 
-// Prices (docs/FEATURES.md "Prices"): furniture and stationery keep the game's own table prices;
+// Prices (docs/FEATURES.md "The items"): Nintendo bench, pikmin and Blue Falcon 2400 (the user's
+// price); the other furniture and the stationery keep the game's own table prices;
 // walls 1440 = median of Nook's 54 regular wallpapers (sources 3/4/5: 800..2660, median 1435,
 // rounded to 10 like every game price), floors 1540 = median of Nook's 51 regular floors
 // (720..3200); moving boxes 100 Bells per box (the cardboard box, #C42, is 100) x 5 / 4 / 2.
 const Item kItems[] = {
-    {0xC0AC, "Nintendo bench", Cat::Furniture, 0, "Furniture", "Wild World leftover.", {}},
-    {0xC178, "pikmin", Cat::Furniture, 0, "Furniture", "Wild World leftover.", {}},
-    {0xC17C, "Blue Falcon", Cat::Furniture, 0, "Furniture", "Wild World leftover.", {}},
+    // The user's prices (the game's 120 / 1024 / 1024 are far too cheap for these).
+    {0xC0AC, "Nintendo bench", Cat::Furniture, 2400, "Furniture", "Wild World leftover.", {}},
+    {0xC178, "pikmin", Cat::Furniture, 2400, "Furniture", "Wild World leftover.", {}},
+    {0xC17C, "Blue Falcon", Cat::Furniture, 2400, "Furniture", "Wild World leftover.", {}},
     {0xC23C, "brown pot", Cat::Furniture, 0, "Furniture", "Wild World leftover.", {}},
     {0xC240, "white pot", Cat::Furniture, 0, "Furniture", "Wild World leftover.", {}},
     {0xC244, "moth orchid", Cat::Furniture, 0, "Furniture", "Wild World leftover.", {}},
