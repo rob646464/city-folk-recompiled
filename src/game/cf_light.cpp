@@ -167,6 +167,104 @@ float sLocalUp[3] = {0.0f, 1.0f, 0.0f};
 float sUpAcc[3] = {};
 u32 sUpCount = 0, sUpFrame = ~0u;
 
+// The rolling log itself (branch interp-town): every placed object stands on a cylinder about the
+// world X axis, its Y axis exactly radial (checked with CF_SUN_LOG: house, post office, bulletin
+// board, build sites, birds: up = (p - axis) / |p - axis| to 0.01 degrees, axis at y = z = 0 in the
+// user's town; radius 670.7 on the main level, 614.7 on the lower terrace, more for flying birds).
+// The mean Y axis above changed in a step whenever an object came into or left the view and lagged
+// a frame, so the sun turned in jumps as the player walked up or down the log (shadows jumped). The
+// axis is fitted from the objects (least squares: each object's up line passes through it), the
+// ground radius is the most common object radius, and the local up is the log's normal where the
+// view's forward ray meets the ground (groundAhead): it turns continuously with the camera, like the
+// ground under the player. Test aids CF_SUN_LOG=<n> (fit and both ups every n frames, samples every 60),
+// CF_SUN_UP=mean (the old mean).
+struct LogFit {
+    double s11 = 0, s12 = 0, s22 = 0, b1 = 0, b2 = 0;  // normal equations of (cy, cz)
+    u32 n = 0, rejected = 0;
+    u32 place = ~0u;  // the kind of place the samples came from (town, city)
+    bool valid = false;
+    float cy = 0, cz = 0, r = 0;
+    std::unordered_map<int, u32> radii;  // object radius (whole units) -> samples
+};
+LogFit sFit;
+const u32 sSunLog = [] { const char* v = std::getenv("CF_SUN_LOG"); return v ? u32(std::max(1, std::atoi(v))) : 0u; }();  // every n frames (1 = every frame; samples every 60)
+const bool sUpMean = [] {
+    const char* v = std::getenv("CF_SUN_UP");
+    return v && std::strcmp(v, "mean") == 0;
+}();
+u32 placeKey() { return (relBase(108, 1) != 0 ? 1u : 0u) | (relBase(109, 1) != 0 ? 2u : 0u) | (relBase(107, 1) != 0 ? 4u : 0u); }
+void fitSample(float py, float pz, float uy, float uz) {
+    const u32 key = placeKey();
+    if (key != sFit.place) sFit = LogFit{}, sFit.place = key;
+    const float ul = std::sqrt(uy * uy + uz * uz);
+    if (!(ul > 0.5f) || !std::isfinite(py) || !std::isfinite(pz)) return;
+    uy /= ul, uz /= ul;
+    if (sFit.valid) {  // its up line misses the fitted axis: a prop that is not upright on the log
+        const float off = (py - sFit.cy) * uz - (pz - sFit.cz) * uy;
+        if (std::fabs(off) > 20.0f) {
+            sFit.rejected++;
+            return;
+        }
+    }
+    // (p - c) x u = 0 in YZ: cy uz - cz uy = py uz - pz uy.
+    const double a0 = uz, a1 = -uy, b = double(py) * uz - double(pz) * uy;
+    sFit.s11 += a0 * a0, sFit.s12 += a0 * a1, sFit.s22 += a1 * a1, sFit.b1 += a0 * b, sFit.b2 += a1 * b;
+    sFit.n++;
+    const double det = sFit.s11 * sFit.s22 - sFit.s12 * sFit.s12;
+    if (sFit.n < 16 || !(det > 1e-4 * double(sFit.n) * sFit.n)) return;  // up lines of several directions
+    sFit.cy = float((sFit.b1 * sFit.s22 - sFit.b2 * sFit.s12) / det);
+    sFit.cz = float((sFit.s11 * sFit.b2 - sFit.s12 * sFit.b1) / det);
+    const float r = (py - sFit.cy) * uy + (pz - sFit.cz) * uz;
+    if (r > 100.0f && r < 1e6f) {
+        const int k = int(std::lround(r));
+        const u32 cnt = ++sFit.radii[k];
+        // (a clear majority to switch: the ground must not hop between terraces as views change)
+        if (!sFit.valid || cnt > 2 * sFit.radii[int(sFit.r)] + 8) sFit.r = float(k);
+        sFit.valid = true;
+    }
+}
+// The log's up under the camera's target (world space); false = no fit for this place yet.
+bool logUpAt(const float t[3], float up[3]) {
+    if (!sFit.valid || sFit.place != placeKey() || sUpMean) return false;
+    const float y = t[1] - sFit.cy, z = t[2] - sFit.cz, l = std::sqrt(y * y + z * z);
+    if (!(l > 1.0f)) return false;
+    up[0] = 0.0f, up[1] = y / l, up[2] = z / l;
+    return true;
+}
+u32 sFitWanted = 0x80000000u;  // copyDispCount() of the last wantGroundFit() (Enhanced world)
+}  // namespace
+
+void wantGroundFit() { sFitWanted = copyDispCount(); }
+
+bool logAxis(float& cy, float& cz, float& radius) {
+    if (!sFit.valid || sFit.place != placeKey()) return false;
+    cy = sFit.cy, cz = sFit.cz, radius = sFit.r;
+    return true;
+}
+
+bool groundAhead(const float view[12], float out[3]) {
+    if (!sFit.valid || sFit.place != placeKey()) return false;
+    // Camera position C = -R^T t, forward = -(row 2) (g3d world, the log's frame).
+    float C[3], d[3];
+    for (int k = 0; k < 3; k++) {
+        C[k] = -(view[k] * view[3] + view[4 + k] * view[7] + view[8 + k] * view[11]);
+        d[k] = -view[8 + k];
+    }
+    // |(C + s d)_yz - centre| = R, the first hit from outside.
+    const float oy = C[1] - sFit.cy, oz = C[2] - sFit.cz;
+    const float a = d[1] * d[1] + d[2] * d[2], b = 2.0f * (oy * d[1] + oz * d[2]), cc = oy * oy + oz * oz - sFit.r * sFit.r;
+    const float disc = b * b - 4.0f * a * cc;
+    if (!(a > 1e-6f) || !(disc >= 0.0f) || !(cc > 0.0f)) return false;
+    const float sq = std::sqrt(disc);
+    float s = (-b - sq) / (2.0f * a);
+    if (!(s > 0.0f)) s = (-b + sq) / (2.0f * a);
+    if (!(s > 0.0f) || !std::isfinite(s)) return false;
+    for (int k = 0; k < 3; k++) out[k] = C[k] + s * d[k];
+    return true;
+}
+
+namespace {
+
 SkyLight skyLight(const Clock& k) {
     const auto& s = port::settings().enhancedLighting;
     float hour = float(k.hour) + float(k.min) / 60.0f + float(k.sec) / 3600.0f;
@@ -288,6 +386,15 @@ void submitSky() {
         // mean Y axis of the objects drawn last frame), not world X / Y / Z. The camera data is
         // the true world -> view (ScnObj view = camera x world, checked).
         const float* U = sLocalUp;
+        float fitUp[3], ground[3];
+        // (CameraData's position / target fields are not set by the game: the view matrix is.)
+        const bool fitted = !sUpMean && groundAhead(sView, ground) && logUpAt(ground, fitUp);
+        if (fitted) U = fitUp;
+        if (sSunLog && copyDispCount() % sSunLog == 0)
+            log("[sun] f%u fit %s cy %.1f cz %.1f R %.1f n %u rejected %u | ground %.1f %.1f %.1f | up fit %.4f %.4f %.4f mean %.4f %.4f %.4f cam %.4f %.4f",
+                copyDispCount(), fitted ? "used" : "none", sFit.cy, sFit.cz, sFit.r, sFit.n, sFit.rejected, fitted ? ground[0] : 0.0f,
+                fitted ? ground[1] : 0.0f, fitted ? ground[2] : 0.0f, fitted ? fitUp[0] : 0.0f, fitted ? fitUp[1] : 0.0f,
+                fitted ? fitUp[2] : 0.0f, sLocalUp[0], sLocalUp[1], sLocalUp[2], sView[5], sView[6]);
         const float E[3] = {1.0f, 0.0f, 0.0f};
         const float S[3] = {E[1] * U[2] - E[2] * U[1], E[2] * U[0] - E[0] * U[2], E[0] * U[1] - E[1] * U[0]};
         float w[3];
@@ -304,6 +411,21 @@ void submitSky() {
     l.box[4] = 0.25f;
     l.box[5] = sky.tanSize;
     l.box[6] = 4000.0f;
+    {
+        // Aurora 0441: the shadow cascades' texel grid fixed in the world (world X axis as the
+        // reference, the world origin as the anchor), not moving with the camera (branch
+        // interp-town: shadow edges crawled as the camera moved). CF_SUN_GRID=view: the old layout.
+        static const bool sViewGrid = [] {
+            const char* v = std::getenv("CF_SUN_GRID");
+            return v && std::strcmp(v, "view") == 0;
+        }();
+        if (!sViewGrid) {
+            const float ref[3] = {sView[0], sView[4], sView[8]};  // world X in view space
+            const float origin[3] = {sView[3], sView[7], sView[11]};
+            l.box[7] = ref[0], l.box[8] = ref[1], l.box[9] = ref[2];
+            aurora::gfx::dir_light_anchor(l.pos, ref, origin, l.box + 10);
+        }
+    }
     if (!s.sunShadows) l.box[0] = l.box[1] = l.box[2] = 1.0f;
     submitExtraLights(&l, 1);
     if (logNow())
@@ -1001,9 +1123,23 @@ void submitEffectLights() {
 }  // namespace
 
 bool onModel(Ctx& c, u32 obj) {
-    if (!sModelLog && !enh::masterOn()) return true;
+    const bool fit = sFitWanted + 2 >= copyDispCount();  // Enhanced world's effects centre (groundAhead)
+    if (!sModelLog && !enh::masterOn() && !fit) return true;
     const ModelInfo& mi = modelInfo(obj);
     const u32 task = c.r[4];
+    if ((enh::masterOn() || fit) && sInStage && sPass == 1 && (task & 0xFFFF) == 6 &&
+        (mi.name.compare(0, 4, "obj_") == 0 || mi.name.compare(0, 4, "sdw_") == 0)) {
+        // The rolling log's fit (LogFit): reads only.
+        const float y[3] = {rdf32(obj + 0x3C + 4), rdf32(obj + 0x3C + 20), rdf32(obj + 0x3C + 36)};
+        const float yl = std::sqrt(y[0] * y[0] + y[1] * y[1] + y[2] * y[2]);
+        if (yl > 1e-3f && std::isfinite(yl)) {
+            const float p[3] = {rdf32(obj + 0x3C + 12), rdf32(obj + 0x3C + 28), rdf32(obj + 0x3C + 44)};
+            fitSample(p[1], p[2], y[1] / yl, y[2] / yl);
+            if (sSunLog && copyDispCount() % 60 == 0)
+                log("[sun] f%u sample %s p %.1f %.1f %.1f up %.4f %.4f %.4f", copyDispCount(), mi.name.c_str(), p[0], p[1], p[2], y[0] / yl,
+                    y[1] / yl, y[2] / yl);
+        }
+    }
     if (sModelLog) {
         static std::unordered_map<std::string, u32> sSeen;
         if (sSeen[mi.name]++ < 2)

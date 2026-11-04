@@ -17,4 +17,11 @@ bool onModel(Ctx& c, u32 scnObj);  // false: do not draw (blob shadows hidden)
 // A furniture glow material's TEV colour data with its light amount (cf_furniture_light.cpp):
 // drawn with the emissive hint while lit (Aurora 0420), like the structures' lit materials.
 void markLitMaterial(u32 tevColorData, float amount);
+// The town's "rolling log" (branch interp-town): the point where the view's forward ray meets the
+// log's ground, from a cylinder fitted to the placed objects (g3d world; false until fitted, or
+// indoors). wantGroundFit(): keep fitting this frame even with enhanced lighting off.
+bool groundAhead(const float view[12], float out[3]);
+void wantGroundFit();
+// The fitted log: its axis (parallel to world X through y = cy, z = cz) and the ground radius.
+bool logAxis(float& cy, float& cz, float& radius);
 }  // namespace recomp::cflight

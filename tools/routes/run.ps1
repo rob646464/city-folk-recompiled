@@ -18,7 +18,11 @@ param(
     [string]$Build = "windows-clang",
     # settings.ini lines written into the scratch APPDATA before the start, "[audio]|output=3|..."
     # ('|' separates lines; for settings the game reads at boot, which CF_SETTINGS_AT is too late for).
-    [string]$Settings = ""
+    [string]$Settings = "",
+    # A whole settings.ini copied into the scratch APPDATA instead (e.g. a copy of a user's report).
+    [string]$SettingsFile = "",
+    # Executable in the build folder (e.g. a copy of an older build for before/after runs).
+    [string]$Exe = "cfrecomp.exe"
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -28,10 +32,11 @@ foreach ($d in @("appdata", "card", "shots")) {
     if (Test-Path $p) { Remove-Item -Recurse -Force $p }
     New-Item -ItemType Directory -Force $p | Out-Null
 }
-if ($Settings) {
+if ($Settings -or $SettingsFile) {
     $sd = Join-Path $run "appdata\Animal Crossing City Folk Recompiled"
     New-Item -ItemType Directory -Force $sd | Out-Null
-    ($Settings -split '\|') -join "`n" | Out-File -Encoding ascii (Join-Path $sd "settings.ini")
+    if ($SettingsFile) { Copy-Item $SettingsFile (Join-Path $sd "settings.ini") }
+    else { ($Settings -split '\|') -join "`n" | Out-File -Encoding ascii (Join-Path $sd "settings.ini") }
 }
 if (-not $Nand) { $Nand = Join-Path $run "nand" }
 if (-not $KeepNand -and (Test-Path $Nand) -and -not $PSBoundParameters.ContainsKey("Nand")) { Remove-Item -Recurse -Force $Nand }
@@ -54,7 +59,7 @@ foreach ($kv in ($Env -split ';')) {
 }
 foreach ($k in $vars.Keys) { Set-Item -Path "env:$k" -Value $vars[$k] }
 
-$exe = Join-Path $root "build\$Build\cfrecomp.exe"
+$exe = Join-Path $root "build\$Build\$Exe"
 $argList = @("--disc", $Disc)
 if ($Route) { $argList += @("--input", "@$((Resolve-Path $Route).Path)") }
 elseif ($Script) { $argList += @("--input", $Script) }

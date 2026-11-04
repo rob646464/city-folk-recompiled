@@ -85,6 +85,11 @@ fn_80104520
 # stage draw (both ScnRoot passes + effects of the field/room scene) brackets the 3D scene.
 d_s_stageNP::fn_125_C0 all
 
+# Frame interpolation (src/game/cf_tags.cpp, docs/WII.md "Town interpolation (branch interp-town)"):
+# one field object (tree, bush, flower, fence, ...) of the town's ScnProc draw, r3 = its record
+# (+0x8 kind, +0x14 position): each object its own tag scope, keyed by its place.
+d_fg_drawNP::fn_112_2184 all
+
 # Online letters research (src/recomp/online_mail.cpp CF_MAIL_PROBE): Pelly's post office checks.
 fn_80177D78
 fn_801165F4

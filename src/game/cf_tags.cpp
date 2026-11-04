@@ -106,6 +106,32 @@ HLE(DrawQuad__Q24nw4r2efFRCQ34nw4r4math5MTX34PCQ34nw4r4math5_VEC3b) {
     callOriginal(c, kName);
 }
 
+// Field objects (trees, bushes, flowers, fences, signs...): the town's field draw is ONE ScnProc
+// (d_fg_drawNP) that draws every visible object through d_fg_drawNP fn_112_2184 (r3 = the object's
+// record: +0x8 kind, +0x14..0x1C position; a visibility test, then the kind's draw function), each
+// loading its model matrix from the same scratch MTX34 (0x80763AD0). Under the one ScnProc scope
+// those loads were paired by their order: when a tree came into or left the view while walking,
+// every later object's matrix was blended with ANOTHER object's (trees slid between two trees for
+// an in-between, or "jumped" back at the game frame when the pair was caught as a jump; the user's
+// "trees jumping around" at 120 fps, branch interp-town). Each object is now its own scope keyed by
+// its place in the world and its kind, whatever the draw order. A/B: CF_FG_TAG=0.
+static void fgObjDraw(Ctx& c) {
+    static const char* const kName = "d_fg_drawNP::fn_112_2184";
+    static const bool sOn = [] {
+        const char* v = std::getenv("CF_FG_TAG");
+        return !(v && *v == '0');
+    }();
+    const u32 rec = c.r[3];
+    if (!sOn || !interp::capturing() || rec < 0x80000000u) return callOriginal(c, kName);
+    const u32 x = rd32(rec + 0x14), y = rd32(rec + 0x18), z = rd32(rec + 0x1C), kind = rd32(rec + 0x8);
+    // The place as the identity (not an address: draw order and record reuse do not matter). The
+    // object word stays below guest memory, so freeing guest memory never bumps its generation.
+    const u32 place = ((x * 0x9E3779B1u) ^ (z * 0x85EBCA77u) ^ (y * 0xC2B2AE35u)) & 0x00FFFFFFu;
+    interp::TagScope t(interp::TagCat::Object, 0x01000000u | place, 0xF6F60000u ^ kind, x ^ (z << 16 | z >> 16) ^ y);
+    callOriginal(c, kName);
+}
+static HleReg sFgObjReg("d_fg_drawNP::fn_112_2184", &fgObjDraw);
+
 HLE(G3dProc__Q34nw4r3g3d12ScnMdlSimpleFUlUlPv) { objectScope(c, "G3dProc__Q34nw4r3g3d12ScnMdlSimpleFUlUlPv"); }
 HLE(G3dProc__Q34nw4r3g3d6ScnMdlFUlUlPv) { objectScope(c, "G3dProc__Q34nw4r3g3d6ScnMdlFUlUlPv"); }
 HLE(G3dProc__Q34nw4r3g3d7ScnProcFUlUlPv) { objectScope(c, "G3dProc__Q34nw4r3g3d7ScnProcFUlUlPv"); }

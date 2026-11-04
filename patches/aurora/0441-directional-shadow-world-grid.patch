@@ -1,0 +1,90 @@
+diff --git a/include/aurora/lights.h b/include/aurora/lights.h
+--- a/include/aurora/lights.h
++++ b/include/aurora/lights.h
+@@ -8,6 +8,7 @@
+ // frame per pixel, added to the game's own lit color channels (so the game's materials and TEV
+ // decide how a surface responds), only while the enhanced lighting mode and its "extra lights"
+ // part are on; otherwise they are ignored.
++#include <cmath>
+ #include <cstdint>
+ 
+ namespace aurora::gfx {
+@@ -45,6 +46,43 @@ constexpr uint32_t ExtraLightRoomBox = 1u << 4;
+ // [6] the distance behind the view toward the light within which casters are rendered (world units).
+ // With ExtraLightCastShadows it takes a shadow slot: four orthographic cascades in its atlas cell.
+ constexpr uint32_t ExtraLightDirectional = 1u << 5;
++// 0441 (optional, directional lights): a world anchor for the cascades' texel snapping. Aurora gets
++// only view-space data, so it snapped the cascade centres in a frame that moves and turns with the
++// camera: the shadow map's texel grid slid over the world whenever the camera moved (shadow edges
++// crawled and shimmered, and stepped as the light direction changed). With [7..9] = a world-fixed
++// reference axis in view space (unit, e.g. the world's east axis) and [10..11] = the light-space
++// coordinates of a world-fixed point (dir_light_anchor below, e.g. of the world origin, whose view
++// position is the view matrix' translation), the cascades are laid out on a grid fixed in the
++// world. [7..9] all zero = the old view-space layout.
++// The cascades' light-space axes: `f` the light's travel direction (unit, view space, = -pos),
++// `ref` the reference axis (view space): r = ref without its f part, up = f x r.
++inline bool dir_light_axes(const float f[3], const float ref[3], float r[3], float up[3]) {
++  const float d = f[0] * ref[0] + f[1] * ref[1] + f[2] * ref[2];
++  float x[3] = {ref[0] - f[0] * d, ref[1] - f[1] * d, ref[2] - f[2] * d};
++  const float l = x[0] * x[0] + x[1] * x[1] + x[2] * x[2];
++  if (!(l > 1e-6f)) return false;
++  const float k = 1.f / std::sqrt(l);
++  for (int i = 0; i < 3; ++i) r[i] = x[i] * k;
++  up[0] = f[1] * r[2] - f[2] * r[1], up[1] = f[2] * r[0] - f[0] * r[2], up[2] = f[0] * r[1] - f[1] * r[0];
++  return true;
++}
++// [10..11] for a directional light toward `toLight` (view space) with reference axis `ref`: the
++// world-fixed point `anchor` (view space) in the cascades' light-space axes.
++inline void dir_light_anchor(const float toLight[3], const float ref[3], const float anchor[3], float out[2]) {
++  float f[3] = {-toLight[0], -toLight[1], -toLight[2]};
++  const float fl = f[0] * f[0] + f[1] * f[1] + f[2] * f[2];
++  if (fl > 1e-12f) {
++    const float k = 1.f / std::sqrt(fl);
++    for (float& v : f) v *= k;
++  }
++  float r[3], up[3];
++  if (!dir_light_axes(f, ref, r, up)) {
++    out[0] = out[1] = 0.f;
++    return;
++  }
++  out[0] = r[0] * anchor[0] + r[1] * anchor[1] + r[2] * anchor[2];
++  out[1] = up[0] * anchor[0] + up[1] * anchor[1] + up[2] * anchor[2];
++}
+ 
+ // Call once per game frame (guest thread), before the frame's draws; applies to world-geometry
+ // draws of that frame. Lights beyond MaxExtraLights are dropped (pass the strongest first).
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -3736,7 +3736,19 @@ static void directional_records(const ExtraLight& l, uint32_t s, uint32_t cols,
+   float r[3] = {ref[1] * f[2] - ref[2] * f[1], ref[2] * f[0] - ref[0] * f[2], ref[0] * f[1] - ref[1] * f[0]};
+   const float rl = std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+   for (float& v : r) v /= rl;
+-  const float up[3] = {f[1] * r[2] - f[2] * r[1], f[2] * r[0] - f[0] * r[2], f[0] * r[1] - f[1] * r[0]};
++  float up[3] = {f[1] * r[2] - f[2] * r[1], f[2] * r[0] - f[0] * r[2], f[0] * r[1] - f[1] * r[0]};
++  // 0441: axes from the application's world-fixed reference axis and the snapping grid anchored
++  // at its world point (lights.h dir_light_anchor), so the grid does not move with the camera.
++  float anchor[2] = {0.f, 0.f};
++  {
++    const float wref[3] = {l.box[7], l.box[8], l.box[9]};
++    float wr[3], wu[3];
++    if ((wref[0] != 0.f || wref[1] != 0.f || wref[2] != 0.f) && std::isfinite(l.box[10]) && std::isfinite(l.box[11]) &&
++        dir_light_axes(f, wref, wr, wu)) {
++      for (int a = 0; a < 3; ++a) r[a] = wr[a], up[a] = wu[a];
++      anchor[0] = l.box[10], anchor[1] = l.box[11];
++    }
++  }
+   const auto dot3 = [](const float* a, const float* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+   const float maxDist = std::clamp(l.radius, 100.f, 100000.f);
+   const float back = std::clamp(l.box[6] > 0.f ? l.box[6] : maxDist, 100.f, 100000.f);
+@@ -3769,8 +3781,8 @@ static void directional_records(const ExtraLight& l, uint32_t s, uint32_t cols,
+     R = std::ceil(R * 1.04f / 8.f) * 8.f; // steady size; room for the filter at the edge
+     const float texel = 2.f * R / fS;
+     float cr = dot3(r, ctr), cu = dot3(up, ctr);
+-    cr = std::floor(cr / texel) * texel;
+-    cu = std::floor(cu / texel) * texel;
++    cr = anchor[0] + std::floor((cr - anchor[0]) / texel) * texel;
++    cu = anchor[1] + std::floor((cu - anchor[1]) / texel) * texel;
+     const float cf = dot3(f, ctr);
+     const float dmin = cf - R - back, dmax = cf + R, range = dmax - dmin;
+     const float tx = float((s % cols) * 3 * S + (c % 3) * S), ty = float((s / cols) * 2 * S + (c / 3) * S);

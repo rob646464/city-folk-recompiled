@@ -1,0 +1,59 @@
+diff --git a/include/aurora/world_fx.h b/include/aurora/world_fx.h
+--- a/include/aurora/world_fx.h
++++ b/include/aurora/world_fx.h
+@@ -36,6 +36,12 @@ extern "C" {
+ #define AURORA_SURFACE_WORLD 3  // any other draw of the main 3D view (camera capture only)
+ 
+ #define AURORA_WORLD_FX_XF_VIEW 0x0700u
++// 0440 (optional): the point the effects centre on, as a 3x4 model -> view matrix whose
++// translation is that point in view space (e.g. the camera's look-at target: the player). Loaded
++// like a model matrix, frame interpolation blends it with the objects. While it is all zero the
++// point comes from the scene depth (below), which jumps whenever another object passes under that
++// pixel (falling leaves and ripple cells jumped with the depth under the view's centre).
++#define AURORA_WORLD_FX_XF_FOCUS 0x070Cu
+ #define AURORA_APP_XF_BASE 0x0700u
+ #define AURORA_APP_XF_WORDS 256u
+ 
+diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
+--- a/lib/gfx/world_fx.cpp
++++ b/lib/gfx/world_fx.cpp
+@@ -143,6 +143,7 @@ struct FxUniform {
+   float part[4];    // particle kind, count, world scale, mask valid
+   float wind[4];    // wind x, z, enables (bit 0 reflections, 1 wet, 2 ripples, 3 sparkle, 4 haze), focus y (px)
+   float pass[4];    // per pass: blur direction x, y; final: tilt on, reserved
++  float fv[4];      // 0440: view-space focus point from AURORA_WORLD_FX_XF_FOCUS, w = 1 when given
+ };
+ static_assert(sizeof(FxUniform) % 16 == 0);
+ 
+@@ -151,7 +152,7 @@ struct FxU {
+   size: vec4f, vp: vec4f, proj: vec4f, projz: vec4f, dr: vec4f,
+   view0: vec4f, view1: vec4f, view2: vec4f,
+   focus: vec4f, refl: vec4f, p1: vec4f, hazeCol: vec4f, zenith: vec4f, horizon: vec4f,
+-  moonDir: vec4f, ambient: vec4f, part: vec4f, wind: vec4f, pp: vec4f,
++  moonDir: vec4f, ambient: vec4f, part: vec4f, wind: vec4f, pp: vec4f, fv: vec4f,
+ };
+ @group(0) @binding(0) var<uniform> u: FxU;
+ @group(0) @binding(1) var samp: sampler;
+@@ -237,6 +238,7 @@ fn view_ok() -> bool { return dot(u.view0.xyz, u.view0.xyz) > 0.25; }
+ // The point the effects centre on: the scene under the view's centre column, a little below the
+ // middle (where the player stands in a third-person view); far / empty -> 1500 units along that ray.
+ fn focus_v() -> vec3f {
++  if (u.fv.w > 0.5) { return u.fv.xyz; }
+   let px = vec2f(u.vp.x + u.vp.z * 0.5, u.vp.y + u.vp.w * 0.56);
+   let p = view_pos(px, load_depth(px));
+   let dir = normalize(view_pos(px, mix(u.dr.x, u.dr.y, 0.5)));
+@@ -1127,6 +1129,14 @@ void scene_end() noexcept {
+   std::memcpy(u.view, xv, sizeof(u.view));
+   const bool viewValid = xv[0] * xv[0] + xv[1] * xv[1] + xv[2] * xv[2] > 0.25f;
+   u.focus[3] = viewValid ? 1.f : 0.f;
++  {
++    // 0440: the application's focus point (its matrix' translation), when given and in front.
++    const float* xfo = st.appXf.data() + (AURORA_WORLD_FX_XF_FOCUS - AURORA_APP_XF_BASE);
++    const bool given = xfo[0] != 0.f || xfo[1] != 0.f || xfo[2] != 0.f || xfo[3] != 0.f || xfo[7] != 0.f || xfo[11] != 0.f;
++    if (given && std::isfinite(xfo[3]) && std::isfinite(xfo[7]) && std::isfinite(xfo[11]) && xfo[11] < -1.f) {
++      u.fv[0] = xfo[3], u.fv[1] = xfo[7], u.fv[2] = xfo[11], u.fv[3] = 1.f;
++    }
++  }
+   u.focus[0] = std::clamp(c.clouds, 0.f, 1.f);
+   const uint32_t q = std::min(c.reflectionQuality, 2u);
+   u.refl[0] = std::clamp(c.reflectionStrength, 0.f, 1.5f);

@@ -1,0 +1,15 @@
+# Walk and run past the trees around the town hall plaza in every direction, up and down the
+# rolling log (branch interp-town: tree / sun-shadow / leaf motion at 120 fps, as in the user's
+# report). CF_FIXTURE=user-town-clean. Items timed from the arrival after the warp (the town
+# reloads: d_bgo_drawNP #3).
+include warp.txt
++1600:WARP=town.plaza
+after link d_bgo_drawNP 3
++200:STICKDOWN*200
++230:STICKLEFT*150
++180:STICKUP*200
++230:STICKRIGHT*240
++270:STICKDOWN+B*150
++180:STICKUP+B*150
++180:STICK=0.7/0.7*150
++180:STICK=-0.7/-0.7*150

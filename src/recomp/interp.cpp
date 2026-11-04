@@ -7,6 +7,7 @@
 #include "recomp/pacing.h"
 #include "recomp/sched.h"
 
+#include <aurora/lights.h>
 #include <aurora/present_timing.h>
 #include <dolphin/gx.h>
 #include <dolphin/gx/GXAurora.h>
@@ -5182,6 +5183,22 @@ void replayPair(const Tape* a, const Tape& b, float alpha, void* dump) {
                     f32 o[3] = {d[0], d[1], d[2]};
                     if (mvp) rotate(mvp->vt, d, o);
                     for (int c = 0; c < 3; c++) storeBE(out + 4 * c, o[c]);
+                    // Aurora 0441: the cascades' world reference axis (box [7..9], a direction:
+                    // b's view -> world -> blended view) and the world origin's light-space place
+                    // (box [10..11]) for the blended camera and direction, so the in-between
+                    // frames snap the shadow map to the same world grid.
+                    const f32 rb[3] = {loadBE(lb + 40 + 28), loadBE(lb + 40 + 32), loadBE(lb + 40 + 36)};
+                    if (mvp && (rb[0] != 0.0f || rb[1] != 0.0f || rb[2] != 0.0f)) {
+                        f32 rw[3], rv[3];
+                        rotate(mvp->ib, rb, rw);
+                        rotate(mvp->vt, rw, rv);
+                        const f32 origin[3] = {mvp->vt[3], mvp->vt[7], mvp->vt[11]};
+                        f32 an[2];
+                        aurora::gfx::dir_light_anchor(o, rv, origin, an);
+                        for (int c = 0; c < 3; c++) storeBE(out + 40 + 28 + 4 * c, rv[c]);
+                        storeBE(out + 40 + 40, an[0]);
+                        storeBE(out + 40 + 44, an[1]);
+                    }
                     continue;
                 }
                 if (mvp) {

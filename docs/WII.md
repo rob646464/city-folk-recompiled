@@ -230,6 +230,58 @@ items done as they land.
   widened by the same factor (src/game/cf_pointer.cpp): the Save button at the window edge is
   hovered and clicked where it is drawn at 21:9 and 32:9. docs/CONTROLS.md "Pointer in ultrawide".
 
+### Town interpolation (branch interp-town)
+
+User report (USA town, 4K, 120 Hz, VSync, Enhanced lighting Ultra + Enhanced world): trees very
+jumpy at high frame rates, sun shadows jumping when walking up / down the log, Enhanced world's
+falling leaves jumping even at Original 60. Route `tools/routes/town_trees.txt` (user-town-clean,
+warp to the plaza, walk / run in 8 directions); runs with a copy of the user's settings
+(`run.ps1 -SettingsFile`, `-Exe` for a baseline build).
+
+- **The game turns the camera, not the world**: walking north / south, the view matrix' translation
+  stays (-x, -584.7, -751.7) and its rotation turns about world X (the log's axis, through y = z = 0
+  in the user's town). Every placed object's Y axis is exactly radial from that axis (CF_SUN_LOG
+  samples: 0.01 degrees), radius 670.7 on the main level, 614.7 on the lower terrace.
+- **Trees mis-paired** (the main "jumpy"): the town's field objects (trees, bushes, flowers, fences,
+  signs) are one ScnProc (d_fg_drawNP) that draws each visible object through fn_112_2184 (r3 =
+  its record: +0x8 kind, +0x14 position), every one loading its model matrix from the same scratch
+  MTX34 at 0x80763AD0. Under the one ScnProc scope the loads paired by order, so whenever an object
+  entered or left the view all later ones blended with another object's matrix: present dumps show
+  trees sliding halfway between two trees, or caught as a "jump" and shown at the game frame
+  (judder summary: 840-1997 field-object jumps per 200 in-betweens). Each object is now its own
+  tag scope keyed by its place and kind (hooks.txt `d_fg_drawNP::fn_112_2184 all`, cf_tags.cpp;
+  A/B `CF_FG_TAG=0`): jumps 0, one-present pops on screen 151 -> 0 over 1200 presents.
+- **Sun shadows**: the sun frame's "up" was the mean Y axis of the obj_ / sdw_ models drawn the
+  frame before; it changed in a step whenever an object came into or left the view (steps up to
+  11 degrees between game frames, 30 steps over 0.5 degrees in 2000 frames). Now the log is fitted
+  (axis from the objects' up lines, ground radius = the most common radius; cf_light.cpp LogFit)
+  and "up" is its normal where the view's forward ray meets the ground (`groundAhead`): max step
+  0.03 degrees per frame. The cascades' texel grid is anchored in the world (Aurora 0441: world X
+  as the reference axis, the world origin as the anchor; interpolation turns both with the blended
+  camera); before, all of Aurora's inputs were view space, so the snapping never held. A/B
+  `CF_SUN_UP=mean`, `CF_SUN_GRID=view`; `CF_SUN_LOG=<n>` every n frames.
+- **Leaves** (not interpolation): Aurora's world effects centred their particle volume and scale on
+  the scene depth under one pixel near the view's middle (the player, a tree, the ground behind as
+  they passed under it), and the port's effects frame snapped the world's up to one of six axes,
+  which flipped by 90 degrees as the camera turned about the log. Now the centre is the ground
+  ahead (Aurora 0440 `AURORA_WORLD_FX_XF_FOCUS`, blended like a model matrix) and the frame is the
+  log's own flat frame there (x = axis, y = normal, z = along the ground at -R theta, theta
+  unwrapped), so the leaves stay on the ground as it turns. Leaves tracked frame to frame
+  (GLOWDBG=8 dumps, agent scratch leaves.py): Original 60 p99 jerk 21.7 -> 5.2 px, frames with
+  every leaf jumping together 35 -> 0; 120 fps p99 18.0 -> 1.7 px, 20 -> 0. A/B
+  `CF_WFX_DEPTH_FOCUS=1`, `CF_WFX_AXIS=snap`.
+- Original 60, default settings: frame dumps byte-identical to main (61 of 61); the changes act
+  only while interpolating (tags), with Enhanced lighting (sun) or Enhanced world (frame, centre).
+- **Judder detector**: `CF_JUDDER_SLOTCHECK=1` (perf-2) reported 0 defects while the trees were
+  this wrong; the remaining ~16 "blend defects" per in-between with the check off are texture
+  matrices from ResTev display lists (CallDisplayList +0x44) in PNMTX rows, as perf-2 found. Use
+  present dumps (`CF_PRESENT_DUMP=1` + `CF_FRAME_DUMP`) and an on-screen check as well.
+- The user's video (22 s, 4K/120): in-betweens were evenly spaced in the stretches measured, but a
+  repeated frame came every ~12-35 refreshes: the log shows "variable refresh rate detected" and
+  the governor limiting to 103-110 fps (GPU 8.8-9.1 ms median at 4K Ultra, over the 8.3 ms of
+  120 Hz). On a display that really follows the presents that is smooth; captured at a fixed 120
+  it repeats frames. Not changed here (pacing); worth asking whether G-Sync is on in windowed mode.
+
 ## IOS (Starlet)
 
 The game reaches every device through IPC to IOS (`IOS_Open/Ioctl(v)/Read/Write`). Decision

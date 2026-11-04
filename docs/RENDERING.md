@@ -352,7 +352,7 @@ stream: frames are byte-identical to the game's.
   view x a translation, the "rolling log" curve is a small rotation about x per acre (seen 7 deg).
   The port picks the world's up axis per frame among the six axes (the one the camera's up points
   along and its forward away from, with hysteresis) and sends view x B, B rotating that axis to +y,
-  so the effects' "world" is always y-up. The projection is the main view's own (Hor+ included),
+  so the effects' "world" is always y-up. Since branch interp-town (docs/WII.md "Town interpolation"), with a fitted log the frame is the log's own flat frame at the ground ahead (the snapped axis flipped by 90 degrees as the camera turned about the log) and the centre is that ground point (Aurora 0440). The projection is the main view's own (Hor+ included),
   taken by Aurora from the surface draws (the sky dome has its own depth range). The focus point
   (particle volume, haze start, effect scale: "one metre" = 1/8 of the view height there, about 20
   units in the town at the default zoom, focus ~390 units away) is the scene depth under the view's
@@ -452,7 +452,7 @@ unchanged (the hooks call the original and return). Presets Low / Medium / High 
 - **The camera data is the true world -> view** (checked: ScnObj + 0x6C view matrix = camera x
   ScnObj + 0x3C world matrix). The town is a **"rolling log"**: a cylinder about world X; every
   placed object's world matrix is turned with the surface (the player's house: Y axis
-  (0, 0.53, 0.85)). So "up" for the sun is the local ground normal (`sLocalUp`: mean Y axis of the
+  (0, 0.53, 0.85)). So "up" for the sun is the local ground normal (since interp-town: the fitted log's normal at the ground ahead, docs/WII.md "Town interpolation"; before, `sLocalUp`: mean Y axis of the
   obj_* / sdw_* models drawn the previous frame), east = world X, south = X x up. (A first version
   used world Y: the ground's pre-pass normals came out mirrored against the light and the house
   front lay in its own shadow.)

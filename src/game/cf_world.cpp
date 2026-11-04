@@ -28,6 +28,7 @@
 // deterministic shots), CF_WFX_AB=1 (effects only on odd dump frames: consecutive shots compare
 // with / without), AURORA_WORLD_FX_LOG=1 (Aurora's scene-end line).
 #include "game/cf_calendar.h"
+#include "game/cf_light.h"
 
 #include "port/settings.h"
 #include "recomp/game.h"
@@ -494,6 +495,7 @@ void onScnRoot(u32 root, bool xlu, bool begin) {
             sApplied = false;
         }
         if (sOn) sApplied = true;
+        if (sOn) cflight::wantGroundFit();  // the effects' centre (endWorld)
     }
     if (!sOn) return;
     if (begin && !xlu && ++sPass == 2 && sPendingEnd) endWorld();  // a second pass (3D over the HUD)
@@ -540,20 +542,79 @@ void endWorld() {
     float e1[3] = {0, 0, 0};
     e1[sAxis / 2] = (sAxis & 1) ? -1.0f : 1.0f;
     float e0[3] = {sAxis / 2 == 0 ? 0.0f : 1.0f, sAxis / 2 == 0 ? 1.0f : 0.0f, 0.0f};
-    const float e2[3] = {e0[1] * e1[2] - e0[2] * e1[1], e0[2] * e1[0] - e0[0] * e1[2], e0[0] * e1[1] - e0[1] * e1[0]};
+    float e2[3] = {e0[1] * e1[2] - e0[2] * e1[1], e0[2] * e1[0] - e0[0] * e1[2], e0[0] * e1[1] - e0[1] * e1[0]};
+    float origin[3] = {0.0f, 0.0f, 0.0f};  // g3d world place of the effects frame's origin
+    // The town is a "rolling log" (cf_light.cpp LogFit): walking north / south, the game turns the
+    // camera about the log's axis (world X; the camera's translation stays put). The snapped axis
+    // above then flipped by 90 degrees (+z <-> -y) as the camera turned, which turned the leaves'
+    // volume and their fall with it, and the world frame never matched the ground under the player
+    // anyway (branch interp-town: leaves jumped while walking, at any frame rate). With a fitted
+    // log the effects frame is the log's own flat frame at the ground ahead F: x = the log's axis,
+    // y = its normal at F, z = along the ground, with F at (F.x, 0, -R theta) (theta F's angle about
+    // the axis, unwrapped): the ground near F keeps its effect coordinates as the log turns, so the
+    // leaves, ripples and puddles stay on it; the frame turns continuously. CF_WFX_AXIS=snap: the old
+    // snapped axis.
+    static const bool sSnapAxis = [] {
+        const char* v = std::getenv("CF_WFX_AXIS");
+        return v && std::strcmp(v, "snap") == 0;
+    }();
+    float F[3], cy = 0.0f, cz = 0.0f, rad = 0.0f;
+    bool logFrame = false;
+    if (!sSnapAxis && cflight::groundAhead(view, F) && cflight::logAxis(cy, cz, rad)) {
+        const float ny = F[1] - cy, nz = F[2] - cz, nl = std::sqrt(ny * ny + nz * nz);
+        if (nl > 1.0f) {
+            static float sTheta = 0.0f;
+            static bool sThetaValid = false;
+            float th = std::atan2(ny, nz);
+            if (sThetaValid)  // unwrapped: no step at +-180 degrees
+                while (th - sTheta > 3.14159265f) th -= 6.2831853f;
+            if (sThetaValid)
+                while (th - sTheta < -3.14159265f) th += 6.2831853f;
+            sTheta = th, sThetaValid = true;
+            e0[0] = 1.0f, e0[1] = 0.0f, e0[2] = 0.0f;
+            e1[0] = 0.0f, e1[1] = ny / nl, e1[2] = nz / nl;
+            e2[0] = 0.0f, e2[1] = -e1[2], e2[2] = e1[1];  // e0 x e1
+            const float q[3] = {F[0], 0.0f, -rad * th};
+            for (int k = 0; k < 3; k++) origin[k] = F[k] - (e0[k] * q[0] + e1[k] * q[1] + e2[k] * q[2]);
+            logFrame = true;
+        }
+    }
     float w[12];
     for (int r = 0; r < 3; r++) {
         const float* row = view + r * 4;
         w[r * 4 + 0] = row[0] * e0[0] + row[1] * e0[1] + row[2] * e0[2];
         w[r * 4 + 1] = row[0] * e1[0] + row[1] * e1[1] + row[2] * e1[2];
         w[r * 4 + 2] = row[0] * e2[0] + row[1] * e2[1] + row[2] * e2[2];
-        w[r * 4 + 3] = row[3];
+        w[r * 4 + 3] = row[0] * origin[0] + row[1] * origin[1] + row[2] * origin[2] + row[3];
     }
+    if (sLog && game::guestFrames() % 120 < 2)
+        log("[wfx] f%u effects frame %s up %.3f %.3f %.3f origin %.1f %.1f %.1f", game::guestFrames(), logFrame ? "log" : "snapped", e1[0],
+            e1[1], e1[2], origin[0], origin[1], origin[2]);
     {
         interp::TagScope tag(interp::TagCat::Object, 0xCF57F000u, 0x57F0u, 0);
         const u32 at = interp::mark();
         GXLoadAppXfAurora(AURORA_WORLD_FX_XF_VIEW, w, 12);
         interp::note(at, interp::Kind::PosMtx, 0xCF57F000u, AURORA_WORLD_FX_XF_VIEW, 12);
+    }
+    {
+        // The effects' centre (Aurora 0440): the ground where the view's forward ray meets the
+        // rolling log (cf_light.cpp groundAhead; the CameraData target is not set by the game), as
+        // the model matrix of a world-aligned object there, so the in-between frames blend it with
+        // the world. Before, the centre was the scene depth under one pixel near the view's middle:
+        // the player, a tree or the ground behind them as they passed under it, so the falling
+        // leaves' volume and their scale jumped while walking, at any frame rate (branch
+        // interp-town). No fit (indoors, the city, the first frames): zero = Aurora's depth centre.
+        float fm[12] = {};
+        float g[3];
+        static const bool sDepthCentre = envFlag("CF_WFX_DEPTH_FOCUS");  // A/B: the old centre
+        if (!sDepthCentre && cflight::groundAhead(view, g)) {
+            std::memcpy(fm, w, sizeof fm);
+            for (int r = 0; r < 3; r++) fm[r * 4 + 3] = view[r * 4] * g[0] + view[r * 4 + 1] * g[1] + view[r * 4 + 2] * g[2] + view[r * 4 + 3];
+        }
+        interp::TagScope tag(interp::TagCat::Object, 0xCF57F001u, 0x57F1u, 0);
+        const u32 at = interp::mark();
+        GXLoadAppXfAurora(AURORA_WORLD_FX_XF_FOCUS, fm, 12);
+        interp::note(at, interp::Kind::PosMtx, 0xCF57F001u, AURORA_WORLD_FX_XF_FOCUS, 12);
     }
     const float* vf = view;  // (log below)
     (void)target;
