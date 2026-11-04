@@ -92,6 +92,12 @@ fn_8017FF4C all
 fn_800FA6AC all
 d_a_playerNP::fn_80_2DB28 all
 
+# Mii maker (src/game/cf_mii.cpp, docs/MIIS.md): the game's Mii icon queue (RFLMakeIcon for each
+# pending request), run at the start of the stage draw (d_s_stageNP fn_125_C0). The F1 > Miis
+# preview is drawn by RFLMakeIcon right after the game's own icons. (RFLSetMtx, hooked for the
+# preview's rotation, is a named SDK function: no line needed.)
+fn_8000A57C all
+
 # The structures' window glow (daSTR_c light controller, d_a_strNP fn_99_A40: lerps TEV colour 1
 # of m_light / m_window / m_spotlight / m_museum ... by the light amount at controller +0, ScnMdl
 # at +0x2C): night lights follow the game's own lights-on state.

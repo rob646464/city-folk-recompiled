@@ -77,6 +77,10 @@ add_test(NAME wiimote_hid COMMAND cf_wiimote_hid_test)
 add_executable(cf_distrib_test tools/tests/distrib_test.cpp src/recomp/wc24_crypto.cpp src/recomp/vff.cpp)
 target_include_directories(cf_distrib_test PRIVATE src)
 add_test(NAME distrib COMMAND cf_distrib_test)
+# Mii data / database checks (docs/MIIS.md).
+add_executable(cf_mii_test tools/tests/mii_test.cpp src/game/cf_mii_data.cpp)
+target_include_directories(cf_mii_test PRIVATE src)
+add_test(NAME mii COMMAND cf_mii_test)
 
 # Online room transport (src/recomp/online_net.*, docs/ONLINE.md): host + members over loopback UDP.
 add_executable(cf_online_test tools/tests/online_net_test.cpp src/recomp/online_net.cpp

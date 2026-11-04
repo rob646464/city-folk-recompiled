@@ -4,6 +4,7 @@
 #include "recomp/menu.h"
 #include "game/cf_calendar.h"
 #include "game/cf_features.h"
+#include "game/cf_mii.h"
 #include "recomp/system.h"
 #include "recomp/game.h"
 #include "recomp/gx_bridge.h"
@@ -97,7 +98,7 @@ constexpr Page kPages[] = {
     {"Visuals", "Texture packs"},
     {"Sound", nullptr},           {"Controls", "Ports"},           {"Controls", "Bindings"},
     {"Controls", "Pointer"},      {"Controls", "Analog"},       {"Controls", "DSU"},             {"Enhancements", "General"},     {"Enhancements", "Gameplay"},
-    {"Enhancements", "Silly"},          {"Enhancements", "Unused content"}, {"Enhancements", "Debug"}, {"Game", nullptr}, {"Online", "Play together"}, {"Online", "Nintendo events"},
+    {"Enhancements", "Silly"},          {"Enhancements", "Unused content"}, {"Enhancements", "Debug"}, {"Game", nullptr}, {"Miis", nullptr}, {"Online", "Play together"}, {"Online", "Nintendo events"},
 };
 constexpr int kPageCount = int(sizeof(kPages) / sizeof(kPages[0]));
 constexpr float kXs[] = {0.05f, 0.3f, 0.6f, 0.88f};
@@ -1578,6 +1579,10 @@ void openTreesForCheck() {
 }
 
 bool isOpen() { return sOpen || recomp::movein::windowOpen(); }
+void openPage(const char* tab) {
+    sOpen = true;
+    sOpenTab = tab;
+}
 bool quitRequested() { return sQuit; }
 void requestQuit() { sQuit = true; }
 
@@ -1820,6 +1825,10 @@ void draw() {
             }
             if (tab("Game")) {
                 gameTab();
+                ImGui::EndTabItem();
+            }
+            if (tab("Miis")) {
+                sDirty |= recomp::cf::miiMenu();  // src/game/cf_mii.cpp, docs/MIIS.md
                 ImGui::EndTabItem();
             }
             if (tab("Online")) {
