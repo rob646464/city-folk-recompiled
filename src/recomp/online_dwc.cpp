@@ -28,8 +28,10 @@
 #include "recomp/online_sync.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <functional>
@@ -754,14 +756,50 @@ std::string online::dwcStatusText() {
 }
 
 // ---- network start-up below DWC (game: fn_800E80B0 / fn_800E8198 / fn_800E7FA8) ----
-// Online only in a room; otherwise the original library runs (and finds no network).
+// Online only in a room. Outside one, SOInit and the clean-up run the original library, but the
+// start-up fails at once: the port has no IP stack for the game (no /dev/net/ip/top), and the
+// library's SOStartupEx would retry the link check, the IP device and the DHCP wait every 100 ms
+// (OSSleepTicks) until its timeout, 60 s for SOStartup. The save flow's WiiConnect24 step
+// (fn_8017A82C -> fn_80179A8C / fn_80179C0C -> fn_800EB1B0: SOInit, SOStartup, NHTTPStartup for the
+// game's wus.wapp.wii.com notify/inquiry requests) runs it on every save while the console's
+// WiiConnect24 is on; with a 60 s wait the save would hang. The result is what the library returns
+// when the DHCP wait runs out (a console whose network does not answer), without the wait; the
+// callers treat it as "no network" quietly (the save) or show the connection error (DWC start-up).
+static constexpr s32 kSoETimedOut = -76;  // SO_ETIMEDOUT
+// A/B CF_SO_STARTUP=original: the library's own start-up runs (60 s of retries, then its error).
+static void soStartupOffline(Ctx& c, const char* fn) {
+    static const bool sOriginal = [] {
+        const char* v = std::getenv("CF_SO_STARTUP");
+        return v && std::strcmp(v, "original") == 0;
+    }();
+    if (sOriginal) return callOriginal(c, fn);
+    static std::atomic<bool> sLogged{false};
+    if (!sLogged.exchange(true))
+        std::printf("[so] %s outside an online room (lr %08X): no network (%d), at once\n", fn, c.lr, kSoETimedOut);
+    c.r[3] = u32(kSoETimedOut);
+}
 HLE(SOInit) {
     if (!online::active()) return callOriginal(c, "SOInit");
     c.r[3] = 0;
 }
 HLE(SOStartup) {
-    if (!online::active()) return callOriginal(c, "SOStartup");
+    if (!online::active()) return soStartupOffline(c, "SOStartup");
     c.r[3] = 0;
+}
+HLE(SOStartupEx) {  // (s32 timeout ms)
+    if (!online::active()) return soStartupOffline(c, "SOStartupEx");
+    c.r[3] = 0;
+}
+// NHTTP (the game's own HTTP client) is used only for Nintendo's WiiConnect24 notify/inquiry
+// service (https://wus.wapp.wii.com, gone; fn_800EB1B0 above) and by DWC's server login (answered
+// at the DWC API: online_dwc.cpp). Neither is served here, so it does not start (-1, the library's
+// own failure result): the game skips those requests and keeps them for its next save, as a
+// console that cannot reach the server does. In a room it would otherwise run socket calls against
+// the IP device the port does not have.
+HLE(NHTTPStartup) {
+    static std::atomic<bool> sLogged{false};
+    if (!sLogged.exchange(true)) std::printf("[nhttp] NHTTPStartup (lr %08X): not available, -1\n", c.lr);
+    c.r[3] = u32(-1);
 }
 HLE(SOCleanup) {
     if (!online::active() && !d.inited) return callOriginal(c, "SOCleanup");

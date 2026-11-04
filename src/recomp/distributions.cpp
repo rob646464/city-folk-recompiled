@@ -1148,6 +1148,19 @@ void onGuestFrame(Ctx& c) {
     // Live delivery (USA): the game's own WiiConnect24 job (the one it starts when a town is
     // loaded, fn_801783B4 -> fn_8017B6F4) reads the stored package; Pete brings the letter.
     if (port::install().running != port::GameVersion::USA) return;
+    // A job we started is polled to its end with the game's own poll (fn_80178498: -1 while it
+    // runs or waits for a retry, then its result), as the game polls the jobs it starts: the poll
+    // (fn_8017803C) frees the job thread's stack once it has ended, and until then the game's
+    // job starter (fn_80177F44) refuses every new job. Unpolled, the save's WiiConnect24 step
+    // (fn_80178410, the HUD save / save and quit) could never start, so "Saving..." stayed up for
+    // good (found 2026-11-04 with Nintendo events on, branch save-crash).
+    static bool sJobPending = false;
+    if (sJobPending) {
+        const s32 r = s32(guestCall(c, 0x80178498u));
+        if (r == -1) return;
+        sJobPending = false;
+        recomp::log("[distrib] the game's WiiConnect24 check ended (result %d)", r);
+    }
     const u32 save = rd32(0x8074E960u);  // the town's save data (null before a town is loaded)
     const bool town = save >= 0x80000000u && save < 0x94000000u;
     static u32 sFrame = 0;
@@ -1192,6 +1205,7 @@ void onGuestFrame(Ctx& c) {
         std::lock_guard lk(sM);
         sRegistered = true;
         sState.syncWanted = false;
+        sJobPending = true;
         recomp::log("[distrib] started the game's WiiConnect24 check (live delivery)");
     }
 }

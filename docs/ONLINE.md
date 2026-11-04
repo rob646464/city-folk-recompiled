@@ -97,7 +97,8 @@ outside DWC touches the network. Replacing that API (about 50 functions) means:
 - the game's flow and dialogue stay exactly as on the Wii (Copper, friend roster, errors);
 - GameSpy, NAS, SSL, NAT negotiation and console identities never need emulating, nor do SO
   sockets (SOInit/SOStartup/SOCleanup/SOFinish and the WC24 scheduler pause only answer "ok"
-  while in a room);
+  while in a room; outside one SOStartup fails at once with SO_ETIMEDOUT and NHTTPStartup always
+  fails: the save's WiiConnect24 step uses them, docs/NAND.md "The save's network step");
 - the account functions keep computing real friend codes from our profile ids.
 The IOS-device approach of the earlier research (host sockets under SO, rewrite hostnames to a
 revival service) is not needed any more. Not covered by DWC HLE: Wii Speak (PMIC HLE, section
