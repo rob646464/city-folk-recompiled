@@ -1,0 +1,13 @@
+# The beach and the sea by warp (saved town CF_FIXTURE=user-town; walking version: beach.txt):
+# continue, WARP=town.beach (the lower terrace above the beach, 1300,28,2860 in user-town; the
+# warp is a stage change, so the town reloads around the player: link d_bgo_drawNP #3), down onto
+# the sand, along the shore east and back west.
+include warp.txt
++1600:WARP=town.beach
+after link d_bgo_drawNP 3
++300:STICKDOWN*40
++120:STICKRIGHT*200
++230:STICKRIGHT+B*160
++200:STICKDOWN*30
++60:STICKLEFT+B*320
++360:STICKUP*30

@@ -244,7 +244,9 @@ std::vector<ScriptItem> parseScript(const std::string& script) {
                 {"C", kBtnC}, {"Z", kBtnZ}, {"SHAKE", kBtnShake}, {"NSHAKE", kBtnShakeNunchuk}, {"RECENTER", kBtnRecenter}};
             for (const auto& [name, bit] : kNames)
                 if (b == name) p.buttons |= bit;
-            if (b.rfind("TP=", 0) == 0) {  // TP=<target>: player teleport (cf_region.cpp, CF_TELEPORT syntax, '/' for ',')
+            // TP=<target>: player teleport (cf_region.cpp, CF_TELEPORT syntax, '/' for ',');
+            // WARP=<target>: stage warp (cf_warp.cpp, docs/WARPS.md).
+            if (b.rfind("TP=", 0) == 0 || b.rfind("WARP=", 0) == 0) {
                 p.action = b;
                 p.frames = 1;
                 continue;
