@@ -74,7 +74,8 @@ target_include_directories(cf_wiimote_hid_test PRIVATE src)
 enable_testing()
 add_test(NAME wiimote_hid COMMAND cf_wiimote_hid_test)
 # Nintendo events: WC24 crypto (SHA-1, AES-OFB, RSA) and VFF volumes (docs/DISTRIBUTIONS.md "Testing").
-add_executable(cf_distrib_test tools/tests/distrib_test.cpp src/recomp/wc24_crypto.cpp src/recomp/vff.cpp)
+add_executable(cf_distrib_test tools/tests/distrib_test.cpp src/recomp/wc24_crypto.cpp src/recomp/vff.cpp
+    src/recomp/distrib_record.cpp)
 target_include_directories(cf_distrib_test PRIVATE src)
 add_test(NAME distrib COMMAND cf_distrib_test)
 # Mii data / database checks (docs/MIIS.md).
