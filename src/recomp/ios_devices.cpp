@@ -273,13 +273,16 @@ struct KbdState {
     std::vector<std::array<u8, 16>> queue;
 } sKbd;
 
-void kbdDeliverLocked() {
-    if (!sKbd.pending || sKbd.queue.empty()) return;
+// Takes the next message into the pending request's buffer; the caller answers the returned
+// request after releasing sKbd.m: answering can run the game's callback at once (interrupt
+// delivered on this thread), and that callback queues the next request (ioctl -> sKbd.m).
+std::optional<Reply> kbdDeliverLocked() {
+    if (!sKbd.pending || sKbd.queue.empty()) return std::nullopt;
     if (sKbd.outLen >= 16) std::memcpy(hostp(sKbd.out), sKbd.queue.front().data(), 16);
     sKbd.queue.erase(sKbd.queue.begin());
     const Reply r = *sKbd.pending;
     sKbd.pending.reset();
-    answer(r, IPC_OK);
+    return r;
 }
 
 class UsbKeyboard final : public Handle {
@@ -298,11 +301,15 @@ public:
             logOnce(path + " synchronous ioctl " + std::to_string(cmd) + " (returns an error)");
             return IPC_EINVAL;
         }
-        std::lock_guard lk(sKbd.m);
-        sKbd.pending = r;
-        sKbd.out = out;
-        sKbd.outLen = outLen;
-        kbdDeliverLocked();
+        std::optional<Reply> done;
+        {
+            std::lock_guard lk(sKbd.m);
+            sKbd.pending = r;
+            sKbd.out = out;
+            sKbd.outLen = outLen;
+            done = kbdDeliverLocked();
+        }
+        if (done) answer(*done, IPC_OK);
         return kPending;
     }
 };
@@ -325,13 +332,13 @@ public:
 
 }  // namespace
 
-void usbKeyboardPoll(bool enabled, const u8* scancodes, int count) {
-    std::lock_guard lk(sKbd.m);
+namespace {
+std::optional<Reply> kbdPollLocked(bool enabled, const u8* scancodes, int count) {
     static bool attached = false;
     static std::array<u8, 8> last{};
     if (!sKbd.open) {
         attached = false;
-        return;
+        return std::nullopt;
     }
     auto push = [](u32 type, const std::array<u8, 8>& rep) {
         std::array<u8, 16> m{};
@@ -359,7 +366,17 @@ void usbKeyboardPoll(bool enabled, const u8* scancodes, int count) {
             push(2, rep);
         }
     }
-    kbdDeliverLocked();
+    return kbdDeliverLocked();
+}
+}  // namespace
+
+void usbKeyboardPoll(bool enabled, const u8* scancodes, int count) {
+    std::optional<Reply> done;
+    {
+        std::lock_guard lk(sKbd.m);
+        done = kbdPollLocked(enabled, scancodes, count);
+    }
+    if (done) answer(*done, IPC_OK);  // outside the lock: the game's callback re-arms the request
 }
 
 void stmEvent(u32 event) {

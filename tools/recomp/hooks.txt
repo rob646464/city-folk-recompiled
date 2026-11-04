@@ -102,3 +102,25 @@ fn_8017856C
 fn_80404BBC
 fn_80404DB8
 fn_803F9D44
+
+# Wii Speak (src/recomp/online_voice.cpp, docs/ONLINE.md "Wii Speak voice chat"): the PMIC library's
+# API answered by the host (PC microphone through SDL3 capture, opt-in): Init, Quit, Probe, Open,
+# Close, Start, Stop, Read, the speaker echo-reference resampler/writer and the device control
+# requests (three set-parameter calls, the reset pulse). The game's VCT runs as is.
+fn_80225CE4 all
+fn_80225FE0 all
+fn_802260CC all
+fn_802261A0 all
+fn_802262C8 all
+fn_80226358 all
+fn_8022646C all
+fn_80228FD4 all
+fn_802290BC all
+fn_802291F8 all
+fn_80229B50 all
+fn_80229C28 all
+fn_8022A15C all
+fn_8022A238 all
+# The game's echo suppressor (mic frame vs the voices being played): F1 "Echo suppression" off
+# (headphones) skips it, so both players can talk at once.
+fn_80229D08 all

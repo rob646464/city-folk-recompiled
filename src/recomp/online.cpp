@@ -18,6 +18,8 @@
 #include "recomp/online_mail.h"
 #include "recomp/online_email.h"
 #include "recomp/online_net.h"
+#include "recomp/online_voice.h"
+#include "recomp/usb_kbd_script.h"
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
@@ -631,12 +633,14 @@ void drawOverlay() {
     watchRoom();
     email::tick();
     friends::tick();
+    voice::tick();
     {
         int n = 0;
         const bool* keys = SDL_GetKeyboardState(&n);
         static std::vector<u8> sc;
         sc.assign(size_t(n), 0);
         for (int i = 0; i < n && keys; i++) sc[size_t(i)] = keys[i] ? 1 : 0;
+        kbdscript::apply(sc.data(), n);
         ios::usbKeyboardPoll(port::settings().online.usbKeyboard, sc.data(), n);
     }
     const auto snap = net::session().snapshot();
@@ -936,6 +940,7 @@ bool drawTab() {
     }
     friendsSection();
     dirty |= email::drawSection();
+    dirty |= voice::drawSection();
     dirty |= menu::Checkbox("Room notices over the game", &o.notices);
     dirty |= menu::Checkbox("USB keyboard (PC keyboard for chat)", &o.usbKeyboard);
     ImGui::SetItemTooltip("The game sees your PC keyboard as a Wii USB keyboard: type chat messages while online. "

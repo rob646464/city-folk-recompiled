@@ -418,6 +418,14 @@ struct OnlineSettings {
     int emailImapPort = 993, emailSmtpPort = 465;
     std::string relay;          // optional self-hosted relay "host[:port]" (tools/relay/cf_relay.cpp)
     bool usbKeyboard = false;   // the PC keyboard is the Wii USB keyboard (chat); applies when the game opens it
+    // Wii Speak from the PC microphone (src/recomp/online_voice.cpp). Nothing is recorded or sent while off.
+    bool micOn = false;
+    std::string micDevice;      // SDL recording device name; empty = the system default
+    bool micPushToTalk = true;  // true: send only while the push-to-talk key/button is held; false: open mic
+    int micPttKey = 25;         // SDL scancode (25 = V); 0 = none
+    int micPttPadButton = -1;   // SDL gamepad button on port 1's controller; -1 = none
+    float micGain = 1.0f;       // input gain, 0..4
+    bool micEchoSuppression = true;  // the game's Wii Speak echo suppressor (half duplex); off = full duplex (headphones)
 };
 
 struct Settings {

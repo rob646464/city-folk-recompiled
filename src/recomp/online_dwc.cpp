@@ -576,8 +576,9 @@ void handle(Ctx& c, const net::AppMsg& m) {
         }
         std::memcpy(hostp(rb.buf), p, len);
         if (log()) {
-            static int n = 0;
-            if (n++ < 40 || n % 100 == 0)
+            static int counts[2] = {0, 0};  // reliable, unreliable (VCT voice) counted apart
+            int& n = counts[m.type == M_DATA ? 0 : 1];
+            if (n++ < (m.type == M_DATA ? 40 : 10) || n % (m.type == M_DATA ? 100 : 500) == 0)
                 std::printf("[dwc] %.3f receive #%d from aid %u: %zu bytes (%s): %s\n", wall(), n, src, len,
                             m.type == M_DATA ? "reliable" : "unreliable", hexHead(p, len).c_str());
         }
@@ -1098,7 +1099,17 @@ HLE(DWC_SendReliable) {
 }
 
 HLE(DWC_SendUnreliable) {
-    c.r[3] = sendData(u8(c.r[3]), c.r[4], c.r[5], false) ? 1 : 0;
+    const u8 aid = u8(c.r[3]);
+    const u32 buf = c.r[4], size = c.r[5];
+    const bool ok = sendData(aid, buf, size, false);
+    if (log()) {  // VCT voice packets ("_VCT" ...)
+        static int n = 0, bad = 0;
+        if (!ok) bad++;
+        if (n++ < 10 || n % 500 == 0 || (!ok && bad <= 10))
+            std::printf("[dwc] %.3f SendUnreliable #%d to aid %u: %u bytes: %s%s\n", wall(), n, aid, size, hexHead(hostp(buf), size).c_str(),
+                        ok ? "" : " (refused)");
+    }
+    c.r[3] = ok ? 1 : 0;
 }
 
 HLE(DWC_Ping) {
