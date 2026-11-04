@@ -212,7 +212,7 @@ receive the same item over and over and sell it at Nook's. See "Receive now once
   resident's copy of them in the town data (`rd32(0x8074E960)` = the save's contents, resident
   slots at +0x20 + slot * 0x86C0, town struct at +0x7EC2 of each: u16 id + UTF-16 name; in the
   user-town fixture's save file at 0x7EE2: `F177`, "Frunch"). Key `<id>-<name as UTF-16 hex>`
-  (`distrib_record.cpp townKey`), section `[received_now.<key>]` (`<distribution>=<time>`),
+  (`town_id.cpp keyInSave` + `distrib_record.cpp townKey`; the same key as `town_wc24.txt`, docs/ONLINE.md), section `[received_now.<key>]` (`<distribution>=<time>`),
   readable names in `[towns]`. The data folder (incl. portable mode and F1 > Game > Data folder
   moves) carries the file, so a copied or renamed data folder keeps the record, restarting keeps
   it, and a different town (another save) gets its own record. The town is identified every 60

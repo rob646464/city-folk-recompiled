@@ -22,7 +22,7 @@
 #include "recomp/online.h"
 #include "recomp/runtime.h"
 #include "recomp/system.h"
-#include "recomp/version.h"
+#include "recomp/town_id.h"
 #include "recomp/wc24_crypto.h"
 
 #include <imgui.h>
@@ -435,22 +435,12 @@ std::string encKey(const std::vector<u8>& data) {
     return k;
 }
 
-// The town in the save (USA 0x8074E960, the town data fn_8010DD60 loads: the save file's
-// contents; resident slots at +0x20 + slot * 0x86C0, each with a copy of the town id + name at
-// +0x7EC2; the first resident that exists). "" while no town is loaded.
+// The town in the save (town_id.h: town id + name; shared with online.cpp's town_wc24.txt).
+// "" while no town is loaded.
 std::string townInSave(std::string* readable) {
     // In an online room the town data may be another player's town (a visit): keep the last one.
     if (recomp::online::active()) return "";
-    const u32 save = rd32(VA(0x8074E960));
-    if (save < 0x80000000u || save >= 0x93F00000u) return "";
-    for (u32 slot = 0; slot < 4; slot++) {
-        const u32 pd = save + 0x20 + slot * 0x86C0;
-        const u32 player = rd16(pd + 0x7ED8);
-        if (!player || player == 0xFFFF) continue;
-        const std::string k = record::townKey(static_cast<const u8*>(hostp(pd + 0x7EC2)), readable);
-        if (!k.empty()) return k;
-    }
-    return "";
+    return recomp::town::keyInSave(readable);
 }
 // Called with sM held: the game shows this town (its record becomes the current one).
 void noteTown(const std::string& key, const std::string& readable) {

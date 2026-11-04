@@ -13,6 +13,7 @@
 #include "recomp/menu.h"
 #include "recomp/online_crypto.h"
 #include "recomp/version.h"
+#include "recomp/town_id.h"
 #include "recomp/online_ed25519.h"
 #include "recomp/online_friends.h"
 #include "recomp/online_mail.h"
@@ -630,39 +631,42 @@ static void townWc24Default(Ctx& c) {
     // Only once the town is in play: at the title, on the train and in player creation (scenes
     // 0x44, 0x38, 0x3B, 0x3C) the town data is reloaded from the save afterwards, which undoes it.
     if (const u32 scene = gu::call(c, VA(0x8016266C)) & 0xFF; scene == 0x44 || scene == 0x38 || scene == 0x3B || scene == 0x3C) return;
-    char key[64];
-    {
-        std::string k;
-        const u32 t = town + 0x7EC2;  // town name struct: u16 id, 9 UTF-16 units
-        char b[8];
-        for (u32 i = 0; i < 0x14; i++) {
-            std::snprintf(b, sizeof b, "%02x", rd8(t + i));
-            k += b;
-        }
-        std::snprintf(key, sizeof key, "%s", k.c_str());
-    }
+    if (active()) return;  // in a room the town data may be another player's town (a visit)
+    // The town's identity (town id + name from a resident's copy, town_id.h; the same key as the
+    // Nintendo events record). Files before 2026-11-04 read the struct at town + 0x7EC2, which is
+    // empty (the residents' data starts at +0x20), so every town got one all-zero key and one
+    // town's choice (turned off on the attic telephone) applied to every other town: such entries,
+    // and any other line not in the "<id>-<name hex>" form, are ignored (each town gets its
+    // default once more).
+    std::string readable;
+    const std::string key = recomp::town::keyInSave(&readable);
+    if (key.empty()) return;
     static std::string doneFor;
     if (doneFor == key) return;
     const auto path = port::dataDir() / "town_wc24.txt";
     std::vector<std::string> done;
     {
         std::ifstream in(path);
-        for (std::string l; std::getline(in, l);)
-            if (!l.empty() && l[0] != '#') done.push_back(l.substr(0, l.find(' ')));
+        for (std::string l; std::getline(in, l);) {
+            if (l.empty() || l[0] == '#') continue;
+            const std::string k = l.substr(0, l.find(' '));
+            if (k.find('-') == std::string::npos || k.find_first_not_of('0') == std::string::npos) continue;  // old key
+            done.push_back(k);
+        }
     }
     if (std::find(done.begin(), done.end(), key) == done.end()) {
         const bool was = rd8(town + 0x735E4) != 0;
         u32 r = 0;
         if (!was) r = gu::call(c, VA(0x80177DE0));
-        std::printf("[online] town WiiConnect24 setting: %s (fn_80177DE0 -> %u, now %u)\n",
+        std::printf("[online] town WiiConnect24 setting of %s: %s (fn_80177DE0 -> %u, now %u)\n", readable.c_str(),
                     was ? "already on" : "turned on for this town (first start)", r, rd8(town + 0x735E4));
         if (!was && !rd8(town + 0x735E4)) return;  // the setter refused: try again later
         std::error_code ec;
         std::filesystem::create_directories(path.parent_path(), ec);
         const bool fresh = !std::filesystem::exists(path, ec);
         std::ofstream out(path, std::ios::app);
-        if (fresh) out << "# Towns whose WiiConnect24 setting City Folk Recompiled turned on once (town name struct hex).\n";
-        out << key << "\n";
+        if (fresh) out << "# Towns whose WiiConnect24 setting City Folk Recompiled turned on once (town id-name key, then the name).\n";
+        out << key << " " << readable << "\n";
     }
     doneFor = key;
 }
