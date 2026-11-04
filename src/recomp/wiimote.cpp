@@ -422,7 +422,7 @@ public:
                 }
                 if (ps.last == PortState::MouseDev) {
                     mouseToPointer(m, ps.px, ps.py);
-                    ps.valid = m.inside && std::fabs(ps.px) <= 1.1f && std::fabs(ps.py) <= 1.1f;
+                    ps.valid = m.inside && std::fabs(ps.px) <= ws::pointerRangeX() + 0.1f && std::fabs(ps.py) <= 1.1f;
                 }
             }
             if (rc.pointer & kPtrStick) {
@@ -432,7 +432,7 @@ public:
                     // While the snap holds the pointer on an item, a centred stick does not take it back.
                     if (m > 0.02f || (ps.last == PortState::StickDev && !ps.snapped)) {
                         ps.last = PortState::StickDev;
-                        ps.px = ptrX;
+                        ps.px = ptrX * ws::pointerRangeX();  // the whole window in ultrawide
                         ps.py = -ptrY;
                         ps.valid = true;
                     }
@@ -503,7 +503,10 @@ public:
                 pointerMoved = true;
             }
             if (ps.last != PortState::MouseDev) {
-                ps.px = std::clamp(ps.px, -1.0f, 1.0f);
+                // The whole window while the HUD is anchored to its edges (ultrawide), else the
+                // game's 16:9 frame.
+                const float rx = ws::pointerRangeX();
+                ps.px = std::clamp(ps.px, -rx, rx);
                 ps.py = std::clamp(ps.py, -1.0f, 1.0f);
             }
         }

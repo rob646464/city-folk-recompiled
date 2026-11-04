@@ -12,6 +12,7 @@
 #include "recomp/menu_nav.h"
 
 #include "recomp/game.h"
+#include "recomp/widescreen.h"
 #include "recomp/wiimote.h"
 
 #include <algorithm>
@@ -78,9 +79,14 @@ struct Box {
     float cy() const { return (y0 + y1) * 0.5f; }
 };
 
+// The screen's x extent in KPAD units: the window's in ultrawide with the HUD anchored to its
+// edges (widescreen.h pointerRangeX; anchored HUD panes lie beyond +-1 there).
+float edgeX() { return kEdge * ws::pointerRangeX(); }
+
 // The part of an item on screen; false when nothing of it is.
 bool visibleBox(const Item& it, Box& b) {
-    b = {std::max(it.x0, -kEdge), std::max(it.y0, -kEdge), std::min(it.x1, kEdge), std::min(it.y1, kEdge)};
+    const float ex = edgeX();
+    b = {std::max(it.x0, -ex), std::max(it.y0, -kEdge), std::min(it.x1, ex), std::min(it.y1, kEdge)};
     return b.x1 - b.x0 > 0.004f && b.y1 - b.y0 > 0.004f;
 }
 
@@ -159,7 +165,7 @@ const Item* inDirection(const std::vector<Item>& items, const Box& from, float d
 void target(const Item& it, float& x, float& y) {
     Box b;
     if (!visibleBox(it, b)) b = {it.x0, it.y0, it.x1, it.y1};
-    x = std::clamp(b.cx(), -kEdge, kEdge);
+    x = std::clamp(b.cx(), -edgeX(), edgeX());
     y = std::clamp(b.cy(), -kEdge, kEdge);
 }
 

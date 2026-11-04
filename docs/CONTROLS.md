@@ -137,6 +137,8 @@ reads 0 (that was the boot stand-in's message in the bus).
 Pointer mapping: KPAD position = screen position (checked on the game's own cursor: (0, 0) is the
 centre, (+-1, +-1) the corners, at 4:3 and at native 16:9). The mouse pointer maps the window to
 [-1, 1] (divided by the widescreen factor when the port's widescreen keeps 2D at the game's aspect).
+Wider than 16:9 with "Keep HUD at 16:9" off the pointer spans the whole window: "Pointer in
+ultrawide" below.
 
 ## F1 > Controls
 
@@ -278,6 +280,42 @@ Test aids: script tokens `UP DOWN LEFT RIGHT STICK*` drive it like a pad, `RECEN
 "Recenter pointer"; a scripted `@x/y` counts as a free pointer move. `CF_NAV_LOG=1` (each item set
 as it becomes navigable, every selection change, toolbar enter/leave), `CF_NAV_DUMP=1` (every hit-test
 source with its scale and items, every 30 frames).
+
+## Pointer in ultrawide
+
+With a window wider than the game's 16:9 and F1 > Visuals "Keep HUD at 16:9" off, `cf_hud.cpp`
+moves the clock to the left edge and the Save button (top right) and the camera-adjust icon to the
+right edge by shifting their panes' global matrices, so the game's own hit tests (which read those
+matrices) find them where they are drawn. The pointer then covers the whole window:
+
+- KPAD x runs over +-1 / factor (`ws::pointerRangeX()`: 1.3125 at 21:9, 2 at 32:9; y stays +-1).
+  The mouse maps the window onto that range as before (x / factor) and now stays valid up to the
+  window edge (it went invalid past 1.1, i.e. still inside the side areas); the stick and gyro
+  pointer are clamped to the range instead of +-1, the absolute stick pointer is scaled to it.
+- The game's cursor is drawn at any KPAD x already; what kept it out was the game's "pointer on the
+  screen" test fn_8017FF4C (|x| <= 1.05, |y| <= 1.075 of the KPAD position from fn_800FA6AC): past
+  it the field HUD goes (toolbar down, Save button hidden), as when the Remote points away. It is
+  run with the x it reads divided by the range (hooks on both). The player's own test before
+  walking to the pointer (d_a_playerNP fn_80_2DB28, limits in f1/f2) gets its x limit times the
+  range, so the player also walks toward the pointer in the side areas (the 3D is Hor+ there, and
+  the game's 16:9 unprojection extends linearly). `src/game/cf_pointer.cpp`, hooks.txt `all`.
+- Snap to menu items: items are read from the same pane matrices, so the anchored Save button is an
+  item at its drawn place; the screen edge of the item clipping / targets (menu_nav.cpp `edgeX`)
+  follows the range.
+
+Nothing changes at 16:9 or 4:3, or with "Keep HUD at 16:9" on (range 1: the same tests and
+clamps as before). Test aid `CF_POINTER_LOG=1`: each change of fn_8017FF4C's answer, with the range.
+
+Verified (USA, fixture `user-town`, scripted `@x/y` pointer, screenshots; 1680x720 = 21:9 and
+2560x720 = 32:9 with the HUD anchored, 1280x720 and 21:9 with "Keep HUD at 16:9" on unchanged):
+field toolbar stays up with the pointer at the window edges, Save button hover ("Save") and click
+("Would you like to quit now?" with its choices) at 21:9 (x 1.17) and 32:9 (x 1.855), the snap
+from the toolbar (Recenter, right along the slots) onto the anchored Save button and A, dialogue
+choices, pockets and the letters panel, town map, Nook's Cranny's buy choices with the pointer
+moved through both side areas (nothing reacts there, no misplaced hits). Not tried: the design
+editor, the HOME Menu, a real mouse in the side areas (the mapping is the scripted one's), the
+camera-adjust icon (not seen on screen in these routes), PAL / Japan / Korea (hooks mapped by `all`, not
+run).
 
 ## Test aids
 

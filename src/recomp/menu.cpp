@@ -1341,8 +1341,9 @@ void visualsTab() {
                           "window. Match window: fills the window. The fixed ratios add black bars as needed.");
     sDirty |= recomp::menu::Checkbox("Keep HUD at 16:9###hudKeep", &v.hudKeep4x3);
     ImGui::SetItemTooltip("On: in a window wider than 16:9 the HUD stays where it is on a 16:9 TV, centred.\n"
-                          "Off: the clock moves to the left edge and the memo / camera buttons to the right\n"
-                          "edge (src/game/cf_hud.cpp); the toolbar, dialogue and menus stay centred.");
+                          "Off: the clock moves to the left edge and the Save / camera buttons to the right\n"
+                          "edge, where they are clicked, and the pointer reaches the whole window. The\n"
+                          "toolbar, dialogue and menus stay centred.");
     sDirty |= recomp::menu::SliderFloat("Field of view", &v.fovScale, 0.75f, 1.5f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
     ImGui::SetItemTooltip("Scales the camera's field of view (1 = original). Higher shows more of the room.");
 

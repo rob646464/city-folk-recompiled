@@ -84,3 +84,10 @@ fn_80104520
 # Enhanced lighting (src/game/cf_light.cpp, docs/RENDERING.md "Enhanced lighting (City Folk)"): the
 # stage draw (both ScnRoot passes + effects of the field/room scene) brackets the 3D scene.
 d_s_stageNP::fn_125_C0 all
+
+# Pointer over the whole window in ultrawide (src/game/cf_pointer.cpp, docs/CONTROLS.md "Pointer in
+# ultrawide"): the game's "pointer on the screen" test, the KPAD pointer getter it reads, and the
+# player's "pointer inside the limits" test before walking to it, widened in x by the pointer range.
+fn_8017FF4C all
+fn_800FA6AC all
+d_a_playerNP::fn_80_2DB28 all

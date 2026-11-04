@@ -68,6 +68,11 @@ constexpr int kAnchorBySide = 2;
 // anchoring off.
 int hudAnchor();
 bool inHudScope();   // inside any scope (widescreen active), and not in a RenderToTextureScope
+// The Wii Remote pointer's x range in the game's KPAD units (docs/CONTROLS.md "Pointer in
+// ultrawide"): 1 normally; 1 / factor() while the HUD is anchored to the window edges
+// (widescreen active and "Keep HUD at 16:9" off), so the pointer reaches the whole window and the
+// HUD elements drawn at its edges. Live (follows the window and the setting).
+float pointerRangeX();
 // True while the frame loop sets up view 0, the main view (fn_800115F8(0)). A main view smaller
 // than the screen (the game's unused bordered view, patch 50) follows the centered frame there;
 // the same rectangle set again later for that view's passes (ghost layer, effects) follows too
