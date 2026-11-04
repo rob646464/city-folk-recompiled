@@ -461,6 +461,11 @@ struct Governor {
     };
     std::deque<Interval> intervals;  // the last second's start intervals (no hitches)
     u32 hitches = 0, slowdowns = 0;
+    // The last slowdown came while the frames cost far less than the period: the display chain
+    // (compositor, swap chain) delivers no more presents, not the PC (see governFrame).
+    bool presentLimited = false;
+    Clock::time_point releasedAt{};  // the last floor release by the cost rule, and the period then
+    double releasedLimit = 0;
 };
 Governor sGov;
 
@@ -511,13 +516,27 @@ void governFrame(Clock::time_point start, double expected, double target, bool s
         for (const auto& i : g.intervals)
             if (start - i.t <= std::chrono::milliseconds(500)) sum += i.iv, k++;
         const double achieved = k ? sum / k : iv;
-        const double lim = std::max({achieved * 1.03, expected * 1.05, g.limit});
+        double lim = std::max({achieved * 1.03, expected * 1.05, g.limit});
         log("[pacing] frame rate not sustained (%zu of %zu frames late in 1 s, %zu by >25%%; %.1f ms achieved vs %.1f ms): "
             "limited to %.1f fps",
             late, n, misses, achieved * 1000.0, expected * 1000.0, 1.0 / lim);
+        // A display-chain cap (a windowed swap chain on a slower display: 144 asked, ~120 delivered
+        // while a frame costs 2-3 ms): the cost rule below released the floor because the frames
+        // were cheap, the rate climbed back into the cap and failed again within half a second,
+        // every ~10 s (124 -> 116 -> 124 fps, each cycle a burst of uneven intervals). Detected as a
+        // slowdown within 3 s of such a release (the cost measured at the slowdown includes the
+        // waits the capped swap chain adds, so it does not show this); the rate that held before
+        // the release is then held for 60 s and not released by cost. CF_PACING_CAP_HOLD=0: off (A/B).
+        static const bool sCapHold = [] { const char* v = std::getenv("CF_PACING_CAP_HOLD"); return !(v && *v == '0'); }();
+        g.presentLimited = sCapHold && g.releasedLimit > 0 && start - g.releasedAt < std::chrono::seconds(3);
+        if (g.presentLimited) {
+            lim = std::max(lim, g.releasedLimit);
+            log("[pacing] slowed again right after the frames cost little: the display chain limits the rate, %.1f fps "
+                "held for 60 s", 1.0 / lim);
+        }
         g.limit = lim;
         g.floor = lim * 0.97;
-        g.floorUntil = start + std::chrono::seconds(10);
+        g.floorUntil = start + std::chrono::seconds(g.presentLimited ? 60 : 10);
         g.holdUntil = start + std::chrono::milliseconds(1000);
         g.judgeFrom = start + std::chrono::milliseconds(1000);
         g.intervals.clear();  // judged afresh at the new period
@@ -532,10 +551,12 @@ void governFrame(Clock::time_point start, double expected, double target, bool s
     // clocked down while slowed shows a higher cost here, which keeps the floor (as before).
     // CF_PACING_FLOOR_RELEASE=0: the old rule (A/B).
     static const bool sRelease = [] { const char* v = std::getenv("CF_PACING_FLOOR_RELEASE"); return !(v && *v == '0'); }();
-    if (sRelease && g.limit > 0 && start >= g.holdUntil && start < g.floorUntil && sCostNoHold.size() >= 15) {
+    if (sRelease && !g.presentLimited && g.limit > 0 && start >= g.holdUntil && start < g.floorUntil && sCostNoHold.size() >= 15) {
         std::vector<double> v(sCostNoHold.begin(), sCostNoHold.end());
         std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
         if (v[v.size() / 2] < 0.75 * target) {
+            g.releasedAt = start;
+            g.releasedLimit = g.limit;
             g.floorUntil = start;
             log("[pacing] frames cost %.1f ms again (target %.1f ms): the rate climbs back from %.1f fps", v[v.size() / 2] * 1e3,
                 target * 1e3, 1.0 / g.limit);
