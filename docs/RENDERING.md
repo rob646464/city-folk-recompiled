@@ -70,7 +70,8 @@ reference runs" below): the beach by the river mouth (sea colour and pattern, th
 shallow-water band over the sand, surf, the sand steps, the terrace's striped side, the bridge)
 and the city plaza / west street (fountain, plaza stones, GracieGrace, lamps, Kicks at the
 barricaded door, Shampoodle) look the same in both; only the camera position differs a little
-(both runs walk by timed stick input). The other places are unverified. Positions are the game's
+(both runs walk by timed stick input). Since routes-4 the river, the museum rooms, the town hall
+and every shop interior (Nook's, Able Sisters, the city shops) are compared too: all the same. Positions are the game's
 own (actor +0x64), the town is about x 600-3000, z 500-3000 (south = +z), upper terrace y 84,
 lower 28.
 
@@ -126,10 +127,45 @@ pointer at 0x805D26E4 (USA rev 1, found in a `CF_MEM_DUMP`; heap and REL address
 written once while the player still stands at the house door (1200, 84, 640). The town is the
 clean post-save fixture `user-town-clean` (tools/routes/save_quit.txt, make_fixtures.ps1),
 copied into Dolphin's NAND before every run, so a killed run never leaves Mr. Resetti waiting at
-the next start; the in-game save before quitting is in the scripts but the HUD Save button was not
-hit through Dolphin's IR mapping yet. Seen on the way: on Dolphin's console the first city trip
-gave Rover's WiiConnect24 talk on the bus instead of ours (Kapp'n's first-trip talk): a save /
-console-state difference (the Dolphin NAND's WiiConnect24 setting), not rendering.
+the next start. The in-game save before quitting stays out (routes-4): the HUD Save button needs
+the Wii pointer on it, and Dolphin's IR position for a given DSU stick value is not the KPAD
+position (calibrating it means screenshots of the cursor per value); the NAND restore already
+gives every run the clean town, so it was not worth it.
+
+**Every place (routes-4)**: `-Gecko "Places warps"` (tools/dolphin/make_warps.py; `--nocall`
+builds the same code without the call, for testing the code alone) does in Dolphin what
+`tools/routes/dolphin_places_warp.txt` does in the port: from the house-door arrival, every 900
+frames the game's own stage change fn_80163064(stage manager 0x805FB218, stage, &pos, type,
+angle, 2, 2) with the arguments the port's warps pass (copied from its `CF_WARP_LOG=1` "go to
+stage" lines): river below the waterfall, museum lobby, paintings room, aquarium, The Roost,
+observatory, town hall, Nook's Cranny, Able Sisters, GracieGrace, Shampoodle, Katrina's, Crazy
+Redd's (inside), the HRA office, Lyle's auction house, Club LOL's ticket hall. A C0 (execute)
+code: it saves r3-r31, CR and LR in its own stack frame (the first version saved too little and
+wrote above its frame; Dolphin's code handler then read through a broken pointer every frame and
+no frame was drawn), keeps its counter and table inside the code block (bl / mflr), and waits for
+the player at the door before counting. All 16 places side by side with the port
+(screenshots in the agent scratch area, 2026-11-03): **the same in every room**: geometry,
+materials, lighting and the dark room edges, characters (Blathers, Brewster, Celeste, Pelly,
+Tom Nook, Mabel, Labelle, Harriet, Katrina, Redd, Lyle, Lloid), dialogue boxes and text. Only
+timing differs: the wallet (Bells) HUD fades in a moment after the arrival and Dolphin, below
+full speed, was captured earlier; one Dolphin frame shows the camera-adjust icon (pointer
+position). Nothing to fix.
+
+**The first city trip: Rover instead of Kapp'n (routes-4).** Not a rendering or save difference
+but what the console reports about WiiConnect24. On the first ride Rover sits on the bus and
+explains WiiConnect24 (letters to friends, Message Board, villagers moving between towns) when the
+game's boot check (`fn_80178640`, docs/DISTRIBUTIONS.md) found WiiConnect24 available (state 1 at
+r13-0x2D74); otherwise Kapp'n gives his first-trip talk. The town's own WiiConnect24 setting
+(save +0x735E4) does not decide it: it is 0 in the fixture and Dolphin still showed Rover.
+Dolphin's generated SYSCONF has `NET.WCFG` = 1 (WiiConnect24 on, as a Wii set up for it); main's
+port writes `NET.WCFG` = 0 unless F1 > Online > Nintendo events is on. Verified both ways in the
+port: with `CF_DISTRIB=manual` (WCFG 1, the check's state 1) the same fixture's first ride gives
+Rover's WiiConnect24 talk, as in Dolphin; with the default, Kapp'n. A real Wii with WiiConnect24
+on behaves like Dolphin; one with it off (or never set up) like main's port. The online-1 branch
+(not on main yet) reports WiiConnect24 on by default (`nwc24_dl.cpp consoleWc24()`, opt-out
+`CF_WC24_CONSOLE=0`; letters to other towns need it), so after that merge the port's first ride
+will be Rover's, like Dolphin's; routes that time Kapp'n's talk (city_bus.txt: A until the city)
+work either way.
 
 ### Numbers (2026-11-02)
 

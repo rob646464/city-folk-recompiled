@@ -7,7 +7,8 @@
 # - The town: the clean post-save fixture (make_fixtures.ps1 "user-town-clean": no Mr. Resetti, no
 #   unsaved session), copied into the user folder's NAND before every run, so a killed run never
 #   leaves a Resetti state behind.
-# - -Gecko enables one code of RUUE01.ini (teleports: "Beach teleport", "Bus stop teleport").
+# - -Gecko enables one code of RUUE01.ini: "Beach teleport", "Bus stop teleport" (player moved),
+#   "Places warps" (make_warps.py: the port's warps in turn, as tools/routes/dolphin_places_warp.txt).
 # - Only Dolphin's own PID and the DSU server are stopped. Muted, window at x 6000.
 param(
     [Parameter(Mandatory)] [string]$User,

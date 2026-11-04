@@ -1,0 +1,24 @@
+# The places of the Dolphin comparison (docs/RENDERING.md "Dolphin reference runs"), one WARP
+# every 900 frames from the town arrival, the same order and spacing as the Dolphin Gecko warp
+# table (tools/dolphin/make_warps.py): river, museum lobby / paintings / fish / The Roost /
+# observatory, town hall, Nook's, Able Sisters, GracieGrace, Shampoodle, Katrina's, Crazy Redd's,
+# the HRA office, Lyle's auction house, Club LOL. Run with CF_WARP_LOG=1 to get each warp's
+# fn_80163064 arguments (what make_warps.py writes into the Gecko code). Saved town
+# CF_FIXTURE=user-town-clean.
+include warp.txt
++600:WARP=town@1880/28/2000
++900:WARP=museum
++900:WARP=museum.art
++900:WARP=museum.fish
++900:WARP=museum.cafe
++900:WARP=museum.observatory
++900:WARP=town_hall
++900:WARP=nook
++900:WARP=able
++900:WARP=city.gracie
++900:WARP=city.shampoodle
++900:WARP=city.katrina
++900:WARP=city.redd
++900:WARP=city.hra
++900:WARP=city.auction
++900:WARP=city.theatre
