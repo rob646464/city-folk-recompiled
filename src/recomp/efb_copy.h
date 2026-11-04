@@ -20,4 +20,8 @@ void requestNamedDump(const std::string& path, int shrink, std::function<void(co
 void* namedDumpTarget(const char* name);
 bool namedDumpWritten(const void* target);
 void applyWritebacks();  // host thread, while the guest is held
+// Port features that read their own EFB copies back (e.g. the Mii maker preview): `fn` is called
+// after every writeback into guest memory (the thread applying writebacks; guest held), with the
+// host pointer and size of the range written. Register once.
+void addWritebackListener(void (*fn)(const void* dest, u32 size));
 }  // namespace recomp::efbcopy

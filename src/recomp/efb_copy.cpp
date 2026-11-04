@@ -132,8 +132,11 @@ void writePpmPath(const u8* gx, u32 w, u32 h, const char* path) {
     }
 }
 
+std::vector<void (*)(const void*, u32)> sListeners;
+
 void onWriteback(const void* dest, u32 size, u32, u32 w, u32 h, void*) {
     interp::efbWrittenBack(dest, size);
+    for (auto* fn : sListeners) fn(dest, size);
     if (!sDump.buffers && !sDump.active) return;
     for (auto& n : sNamed)
         if (!n.written && dest == n.buf.data()) {
@@ -287,5 +290,7 @@ bool namedDumpWritten(const void* target) {
 }
 
 void applyWritebacks() { aurora_efb_ram_apply(); }
+
+void addWritebackListener(void (*fn)(const void* dest, u32 size)) { sListeners.push_back(fn); }
 
 }  // namespace recomp::efbcopy

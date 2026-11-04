@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -614,6 +615,46 @@ fs::path hostPath(const std::string& nand) {
         p /= fs::path(std::u8string(e.begin(), e.end()));
     }
     return p;
+}
+
+bool writeHostFile(const std::string& nandPath, const std::vector<u8>& data, std::string& error) {
+    nandRoot();
+    std::lock_guard lk(sFsM);
+    if (isOpen(nandPath)) {
+        error = "the game has the file open";
+        return false;
+    }
+    const fs::path p = hostPath(nandPath);
+    std::error_code ec;
+    fs::create_directories(p.parent_path(), ec);
+    fs::path tmp = p;
+    tmp += ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
+        out.flush();
+        if (!out) {
+            error = "could not write " + tmp.string();
+            fs::remove(tmp, ec);
+            return false;
+        }
+    }
+    fs::rename(tmp, p, ec);
+    if (ec) {
+        error = "could not replace " + p.string() + ": " + ec.message();
+        fs::remove(tmp, ec);
+        return false;
+    }
+    return true;
+}
+
+bool readHostFile(const std::string& nandPath, std::vector<u8>& data) {
+    nandRoot();
+    std::lock_guard lk(sFsM);
+    std::ifstream in(hostPath(nandPath), std::ios::binary);
+    if (!in) return false;
+    data.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    return true;
 }
 
 void setAttr(const std::string& nandPath, const Attr& a) {

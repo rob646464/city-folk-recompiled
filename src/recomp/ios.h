@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace recomp::ios {
 
@@ -78,6 +79,11 @@ std::unique_ptr<Handle> openDevice(const std::string& path, u32 mode, s32& err, 
 const std::filesystem::path& nandRoot();
 // Host path of a NAND path ("/shared2/sys/SYSCONF"); names the host cannot store are escaped.
 std::filesystem::path hostPath(const std::string& nandPath);
+// Host-side access to a NAND file (port features, e.g. the Mii maker), under the file system's
+// lock. The write goes to a temporary file first and replaces the old one only when complete;
+// it is refused while the game has the file open (error says why).
+bool writeHostFile(const std::string& nandPath, const std::vector<u8>& data, std::string& error);
+bool readHostFile(const std::string& nandPath, std::vector<u8>& data);
 // File owner/permissions as IOS records them (kept in <nand>/~attributes.txt).
 struct Attr {
     u32 owner = 0;
