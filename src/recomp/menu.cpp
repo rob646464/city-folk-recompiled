@@ -7,6 +7,7 @@
 #include "recomp/system.h"
 #include "recomp/game.h"
 #include "recomp/gx_bridge.h"
+#include "game/cf_move_in.h"
 #include "game/cf_region.h"
 
 #include "port/install.h"
@@ -1508,6 +1509,8 @@ void gameplayTab() {
     sDirty |= recomp::calendar::drawWeatherMenu();     // src/game/cf_weather.cpp
     // Content from other regions (src/game/cf_region.cpp).
     sDirty |= recomp::region::menuSection();
+    // Move in from Wild World (src/game/cf_move_in.cpp, docs/MOVE_IN.md).
+    sDirty |= recomp::movein::menuSection();
 }
 
 // Debug: the game's debug entries (src/game).
@@ -1574,7 +1577,7 @@ void openTreesForCheck() {
     if (idcheck::active() || click::due()) ImGui::SetNextItemOpen(true, ImGuiCond_Always);
 }
 
-bool isOpen() { return sOpen; }
+bool isOpen() { return sOpen || recomp::movein::windowOpen(); }
 bool quitRequested() { return sQuit; }
 void requestQuit() { sQuit = true; }
 
@@ -1745,6 +1748,7 @@ void draw() {
     }
     recomp::game::drawOverlay();
     recomp::online::drawOverlay();
+    recomp::movein::drawWindow();  // src/game/cf_move_in.cpp (Rover asks for the Moving Van DS)
     // CF_FRAME_TAG=1 (testing, tools/interp/screen_run.py): the replay shown in this present as a
     // bar code in the top-left corner: a white and a black reference cell, then 32 bits (present
     // number low 16, tape seq low 8, alpha x 255), most significant first, 16 px cells.

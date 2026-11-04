@@ -293,7 +293,9 @@ Season limits [spec; check what the weather code accepts]:
   36 blocks; save in bed or from the save icon; autosave when going out/coming back. Miis:
   `/shared2/menu/FaceLib/RFL_DB.dat` (Mii masks at Shampoodle, `d_menu_mii`), so the NAND HLE
   needs a Mii database (empty or user-imported).
-- **DS transfer** (`files/DSApp/Exch_Sign.srl` = Wild World "Move from DS!", `Vaga_Sign.srl` =
+- **DS transfer** (done: docs/MOVE_IN.md; the code shows `Vaga_Sign.srl` = Wild World "Move from
+  DS!" (the Moving Van, ggid 0x400806) and `Exch_Sign.srl` = DS Suitcase, the other way round from
+  this first guess: `files/DSApp/Exch_Sign.srl` = Wild World "Move from DS!", `Vaga_Sign.srl` =
   DS Suitcase; DS Download Play binaries, header `NTRJ01`, signed) [disc; manual p. 4]: moves face,
   name and part of the catalog from Wild World (not pockets/Bells/items); the DS Suitcase carries
   a player to a friend's Wii via a DS. Uses Wii DS-wireless (`/dev/net/wd/command`) [disc]. Port:
