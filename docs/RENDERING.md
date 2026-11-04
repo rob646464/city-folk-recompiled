@@ -590,6 +590,68 @@ come from the game's own particles (cf_light.cpp `noteEffectDraw`, hook on
   fitted in the user-town fixture; r ~ 700). A structure in front of its door: actor z of its centre
   + ~130.
 
+### Furniture lights (branch furniture-lights)
+
+F1 > Visuals > Enhanced lighting > "Furniture lights" (on with the master switch; intensity slider,
+"Furniture light shadows"; `[enhanced_lighting] furniture_lights / furniture_light_intensity /
+furniture_light_shadows`). Lamps, TVs, computers, stereos, fireplaces, candles, lava lamps, festive
+trees, the Nintendo items with glowing parts and so on light the room around them, in the
+player's house, villagers' houses and shops (and on visits: the same actors). Code:
+`src/game/cf_furniture_light.cpp`, two calls from cf_light.cpp (`onModel` notes furniture models,
+the scene begin submits). Off (master or the option): nothing submitted, the two hooks below only
+read guest memory after calling the original.
+
+**What the game has** (USA rev 1; hooks `all`):
+- Item table (Item/item.arc item.bin, 0x18C-byte records; docs/FEATURES.md "Unused items at
+  Nook's"): kind 3 = furniture, +0x171 its action type (01 plain, 02 always animated, 0A candles /
+  sprinklers, 0C computer, 1F/20 stereos, 21/22 TVs, ...), **+0x187 >> 6 & 3 the light kind**
+  (1: modern lamp, lovely lamp, paper lantern, desk light; 2: the other 24 lamps and candles), read
+  by daFTR_c (d_a_ftrNP fn_15_6B8; kind 2 lamps also drive the room-light helper at 0x806244A0).
+  Furniture model n = Item/Ftr/Ftr<n>.brres, n = the furniture's ordinal (item number - 0x9C4,
+  from 0xE07: - 0xE07 + 718).
+- **daFTR_c** (d_a_ftrNP): +0x3A0 the item record, vtable at +0x60 (+0x1B0 is-on, +0x210 the
+  model's MDL0), +0x380 the lamp's glow helper. **Glow helpers** (0x18 bytes: +0 amount 0..1,
+  +0x14 the ResMatData) are made for materials found by exact name: `lp_m` (fn_15_7BB0; lamps and
+  every small light, e.g. the robo series), and an array of `mn_m`, `tv_m`, `wa_m`, `wb_m`, `fr_m`
+  (fn_15_774C: displays, screens, water, fire). Their per-frame update **fn_15_767C** fades the
+  amount toward on / off and writes it as TEV konst colour 3 alpha into the material, whose first
+  stage is `lerp(RASC, RASA, K3.a)`: off = lit by the room, on = full brightness regardless of
+  lighting. Hooked: amount per (MDL0, material). **fn_15_3100** (daFTR_c per-frame update) is
+  hooked to map each actor's MDL0 (virtual +0x210) to its item record (number, name, light kind).
+- Shared furniture textures (fire f1/f2, screen tv.0, glass, water) are in Ftr/roomAlways.arc
+  int_common.brres, not in the model's brres.
+
+**Which furniture lights**: the rules of the review scanner (`py tools/research/furniture_lights.py`,
+contact sheet with on/off renders into out/furniture_lights, reviewed by the user 2026-11-04):
+(a) the helper materials lp_m / mn_m / tv_m / fr_m, (b) a lamp-style konst bypass of the lighting,
+additive blending, unlit special materials (not df_* / ev_*: tp_m screens, tk_m, electric_m),
+unlit or special materials named after fire / lava / neon, whole models named after fire (hibachi,
+fire flower, fire bar, potbelly stove). Water never lights (wa_m / wb_m, and models named pool,
+bath, trough, sink, toilet, urinal, sprinkler, Merlion, Manneken Pis). The exceptions table
+(item numbers + our numbers only) drops the stove (kitchen range) BE3, propane stove BD5, doghouse
+BED and beach table BF2 (name matches / a shine), and adds the tall lantern B5D (a flickering
+light in its fire box at 62 % of its height), the glow clock C1A (green, behind its glass) and the
+kitschy clock C16 (its unlit face). 86 lights out of 729 furniture models (the sheet's 99 minus
+12 water items, 4 dropped, plus 3 added).
+
+**The light** (computed from the loaded model when it is first drawn, cached per MDL0 + item):
+the area-weighted centre of the glowing parts (model space, through bones and their bind
+matrices), turned with the drawn ScnObj's world matrix every frame (placement, rotation, moving
+furniture, room changes); colour = the parts' mean texture colour (texels decoded from the model's
+own TEX0 / PLT0, vertex colours), kept saturated (0.35 + 0.65 x normalised), screens 55 % toward
+cool blue (0.62, 0.80, 1.0), fire 40 % toward (1.0, 0.62, 0.3); radius 110 + 2.2 x the model's
+largest extent (120-320); intensity lamp 1.4 (x 1.15 for light kind 2), fire 1.6, screen 0.8,
+lava lamp 0.9, other 1.0; x the game's amount for helper materials (a lamp switched off stops
+lighting, fading as the game fades its shade); fire flickers (three host-time sines, per-object
+phase) and gets `ExtraLightFire`. Ids `0x46000000 ^ ScnObj` (interpolated by id at 120+).
+Budget: up to 48 per frame into enhanced_lighting.cpp's shared ranking (64 lights); fires and
+screens may cast shadows (they share the night lights' shadow slots, `shadowLightCap`), lamps
+never: the light sits inside the shade, which would hide it from the cube map.
+
+Test aid `CF_FURN_LOG=1`: every model analysed (`[furn] model ...` kind, centre, colour, radius,
+intensity), every furniture actor (`[furn] actor ... item ...`), the lights every 120 frames;
+`=2` also every helper amount change. Compare with the scanner: out/furniture_lights/candidates.json.
+
 ### Indoor places (branch enh-light-2)
 
 Checked with A/B shots (user-town fixture, `CF_TELEPORT` in front of the door, then walking in):

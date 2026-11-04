@@ -176,3 +176,9 @@ fn_8022A238 all
 # The game's echo suppressor (mic frame vs the voices being played): F1 "Echo suppression" off
 # (headphones) skips it, so both players can talk at once.
 fn_80229D08 all
+
+# Furniture lights (src/game/cf_furniture_light.cpp): a furniture glow helper's per-frame update
+# (lp_m / tv_m / mn_m / fr_m amount 0..1 at helper +0, ResMatData at +0x14), and daFTR_c's per-frame
+# update (its model -> its item record at +0x3A0).
+d_a_ftrNP::fn_15_767C all
+d_a_ftrNP::fn_15_3100 all

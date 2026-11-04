@@ -11,6 +11,7 @@
 // fn_125_C0 or at the first root layout pane, whichever comes first.
 #include "game/cf_light.h"
 #include "game/cf_calendar.h"
+#include "game/cf_furniture_light.h"
 #include "recomp/version.h"
 
 #include "port/settings.h"
@@ -337,6 +338,7 @@ void onCamera(Ctx& c, u32 data) {
             submitSky();
             submitNightLights();
             submitEffectLights();
+            cffurn::submit(sView, sViewValid);  // furniture lights (cf_furniture_light.cpp)
             enh::beginScene();
         } else if (sSceneOpen) {
             // (ScnRoot::DrawOpa loads all 32 cameras up front: the last one set is not the current one)
@@ -780,6 +782,7 @@ bool onModel(Ctx& c, u32 obj) {
         }
     }
     if (proc == 6 && sNight > 0.01f) noteNightSource(obj, mi.name);
+    if (proc == 6 || proc == 7) cffurn::noteModel(obj, mi.mdl, mi.name);  // furniture lights
     return true;
 }
 

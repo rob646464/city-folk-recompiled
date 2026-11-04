@@ -1058,6 +1058,22 @@ void enhancedLightingTab() {
     ImGui::Unindent();
     ImGui::EndDisabled();
 
+    // ---- Furniture lights ----
+    ImGui::SeparatorText("Furniture lights");
+    sDirty |= recomp::menu::Checkbox("Furniture lights", &l.furnitureLights);
+    ImGui::SetItemTooltip("Lamps, TVs, computers, stereos, fireplaces, candles, lava lamps, festive trees and other\n"
+                          "glowing furniture light the room around them in their own colour, in your house, villagers'\n"
+                          "houses and shops. Switchable furniture follows the game: a lamp you turn off stops lighting.\n"
+                          "Fires flicker, screens are cool. Cost grows with the lights in view.");
+    ImGui::BeginDisabled(!l.furnitureLights);
+    ImGui::Indent();
+    sDirty |= recomp::menu::SliderFloat("Furniture light intensity", &l.furnitureLightIntensity, 0.0f, 3.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
+    sDirty |= recomp::menu::Checkbox("Furniture light shadows", &l.furnitureLightShadows);
+    ImGui::SetItemTooltip("Fires and screens cast shadows (shares the night lights' shadow slots; the preset sets how\n"
+                          "many). Lamps light without shadows: their own shade would block them.");
+    ImGui::Unindent();
+    ImGui::EndDisabled();
+
     // ---- Ambient occlusion ----
     ImGui::SeparatorText("Ambient occlusion");
     sDirty |= ImGui::Checkbox("Ambient occlusion", &l.ssao);

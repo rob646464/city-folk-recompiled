@@ -393,6 +393,11 @@ def main():
                              anims=anim_names, size=[round(float(x), 1) for x in (np.array(mdl.bbox[1]) - np.array(mdl.bbox[0]))]))
             print("%s %-28s %-24s %s %s" % (tag, mdl.name, rec["name"] if rec else "?", src, [w for _, w, _, _ in found]))
     write_html(out, rows, n_files)
+    # machine-readable proposals (compared with the runtime's CF_FURN_LOG lines)
+    import json
+    (out / "candidates.json").write_text(json.dumps([dict(ftr=r["n"], model=r["model"], item=r["rec"]["number"] if r["rec"] else None,
+                                                          name=r["rec"]["name"] if r["rec"] else None, **r["prop"]) for r in rows], indent=1),
+                                         encoding="utf-8")
     print("%d candidates of %d models -> %s" % (len(rows), n_files, out / "index.html"))
 
 

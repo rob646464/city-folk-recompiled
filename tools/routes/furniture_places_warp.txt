@@ -1,0 +1,15 @@
+# Furniture lights in other places (docs/RENDERING.md "Furniture lights"), CF_FIXTURE=user-town-clean:
+# villager houses 1-3, Nook's Cranny, Able Sisters, the museum lobby, each by WARP with ~600 frames
+# there (CF_FURN_LOG lists the furniture actors and lights of each).
+include warp.txt
++1600:WARP=villager1
+after link d_bgi_drawNP 2
++600:WARP=villager2
+after link d_bgi_drawNP 3
++600:WARP=villager3
+after link d_bgi_drawNP 4
++600:WARP=nook
+after link d_bgi_drawNP 5
++600:WARP=museum
+after link d_bgi_drawNP 6
++600:WARP=villager4

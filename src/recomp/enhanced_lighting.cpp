@@ -391,7 +391,9 @@ uint32_t shadowLightCap() {
     const auto& l = port::settings().enhancedLighting;
     // City Folk: the sun / moon's slot + the night lights' (0 / 2 / 4 / 8 by the preset).
     static constexpr u32 kXlLights[6] = {0, 2, 4, 8, 12, 16};
-    u32 n = (l.sunShadows ? 1u : 0u) + (l.nightLights && l.nightLightShadows ? kXlLights[std::clamp(l.extraShadowLights, 0, 5)] : 0u);
+    // (furniture lights share the night lights' shadow slots: indoors there are no night lights)
+    const bool xl = (l.nightLights && l.nightLightShadows) || (l.furnitureLights && l.furnitureLightShadows);
+    u32 n = (l.sunShadows ? 1u : 0u) + (xl ? kXlLights[std::clamp(l.extraShadowLights, 0, 5)] : 0u);
     if (const char* v = std::getenv("CF_XL_SHADOWS")) {
         int mode = -1, lights = -1;
         std::sscanf(v, "%d,%d", &mode, &lights);
