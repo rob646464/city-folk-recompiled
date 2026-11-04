@@ -83,7 +83,7 @@ town is about x 600-3000, z 500-3000 (south = +z), upper terrace y 84, lower 28.
 | Club LOL | `TP=mod103t0118:0/60`, walk in | ticket counter hall (barricade linked: the show room closed) |
 | Shampoodle | `TP=mod103t0110:0/60`, A at the door | Harriet's first-visit talk; her goodbye at the door needs A |
 | Katrina's | `TP=mod103t0113:0/60`, A at the door | dark fortune room lit by two candles (Katrina at her table) |
-| Crazy Redd's | `TP=mod103t0112:0/60`, A at the door | the doorman turns non-members away |
+| Crazy Redd's | `TP=mod103t0112:0/60`, A at the door | the doorman turns non-members away (members need an invitation: someone has to refer you) |
 | Phineas, Kicks | - | Phineas was not in the city; Kicks stands by a closed door at 1085,68,386 |
 
 With Enhanced lighting + Enhanced world on (`CF_ENHANCED=1 CF_WFX=1`): the sea and the river now
