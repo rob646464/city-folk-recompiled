@@ -1,0 +1,13 @@
+# To the city by Kapp'n's bus (saved town CF_FIXTURE=user-town); included by city.txt and
+# city_shops*.txt. Continue, the player is moved (TP token) onto the bus stop platform below the
+# town gate (town position 1808,84,700; the stop's sign = d_a_str_commonNP type 010D), faces the
+# sign (right) and presses A: "Bus to the city... Want to take the bus?" -> "To the city!" (the
+# highlighted first choice) -> the bus pulls in, the ride with Kapp'n (first trip: his long talk,
+# A advances it) -> arrival at the city's bus stop (`after link d_bgt_drawNP 1`); the player can
+# walk from about +1300. ~3.5 min to the city at the PC's load. Verified 2026-11-03 (routes-2).
+include continue_any.txt
+after link d_bgo_drawNP 2
++1400:TP=1808/84/700
++60:STICKRIGHT*12
++60:A
++40:A ~150

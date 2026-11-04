@@ -11,6 +11,7 @@
 #include <dolphin/types.h>
 
 #include <string>
+#include <vector>
 
 union SDL_Event;
 
@@ -84,6 +85,8 @@ void sample(int chan, State& out);
 // Test-script anchors: rel.cpp reports each REL link ("<module>"); route items written after
 // `after link <module> [n]` start relative to it (docs/CONTROLS.md "Test aids").
 void noteScriptEvent(const std::string& name);
+// Script actions (`TP=<target>` tokens) whose start has come, each returned once (game thread).
+std::vector<std::string> takeScriptActions();
 // The game's motor command (WPADControlMotor) for a Remote.
 void rumble(int chan, bool on);
 // The game's speaker commands and stream data (hle_wpad.cpp), for sources with a real speaker.
