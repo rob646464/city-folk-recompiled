@@ -477,6 +477,15 @@ void applyConfig(const Settings& s, bool outdoor, bool on) {
 
 }  // namespace
 
+// Startup (precache::init, before the first pipeline rebuild): the configuration the settings give
+// outdoors, so the "Preparing shaders" hold already builds the surface-mask variants (Aurora 0451;
+// the configuration was first sent with the first scene, after the hold, and the mask variants were
+// then built while the game ran).
+void applyStartupConfig() {
+    const Settings s = current();
+    if (s.enabled) applyConfig(s, true, true);
+}
+
 // cf_tags.cpp: ScnRoot::DrawOpa / DrawXlu of `root` (begin = before the original).
 void onScnRoot(u32 root, bool xlu, bool begin) {
     const u32 f = game::guestFrames();

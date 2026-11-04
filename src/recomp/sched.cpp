@@ -354,6 +354,12 @@ void detach(u32 guest) {
     if (GuestThread* t = find(guest)) t->detached = true;
 }
 
+bool isDetached(u32 guest) {
+    std::lock_guard lk(sM);
+    GuestThread* t = find(guest);
+    return t && t->detached;
+}
+
 void sleepOn(u32 queue) {
     GuestThread* self = tSelf;
     if (!self || tInIrq) fatal("sleepOn(%08X) outside a guest thread", queue);
@@ -422,7 +428,7 @@ void reacquireAfterHost() {
     waitForCpu(lk, self);
 }
 
-void wakeup(u32 queue) {
+void wakeup(u32 queue, bool mayReschedule) {
     std::unique_lock lk(sM);
     for (auto* t : sThreads) {
         if (t->st == GuestThread::St::Waiting && t->waitQueue == queue) {
@@ -431,7 +437,7 @@ void wakeup(u32 queue) {
             writeState(t, kStateReady);
         }
     }
-    if (tSelf && !tInIrq && sRunning == tSelf) reschedule(lk, tSelf);
+    if (mayReschedule && tSelf && !tInIrq && sRunning == tSelf) reschedule(lk, tSelf);
 }
 
 // CF_IRQ_STALL=1 (debugging): logs the running thread whenever an interrupt has waited more

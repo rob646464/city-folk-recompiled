@@ -37,11 +37,13 @@ s32 priority(u32 guest);
 bool setPriority(u32 guest, s32 prio);  // OSSetThreadPriority (may switch threads)
 s32 suspendCount(u32 guest);            // > 0: suspended (OSIsThreadSuspended)
 void detach(u32 guest);
+bool isDetached(u32 guest);             // OS_THREAD_ATTR_DETACH or OSDetachThread (not joinable)
 
 // Blocks the current thread on a thread queue (any guest address works as a key).
 void sleepOn(u32 queue);
-// Readies every thread blocked on `queue`; may switch to a higher-priority one.
-void wakeup(u32 queue);
+// Readies every thread blocked on `queue`; may switch to a higher-priority one (unless
+// `mayReschedule` is false: the caller blocks right after, e.g. OSWaitCond).
+void wakeup(u32 queue, bool mayReschedule = true);
 
 // The current thread is about to wait for the host (frame handoff, frame.cpp): like a
 // blocking OS call it gives up the CPU, so interrupts are taken and other threads run

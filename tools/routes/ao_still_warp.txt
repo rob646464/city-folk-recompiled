@@ -1,0 +1,8 @@
+# Still frames for A/B screenshots of the lighting (branch stutter-ao: ambient occlusion with
+# CF_AO_AB=1 + CF_SHOT=<dir>,5000,9001,...,2), CF_FIXTURE=user-town-clean: the player stands at the
+# house door (town, ~f4100-5650), in the house (~f5800-7100) and on the plaza in front of the town
+# hall (~f7300-9500), no input in between, so consecutive frames differ only by the A/B setting.
+include warp.txt
++1600:WARP=house1
+after link d_bgi_drawNP 2
++1300:WARP=town.plaza

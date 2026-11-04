@@ -1,0 +1,29 @@
+# Performance route (branch stutter-ao; docs/RENDERING.md "Stutters at 4K with Enhanced lighting"),
+# CF_FIXTURE=user-town-clean: continue, walk/run around the town (~40 s), warp into the player's
+# house (furniture lights) and walk around the room without leaving it (~30 s), warp to the plaza
+# in front of the town hall and run around it (~30 s). About frame 12500 at the end.
+include warp.txt
++1400:STICKDOWN*180
++200:STICKLEFT+B*200
++220:STICKUP+B*200
++220:STICKRIGHT+B*300
++320:STICKDOWN+B*150
++200:STICKLEFT+B*300
++320:STICKUP+B*300
++320:STICKRIGHT+B*200
++400:WARP=house1
+after link d_bgi_drawNP 2
++200:STICKUP*120
++150:STICKLEFT*80
++100:STICKRIGHT*160
++180:STICKLEFT*80
++100:STICKUP*40
++80:STICKRIGHT*120
++150:STICKLEFT*60
++600:WARP=town.plaza
+after link d_bgo_drawNP 3
++200:STICKRIGHT+B*200
++220:STICKDOWN+B*150
++200:STICKLEFT+B*300
++320:STICKUP+B*300
++320:STICKRIGHT+B*200

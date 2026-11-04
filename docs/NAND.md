@@ -249,6 +249,48 @@ result word; `CF_THREAD_LOG=1` logs OSIsThreadTerminated results per thread (who
 A save forced at the town gate (before the house) loads only up to Rover's "Sorry for keeping
 you waiting" (the game expects a house), so fixtures come from the real save flow.
 
+### The save's network step (crash fixed 2026-11-04, branch save-crash)
+
+Every HUD save / "Save and quit" runs one more WiiConnect24 job while the console's WiiConnect24
+is on (the default since online-1, docs/ONLINE.md section 10): fn_80178410 starts task
+fn_8017B908 on the WiiConnect24 thread, which runs fn_8017A82C -> fn_80179A8C / fn_80179C0C. They
+send the game's daily requests to Nintendo's WiiConnect24 user service
+(`https://wus.wapp.wii.com/notify` and `/inquiry`, gone; skipped until the next day once one
+succeeds, dates at fn_8010E32C() + 0x89CE0 + 0xC5C / 0xC60) through fn_800EB1B0: SOInit, SOStartup,
+NHTTPStartup. The save waits for the job.
+
+The user's crash (`OSSleepTicks has no HLE implementation`, lr 8043C550): SOStartup =
+SOStartupEx(60000 ms) checks the NCD link, then opens `/dev/net/ip/top` (absent here: -6) and
+sleeps 100 ms (OSSleepTicks) before each retry, until the 60 s timeout; the DHCP wait after it is
+the same. Now:
+- **OSSleepTicks** is HLE'd (hle_os.cpp): the thread sleeps on its own queue until a host timer
+  (postIrqAfter, as alarms) wakes it; other threads run. NWC24's NAND file retries, VF and the SO
+  library call it too. Also added: OSJoinThread (nw4r TaskThread, NHTTP, NWC24), OSInitCond /
+  OSWaitCond / OSSignalCond (NHTTP), OSGetStackPointer. `CF_SLEEP_LOG=1` logs the first sleep
+  from each return address and every 100th (retry loops).
+- **SOStartup / SOStartupEx** outside an online room answer at once with SO_ETIMEDOUT (-76), the
+  library's result when the DHCP wait runs out, i.e. a console whose network does not answer,
+  without the 60 s wait (online_dwc.cpp; one `[so]` log line). fn_800EB1B0 then returns 0 and the
+  job ends quietly; the save completes. In a room they still answer ok (DWC). A/B
+  `CF_SO_STARTUP=original` runs the library's own start-up: 600 sleeps of 100 ms from
+  SOStartupEx+0x1DC (game frames go on meanwhile), then the save completes 60 s late.
+- **NHTTPStartup** returns -1 (the library's failure): nothing here serves NHTTP (the wus
+  requests above; DWC's own logins are answered at the DWC API). Defensive: in the room test the
+  job took the other branch (fn_80179C0C only) and never reached it.
+
+Related hang (Nintendo events on): the "live delivery" check of distributions.cpp starts the
+game's town-load job (fn_801783B4) itself. The job thread's stack is freed only by the game's
+poll (fn_80178498 -> fn_8017803C), and until then fn_80177F44 refuses every new job, so the
+save's job never started and "Saving..." stayed up for good. The port now polls the job it
+started each frame until it ends (`[distrib] the game's WiiConnect24 check ended (result n)`).
+
+Verified (USA, scratch folders, the user's settings.ini): `user-town-clean` HUD "Save and quit"
+(crashed before; now "Save completed!", the network step at once) and a restart from that save;
+Nintendo events on (hung before; now completes, the Nintendo letter still taken); the
+online-letter-test-2 Frunch profile (friend in the roster) with and without a letter to the
+friend in Pelly's outbox (letter queued and sent over the letters link, save completes); saving
+while hosting a room (`CF_ONLINE_HOST`).
+
 ## Not done / next
 
 - **First save through the HUD** (house from Tom Nook, Save icon, "Save and quit") played by a

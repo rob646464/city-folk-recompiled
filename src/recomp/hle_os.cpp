@@ -13,6 +13,8 @@
 
 #include <cmath>
 #include <algorithm>
+#include <atomic>
+#include <memory>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -303,6 +305,78 @@ HLE(OSInitThreadQueue) {
 HLE(OSSleepThread) { sched::sleepOn(c.r[3]); }
 HLE(OSWakeupThread) { sched::wakeup(c.r[3]); }
 HLE(OSYieldThread) { c.poll(); }
+
+// OSSleepTicks(OSTime ticks): the SDK sets a one-shot alarm and sleeps the calling thread until
+// it fires. Here: a host timer (the alarm machinery's postIrqAfter, fast-forward speeds it up
+// like alarms) readies the thread through its own sleep queue; other threads and interrupts run
+// meanwhile. Callers: NWC24/VF NAND retries, SO start-up, NHTTP, the save's WiiConnect24 step.
+HLE(OSSleepTicks) {
+    const s64 ticks = s64(u64(c.r[3]) << 32 | c.r[4]);
+    if (ticks <= 0) {
+        c.poll();
+        return;
+    }
+    const double speed = std::max(1.0, game::retraceSpeed());
+    const double seconds = double(ticks) / kTimerClock / speed;
+    // CF_SLEEP_LOG=1: the first sleep from each return address, then every 100th (retry loops).
+    static const bool sLog = std::getenv("CF_SLEEP_LOG") != nullptr;
+    if (sLog) {
+        static std::mutex m;
+        static std::unordered_map<u32, u32> counts;
+        std::lock_guard lk(m);
+        const u32 n = ++counts[c.lr];
+        if (n == 1 || n % 100 == 0)
+            log("[os] OSSleepTicks %.1f ms from lr %08X (thread %08X, call %u, guest frame %u)", seconds * 1000.0, c.lr,
+                sched::currentGuest(), n, game::guestFrames());
+    }
+    static std::atomic<u32> sKey{0xE0000000u};  // sleep-queue keys need not be real memory
+    const u32 key = sKey.fetch_add(8) | 0xE0000000u;
+    auto flag = std::make_shared<std::atomic<bool>>(false);
+    sched::postIrqAfter(seconds, [key, flag](Ctx&) {
+        flag->store(true);
+        sched::wakeup(key);
+    });
+    while (!flag->load()) sched::sleepOn(key);
+}
+
+// OSJoinThread(thread, void** val): waits until the thread has ended (its join queue is woken by
+// the scheduler when it exits), then hands over its exit value. Detached threads cannot be joined.
+HLE(OSJoinThread) {
+    const u32 t = c.r[3], val = c.r[4];
+    if (!sched::isTerminated(t) && sched::isDetached(t)) {
+        c.r[3] = 0;
+        return;
+    }
+    while (!sched::isTerminated(t)) sched::sleepOn(t + 0x2E8);
+    if (val) wr32(val, rd32(t + 0x2D8));
+    c.r[3] = 1;
+}
+
+HLE(OSGetStackPointer) { c.r[3] = c.r[1]; }
+
+// Condition variables (OSCond = a thread queue): OSWaitCond releases the mutex completely, sleeps
+// until signalled and takes the mutex back with its old lock count.
+HLE(OSInitCond) {
+    wr32(c.r[3], 0);
+    wr32(c.r[3] + 4, 0);
+}
+HLE(OSWaitCond) {
+    const u32 cond = c.r[3], m = c.r[4], self = sched::currentGuest();
+    if (rd32(m + 8) != self) return;
+    const u32 count = rd32(m + 0xC);
+    wr32(m + 8, 0);
+    wr32(m + 0xC, 0);
+    sched::wakeup(m, false);  // no switch before this thread sleeps (a signal must not be lost)
+    sched::sleepOn(cond);
+    for (;;) {
+        const u32 owner = rd32(m + 8);
+        if (owner == 0 || owner == self) break;
+        sched::sleepOn(m);
+    }
+    wr32(m + 8, self);
+    wr32(m + 0xC, count);
+}
+HLE(OSSignalCond) { sched::wakeup(c.r[3]); }
 
 // --- message queues (OSMessageQueue: send queue, receive queue, array, count, first, used)
 
