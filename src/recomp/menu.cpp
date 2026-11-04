@@ -1507,10 +1507,11 @@ void gameplayTab() {
     ImGui::SeparatorText("Seasons and weather");
     sDirty |= recomp::calendar::drawHemisphereMenu();  // src/game/cf_calendar.cpp
     sDirty |= recomp::calendar::drawWeatherMenu();     // src/game/cf_weather.cpp
+    // Move in from Wild World (src/game/cf_move_in.cpp, docs/MOVE_IN.md); before the long
+    // region list so it is seen without scrolling.
+    sDirty |= recomp::movein::menuSection();
     // Content from other regions (src/game/cf_region.cpp).
     sDirty |= recomp::region::menuSection();
-    // Move in from Wild World (src/game/cf_move_in.cpp, docs/MOVE_IN.md).
-    sDirty |= recomp::movein::menuSection();
 }
 
 // Debug: the game's debug entries (src/game).
