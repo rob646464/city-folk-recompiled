@@ -52,7 +52,14 @@ namespace {
 
 using clk = std::chrono::steady_clock;
 
-constexpr u32 kMovingVanGgid = 0x400806;  // DS Download Play of Vaga_Sign.srl (USA fn_800841F8)
+// The Moving Van's game group id differs per version (USA 0x400806, PAL 0x8002CA, Korea 0xC00055;
+// the DS Suitcase USA 0x400805, PAL 0x8002C9): it is recognised by the link manager's mode
+// instead, USA 0x80584E14 +0x1B8 = 0 (receive, set by fn_800841F8 before the download starts).
+std::atomic<u32> sVanGgid{~0u};
+bool movingVanOffered() {
+    const u32 mgr = VA(0x80584E14);
+    return mgr && rd32(mgr + 0x1B8) == 0;
+}
 constexpr u32 kPacket = 0x1FC;            // data per MP packet (the size the game itself sends in)
 constexpr u32 kREQS = 0x52455153, kACKS = 0x41434B53, kNACK = 0x4E41434B;
 // DS Download Play of the Moving Van (320 KB; several seconds on a DS). Not shorter: Rover's
@@ -162,11 +169,11 @@ struct Van : mp::Child {
     }
     bool hasProgram(u32 ggid) override {
         std::lock_guard lk(m);
-        return ggid == kMovingVanGgid && phase == Phase::Download && clk::now() >= readyAt;
+        return ggid == sVanGgid && phase == Phase::Download && clk::now() >= readyAt;
     }
     bool connects(u32 ggid) override {
         std::lock_guard lk(m);
-        if (ggid != kMovingVanGgid || phase != Phase::Download || clk::now() < readyAt) return false;
+        if (ggid != sVanGgid || phase != Phase::Download || clk::now() < readyAt) return false;
         phase = Phase::Linked;
         status = "The Moving Van is running on the DS.";
         MVLOG("the DS runs the Moving Van and connects to the Wii");
@@ -352,16 +359,17 @@ void turnOnDs(Ui& u) {
 }
 
 void Van::downloadStarted(u32 ggid) {
-    if (ggid != kMovingVanGgid) {
+    if (!movingVanOffered()) {
         if (logOn()) MVLOG("Download Play offered with ggid %06X (not the Moving Van): no DS answers", ggid);
         return;
     }
+    sVanGgid = ggid;
     {
         std::lock_guard lk(m);
         phase = Phase::Waiting;
         status.clear();
     }
-    MVLOG("Rover asks for the Moving Van on a DS");
+    MVLOG("Rover asks for the Moving Van on a DS (ggid %06X)", ggid);
     sOpenRequest = true;  // the window opens on the host thread (this runs on a guest thread)
 }
 

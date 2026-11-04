@@ -1514,11 +1514,14 @@ void gameplayTab() {
     lock = recomp::online::sync::lockBegin();
     sDirty |= recomp::calendar::drawHemisphereMenu();  // src/game/cf_calendar.cpp
     sDirty |= recomp::calendar::drawWeatherMenu();     // src/game/cf_weather.cpp
+    recomp::online::sync::lockEnd(lock);
+    // Move in from Wild World (src/game/cf_move_in.cpp, docs/MOVE_IN.md); before the long
+    // region list so it is seen without scrolling, outside the visit lock.
+    sDirty |= recomp::movein::menuSection();
     // Content from other regions (src/game/cf_region.cpp).
+    lock = recomp::online::sync::lockBegin();
     sDirty |= recomp::region::menuSection();
     recomp::online::sync::lockEnd(lock);
-    // Move in from Wild World (src/game/cf_move_in.cpp, docs/MOVE_IN.md).
-    sDirty |= recomp::movein::menuSection();
 }
 
 // Debug: the game's debug entries (src/game).

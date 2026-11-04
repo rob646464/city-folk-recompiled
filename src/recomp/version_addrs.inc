@@ -50,6 +50,7 @@
     {0x804F0C98u, 0x804F1CD8u, 0x804F5958u, 0x8050A698u},  // data, 2/2 sites
     {0x805231B0u, 0x80525DD0u, 0x80527610u, 0x8053C7F0u},  // data, 1/1 sites
     {0x80574A0Cu, 0x8057768Cu, 0x80578E8Cu, 0x8058FB0Cu},  // data, 1/1 sites
+    {0x80584E14u, 0x80587A94u, 0x80589294u, 0x8059FF14u},  // data, 13/13 sites; data, 15/15 sites
     {0x805855E8u, 0x80588268u, 0x80589A68u, 0x805A06E8u},  // data, 4/4 sites
     {0x80591C00u, 0x80594880u, 0x80596080u, 0x805ACD00u},  // data, 2/2 sites
     {0x805BEBC0u, 0x805C1840u, 0x805C3040u, 0x805D9CC0u},  // data, 69/69 sites

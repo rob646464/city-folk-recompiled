@@ -122,7 +122,8 @@ quits as on a Wii with no DS around (before this, the MPDL start failed at once)
 
 ### The virtual DS (cf_move_in.cpp)
 
-When MPDL starts with ggid 0x400806 the window "Move in from Wild World" opens (game input waits
+When MPDL starts while the link manager is in receive mode (+0x1B8 = 0; the Moving Van's ggid is
+0x400806 on the USA disc, 0x8002CA PAL, 0x000986 Japan, 0xC00055 Korea, so the mode decides) the window "Move in from Wild World" opens (game input waits
 while it asks for something). It reads a save file (the last one is offered again), shows the
 format, the layout, both copies' checksums, the town, the Game Card region (guessed from the
 layout and the file name, a choice between North America and Europe for the shared layout) and
@@ -188,12 +189,36 @@ Rev 1 saves have the same layout as Rev 0: the game has one table per region, no
 - the window (PrintWindow screenshot while Rover waits): format, layout, both checksums, town,
   Game Card region, resident, "Turn on the DS".
 
-Not verified by script: the town hall registration and the house (the save the game makes then),
-the catalog seen in Nook's Cranny, a save with several residents (Rover's list and the window's
-pick), other regions' saves on their own discs, the converted saves in a game (unit test only),
-the PAL / Japanese / Korean builds (hooks tagged `all`, mapped by function match, not built here),
-a DeSmuME .dsv or No$GBA file from a real emulator (synthetic ones in the unit test).
+Second round (2026-11-03, branch move-in-2):
 
+- **PAL / Japan / Korea builds** (`toolsuild.ps1 -Game <id>`, hooks `all`): each with the
+  `user-town` fixture's title folder renamed, the same route (Korea's choice boxes further right:
+  x 0.44 / 0.56), a transfer to "All set!", "Preparing saved data" and the bus to Frunch. PAL took
+  the USA save as a DeSmuME `.dsv` (North American card accepted by the European game); Japan
+  (No$GBA file) and Korea (512 KB file, save in the second half) with `CF_MOVE_IN_ANY=1`, i.e. the
+  save converted to the Japanese / Korean layout: the game's own checks and CRC passed. The
+  Japanese character table has A-Z / a-z, so "rob" converts without '?'.
+- **Emulator formats** generated from the user's save in the scratch folder: `.dsv` (raw + the
+  0x7A-byte footer: snip line, six u32, `|-DESMUME SAVE-|`), No$GBA uncompressed and compressed
+  (refused with a message), 512 KB doubled and second-half, trimmed to 0x2BFC0 (padded): all read
+  as the same save (cf_move_in_test with `CF_WW_SAVE`). These are files written from the formats'
+  documented layout, not files saved by the emulators themselves.
+- **Two residents**: slot 1 of a scratch copy = slot 0 renamed "ann" (girl, other player id),
+  sums fixed. "Let Rover ask": Rover lists "rob. / ann. / Never mind.", the second -> "So you're
+  ann from poo town?" -> "You're so lucky, ann!" on the bus.
+- **F1**: Enhancements > Gameplay shows "Move in from Wild World" (moved above the long region
+  list): "Wild World saves from any region", "Check a save file...", the last file.
+- **Town hall** (with the `WARP=` token from branch warps): Pelly greets the moved-in resident
+  ("All available houses in Frunch... 3 vacant houses", "Let me just get the paperwork started",
+  "Do you know how to open your map?"), i.e. the same flow as a new resident. The next step did
+  not work by script: the vacant houses' doors (house 2, reached through the town hall door and
+  `TP=`) still say "On sale now! Inquire at town hall for tours!" and Tom Nook (warp into his
+  shop) says "You already finished saying hello to everyone?"; warping into the empty house finds
+  no Nook. So the house purchase and the save the game makes after it are still open.
+
+Not verified by script: the house purchase and the game's save after it, the catalog seen in
+Nook's Cranny, other regions' own Wild World saves (only the USA save, converted), files saved by
+DeSmuME / No$GBA themselves.
 Earlier finding: with a 3 s download and the DS turned on at once (test aid), the link could come
 and go before Rover's "press B to quit" line was up and he then said he could not find a DS; the
 download takes 8 s now (a DS needs several seconds for the 320 KB program).
