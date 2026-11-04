@@ -102,3 +102,10 @@ fn_8017856C
 fn_80404BBC
 fn_80404DB8
 fn_803F9D44
+fn_8019B84C
+fn_80178244
+fn_801782A0
+fn_800E9D34
+d_a_npc_sp_perikoNP::fn_34_5E9C
+d_a_npc_sp_perikoNP::fn_34_2C3C
+fn_800FBDA8

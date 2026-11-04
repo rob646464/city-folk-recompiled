@@ -570,11 +570,30 @@ void setMyEndpoints(const std::string& eps) {
     sMyEndpoints = eps;
 }
 
+std::string myEndpointsText() {
+    std::lock_guard<std::recursive_mutex> g(sMutex);
+    return sMyEndpoints;
+}
+
 std::string friendEndpoints(const uint8_t pub[32]) {
     std::lock_guard<std::recursive_mutex> g(sMutex);
     load();
     const Friend* f = byPub(pub);
     return f && f->state == State::Friend ? f->endpoints : std::string();
+}
+
+void setFriendEndpoints(const uint8_t pub[32], const std::string& eps) {
+    std::lock_guard<std::recursive_mutex> g(sMutex);
+    load();
+    Friend* f = byPub(pub);
+    if (!f || f->state != State::Friend || eps.size() > 200) return;
+    std::string e;
+    for (char ch : eps)
+        if ((ch >= '0' && ch <= '9') || ch == '.' || ch == ':' || ch == ';' || ch == '[' || ch == ']' || (ch >= 'a' && ch <= 'f')) e += ch;
+    if (e.empty() || e == f->endpoints) return;
+    f->endpoints = e;
+    save();
+    if (online::logOn()) std::printf("[friends] %s's letters link (from the link): %s\n", f->name.c_str(), e.c_str());
 }
 
 bool friendXPub(const uint8_t pub[32], uint8_t out[32]) {

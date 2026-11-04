@@ -60,7 +60,10 @@ uint64_t myWiiNumber();
 // (HMAC("cf-letter", X25519(mine, theirs))).
 // Letters link (online_mail.cpp): this game's addresses, sent to friends in a room; a friend's.
 void setMyEndpoints(const std::string& eps);
+std::string myEndpointsText();
 std::string friendEndpoints(const uint8_t pub[32]);
+// A friend's letters link addresses learned from the link itself (an authenticated HELLO).
+void setFriendEndpoints(const uint8_t pub[32], const std::string& eps);
 bool friendXPub(const uint8_t pub[32], uint8_t out[32]);
 void letterKey(const uint8_t theirX[32], uint8_t out[32]);
 const uint8_t* myXPub();

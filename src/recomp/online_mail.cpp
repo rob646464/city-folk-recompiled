@@ -32,6 +32,8 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <ctime>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -313,6 +315,10 @@ void takeIn(Letter&& l, const u8 from[32]);
 // friend's game acknowledges it. Datagrams: "CFML" 1 type
 //   1 CHUNK  from[32] id[8] index(u16) count(u16) bytes...   (<= 1000 bytes of the blob each)
 //   2 ACK    from[32] id[8]                                   (the receiver's key)
+//   3 HELLO  from[32] time[8] eps... mac[32]   (HMAC-SHA256 with the pair's letter key over all
+//            before it): this game's current addresses, sent to every friend's known ones at
+//            start and every 10 minutes, so a friend learns a changed port without a room; the
+//            receiver keeps the sender's source address first and answers with its own HELLO.
 // Only blobs from friends that open and verify are taken; one sender may have 4 letters being
 // reassembled at a time.
 constexpr u16 kLinkPort = 29913;
@@ -368,9 +374,54 @@ void linkSendLetter(const Letter& l) {
     if (online::logOn()) std::printf("[mail] letter %016llx sent over the letters link (%u chunks)\n", (unsigned long long)l.id, count);
 }
 
+std::vector<u8> helloFor(const u8 friendPub[32], const u8 theirX[32]) {
+    std::vector<u8> d = {'C', 'F', 'M', 'L', 1, 3};
+    d.insert(d.end(), friends::myPublicKey(), friends::myPublicKey() + 32);
+    put64(d, u64(std::time(nullptr)));
+    const std::string eps = friends::myEndpointsText();
+    d.insert(d.end(), eps.begin(), eps.end());
+    u8 k[32], mac[32];
+    friends::letterKey(theirX, k);
+    oc::hmacSha256(k, 32, d.data(), d.size(), mac);
+    d.insert(d.end(), mac, mac + 32);
+    (void)friendPub;
+    return d;
+}
+
+void linkHello() {
+    for (const auto& f : friends::list()) {
+        if (f.state != friends::State::Friend) continue;
+        u8 theirX[32];
+        if (!friends::friendXPub(f.pub, theirX)) continue;
+        const auto eps = parseEps(f.endpoints);
+        if (eps.empty()) continue;
+        const auto d = helloFor(f.pub, theirX);
+        for (auto& e : eps) linkSend(e, d);
+    }
+}
+
 void linkReceive(const sk::Addr& from, const u8* p, size_t n) {
     if (n < 6 + 32 + 8 || std::memcmp(p, "CFML", 4) != 0 || p[4] != 1) return;
     const u8* key = p + 6;
+    if (p[5] == 3) {  // HELLO from a friend
+        if (n < 6 + 32 + 8 + 32 || n > 6 + 32 + 8 + 200 + 32 || !friends::isFriend(key)) return;
+        u8 theirX[32], k[32], mac[32];
+        if (!friends::friendXPub(key, theirX)) return;
+        friends::letterKey(theirX, k);
+        oc::hmacSha256(k, 32, p, n - 32, mac);
+        if (std::memcmp(mac, p + n - 32, 32) != 0) return;
+        u64 t = 0;
+        for (int i = 0; i < 8; i++) t = t << 8 | p[38 + i];
+        const long long now = std::time(nullptr);
+        if (std::llabs(now - (long long)t) > 3600) return;  // an old datagram played back
+        std::string eps = from.text();
+        const std::string adv(reinterpret_cast<const char*>(p + 46), n - 46 - 32);
+        if (!adv.empty()) eps += ";" + adv;
+        const bool changed = friends::friendEndpoints(key) != eps;
+        friends::setFriendEndpoints(key, eps);
+        if (changed) linkSend(from, helloFor(key, theirX));  // tell it ours too (once per change)
+        return;
+    }
     u64 id = 0;
     for (int i = 0; i < 8; i++) id = id << 8 | p[38 + i];
     if (p[5] == 2) {  // ACK from the recipient
@@ -449,6 +500,11 @@ void linkThread() {
             }
             friends::setMyEndpoints(eps);
             if (online::logOn()) std::printf("[mail] letters link on UDP %u: %s\n", sLinkPort, eps.c_str());
+        }
+        static double lastHello = -1e9;
+        if (t - lastHello > 600) {
+            lastHello = t;
+            linkHello();
         }
         if (t - lastPass < 20) continue;
         lastPass = t;
@@ -690,6 +746,24 @@ CF_PROBE(fn_8017856C)
 CF_PROBE(fn_80404BBC)
 CF_PROBE(fn_80404DB8)
 CF_PROBE(fn_803F9D44)
+CF_PROBE(fn_8019B84C)
+CF_PROBE(fn_80178244)
+CF_PROBE(fn_801782A0)
+CF_PROBE(fn_800E9D34)
+// Pelly's send step (d_a_npc_sp_perikoNP fn_34_5E9C): its state word r13-0x2C2C (0x8074ED14, USA).
+static void pellySendStep(Ctx& c) {
+    static const bool on = std::getenv("CF_MAIL_PROBE") != nullptr;
+    if (on) std::printf("[mail-probe] Pelly send step: state %d\n", s32(rd32(0x8074ED14u)));
+    callOriginal(c, "d_a_npc_sp_perikoNP::fn_34_5E9C");
+}
+static HleReg sPellySendReg("d_a_npc_sp_perikoNP::fn_34_5E9C", &pellySendStep);
+CF_PROBE(fn_800FBDA8)
+static void pellyHelperSet(Ctx& c) {
+    static const bool on = std::getenv("CF_MAIL_PROBE") != nullptr;
+    if (on) std::printf("[mail-probe] Pelly helper fn_34_2C3C(%08X, %u)\n", c.r[3], c.r[4]);
+    callOriginal(c, "d_a_npc_sp_perikoNP::fn_34_2C3C");
+}
+static HleReg sPellyHelperReg("d_a_npc_sp_perikoNP::fn_34_2C3C", &pellyHelperSet);
 
 HLE(NWC24CheckUserId) {
     const u64 id = u64(c.r[3]) << 32 | c.r[4];
