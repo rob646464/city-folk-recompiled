@@ -1,0 +1,11 @@
+# Continue the saved town (CF_FIXTURE=user-town), then items timed from the arrival in the town:
+# include this file, then `+N:WARP=<target>` lines (docs/WARPS.md: names, `stage:<n>`, `@x/y/z`).
+# A WARP item waits until the game can change stage (a playable stage, no change running, 90
+# frames after the last arrival), so it can be given early; +1600 is past the continue's last A
+# (Resetti's greeting in user-town). Time the items after a warp from the scene it loads:
+# `after link d_bgi_drawNP <n>` (rooms; #1 = Rover's bus in the continue, so the first room
+# warped to is #2), `after link d_bgt_drawNP <n>` (the city), `after link d_bgo_drawNP <n>`
+# (the town: #1 = the title's town, #2 = the continue).
+# With `run.ps1 -Env "CF_FF=1-5200"` the continue runs fast-forwarded (title to town in seconds).
+include continue_any.txt
+after link d_bgo_drawNP 2

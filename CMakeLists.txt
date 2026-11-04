@@ -91,6 +91,12 @@ if (WIN32)
 endif ()
 add_test(NAME online_net COMMAND cf_online_test)
 
+# Wild World save reader / converter for the move-in (src/game/ww_save.*, docs/MOVE_IN.md "Testing").
+# Synthetic saves; with CF_WW_SAVE=<file> also a real one (never committed).
+add_executable(cf_move_in_test tools/tests/move_in_test.cpp src/game/ww_save.cpp)
+target_include_directories(cf_move_in_test PRIVATE src)
+add_test(NAME move_in COMMAND cf_move_in_test)
+
 # Runtime shared by both executables: memory/CPU helpers, scheduler, HLE SDK, frame driver,
 # audio, menu, and the game-specific parts in src/game. module_rt.cpp belongs to the game
 # module, not the runtime.

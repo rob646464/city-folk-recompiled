@@ -155,3 +155,9 @@ was added for them (the recompiler now puts hooked REL functions' original bodie
 - `CF_POKE=<frame>:<hex addr>:<hex byte>,...`: writes a guest byte at that frame.
 - `CF_WATCH_FROM=<frame>`: the `CF_WATCH` store report starts at that frame; `CF_FRAME_LOG=1`
   logs every 1000th guest frame (to place other log lines in time).
+
+## Move in from Wild World
+
+Rover's "Move from the DS!" with a Wild World save file instead of a DS: a virtual DS behind the
+DS wireless libraries feeds the game's own receive path and import. F1 > Enhancements > Gameplay
+"Move in from Wild World". Everything (protocol, data, region rules, tests): docs/MOVE_IN.md.

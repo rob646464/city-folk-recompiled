@@ -144,7 +144,7 @@ French.
 | `/dev/sdio/slot0`, `slot1` | **SD slot with no card**: GetStatus (0x0B) = 0, card commands fail. Photos to SD: later (see "Not done"). |
 | `/dev/usb/kbd` | **absent** (open fails, `-6`): no USB keyboard. A device version (open succeeds, the event request waits forever = no keyboard attached) exists behind `CF_USB_KBD_DEVICE=1`. |
 | `/dev/usb/oh0` | USB host with no devices (Wii Speak absent); not opened by the game so far. |
-| `/dev/net/*` (KD = WiiConnect24, NCD, IP, SSL, WD = DS wireless) | **not running** (open fails, `-6`): the game is offline. NWC24 retries `/dev/net/kd/request` every ~2 s at the title (logged once). Online play: docs/ONLINE.md. |
+| `/dev/net/*` (KD = WiiConnect24, NCD, IP, SSL, WD = DS wireless) | **not running** (open fails, `-6`): the game is offline. NWC24 retries `/dev/net/kd/request` every ~2 s at the title (logged once). Online play: docs/ONLINE.md. WD is never opened: the MP/MPDL libraries above it are HLE'd (docs/MOVE_IN.md). |
 
 Leaving the game: OSShutdownSystem, OSRestart, OSResetSystem, OSReturnToMenu (and the
 data-management / settings / error variants), `__OSHotReset`, `__OSShutdownToSBY` end the program
