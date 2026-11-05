@@ -73,6 +73,18 @@ u32 sBadOp = 0;  // last unparseable opcode | 0x100 if in the raw stream | offse
 u32 sUnparsed = 0, sDlCpWrites = 0, sAuroraInDl = 0, sStreamMtxLoads = 0, sStreamIndexedLoads = 0;
 
 bool inMem1(u32 a) { return (a >> 28) == 0x8 || (a >> 28) == 0xC; }
+// Bytes from guest address `a` to the end of its main memory (MEM1 or MEM2, cached, uncached or
+// physical), 0 if it is not in main memory. NW4R g3d binds its vertex arrays with physical
+// addresses (0x0xxxxxxx MEM1, 0x1xxxxxxx MEM2) and keeps most model data in MEM2: with a MEM1-only
+// check no array of a g3d model was ever copied (branch face-seams).
+u32 ramAvail(u32 a) {
+    const u32 o = a & 0x0FFFFFFF;
+    switch (a >> 28) {
+    case 0x0: case 0x8: case 0xC: return o < kMem1Size ? kMem1Size - o : 0;
+    case 0x1: case 0x9: case 0xD: return o < kMem2Size ? kMem2Size - o : 0;
+    default: return 0;
+    }
+}
 
 void emitLoad(int slot) {
     Binding& b = sBind[slot];
@@ -107,10 +119,10 @@ void use(int slot, u32 idxLo, u32 idxEnd, u32 extra) {
     }
     Binding& b = sBind[slot];
     u32 extent = idxEnd * b.stride + extra;
-    if (!b.valid || b.cmd < 0 || !inMem1(b.guest)) return;
-    const u32 phys = b.guest & 0x01FFFFFF;
-    if (phys >= kMem1Size) return;
-    extent = std::min(extent, kMem1Size - phys);
+    if (!b.valid || b.cmd < 0) return;
+    const u32 avail = ramAvail(b.guest);
+    if (!avail) return;
+    extent = std::min(extent, avail);
     Cmd& cmd = sCmds[b.cmd];
     if (slot == 0 && cmd.fmt < 0) {
         cmd.fmt = sScanFmt;
@@ -127,6 +139,25 @@ void use(int slot, u32 idxLo, u32 idxEnd, u32 extra) {
         d.resize(extent);
         std::memcpy(d.data() + old, hostp(b.guest) + old, extent - old);
     }
+}
+
+// LOAD_CP_REG 0xA0-0xAF (array base) / 0xB0-0xBF (stride) inside a display list of the tape.
+u16 sCpArrayDirty = 0;  // slots set by the list being parsed
+// CF_DL_LAYOUT=0 (A/B): the vertex layout written by display lists is not followed.
+const bool sCpLayout = [] { const char* v = std::getenv("CF_DL_LAYOUT"); return !(v && *v == '0'); }();
+void cpArrayWrite(u8 reg, u32 value) {
+    const int slot = reg & 0xF;
+    Binding& b = sBind[slot];
+    if (reg < 0xB0) {
+        b.guest = value;
+        b.valid = value != 0;
+        b.key = slot == 0 ? detail::arrayKey() : 0;
+    } else {
+        b.stride = value & 0xFF;
+    }
+    b.cmd = -1;  // draws later in this list read the live array (as before)
+    sSnapBound[slot] = nullptr;
+    sCpArrayDirty |= u16(1u << slot);
 }
 
 // Bytes per vertex of format `fmt`, or 0 if unknown.
@@ -152,7 +183,8 @@ u16 sSlotAny = 0;
 void boxPositions(int fmt, const u8* v, u32 count, u32 vtxSize, u32 offset, u32 idxSize) {
     const bool pnIdx = gx::vtxDesc(GX_VA_PNMTXIDX) == GX_DIRECT;
     const Binding& b = sBind[0];
-    if (!b.valid || !inMem1(b.guest) || b.stride == 0) return;
+    const u32 avail = b.valid ? ramAvail(b.guest) : 0;
+    if (!avail || b.stride == 0) return;
     u8 cnt = 0, type = 0, frac = 0;
     if (!gx::vtxAttrFormat(fmt, GX_VA_POS, cnt, type, frac)) return;
     static constexpr u32 kSize[] = {1, 1, 2, 2, 4};
@@ -164,9 +196,9 @@ void boxPositions(int fmt, const u8* v, u32 count, u32 vtxSize, u32 offset, u32 
         const u8* p = v + i * vtxSize + offset;
         const u32 idx = idxSize == 2 ? u32(p[0] << 8 | p[1]) : p[0];
         if (idx == (idxSize == 2 ? 0xFFFFu : 0xFFu)) continue;
-        const u32 phys = (b.guest & 0x01FFFFFF) + idx * b.stride;
-        if (phys + cs * nc > kMem1Size) continue;
-        const u8* e = hostp(0x80000000u | phys);
+        const u32 off = idx * b.stride;
+        if (off + cs * nc > avail) continue;
+        const u8* e = hostp(b.guest + off);
         for (u32 c = 0; c < 3; c++) {
             float f = 0.0f;
             if (c < nc) {
@@ -248,6 +280,13 @@ u32 parse(const u8* p, u32 size, bool partial) {
             if (i + len <= size) {
                 const u8 reg = p[i + 1];
                 if ((reg & 0xF0) >= 0x50 && (reg & 0xF0) <= 0xB0) sDlCpWrites++;  // VCD/VAT/arrays
+                // Array base / stride set by a display list in the tape (NW4R g3d's shape lists):
+                // followed like GXSetArray, and loaded again after the list (vtxDisplayList) so
+                // the draws of later lists read a copy taken now, not the guest array at replay.
+                if (sParseTapeBase != ~0u && (reg & 0xE0) == 0xA0) cpArrayWrite(reg, be32(i + 2));
+                // Vertex layout set by the list: the draws after it are parsed with it (without, the
+                // g3d shape lists' draws could not be sized and no array they read was copied).
+                if (capturing() && sCpLayout && reg >= 0x50 && reg < 0xA0) gx::cpRegWrite(reg, be32(i + 2));
             }
         } else if (op == 0x10) {  // LOAD_XF_REG
             if (i + 5 > size) {
@@ -519,8 +558,20 @@ void vtxDisplayList(u32 guestAddr, const u8* data, u32 size) {
     sBoxOn = true;
     sBoxAny = false;
     sSlotAny = 0;
+    sCpArrayDirty = 0;
     parse(data, size, false);
     detail::claimForLastDraw();  // the list's own colour writes belong to this draw
+    // Arrays the list pointed somewhere (g3d's shape pre-primitive lists): loaded again as a
+    // GXSetArray after it, so the primitive lists that follow read a copy of the data as it is now
+    // (vtxEndTape). Without it every g3d vertex array was read from guest memory when the tape was
+    // replayed, a game frame late: the CPU-built face shapes of the villagers (expressions) came
+    // from the next frame while their head was drawn with this frame's matrices, a dark crack along
+    // the face's edge at every in-between (branch face-seams).
+    static const bool sCpArrays = [] { const char* v = std::getenv("CF_DL_ARRAYS"); return !(v && *v == '0'); }();
+    if (sCpArrays && sParseTapeBase != ~0u)
+        for (int s = 0; s < kArrays; s++)
+            if ((sCpArrayDirty & (1u << s)) && sBind[s].valid && ramAvail(sBind[s].guest)) emitLoad(s);
+    sCpArrayDirty = 0;
     sBoxOn = false;
     if (sBoxAny) {
         const f32 c[3] = {0.5f * (sBoxLo[0] + sBoxHi[0]), 0.5f * (sBoxLo[1] + sBoxHi[1]), 0.5f * (sBoxLo[2] + sBoxHi[2])};

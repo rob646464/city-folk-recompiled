@@ -45,6 +45,9 @@ int vtxAttrSize(int fmt, int attr);
 unsigned char vtxDesc(int attr);
 // The VAT entry of `attr` in format `fmt` (component count, GXCompType, fraction bits).
 bool vtxAttrFormat(int fmt, int attr, unsigned char& cnt, unsigned char& type, unsigned char& frac);
+// A CP register write found in a display list or raw FIFO data (LOAD_CP_REG): VCD (0x50, 0x60) and
+// VAT (0x70-0x9F) update the layout above (NW4R g3d sets its shapes' layout in display lists).
+void cpRegWrite(unsigned char reg, unsigned int value);
 // An active TEV stage samples an EFB copy.
 bool samplesCopy();
 }  // namespace recomp::gx
