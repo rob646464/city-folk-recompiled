@@ -319,6 +319,46 @@ slots were not singled out (the house showed no hitches beyond the room load). S
 agents' game instances ran during most runs (GPU at 100 %), which inflates "Staging copies" and
 "Mask copy to buffer" to 1-3 ms and the intervals into the hundreds; compare A/B pairs only.
 
+## The once-a-minute freeze (2026-11-04, branch mem-hitch)
+
+User report (4K/120, Enhanced lighting Ultra, own town): `hitches 1` in every `[perf]` line,
+render worker / GPU max 683-852 ms once a minute, each `[mem]` line with "heaps 887 MB". Same cause
+as LM issue #43 (LM docs/RENDERING.md "The once-a-minute freeze"; BACKPORT "Taken from LM / SMS"):
+
+- The 60 s `[mem]` report (src/recomp/mem_report.cpp) ran on the host thread, and its C/C++ heap
+  total called `HeapSummary` on every process heap. `HeapSummary` walks every block of a heap while
+  holding that heap's lock: ~0.4 s for the ~650-760 MB of heaps here, 0.7-0.9 s for the user's
+  ~890 MB. Every thread that allocates meanwhile (render worker, Dawn, the driver, the guest's HLE
+  calls, audio) waits on the lock, so no frame is presented for that long.
+- Fix (same code as LM): the report runs on its own low-priority thread (the host thread only wakes
+  it); the heap total only with `CF_MEM_HEAPS=1` or `CF_MEM_TRACK` (knowing it stalls the game);
+  DXGI adapters enumerated once instead of every report; `[mem] report took N ms (sampler thread)`
+  when a report takes over 20 ms. The `[mem]` lines are otherwise unchanged ("heaps N MB" is gone
+  from the first one unless asked for).
+- **Rule: no heap walks or other whole-process queries on a frame or game thread** (host, render
+  worker, FIFO, guest, audio). Periodic work that needs one gets its own thread, and must not take
+  locks those threads need for long.
+
+Measured (the user's settings.ini at 3840x2160, 120 fps target, VSync off, `user-town-clean` +
+`tools/routes/perf_user_warp.txt`, warm caches, runs back to back; agent scratch
+`scratchpad/mem-hitch/run.ps1`, `gaps.py`):
+
+| run | `[mem]` interval | `[perf]` windows with a hitch after a `[mem]` report | stall per report | guest frames at 240 s |
+|---|---|---|---|---|
+| main (`CF_MEM_LOG=30 CF_PERF_LOG=10`, 250 s) | 30 s | 8 of 8 (render worker / GPU max 400-550 ms) | 400-580 ms | 14059 |
+| branch, same | 30 s | 0 of 8 | none (report < 20 ms on its thread) | 14211 |
+| branch, defaults (60 s), 330 s, `CF_PACING_LOG` | 60 s | 0 of 5 (`hitches 0` in every line; no start-to-start gap over 58 ms after the start-up) | none | - |
+| branch, `CF_MEM_HEAPS=1 CF_MEM_LOG=30` | 30 s | the stall is back, as designed | "report took 375-397 ms" | - |
+
+Other periodic work on frame threads checked: `[cpu]` sampling (per-frame
+GetCurrentProcessorNumberEx counters, one log line a minute), `[perf]` (sorts the minute's frame
+times), the display refresh / vblank monitor checks (cached SDL display mode, MonitorFromWindow every
+500 ms), the GPU memory query (now on the report thread), texture-pack stats (counters; on the host
+thread only with the `CF_TEXPACK_LOG` test aid), the GX object table collection (a scan of guest
+memory, 2-7 ms every ~18 s of play on the guest thread, not process-wide). The update check, the
+Wii Remote HID enumeration (every 2 s) and online/distribution work already run on their own
+threads. None is a whole-process query.
+
 ## Performance (2026-11-02)
 
 Measured with `verify.py --presets perf4k120 --routes nook --cache-from <warm cache>`

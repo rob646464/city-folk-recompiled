@@ -46,6 +46,14 @@ can take. Status: pending = not in LM/SMS yet.
 | 32 | GPU keep-warm filler starts only after 12 menu-light frames in a row (under 40% of `want`); it started whenever a frame took under 75% of `want`, so in play (4K, enhanced lighting: frames between 3 and 9 ms as the view changes) it switched on and off 350-900 times a minute, and the first heavier view after a filled frame carried scene + filler (a late frame). A/B `CF_KEEP_WARM_RULE=old` | src/recomp/pacing.cpp keepWarm | LM: same rule; LM's pause screen / GBH frames (0.5 ms) still qualify at once | pending |
 | 33 | Settings migration for changed defaults (`ao_version`): values still at the old defaults move to the new ones, changed values are kept (converted), one `[settings]` log line | src/port/settings.cpp migrateAo | LM: pattern for any default change (LM's AO is still on by default with the old curve) | n/a unless LM takes 0450 |
 
+## Taken from LM / SMS (LM -> CF)
+
+Fixes made in LM or SMS first and ported here.
+
+| What | LM source | Files here | Status |
+|---|---|---|---|
+| Once-a-minute freeze (branch mem-hitch, docs/RENDERING.md "The once-a-minute freeze"): the `[mem]` report no longer runs on the host thread; it wakes its own low-priority thread; the C/C++ heap total (`HeapSummary`, which walks every heap under its lock: 0.4-0.9 s) only with `CF_MEM_HEAPS=1` / `CF_MEM_TRACK`; DXGI adapters enumerated once; `[mem] report took N ms` when a report takes over 20 ms. Rule: no heap walks or other whole-process queries on a frame or game thread | LM issue #43 (branch issue43-stutter), LM docs/RENDERING.md "The once-a-minute freeze" | src/recomp/mem_report.cpp/.h | done (same code as LM, CF_ names) |
+
 ## Aurora patch series
 Same files as LM (patches/aurora, LM's 0001-0250 at Aurora 50e5be3), plus City Folk's 0300+
 (generic). Note: upstream Aurora has moved on (WPAD/KPAD implementations); we stay on LM's commit.
