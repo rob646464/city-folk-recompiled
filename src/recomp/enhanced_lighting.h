@@ -47,6 +47,12 @@ bool characterPass();
 void setEmissive(bool on);
 // Shadow-map caster pass (shadows.cpp: fn_8005D984 .. fn_8005D8CC): draws in it are class OTHER.
 void setCasterPass(bool on);
+// Branch shadow-casters (docs/RENDERING.md "Shadows of objects outside the view"): the following
+// draws are shadow casters only (Aurora 0470 AURORA_DRAW_CLASS_SHADOW: shadow maps, nothing else).
+// Only inside the scene bracket, outside the caster pass; reset by the caller after the object.
+void setShadowOnly(bool on);
+bool casterPass();  // inside setCasterPass(true) (City Folk: the stage's second root pass)
+bool inScene();     // inside beginScene .. endScene
 // Main view bracket (fn_8000BB98 hook): sends the frame's extra lights / the scene-end marker.
 void beginScene();
 void endScene();

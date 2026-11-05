@@ -90,6 +90,16 @@ d_s_stageNP::fn_125_C0 all
 # (+0x8 kind, +0x14 position): each object its own tag scope, keyed by its place.
 d_fg_drawNP::fn_112_2184 all
 
+# Shadows of objects outside the view (src/game/cf_shadow_casters.cpp, docs/RENDERING.md "Shadows
+# of objects outside the view"): the game camera's sphere-in-frustum test (field objects), daSTR_c's
+# draw and its cull test with the flat window / line tests inside (structures). g3d's
+# ScnObjGather::Add and ScnGroup::Insert are hooked by name.
+fn_802B777C all
+d_a_strNP::fn_99_2B04 all
+d_a_strNP::fn_99_2548 all
+fn_80166CDC all
+fn_8018ABC8 all
+
 # Online letters research (src/recomp/online_mail.cpp CF_MAIL_PROBE): Pelly's post office checks.
 fn_80177D78
 fn_801165F4

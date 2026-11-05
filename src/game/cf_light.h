@@ -4,6 +4,8 @@
 // grading, night lights.
 #include "recomp/ctx.h"
 
+#include <string>
+
 namespace recomp::cflight {
 // nw4r::lyt::Pane::Draw of a root pane (cf_hud.cpp): the 2D starts.
 void onLayoutDraw(Ctx& c);
@@ -24,4 +26,25 @@ bool groundAhead(const float view[12], float out[3]);
 void wantGroundFit();
 // The fitted log: its axis (parallel to world X through y = cy, z = cz) and the ground radius.
 bool logAxis(float& cy, float& cz, float& radius);
+// The main camera of the last scene (world -> view, MTX34); false before the first one.
+bool mainView(float view[12]);
+// A g3d scene object's model name ("" if none / not a model).
+std::string modelName(u32 scnObj);
+// Shadows of objects outside the view (src/game/cf_shadow_casters.cpp, docs/RENDERING.md "Shadows
+// of objects outside the view"): the sun / moon shadow light of this scene in the g3d world
+// (direction toward the light, unit), the same in the ground's frame (east, up, south), the sine
+// of its elevation over the ground in view, and how far its shadows are computed (view depth).
+// Called by submitSky while sun shadows are cast.
+void castersSetSun(const float dirWorld[3], const float dirLocal[3], float sinEl, float reach, u32 frame);
 }  // namespace recomp::cflight
+
+namespace recomp::cfcast {
+// d_fg_drawNP fn_112_2184 (cf_tags.cpp): a field object's visibility test and draw.
+void fgBegin();
+void fgEnd();
+// G3dProc of a g3d scene object (cf_tags.cpp): 0 as the game does, 1 a shadow caster only (the
+// object was culled, but its shadow reaches into the view), 2 not drawn (culled as the game does).
+int g3dDrawMode(u32 scnObj, u32 task);
+void shadowOnlyBegin();
+void shadowOnlyEnd();
+}  // namespace recomp::cfcast

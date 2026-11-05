@@ -1,0 +1,17 @@
+# Shadows of objects outside the view (branch shadow-casters; docs/RENDERING.md "Shadows of objects
+# outside the view"), CF_FIXTURE=user-town-clean: warp to the plaza in front of the town hall, then
+# walk slowly west, east, north and south with pauses, so trees, the town hall and the houses
+# leave the view at every edge. Run in the morning (CF_CLOCK_START ... 07:30, sun in the east:
+# shadows fall west / north-west) and in the evening (16:30-17:00, sun in the west). Items timed
+# from the arrival after the warp (the town reloads: d_bgo_drawNP #3).
+include warp.txt
++1600:WARP=town.plaza
+after link d_bgo_drawNP 3
++300:STICKLEFT*300
++420:STICKRIGHT*600
++720:STICKLEFT*300
++420:STICKUP*260
++380:STICKDOWN*520
++640:STICKUP*260
++380:STICK=0.7/0.7*240
++360:STICK=-0.7/-0.7*480

@@ -1,0 +1,234 @@
+diff --git a/include/aurora/enhanced.h b/include/aurora/enhanced.h
+--- a/include/aurora/enhanced.h
++++ b/include/aurora/enhanced.h
+@@ -25,6 +25,11 @@
+ #define AURORA_DRAW_CLASS_OTHER 0
+ #define AURORA_DRAW_CLASS_WORLD 1
+ #define AURORA_DRAW_CLASS_GHOST 2 // translucent world draws (ghosts): extra lights only with their translucent flag
++// 0470: a shadow caster only (an object outside the view whose shadow reaches into it): rendered
++// into the light shadow maps (opaque, depth-writing draws) and nowhere else: not the EFB pass, the
++// depth / normal pre-pass, ambient occlusion, the glow buffer, world-effect masks or EFB copies.
++// Draws of this class are always dropped from the main pass, also with shadow maps off.
++#define AURORA_DRAW_CLASS_SHADOW 3
+ 
+ typedef struct {
+   bool enabled; // master switch
+@@ -157,6 +162,8 @@
+ // 0028: shadow-map statistics of the last mask (shadowed lights, caster draws rendered into the
+ // atlas, caster draws skipped because their pipeline was still compiling).
+ void aurora_enhanced_shadow_stats(uint32_t* lights, uint32_t* casters, uint32_t* skipped);
++// 0470: AURORA_DRAW_CLASS_SHADOW draws recorded as shadow-map casters in the last recorded frame.
++uint32_t aurora_enhanced_shadow_class_draws(void);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/lib/gfx/enhanced.hpp b/lib/gfx/enhanced.hpp
+--- a/lib/gfx/enhanced.hpp
++++ b/lib/gfx/enhanced.hpp
+@@ -57,6 +57,9 @@
+ // flashlight capture).
+ // True: drop the draw (debug aid AURORA_ENH_HIDE_ADDITIVE).
+ bool note_draw(const gx::PipelineConfig& config, uint8_t drawClass, uint32_t vtxCount, const gx::DrawData& data) noexcept;
++// 0470: the caster-only draw (AURORA_DRAW_CLASS_SHADOW) the last note_draw recorded, or null: the
++// next draw with unchanged GX state is merged into it (like draw_prim merges recorded draws).
++gx::DrawData* last_caster_only_draw() noexcept;
+ // An EFB copy cleared `fraction` of the EFB color: emissive draws recorded before a large clear
+ // are no longer in the picture.
+ void efb_cleared(float fraction, bool color, bool depth) noexcept;
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -165,6 +165,7 @@
+   uint32_t tevStages = 0;
+   bool lit = false;
+   bool nrm = false; // 0224: depth pre-pass pipeline built for depth_normal_layout (AO normals)
++  bool casterOnly = false; // 0470: AURORA_DRAW_CLASS_SHADOW: shadow-map atlas only, not the pre-pass
+ };
+ std::vector<GlowDraw> g_glowDraws;
+ 
+@@ -186,6 +187,9 @@
+ size_t g_depthFlushed = 0;   // g_depthDraws already resolved and in a queued mask
+ uint32_t g_maskW = 0, g_maskH = 0, g_maskPitch = 0; // pitch in u32 words
+ std::atomic<uint32_t> g_statLights{0}, g_statCasters{0}, g_statSkipped{0};
++uint32_t g_shadowClassDraws = 0;              // 0470: caster-only draws recorded this frame (FIFO thread)
++size_t g_lastCasterOnly = SIZE_MAX;           // 0470: g_depthDraws index of the last note_draw's caster-only draw
++std::atomic<uint32_t> g_statShadowClass{0};   // 0470: ... in the last finished frame
+ uint32_t g_lightGen = 0;                  // bumped when the lights or the configuration change
+ uint64_t g_maskKey = ~0ull;               // light gen / atlas / mask layout of the last mask
+ bool shadow_maps() noexcept;
+@@ -2206,7 +2210,7 @@
+   // the normal-target pipeline (AO was on when it was recorded), else none is drawn with normals.
+   bool normals = job.ao;
+   for (size_t i = 0; i < job.draws.size() && normals; ++i) {
+-    normals = job.draws[i].nrm;
++    normals = job.draws[i].nrm || job.draws[i].casterOnly; // 0470: caster-only draws are not in the pre-pass
+   }
+   if (normals) {
+     const auto* prevNormal = g_gpu.maskNormal.texture.Get();
+@@ -2255,8 +2259,8 @@
+     const float sx = 1.f / std::max(job.scaleBack, 1e-3f), sy = sx;
+     for (size_t i = fromDepth; i < job.draws.size(); ++i) {
+       const auto& g = job.draws[i];
+-      if (g.nrm != normals) {
+-        continue; // 0224: built for the other pre-pass layout (AO switched within the frame)
++      if (g.nrm != normals || g.casterOnly) {
++        continue; // 0224: built for the other pre-pass layout (AO switched within the frame); 0470: atlas only
+       }
+       const auto& vp = g.viewport;
+       const float minDepth = gx::UseReversedZ ? 1.f - vp.zfar : vp.znear;
+@@ -2811,6 +2815,9 @@
+ 
+ uint8_t shader_class(const gx::ShaderConfig& sc, uint8_t drawClass, bool blended, bool additive) noexcept {
+   static const bool sNoVariant = std::getenv("AURORA_ENH_NOVARIANT") != nullptr; // debug aid
++  if (drawClass == AURORA_DRAW_CLASS_SHADOW) {
++    drawClass = AURORA_DRAW_CLASS_WORLD; // 0470: the world draw's own pipeline (never drawn; its caster variant is)
++  }
+   if (sNoVariant || !g_cfg.enabled || drawClass == AURORA_DRAW_CLASS_OTHER || additive || sc.lineMode != 0 || sc.wireframe ||
+       gx::g_gxState.projType != GX_PERSPECTIVE) {
+     return 0;
+@@ -3538,6 +3545,50 @@
+     return true;
+   }
+   const auto& st = gx::g_gxState;
++  g_lastCasterOnly = SIZE_MAX;
++  if (drawClass == AURORA_DRAW_CLASS_SHADOW) {
++    // 0470: shadow caster only. Opaque depth-writing perspective draws go into the shadow-map atlas
++    // of this frame's shadowed lights (like the casters of the world draws below); nothing of it is
++    // drawn in the EFB pass or recorded for the pre-pass, AO, glow or world effects.
++    static const bool sShow = std::getenv("AURORA_ENH_SHADOW_CLASS_SHOW") != nullptr; // debug: draw them normally too
++    const bool pointShadows = g_shadowCount > 0 && g_cfg.extraLights && g_cfg.extraShadows;
++    if (pointShadows && shadow_maps() && st.projType == GX_PERSPECTIVE && config.depthCompare && config.depthUpdate &&
++        !(config.blendMode == GX_BM_BLEND && config.blendFacDst == GX_BL_ONE) && config.shaderConfig.lineMode == 0 &&
++        config.shaderConfig.zTexOp == 0 && g_depthDraws.size() < MaxDepthDraws && !is_offscreen()) {
++      static std::unordered_map<PipelineRef, PipelineRef> sCasterOnly;
++      GlowDraw g{.data = data, .viewport = current_viewport(), .scissor = current_scissor()};
++      g.casterOnly = true;
++      g.nrm = ao_forward();
++      g.data.dstAlpha = UINT32_MAX;
++      if (const auto it = sCasterOnly.find(data.pipeline); it != sCasterOnly.end()) {
++        g.lightPipe = it->second;
++      } else {
++        // The same caster variant as a world draw's (below): one pipeline for both.
++        gx::PipelineConfig lc = config;
++        lc.colorUpdate = false;
++        lc.alphaUpdate = false;
++        lc.dstAlpha = UINT32_MAX;
++        lc.shaderConfig.depthOnly = 1;
++        lc.shaderConfig.lightDepth = 1;
++        lc.depthCompare = true;
++        lc.depthUpdate = true;
++        lc.depthFunc = GX_LEQUAL;
++        lc.cullMode = GX_CULL_NONE;
++        lc.polygonOffsetBits = 0;
++        lc.polygonOffsetScaleBits = 0;
++        static const RenderTargetLayout layout = depth_layout();
++        g.lightPipe = find_pipeline(lc, layout);
++        sCasterOnly.emplace(data.pipeline, g.lightPipe);
++      }
++      // Not recorded in the pass: no command of its own to refresh merged ranges from (the next
++      // recorded command is another draw), its ranges are final.
++      g.pass = UINT32_MAX;
++      g_lastCasterOnly = g_depthDraws.size();
++      g_depthDraws.push_back(g);
++      ++g_shadowClassDraws;
++    }
++    return !sShow;
++  }
+   ++g_segDraws[std::min<uint8_t>(drawClass, 2)];
+   if (st.projType != GX_PERSPECTIVE) {
+     drawClass = AURORA_DRAW_CLASS_OTHER; // 2D quads inside the 3D view (ghost-layer composite, screen copies)
+@@ -4047,6 +4098,11 @@
+   }
+   static const bool sFull = std::getenv("AURORA_ENH_MASK_FULL") != nullptr; // A/B: every mask complete
+   job.incremental = job.firstNew > 0 && (job.ao || job.cube) && !sFull;
++  // 0470: a new caster-only draw changes the atlas without changing the pre-pass depth that the
++  // incremental mask looks for: recompute the whole mask then.
++  for (size_t i = job.firstNew; i < job.draws.size() && job.incremental; ++i) {
++    job.incremental = !job.draws[i].casterOnly;
++  }
+   u.ao[2] = job.incremental ? 8.f : 0.f;
+   job.uniform = push_uniform(reinterpret_cast<const uint8_t*>(&u), sizeof(u));
+   std::vector<efb_ram::PassOp> ops;
+@@ -4115,7 +4171,18 @@
+   }
+ }
+ 
++gx::DrawData* last_caster_only_draw() noexcept {
++  if (g_lastCasterOnly >= g_depthDraws.size() || !g_depthDraws[g_lastCasterOnly].casterOnly ||
++      g_lastCasterOnly < g_depthFlushed) {
++    return nullptr; // (a flushed draw is already in a queued mask job: not extended any more)
++  }
++  return &g_depthDraws[g_lastCasterOnly].data;
++}
++
+ void begin_frame() noexcept {
++  g_lastCasterOnly = SIZE_MAX;
++  g_statShadowClass.store(g_shadowClassDraws, std::memory_order_relaxed);
++  g_shadowClassDraws = 0;
+   g_glowDraws.clear();
+   g_depthDraws.clear();
+   g_depthFlushed = 0;
+@@ -4633,6 +4700,10 @@
+   }
+ }
+ 
++uint32_t aurora_enhanced_shadow_class_draws(void) {
++  return aurora::gfx::enhanced::g_statShadowClass.load(std::memory_order_relaxed);
++}
++
+ uint32_t aurora_enhanced_last_light_count(void) {
+   return aurora::gfx::enhanced::g_lastLightCount.load(std::memory_order_relaxed);
+ }
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -174,6 +174,7 @@
+   FogRangeLutKey fogRangeKey{};
+   bool hasFogRange = false;
+   GXVtxFmt lastDrawFmt = GX_MAX_VTXFMT;
++  bool casterOnlyLast = false; // 0470: the last draw was a recorded caster-only draw (merge into it)
+   u8 efbBlend6 = 0; // g_drawEfbBlend6 of the cached pipeline
+   // Early-Z split (0170/0182): decision and the two pipelines, for the cached pipeline.
+   gfx::PipelineRef splitFor{};
+@@ -1314,9 +1315,18 @@
+   }
+   if (gfx::enhanced::config().enabled) {
+     if (gfx::enhanced::note_draw(cache.config, state.drawClass, vtxCount, drawData)) {
+-      return; // debug: hidden
+-    }
+-  }
++      // Not recorded (hidden, or 0470 a shadow caster only): the next draw must not be merged into
++      // the last recorded command (draw_prim extends it when the GX state is unchanged), or its
++      // geometry would be drawn with that command, indexed past the vertices it skipped. A recorded
++      // caster-only draw takes the next ones instead (same state: same object).
++      cache.casterOnlyLast = gfx::enhanced::last_caster_only_draw() != nullptr;
++      if (!cache.casterOnlyLast) {
++        cache.lastDrawFmt = GX_MAX_VTXFMT;
++      }
++      return;
++    }
++  }
++  cache.casterOnlyLast = false;
+   if (state.surfaceKind != 0 && gfx::world_fx::active()) [[unlikely]] {
+     gfx::world_fx::note_draw(cache.config, state.surfaceKind, drawData); // 0350
+   }
+@@ -1575,7 +1585,9 @@
+   const bool cleanState = g_gxState.dirty == 0 && !g_gxState.wireframe && fmt == sDrawCache.lastDrawFmt &&
+                           sDrawCache.lineMode == 0 &&
+                           prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS;
+-  auto* lastDraw = cleanState ? gfx::get_last_draw_command<DrawData>() : nullptr;
++  // 0470: after a caster-only draw, its recorded copy is the draw to extend.
++  const bool casterOnly = cleanState && sDrawCache.casterOnlyLast;
++  auto* lastDraw = !cleanState ? nullptr : casterOnly ? gfx::enhanced::last_caster_only_draw() : gfx::get_last_draw_command<DrawData>();
+   const bool canMerge = lastDraw != nullptr && lastDraw->instanceCount == 1;
+ 
+   // Push raw vertex data to buffer. Merged draws must remain contiguous with the previous range.
+@@ -1615,7 +1627,7 @@
+     lastDraw->indexCount += numIndices;
+     // 0182: the last command is the colour half of an early-Z split pair: its depth half (the
+     // command before it, same geometry) is extended alike.
+-    if (sDrawCache.split && sDrawCache.splitValid && lastDraw->pipeline == sDrawCache.splitColor) {
++    if (!casterOnly && sDrawCache.split && sDrawCache.splitValid && lastDraw->pipeline == sDrawCache.splitColor) {
+       if (auto* depthHalf = gfx::get_draw_command_before_last();
+           depthHalf != nullptr && depthHalf->pipeline == sDrawCache.splitDepth) {
+         depthHalf->vertRange = lastDraw->vertRange;
