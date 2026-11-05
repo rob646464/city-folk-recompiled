@@ -105,7 +105,6 @@ std::vector<Field> fields() {
         flag("rendering", "texture_copy_filter", r.textureCopyFilter),
         flag("rendering", "efb_copy_to_ram", sSettings.rendering.efbCopyToRam),
         flag("rendering", "vertex_snapshot", r.vtxSnapshot),
-        flag("rendering", "gpu_keep_warm", r.gpuKeepWarm),
         flag("rendering", "shadow_render_resolution", r.shadowRenderResolution),
         flag("rendering", "shadow_widescreen", r.shadowWidescreen),
         flag("rendering", "shadow_any_distance", r.shadowAnyDistance),

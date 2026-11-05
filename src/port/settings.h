@@ -189,9 +189,6 @@ struct RenderingSettings {
     // flicker (CPU/GPU timing race; docs/RENDERING.md "Vertex snapshots"). Interpolated frame
     // rates snapshot anyway.
     bool vtxSnapshot = true;
-    // Keep the GPU clocks up when a frame is much lighter than play (menus over a still picture):
-    // filler GPU work so the first frames after it are not 5-7x slower (pacing.cpp, Aurora 0215).
-    bool gpuKeepWarm = true;
     // Shadows (docs/RENDERING.md, "Shadows"). The game's shadow map (light's-view depth, copied
     // as Z16 and compared in the TEV) at the internal render resolution instead of 640x480.
     bool shadowRenderResolution = true;

@@ -685,7 +685,12 @@ bool presentTimingAvailable() {
 
 bool keepWarmAvailable() { return presentTimingAvailable(); }
 
-bool keepWarmOn() { return keepWarmAvailable() && port::settings().rendering.gpuKeepWarm; }
+// Off in City Folk (user decision 2026-11-04): the game keeps drawing its world under every menu,
+// so there are no light menu frames for the GPU to clock down in. CF_KEEP_WARM=1 turns it on (test aid).
+bool keepWarmOn() {
+    static const bool sOn = [] { const char* e = std::getenv("CF_KEEP_WARM"); return e && *e == '1'; }();
+    return sOn && keepWarmAvailable();
+}
 
 bool vsyncOn() {
     static const bool sKeep = [] { const char* e = std::getenv("CF_GAMESCOPE_VSYNC"); return e && *e == '0'; }();

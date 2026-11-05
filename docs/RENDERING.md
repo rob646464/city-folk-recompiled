@@ -286,6 +286,9 @@ CF_PIPELINE_LOG=1 AURORA_CREATE_LOG=1`; agent scratch perfrun.py / perfsum.py). 
    the recent heavy level, 30-125 times a minute in play here (user: 92 in the first minute); each
    time the view got heavier the frame carried scene + filler. Now only after 12 menu-light frames
    in a row (under 40%); A/B `CF_KEEP_WARM_RULE=old`.
+   Since then the keep-warm is **off** in City Folk and its F1 option is gone (user decision
+   2026-11-04): the game keeps drawing its world under every menu, so the GPU never gets the light
+   menu frames it was made for (LM's pause screen). `CF_KEEP_WARM=1` turns it on for tests.
 
 5. **Ambient occlusion's cost at 4K**: with AO on, per frame +0.75 ms in the EFB pass (the AO mask
    taps), 0.53 ms of AO passes, +0.5 ms mask copies (its plane), more staging: busy 8.2 vs 5.3 ms
