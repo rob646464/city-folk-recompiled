@@ -497,6 +497,46 @@ bool gx::samplesCopy() {
     return false;
 }
 u8 gx::vtxDesc(int attr) { return attr < GX_VA_MAX_ATTR ? sDesc[attr] : 0; }
+void gx::cpRegWrite(u8 reg, u32 v) {
+    const auto bits = [&](int lo, int n) { return u8((v >> lo) & ((1u << n) - 1)); };
+    const u32 fmt = reg & 7;
+    switch (reg & 0xF0) {
+    case 0x50:  // VCD low: matrix indices (1 bit: direct or none), position, normal, colours
+        sDesc[GX_VA_PNMTXIDX] = bits(0, 1);
+        for (int t = 0; t < 8; t++) sDesc[GX_VA_TEX0MTXIDX + t] = bits(1 + t, 1);
+        sDesc[GX_VA_POS] = bits(9, 2);
+        sDesc[GX_VA_NRM] = bits(11, 2);
+        sDesc[GX_VA_CLR0] = bits(13, 2);
+        sDesc[GX_VA_CLR1] = bits(15, 2);
+        break;
+    case 0x60:  // VCD high: texture coordinates
+        for (int t = 0; t < 8; t++) sDesc[GX_VA_TEX0 + t] = bits(2 * t, 2);
+        break;
+    case 0x70:  // VAT group 0
+        if (reg & 8) break;
+        sVat[fmt][GX_VA_POS] = {bits(0, 1), bits(1, 3), bits(4, 5)};
+        sVat[fmt][GX_VA_NRM] = {u8(bits(9, 1) ? (bits(31, 1) ? GX_NRM_NBT3 : GX_NRM_NBT) : GX_NRM_XYZ), bits(10, 3), 0};
+        sVat[fmt][GX_VA_CLR0] = {bits(13, 1), bits(14, 3), 0};
+        sVat[fmt][GX_VA_CLR1] = {bits(17, 1), bits(18, 3), 0};
+        sVat[fmt][GX_VA_TEX0] = {bits(21, 1), bits(22, 3), bits(25, 5)};
+        break;
+    case 0x80:  // VAT group 1
+        if (reg & 8) break;
+        sVat[fmt][GX_VA_TEX1] = {bits(0, 1), bits(1, 3), bits(4, 5)};
+        sVat[fmt][GX_VA_TEX2] = {bits(9, 1), bits(10, 3), bits(13, 5)};
+        sVat[fmt][GX_VA_TEX3] = {bits(18, 1), bits(19, 3), bits(22, 5)};
+        sVat[fmt][GX_VA_TEX4].cnt = bits(27, 1), sVat[fmt][GX_VA_TEX4].type = bits(28, 3);
+        break;
+    case 0x90:  // VAT group 2
+        if (reg & 8) break;
+        sVat[fmt][GX_VA_TEX4].frac = bits(0, 5);
+        sVat[fmt][GX_VA_TEX5] = {bits(5, 1), bits(6, 3), bits(9, 5)};
+        sVat[fmt][GX_VA_TEX6] = {bits(14, 1), bits(15, 3), bits(18, 5)};
+        sVat[fmt][GX_VA_TEX7] = {bits(23, 1), bits(24, 3), bits(27, 5)};
+        break;
+    default: break;
+    }
+}
 bool gx::vtxAttrFormat(int fmt, int attr, u8& cnt, u8& type, u8& frac) {
     if (fmt >= GX_MAX_VTXFMT || attr >= GX_VA_MAX_ATTR) return false;
     cnt = sVat[fmt][attr].cnt, type = sVat[fmt][attr].type, frac = sVat[fmt][attr].frac;

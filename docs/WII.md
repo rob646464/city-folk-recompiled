@@ -282,6 +282,40 @@ warp to the plaza, walk / run in 8 directions); runs with a copy of the user's s
   120 Hz). On a display that really follows the presents that is smooth; captured at a fixed 120
   it repeats frames. Not changed here (pacing); worth asking whether G-Sync is on in windowed mode.
 
+### Face seams at high frame rates (branch face-seams)
+
+User report (4K, 120 Hz display with "Match display refresh rate", Enhanced lighting Ultra): a dark
+line along the edge of Rover's face patch (across the forehead, down the sides) in the bus. **Not
+Enhanced lighting**: the line is there with Enhanced lighting off as well and never at Original 60;
+it comes from frame interpolation (any target above the game's 60). Route: `continue.txt` from
+user-town-clean, `video.target_fps=120`, shots of game frames 1950-2550.
+
+- The crack is the background seen between two shapes of the head: the face shape (one matrix,
+  `LoadResShpPrimitive`) and the skinned head around it (envelope matrices in the PN slots), whose
+  edge vertices meet. With every value shown as captured (`CF_INTERP_NOBLEND=0x3F`) it stayed: the
+  tape replay itself drew the two shapes from different game frames.
+- **Vertex arrays of g3d models were never copied into the tape** (interp_vtx.cpp). NW4R g3d sets
+  each shape's vertex layout (VCD/VAT) and array bases with LOAD_CP_REG commands inside its shape
+  display lists, with physical addresses (0x0xxxxxxx MEM1, 0x1xxxxxxx MEM2) and most model data in
+  MEM2. The tape's vertex scan knew neither: the layout came only from the GXSetVtxDesc/AttrFmt HLEs
+  (the shape lists' draws could not be sized: ~105 "unparsed streams" per log period in the bus),
+  the arrays only from the GXSetArray HLE, and only MEM1 (0x8/0xC) arrays were copied. So Aurora
+  read every g3d vertex array from guest memory at replay, a game frame late: shapes the CPU
+  rebuilds every frame (the villagers' face expressions) came from the next frame while the rest of
+  the head was drawn with this frame's matrices.
+- Now, while a tape is captured, the layout written by a display list updates the port's VCD/VAT
+  mirror (`gx::cpRegWrite`, hle_gx.cpp), array base/stride writes in a list are followed like
+  GXSetArray and loaded again as a GXSetArray after the list (g3d's pre-primitive list), so the
+  primitive lists after it read a copy taken at capture (and CPU-deformed position arrays can be
+  paired and blended); MEM2 and physical addresses are accepted (`ramAvail`). Bus: 0 unparsed
+  streams, ~20 arrays (12 KB) copied per tape. A/B `CF_DL_LAYOUT=0`, `CF_DL_ARRAYS=0`.
+- Original 60 is unchanged by construction (all of it runs only while a tape is captured; the
+  lockstep draw-time snapshots keep their MEM1-only check), and no Enhanced lighting code changed.
+- Left: a faint dotted line (under a pixel at 1368p) at some in-betweens: the face's single matrix
+  and the head's envelope matrices take slightly different in-between paths (gone with position
+  matrices shown as captured, `CF_INTERP_NOBLEND=0x1`; entrywise blending of the instance does not
+  remove it). The player's face (the town, 120 fps) had no seam before or after.
+
 ## IOS (Starlet)
 
 The game reaches every device through IPC to IOS (`IOS_Open/Ioctl(v)/Read/Write`). Decision
