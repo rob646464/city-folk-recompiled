@@ -270,6 +270,18 @@ warp to the plaza, walk / run in 8 directions); runs with a copy of the user's s
   holds the last one (600 frames) instead of falling back. Same frames at 16:57: shadows as with
   the old mean (evidence in the agent scratch), steps max 0.015 degrees per frame outside the warp;
   10:00 unchanged. A/B `CF_SUN_UP=ahead` (interp-town's), `=mean` (the old).
+- **Leaves on slopes (branch leaves-slope, user report on main c789775)**: the focus point itself
+  is analytic (the fitted log, not the terrain) and steady, but Aurora's effects "metre" came from
+  the focus distance, which changes as the camera rises or sinks on a slope (CF_WFX_FOCUS_LOG=1:
+  440 -> 411 units, 7 %, going down south of the upper level). The particle field is laid out in
+  that unit around a world position, so the whole field slid by its world offset x the scale
+  change and zoomed. Aurora 0442: with a focus given and `worldScale` > 1.5, that fixed scale is
+  used (CF: 14.7 = what the distance gave on flat ground); the log's ground radius only switches
+  while the fit is young (a late switch moved the frame in one step). Route
+  tools/routes/slope_probe.txt (upper level at 7 x positions, walking south down the slopes).
+  Leaves tracked frame to frame on the slopes at 60 (TP frames excluded): p90 jerk 1.4-1.6 ->
+  0.7-0.9 px, frames with every leaf jumping 4 -> 0; beach slope 9 -> 1 (the camera stopping);
+  flat town p99 2.6 px, 0. 120 fps on the slopes: 0.
 - **Leaves** (not interpolation): Aurora's world effects centred their particle volume and scale on
   the scene depth under one pixel near the view's middle (the player, a tree, the ground behind as
   they passed under it), and the port's effects frame snapped the world's up to one of six axes,

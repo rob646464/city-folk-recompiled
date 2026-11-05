@@ -1,0 +1,32 @@
+diff --git a/include/aurora/world_fx.h b/include/aurora/world_fx.h
+--- a/include/aurora/world_fx.h
++++ b/include/aurora/world_fx.h
+@@ -101,7 +101,8 @@ typedef struct {
+   uint32_t particles;
+   float particleDensity; // 0..2
+   float wind[2];         // horizontal drift (effect metres per second, world x / z)
+-  float worldScale;      // unused (the scale comes from the focus distance)
++  float worldScale;      // 0442: world units per "metre" while AURORA_WORLD_FX_XF_FOCUS is given (> 1.5;
++                         // else, and without a focus, the scale comes from the focus distance)
+ 
+   bool freezeTime;       // test aid: effect time fixed (deterministic shots)
+ } AuroraWorldFxConfig;
+diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
+--- a/lib/gfx/world_fx.cpp
++++ b/lib/gfx/world_fx.cpp
+@@ -246,7 +246,14 @@ fn focus_v() -> vec3f {
+   return p;
+ }
+ // "One metre" for the effects: an eighth of the view height at the focus distance.
+-fn wscale(f: vec3f) -> f32 { return max(2.0 * (-f.z) / max(abs(u.proj.y), 1e-3) / 8.0, 1e-3); }
++// 0442: with the application's focus point (0440) and a world scale in the configuration, "a metre"
++// is that fixed scale: from the focus distance it changed whenever the camera rose or sank (slopes,
++// steps between levels), and the particle field, laid out in that unit around a world position,
++// slid and zoomed as a whole (falling leaves "freaking out" on slopes).
++fn wscale(f: vec3f) -> f32 {
++  if (u.fv.w > 0.5 && u.part.z > 1.5) { return u.part.z; }
++  return max(2.0 * (-f.z) / max(abs(u.proj.y), 1e-3) / 8.0, 1e-3);
++}
+ 
+ // Normal of the surface at px from a depth source (0 scene, 1 mask), the side with the smaller step.
+ fn depth_normal(px: vec2f, src: i32) -> vec3f {

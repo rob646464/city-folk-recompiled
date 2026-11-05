@@ -59,8 +59,13 @@
 namespace recomp {
 namespace world {
 
-// World units per metre-ish (particle sizes, ripple cells, puddle noise).
-constexpr float kWorldScale = 20.0f;
+// World units per "metre" of the effects (particle sizes and their volume, ripple cells, puddle
+// noise) while the port gives Aurora the effects' centre (0440, the town's log): Aurora 0442 then
+// uses it instead of a scale from the centre's distance, which changed with the camera's height on
+// slopes and steps (the leaf field slid and zoomed: branch leaves-slope). 14.7 = what the distance
+// gave on flat ground in the town (centre 296 units away, projection p11 5.03: 2 x 296 / 5.03 / 8),
+// so the look there is unchanged. Elsewhere (no centre given) Aurora keeps the distance scale.
+constexpr float kWorldScale = 14.7f;
 void endWorld();
 void onLayoutDraw();
 
@@ -614,12 +619,16 @@ void endWorld() {
         // leaves' volume and their scale jumped while walking, at any frame rate (branch
         // interp-town). No fit (indoors, the city, the first frames): zero = Aurora's depth centre.
         float fm[12] = {};
-        float g[3];
+        float g[3] = {0.0f, 0.0f, 0.0f};
         static const bool sDepthCentre = envFlag("CF_WFX_DEPTH_FOCUS");  // A/B: the old centre
         if (!sDepthCentre && cflight::groundAhead(view, g)) {
             std::memcpy(fm, w, sizeof fm);
             for (int r = 0; r < 3; r++) fm[r * 4 + 3] = view[r * 4] * g[0] + view[r * 4 + 1] * g[1] + view[r * 4 + 2] * g[2] + view[r * 4 + 3];
         }
+        static const bool sFocusLog = envFlag("CF_WFX_FOCUS_LOG");  // test aid: the centre every frame
+        if (sFocusLog)
+            log("[wfx] f%u focus world %.1f %.1f %.1f view %.1f %.1f %.1f cam t %.1f %.1f %.1f", game::guestFrames(), g[0], g[1], g[2],
+                fm[3], fm[7], fm[11], view[3], view[7], view[11]);
         interp::TagScope tag(interp::TagCat::Object, 0xCF57F001u, 0x57F1u, 0);
         const u32 at = interp::mark();
         GXLoadAppXfAurora(AURORA_WORLD_FX_XF_FOCUS, fm, 12);
