@@ -42,6 +42,7 @@ bool sPerfNoMap = false;
 bool sGhostPass = false;
 bool sCharPass = false;
 bool sEmissive = false;
+bool sShadowOnly = false;  // branch shadow-casters: an off-screen object drawn into the shadow maps only
 u8 sMaterial = 0xFF;  // last material hint sent
 
 // Extra lights submitted for the coming main view (guest thread only). Providers (ghost lights,
@@ -587,7 +588,8 @@ void emitMaterial();
 void emitClass() {
     if (!masterOn()) return;
     u8 cls = AURORA_DRAW_CLASS_OTHER;
-    if (sInScene && !sInCaster && active()) cls = sGhostPass ? AURORA_DRAW_CLASS_GHOST : AURORA_DRAW_CLASS_WORLD;
+    if (sInScene && !sInCaster && active())
+        cls = sShadowOnly ? AURORA_DRAW_CLASS_SHADOW : sGhostPass ? AURORA_DRAW_CLASS_GHOST : AURORA_DRAW_CLASS_WORLD;
     if (cls == sClass) return;
     GXSetDrawClassAurora(cls);
     sClass = cls;
@@ -629,6 +631,14 @@ void setEmissive(bool on) {
     emitMaterial();
 }
 
+void setShadowOnly(bool on) {
+    if (sShadowOnly == on) return;
+    sShadowOnly = on;
+    emitClass();
+}
+bool casterPass() { return sInCaster; }
+bool inScene() { return sInScene; }
+
 void setCasterPass(bool on) {
     if (sInCaster == on) return;
     sInCaster = on;
@@ -649,6 +659,7 @@ void beginScene() {
     sMaterial = 0xFF;
     sSceneCount++;
     sInScene = true;
+    sShadowOnly = false;
     emitClass();
     emitMaterial();
     if (!active()) return;
@@ -676,6 +687,7 @@ void beginScene() {
 void endScene() {
     sInScene = false;
     sEmissive = false;
+    sShadowOnly = false;
     emitClass();
     emitMaterial();
     if (active()) GXSceneEndAurora();

@@ -489,6 +489,31 @@ void submitSky() {
     }
     if (!s.sunShadows) l.box[0] = l.box[1] = l.box[2] = 1.0f;
     submitExtraLights(&l, 1);
+    // Shadows of objects outside the view (cf_shadow_casters.cpp): the light's direction in the g3d
+    // world, how steep it is over the ground in view, how far its shadows are computed.
+    if (s.sunShadows && !indoor && sky.strength > 0.002f) {
+        float w[3];
+        for (int k = 0; k < 3; k++) w[k] = sView[k] * l.pos[0] + sView[4 + k] * l.pos[1] + sView[8 + k] * l.pos[2];
+        const float wl = std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+        if (wl > 1e-4f) {
+            for (float& v : w) v /= wl;
+            // Elevation over the local ground: the time-of-day light is held >= 12 degrees up in the
+            // ground's frame (sky.dir[1]); the game's key light against the mean object up.
+            // Its direction in the ground's own frame (east = world X, up, south = east x up) for the
+            // game's flat-coordinate tests (structures).
+            float local[3] = {sky.dir[0], sky.dir[1], sky.dir[2]};
+            if (s.sunDirection == 1) {
+                const float* U = sLocalUp;
+                const float S[3] = {0.0f, -U[2], U[1]};
+                local[0] = w[0], local[1] = w[0] * U[0] + w[1] * U[1] + w[2] * U[2], local[2] = w[0] * S[0] + w[1] * S[1] + w[2] * S[2];
+                const float hl = std::sqrt(local[0] * local[0] + local[2] * local[2]);
+                if (local[1] < 0.2079f && hl > 1e-4f)  // held >= 12 degrees up, like the time-of-day light
+                    local[0] = local[0] / hl * 0.9781f, local[2] = local[2] / hl * 0.9781f, local[1] = 0.2079f;
+            }
+            const float sinEl = std::clamp(local[1], 0.2079f, 1.0f);  // sin 12 deg
+            castersSetSun(w, local, sinEl, std::min(l.radius, l.box[6]), copyDispCount());
+        }
+    }
     if (logNow())
         log("[sky] f%u %02d:%02d yday %d weather %d dir %.2f %.2f %.2f view %.2f %.2f %.2f tint %.2f %.2f %.2f I %.2f soft %.3f",
             copyDispCount(), sClock.hour, sClock.min, sClock.yday, sWeather, sky.dir[0], sky.dir[1], sky.dir[2], l.pos[0], l.pos[1],
@@ -586,6 +611,16 @@ const ModelInfo& modelInfo(u32 obj) {
     return mi;
 }
 const bool sModelLog = std::getenv("CF_MODEL_LOG") != nullptr;
+}  // namespace
+
+bool mainView(float view[12]) {
+    if (!sViewValid) return false;
+    std::memcpy(view, sView, sizeof sView);
+    return true;
+}
+std::string modelName(u32 scnObj) { return modelInfo(scnObj).name; }
+
+namespace {
 
 // ---- night lights ----
 // Sources by model name: lit windows of houses and shops (a warm light in front of the building at

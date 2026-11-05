@@ -71,10 +71,16 @@ HLE(DrawXlu__Q34nw4r3g3d7ScnRootFv) {
 namespace {
 void objectScope(Ctx& c, const char* name) {
     const u32 obj = c.r[3];
-    if (!cflight::onModel(c, obj)) return;
+    // A culled object kept for its shadow (cf_shadow_casters.cpp): a shadow caster only, never
+    // drawn in the picture; tagged like any other object, so it blends when it comes into view.
+    const int cast = cfcast::g3dDrawMode(obj, c.r[4]);
+    if (cast == 2) return;
+    if (cast == 0 && !cflight::onModel(c, obj)) return;
     interp::TagScope t(interp::TagCat::Object, obj, rd32(obj), c.r[4]);
     interp::tagGroupIfNone(obj);
+    if (cast == 1) cfcast::shadowOnlyBegin();
     callOriginal(c, name);
+    if (cast == 1) cfcast::shadowOnlyEnd();
 }
 }  // namespace
 
@@ -122,13 +128,22 @@ static void fgObjDraw(Ctx& c) {
         return !(v && *v == '0');
     }();
     const u32 rec = c.r[3];
-    if (!sOn || !interp::capturing() || rec < 0x80000000u) return callOriginal(c, kName);
+    // (cf_shadow_casters.cpp: the object's visibility test inside may keep it as a shadow caster)
+    cfcast::fgBegin();
+    if (!sOn || !interp::capturing() || rec < 0x80000000u) {
+        callOriginal(c, kName);
+        cfcast::fgEnd();
+        return;
+    }
     const u32 x = rd32(rec + 0x14), y = rd32(rec + 0x18), z = rd32(rec + 0x1C), kind = rd32(rec + 0x8);
     // The place as the identity (not an address: draw order and record reuse do not matter). The
     // object word stays below guest memory, so freeing guest memory never bumps its generation.
     const u32 place = ((x * 0x9E3779B1u) ^ (z * 0x85EBCA77u) ^ (y * 0xC2B2AE35u)) & 0x00FFFFFFu;
-    interp::TagScope t(interp::TagCat::Object, 0x01000000u | place, 0xF6F60000u ^ kind, x ^ (z << 16 | z >> 16) ^ y);
-    callOriginal(c, kName);
+    {
+        interp::TagScope t(interp::TagCat::Object, 0x01000000u | place, 0xF6F60000u ^ kind, x ^ (z << 16 | z >> 16) ^ y);
+        callOriginal(c, kName);
+        cfcast::fgEnd();  // (inside the scope: the class switch back belongs to this object)
+    }
 }
 static HleReg sFgObjReg("d_fg_drawNP::fn_112_2184", &fgObjDraw);
 

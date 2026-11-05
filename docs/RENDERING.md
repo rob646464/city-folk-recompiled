@@ -622,6 +622,80 @@ unchanged (the hooks call the original and return). Presets Low / Medium / High 
   32 -> off, 0.30, 32); a tuned intensity is kept with AO on/off as it was, converted to the same strength on the new curve (i + 0.5); radius 60 (old default)
   becomes 40, any other radius is kept. Saved with `ao_version=2` afterwards.
 
+### Shadows of objects outside the view (branch shadow-casters, Aurora 0470)
+
+User request: with sun / moon shadows, trees, houses and rocks that left the picture took their
+shadows with them (the game culls them), very visible with the long morning / evening shadows.
+src/game/cf_shadow_casters.cpp widens the game's own culling decisions toward the light and draws
+what only the widened test keeps as a **shadow caster only**.
+
+- **The game's culling** (USA rev 1; hooks `all`):
+  - Field objects (trees, bushes, rocks, fences, signs; d_fg_drawNP fn_112_2184): a bounding
+    sphere (record + 0x14 through fn_800829D4 onto the log, radius + 0x34) against the game
+    camera's frustum (camera object + 0x254, from fn_80162D1C) with fn_802B777C: view matrix at
+    +0x00, near / far view z at +0x70 / +0x74, side planes (x, z) at +0x30/+0x38 and +0x40/+0x48,
+    (y, z) at +0x54/+0x58 and +0x64/+0x68. The fg manager only hands the objects of the area
+    around the view to it (5-25 culled per frame).
+  - Structures (daSTR_c: houses, shops, town hall, museum, bulletin board, bus stop, build
+    sites...): the draw d_a_strNP fn_99_2B04 skips the model when fn_99_2548 says so: a window
+    in the town's flat coordinates around a camera reference point (fn_80166CDC: |x - ref.x| <= w,
+    b <= z - ref.z <= a; ref = USA 0x8062426C, decoded from the function's own code) or a line
+    behind the camera (fn_8018ABC8: z - k r beyond camera + 0x368). A drawn structure inserts its
+    models into the scene group every frame (ScnGroup::Insert); a culled one does not. 28-34 of
+    them are culled per frame on the plaza.
+  - g3d's own culling (ScnObjGather::Add with the gather frustum, ScnObj option 9): no town or
+    city object uses it (0 culled); hooked anyway (by name) for other places.
+- **Widened toward the light**: each test again with the object swept along the light's travel
+  direction by the length of its shadow: 3D (field objects, g3d boxes) `height / sin(elevation)`
+  with height = the sphere's diameter / the box's diagonal; flat map (structures) the shadow's
+  footprint `height / tan(elevation)` along the light's horizontal direction, height 160 (the
+  tallest common structures); at most the sun shadow distance (and the cascades' caster reach,
+  4000), and only what lies within the shadow distance in view depth. Elevation over the
+  ground in view (the light is held >= 12 degrees up, like the shadows themselves): at 07:30 /
+  16:45 in October about 12 degrees (shadow ~4.7 heights long), at noon ~38 degrees (~1.3 heights:
+  still a few objects behind the camera, south, whose shadows fall north into the view).
+- **Shadow casters only**: field objects get the draw class `AURORA_DRAW_CLASS_SHADOW` around their
+  draw (enh::setShadowOnly); structures kept by the widened test mark the models they insert, and
+  cf_tags.cpp's G3dProc hook draws those as class SHADOW (opaque pass of the main view only; their
+  translucent parts (blob shadows, fade models) and the stage's second root pass are skipped, as
+  the game culled them). Aurora 0470 records an opaque depth-writing draw of that class into the
+  shadow-map atlas with the world draws' caster pipeline and drops it everywhere else (EFB pass,
+  depth / normal pre-pass, AO, glow, world effects, EFB copies; the frame-interpolation tape
+  carries the class, so in-betweens drop it too). The draw's main pipeline is the world class's
+  (no new variants to precache).
+- **Interpolation**: casters keep the objects' tags (field objects by place + kind, g3d objects by
+  ScnObj), so a caster that comes into view (or leaves it) blends from its previous matrix like
+  any other object: no pop at the switch. 120 fps at 4K Ultra: judder detector 0 defects (727k
+  tagged draws judged, identity check 0 jumps); the walk route shows no stray geometry.
+- **Off**: everything is decided only while sun / moon shadows are cast outdoors (cf_light
+  submitSky calls `castersSetSun`); with sun shadows or Enhanced lighting off nothing is widened,
+  no class is emitted (0 `[casters]` lines, 0 caster-only draws in a run with the user's settings
+  and sun shadows off). The new hooks call the game's functions unchanged then. (Shots of two runs
+  are not comparable frame by frame here: the continue's loading timing moves the arrival by up
+  to 80 frames between runs of the same build.) Indoors: not needed (rooms are in view whole).
+- **The merge bug found on the way** (generic, BACKPORT 0470): a draw that `note_draw` dropped
+  left the draw cache as if recorded, so the next draw with unchanged GX state was merged into the
+  last recorded command, indexed over the skipped vertices: kept structures showed up as huge
+  stretched walls in front of the camera. The merge is cut after a dropped draw now; consecutive
+  caster-only draws merge into each other instead (535 -> 16-40 caster draws per frame).
+- **Cost** (RTX 3090 Ti, quiet PC, user's settings at 4K (scale 3) / 120 fps, morning walk route
+  tools/routes/shadow_casters.txt, back to back with `CF_CASTERS=0`): GPU busy 2.49 vs 2.48 ms per
+  frame (shadow-map atlas pass 0.077 -> 0.084 ms), host thread median 1.9 -> 2.0-2.1 ms, render
+  worker 0.9 -> 0.9-1.0 ms; 120.0 fps presented in both.
+- Results: A/B pairs (left the game's culling, right with off-screen casters, below the difference
+  x8) in the agent scratch: morning shadow bands across the path and bridge from trees off the
+  right (east) edge and from structures behind the camera, evening shadows on the plaza and the
+  town hall's wall from objects off the left (west) edge; noon: no visible change in the pairs.
+- Test aids: `CF_CASTERS=0` (off), `CF_CASTERS_AB=<n>` (on in every other block of n frames: shots
+  n apart compare; structures are decided a frame ahead, measured), `CF_CASTERS_LOG=<n>` (counts:
+  culled / kept per kind, models drawn as casters, Aurora caster-only draws; the kept models),
+  `CF_CASTERS_SHOW=1` (kept objects drawn in the picture too), `CF_CASTERS_SCALE=<f>` (sweep
+  length), `CF_CASTERS_NOSTR=1` (field objects only), `AURORA_ENH_SHADOW_CLASS_SHOW=1`. Route
+  `tools/routes/shadow_casters.txt` (plaza, slow walks W/E/N/S/diagonal with pauses).
+- Open: villagers' culling not looked at (their shadows are short; unchanged);
+  d_fgobj_managerNP's objects (fn_111_E4C, the line test fn_8018AB88) and d_fg_drawNP fn_112_17F0
+  not widened; the city's structures (d_a_str_townNP) and PAL/JP/KR not run.
+
 ### Time of day (Aurora 0342 grade)
 
 A colour grade of the 3D scene at scene end (gain, lift, saturation, contrast; the HUD is never
