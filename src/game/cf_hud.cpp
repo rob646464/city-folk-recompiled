@@ -148,6 +148,18 @@ HLE(CalculateMtx__Q34nw4r3lyt4PaneFRCQ34nw4r3lyt8DrawInfo) {
     }
 }
 
+// mWipeFader_c::draw (fn_802B6B48; vtable 0x804F0984, dWipeFader_c's calc fn_8017D0A4 sets its
+// texture matrix): the circle wipe of doors and stage changes. One quad over the game's 608x456
+// 2D frame (C_MTXOrtho +-304 x scale +0x48, +-228) whose clamped circle texture (+0x4C, size
+// +0x50/+0x54) is placed by the texture matrix at +0x14; at frame 0xFF a plain black quad.
+// Classified as a full-screen picture it stayed in the 16:9 frame, so the town showed beside it in
+// wider windows. In a WipeScope it is drawn centered (round circle) and widened to the display's
+// edges (hle_gx.cpp widenWipeHeld). At 16:9 and narrower nothing changes.
+HLE(fn_802B6B48) {
+    ws::WipeScope wipe;
+    callOriginal(c, "fn_802B6B48");
+}
+
 namespace world {
 void onLayoutDraw();
 }

@@ -203,6 +203,7 @@ bool sRawCheck = true;
 // is only sent at the next GX call, which may come after the HUD element's scope ended).
 int sHeldAnchor = 0;
 int sHeldShift = 0;
+bool sHeldWipe = false;  // GXBegin came inside a ws::WipeScope (the draw ends after the scope)
 bool sInHeldPrepare = false;
 // A by-side scope is resolved per held draw (classifyHeld); anything else in it stays centered.
 int scopeAnchor() {
@@ -458,6 +459,86 @@ bool coversScreen() {
     return lo <= -0.98f && hi >= 0.98f;
 }
 
+// Inside a ws::WipeScope (the circle wipe, mWipeFader_c::draw fn_802B6B48, hooked in cf_hud.cpp):
+// the wipe is one quad over the game's whole 2D frame whose texture (the circle hole, clamped, so
+// everything outside the texture is its opaque black edge) is placed by a texture matrix. The quad
+// is drawn centered in the game's frame like other 2D (classifyHeld), which keeps the circle round,
+// and is widened here about the frame's centre by 1 / factor() so it reaches the display's left
+// and right edges; every other direct F32 attribute (the texture coordinates) is extrapolated
+// along the quad's x in the same way, so the circle keeps its place and size and the added strips
+// show what the texture shows beyond its edge (black). Direct F32 positions with no matrix
+// rotation only; anything else is left as it is.
+void widenWipeHeld() {
+    if (!sHeldWipe || !ws::active()) return;
+    const int fmt = sHeld.fmt;
+    const size_t n = sHeld.verts;
+    if (n < 3 || n > 64 || fmt >= GX_MAX_VTXFMT || sHeld.bytes.size() % n) return;
+    const size_t stride = sHeld.bytes.size() / n;
+    if (sDesc[GX_VA_POS] != GX_DIRECT || sVat[fmt][GX_VA_POS].type != GX_F32) return;
+    // Offsets of the direct F32 components (position x first) and of the matrix index.
+    int off = 0, posOff = -1, mtxOff = -1;
+    std::vector<int> comps;  // byte offsets of the F32 components to extrapolate (not position)
+    for (int a = 0; a <= GX_VA_TEX7; a++) {
+        const int sz = attrSize(fmt, a);
+        if (sz < 0) return;
+        if (a == GX_VA_PNMTXIDX && sz) mtxOff = off;
+        if (a == GX_VA_POS) posOff = off;
+        else if (sz && a >= GX_VA_TEX0 && sDesc[a] == GX_DIRECT && sVat[fmt][a].type == GX_F32)
+            for (int k = 0; k < sz / 4; k++) comps.push_back(off + k * 4);
+        off += sz;
+    }
+    if (size_t(off) != stride || posOff < 0) return;
+    auto rf = [&](size_t v, int o) { return readComp(sHeld.bytes.data() + v * stride + o, GX_F32, 0); };
+    auto wf = [&](size_t v, int o, f32 x) {
+        const u32 b = std::bit_cast<u32>(x);
+        u8* p = sHeld.bytes.data() + v * stride + o;
+        p[0] = u8(b >> 24), p[1] = u8(b >> 16), p[2] = u8(b >> 8), p[3] = u8(b);
+    };
+    const u32 mtxId = mtxOff >= 0 ? sHeld.bytes[mtxOff] : sCurPosMtx;
+    if (mtxId % 3 || mtxId / 3 >= 10 || !sPosMtxValid[mtxId / 3]) return;
+    const auto& m = sPosMtx[mtxId / 3];
+    if (std::fabs(m[0][1]) > 1e-4f || std::fabs(m[0][2]) > 1e-4f || std::fabs(m[0][0]) < 1e-6f) return;
+    if (std::fabs(sProj.m[0][0]) < 1e-9f) return;
+    // Object-space x at the frame's centre (NDC x = 0).
+    const f32 xc = ((-sProj.m[0][3] / sProj.m[0][0]) - m[0][3]) / m[0][0];
+    // Each extrapolated component as an affine function of (x, y): from three vertices that span
+    // the quad (the first one and the two farthest from it).
+    const size_t i0 = 0;
+    size_t i1 = 0, i2 = 0;
+    f32 best = 0;
+    for (size_t i = 1; i < n; i++) {
+        const f32 d = std::fabs(rf(i, posOff) - rf(0, posOff)) + std::fabs(rf(i, posOff + 4) - rf(0, posOff + 4));
+        if (d > best) best = d, i1 = i;
+    }
+    best = 0;
+    const f32 ax = rf(i1, posOff) - rf(i0, posOff), ay = rf(i1, posOff + 4) - rf(i0, posOff + 4);
+    for (size_t i = 1; i < n; i++) {
+        const f32 bx = rf(i, posOff) - rf(i0, posOff), by = rf(i, posOff + 4) - rf(i0, posOff + 4);
+        const f32 cr = std::fabs(ax * by - ay * bx);
+        if (cr > best) best = cr, i2 = i;
+    }
+    const f32 bx = rf(i2, posOff) - rf(i0, posOff), by = rf(i2, posOff + 4) - rf(i0, posOff + 4);
+    const f32 det = ax * by - ay * bx;
+    if (std::fabs(det) < 1e-6f) return;
+    std::vector<f32> dfdx(comps.size());
+    for (size_t k = 0; k < comps.size(); k++) {
+        const f32 fa = rf(i1, comps[k]) - rf(i0, comps[k]), fb = rf(i2, comps[k]) - rf(i0, comps[k]);
+        dfdx[k] = (fa * by - fb * ay) / det;  // solve fa = gx*ax + gy*ay, fb = gx*bx + gy*by for gx
+    }
+    const f32 k = 1.0f / ws::factor() - 1.0f;  // extra share of the distance from the centre
+    for (size_t v = 0; v < n; v++) {
+        const f32 x = rf(v, posOff), dx = (x - xc) * k;
+        wf(v, posOff, x + dx);
+        for (size_t c = 0; c < comps.size(); c++) wf(v, comps[c], rf(v, comps[c]) + dfdx[c] * dx);
+    }
+    static bool sLogged = false;
+    if (!sLogged) {
+        sLogged = true;
+        log("[ws] circle wipe widened to the display (factor %.3f, %zu vertices, %zu coordinates)", ws::factor(), n,
+            comps.size());
+    }
+}
+
 // A held 2D draw into the full-screen viewport:
 //  - covers the logical width and is a fill or samples an EFB copy (fades,
 //    screen-space effects that copy the frame and draw it back): stretched,
@@ -467,9 +548,9 @@ bool coversScreen() {
 //  - anything else is HUD: centered 4:3 (moved to an edge with its HUD element's anchor).
 ProjMode classifyHeld() {
     sHeldDecoded = false;
-    // The iris wipe's boxes and circle picture all stay in the centered 4:3 frame (the boxes
-    // are extended to the display's edges in that frame, widescreen.cpp J2DFillBox).
-    if (ws::inWipe()) return ProjMode::Scaled;
+    // The circle wipe stays centered in the game's frame (round circle); widenWipeHeld then
+    // stretches its quad to the display's edges.
+    if (sHeldWipe) return ProjMode::Scaled;
     if (!coversScreen()) {
         if (sHeldAnchor == ws::kAnchorBySide) sHeldAnchor = !sHeldDecoded ? 0 : sHeldLo + sHeldHi < 0.0f ? -1 : 1;
         return ProjMode::Scaled;
@@ -857,6 +938,7 @@ void gx::endPendingDraw() {
         sHeld.active = false;
         sInHeldPrepare = true;
         const ProjMode mode = classifyHeld();
+        if (mode == ProjMode::Scaled) widenWipeHeld();
         prepareDraw(mode, "held");
         sInHeldPrepare = false;
         HUD_TRACE("held %s x[%.3f,%.3f] mode=%d anchor=%d tex %s %s", sHeldDecoded ? "dec" : "nodec", sHeldLo, sHeldHi,
@@ -1401,6 +1483,7 @@ GXHLE(GXBegin) {
         sHeld.active = true;
         sHeldAnchor = ws::hudAnchor();
         sHeldShift = ws::hudShift();
+        sHeldWipe = ws::inWipe();
         sHeld.prim = GXPrimitive(c.r[3]);
         sHeld.fmt = GXVtxFmt(c.r[4]);
         sHeld.verts = u16(c.r[5]);

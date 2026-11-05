@@ -92,10 +92,11 @@ struct RenderToTextureScope {
     RenderToTextureScope& operator=(const RenderToTextureScope&) = delete;
 };
 
-// The iris wipes (fn_80055C54, and the area-clear screens' fn_80050524): black boxes around a circle picture, laid out in the 640-wide
-// 2D frame. Inside a WipeScope (widescreen active) every 2D draw is centered 4:3, and fill
-// boxes that reach the 4:3 frame's left or right edge are extended to the display's edge
-// (J2DFillBox hook), so the mask covers the whole width and the circle stays round.
+// The circle wipe (City Folk: mWipeFader_c::draw, one quad with a clamped circle texture over the
+// game's 16:9 2D frame; cf_hud.cpp). Inside a WipeScope (widescreen active) every 2D draw is
+// centered in the game's frame, and its full-frame quad is widened to the display's edges with
+// its texture coordinates extrapolated (hle_gx.cpp widenWipeHeld), so the mask covers the whole
+// width and the circle stays round. (LM: the iris wipes' J2DFillBox boxes.)
 struct WipeScope {
     WipeScope();
     ~WipeScope();

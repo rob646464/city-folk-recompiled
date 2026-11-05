@@ -205,3 +205,8 @@ fn_800D2830 all
 # update (its model -> its item record at +0x3A0).
 d_a_ftrNP::fn_15_767C all
 d_a_ftrNP::fn_15_3100 all
+
+# Circle wipe (src/game/cf_hud.cpp, docs/WII.md "The circle wipe"): mWipeFader_c::draw, the iris
+# wipe of doors, stage changes and the arrival in the town; drawn in a ws::WipeScope so it covers
+# windows wider than 16:9.
+fn_802B6B48 all
