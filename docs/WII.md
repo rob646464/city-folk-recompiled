@@ -282,6 +282,34 @@ warp to the plaza, walk / run in 8 directions); runs with a copy of the user's s
   120 Hz). On a display that really follows the presents that is smooth; captured at a fixed 120
   it repeats frames. Not changed here (pacing); worth asking whether G-Sync is on in windowed mode.
 
+### The circle wipe (branch wipe-cover)
+
+The circle that closes and opens around the player at doors, warps / stage changes and the
+arrival in the town after "Preparing saved data" is `mWipeFader_c` (RTTI; vtable 0x804F0984,
+`dWipeFader_c` 0x804F4DEC). Its draw `fn_802B6B48` sets `C_MTXOrtho(-228, 228, -304 * s, 304 * s)`
+(s = +0x48) and draws ONE quad over exactly that frame with the circle texture (+0x4C, size
++0x50/+0x54, clamped: everything outside the texture is its black edge) placed by the texture
+matrix at +0x14, which `dWipeFader_c`'s calc `fn_8017D0A4` builds as a scale about the centre
+(+0x58/+0x5C) from the frame count (+0x44); at frame 0xFF a plain black quad. So the game's own
+draw covers its whole 640x456 frame at 16:9 and 4:3 (checked at 1280x720: no gaps). In a window
+wider than 16:9 the quad was classified as a full-screen picture and pillarboxed at 16:9, so the
+town showed at both sides (any window even slightly wider than 16:9, e.g. one shortened by a title
+bar, gets thin side gaps).
+
+Fix: `HLE(fn_802B6B48)` (cf_hud.cpp, hooks.txt `all`) runs the draw in a `ws::WipeScope`. The
+held quad (its GXBegin came inside the scope; it ends at the next GX call, after the scope, so
+the flag is taken at GXBegin: `sHeldWipe`) stays centered in the game's frame (round circle) and
+`widenWipeHeld` (hle_gx.cpp) widens it about the frame's centre by 1 / factor() with its texture
+coordinates extrapolated along x, so the circle keeps its size and place and the added strips show
+the texture's black edge. The plain black quad is widened the same way. At 16:9 and narrower
+(factor 1) nothing changes. Verified (CF_SHOT, user-town-clean, route warps house1 at 7000 and
+town.house1 at 8200): 21:9 entering/leaving the house and the town arrival cover the whole width
+(before: town beside the 16:9 frame); 16:9 at 60 and 120 fps (interpolated in-betweens) and with
+Enhanced lighting Ultra + world unchanged and gap-free; 4:3 unchanged. CF_SHOT is the game image
+before post-processing: a gap the user sees at 16:9 that these runs do not show would come from
+later (post / presentation) or a window slightly wider than 16:9 (fixed by the above). Log line
+`[ws] circle wipe widened to the display` (once).
+
 ## IOS (Starlet)
 
 The game reaches every device through IPC to IOS (`IOS_Open/Ioctl(v)/Read/Write`). Decision
