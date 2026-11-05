@@ -174,8 +174,8 @@ u32 sUpCount = 0, sUpFrame = ~0u;
 // The mean Y axis above changed in a step whenever an object came into or left the view and lagged
 // a frame, so the sun turned in jumps as the player walked up or down the log (shadows jumped). The
 // axis is fitted from the objects (least squares: each object's up line passes through it), the
-// ground radius is the most common object radius, and the local up is the log's normal where the
-// view's forward ray meets the ground (groundAhead): it turns continuously with the camera, like the
+// ground radius is the most common object radius, and the local up is the mean of the log's normals
+// under rays through the view (visibleGroundUp; shadow-fix): it turns continuously with the camera, like the
 // ground under the player. Test aids CF_SUN_LOG=<n> (fit and both ups every n frames, samples every 60),
 // CF_SUN_UP=mean (the old mean).
 struct LogFit {
@@ -242,18 +242,27 @@ bool logAxis(float& cy, float& cz, float& radius) {
     return true;
 }
 
-bool groundAhead(const float view[12], float out[3]) {
+namespace {
+// Where the view-space ray `vd` from the camera meets the log's ground (g3d world).
+// horizon: a ray that misses the log gives the point where it passes closest to the axis (the
+// horizon it looks over: continuous with the hits as a ray rises past the horizon).
+bool rayHitLog(const float view[12], const float vd[3], float out[3], bool horizon = false) {
     if (!sFit.valid || sFit.place != placeKey()) return false;
-    // Camera position C = -R^T t, forward = -(row 2) (g3d world, the log's frame).
+    // Camera position C = -R^T t, the ray R^T vd (g3d world, the log's frame).
     float C[3], d[3];
     for (int k = 0; k < 3; k++) {
         C[k] = -(view[k] * view[3] + view[4 + k] * view[7] + view[8 + k] * view[11]);
-        d[k] = -view[8 + k];
+        d[k] = view[k] * vd[0] + view[4 + k] * vd[1] + view[8 + k] * vd[2];
     }
     // |(C + s d)_yz - centre| = R, the first hit from outside.
     const float oy = C[1] - sFit.cy, oz = C[2] - sFit.cz;
     const float a = d[1] * d[1] + d[2] * d[2], b = 2.0f * (oy * d[1] + oz * d[2]), cc = oy * oy + oz * oz - sFit.r * sFit.r;
     const float disc = b * b - 4.0f * a * cc;
+    if (horizon && a > 1e-6f && cc > 0.0f && disc < 0.0f) {
+        const float s = std::max(-b / (2.0f * a), 0.0f);
+        for (int k = 0; k < 3; k++) out[k] = C[k] + s * d[k];
+        return true;
+    }
     if (!(a > 1e-6f) || !(disc >= 0.0f) || !(cc > 0.0f)) return false;
     const float sq = std::sqrt(disc);
     float s = (-b - sq) / (2.0f * a);
@@ -262,8 +271,39 @@ bool groundAhead(const float view[12], float out[3]) {
     for (int k = 0; k < 3; k++) out[k] = C[k] + s * d[k];
     return true;
 }
+}  // namespace
+
+bool groundAhead(const float view[12], float out[3]) {
+    static const float kFwd[3] = {0.0f, 0.0f, -1.0f};
+    return rayHitLog(view, kFwd, out);
+}
 
 namespace {
+// The sun frame's up (shadow-fix): the mean of the log's normals where rays through five rows of
+// the view's centre column meet the ground: the visible ground as a whole, like the old mean of the
+// visible objects' axes (which the look was tuned with), but continuous. The up at the ground
+// ahead alone (interp-town) leaned ~20-30 degrees further than the old mean, so a low sun (the
+// 12-degree floor: late afternoon, the user's report at 16:57) grazed the ground there and the
+// shadows were gone, flickering in only in frames without a fit (then the old mean was used).
+bool visibleGroundUp(const float view[12], u32 cam, float up[3]) {
+    float fovy = cam ? rdf32(cam + 0xAC) : 60.0f;  // CameraData fovy (degrees; 60 in the town)
+    if (!(fovy > 10.0f && fovy < 120.0f)) fovy = 60.0f;
+    const float t = std::tan(fovy * 0.5f * 3.14159265f / 180.0f);
+    float acc[3] = {0.0f, 0.0f, 0.0f};
+    int n = 0;
+    for (const float row : {0.1f, 0.3f, 0.5f, 0.7f, 0.9f}) {  // 0 top .. 1 bottom
+        const float vd[3] = {0.0f, (1.0f - 2.0f * row) * t, -1.0f};
+        float p[3];
+        if (!rayHitLog(view, vd, p, true)) continue;
+        const float y = p[1] - sFit.cy, z = p[2] - sFit.cz, l = std::sqrt(y * y + z * z);
+        if (!(l > 1.0f)) continue;
+        acc[1] += y / l, acc[2] += z / l, n++;
+    }
+    const float l = std::sqrt(acc[1] * acc[1] + acc[2] * acc[2]);
+    if (n < 2 || !(l > 1e-3f)) return false;
+    up[0] = 0.0f, up[1] = acc[1] / l, up[2] = acc[2] / l;
+    return true;
+}
 
 SkyLight skyLight(const Clock& k) {
     const auto& s = port::settings().enhancedLighting;
@@ -386,9 +426,30 @@ void submitSky() {
         // mean Y axis of the objects drawn last frame), not world X / Y / Z. The camera data is
         // the true world -> view (ScnObj view = camera x world, checked).
         const float* U = sLocalUp;
-        float fitUp[3], ground[3];
+        float fitUp[3] = {0.0f, 0.0f, 0.0f}, ground[3] = {0.0f, 0.0f, 0.0f};
         // (CameraData's position / target fields are not set by the game: the view matrix is.)
-        const bool fitted = !sUpMean && groundAhead(sView, ground) && logUpAt(ground, fitUp);
+        // The visible ground's mean normal (visibleGroundUp); a frame without it holds the last
+        // one for a while (shadow-fix: such frames fell back to the old mean, and the shadows
+        // flickered in for a frame). CF_SUN_UP=ahead: the normal at the ground ahead (interp-town).
+        static const bool sUpAhead = [] {
+            const char* v = std::getenv("CF_SUN_UP");
+            return v && std::strcmp(v, "ahead") == 0;
+        }();
+        static float sHeldUp[3] = {0.0f, 0.0f, 0.0f};
+        static u32 sHeldFrame = 0, sHeldPlace = ~0u;
+        bool fitted = false;
+        if (!sUpMean) {
+            const bool ahead = groundAhead(sView, ground) && logUpAt(ground, fitUp);
+            if (!sUpAhead) fitted = visibleGroundUp(sView, sMainCam, fitUp);
+            else fitted = ahead;
+            if (fitted) {
+                std::memcpy(sHeldUp, fitUp, sizeof sHeldUp);
+                sHeldFrame = copyDispCount(), sHeldPlace = placeKey();
+            } else if (sHeldPlace == placeKey() && copyDispCount() - sHeldFrame < 600) {
+                std::memcpy(fitUp, sHeldUp, sizeof fitUp);
+                fitted = true;
+            }
+        }
         if (fitted) U = fitUp;
         if (sSunLog && copyDispCount() % sSunLog == 0)
             log("[sun] f%u fit %s cy %.1f cz %.1f R %.1f n %u rejected %u | ground %.1f %.1f %.1f | up fit %.4f %.4f %.4f mean %.4f %.4f %.4f cam %.4f %.4f",

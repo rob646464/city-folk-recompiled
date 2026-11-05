@@ -260,6 +260,16 @@ warp to the plaza, walk / run in 8 directions); runs with a copy of the user's s
   as the reference axis, the world origin as the anchor; interpolation turns both with the blended
   camera); before, all of Aurora's inputs were view space, so the snapping never held. A/B
   `CF_SUN_UP=mean`, `CF_SUN_GRID=view`; `CF_SUN_LOG=<n>` every n frames.
+- **Shadows gone at a low sun (branch shadow-fix, user report on main 077d9a1)**: the normal at
+  the ground ahead leans 20-30 degrees further than the old mean of the visible objects' axes, so
+  with the sun at its 12-degree floor (the user played at 16:57 in November) it grazed the ground
+  there: long, faint shadows lost in the terminator, and only frames without a fit (old mean as the
+  fallback) showed them, flickering in. Now the sun's up is the mean of the log's normals under
+  rays through five rows of the view's centre column (a ray over the horizon takes its closest
+  point: continuous), the look the old mean gave but without its steps, and a frame without it
+  holds the last one (600 frames) instead of falling back. Same frames at 16:57: shadows as with
+  the old mean (evidence in the agent scratch), steps max 0.015 degrees per frame outside the warp;
+  10:00 unchanged. A/B `CF_SUN_UP=ahead` (interp-town's), `=mean` (the old).
 - **Leaves** (not interpolation): Aurora's world effects centred their particle volume and scale on
   the scene depth under one pixel near the view's middle (the player, a tree, the ground behind as
   they passed under it), and the port's effects frame snapped the world's up to one of six axes,
