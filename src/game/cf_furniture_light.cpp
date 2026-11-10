@@ -255,8 +255,12 @@ struct Light {
     float centre[3] = {};  // model space
     float color[3] = {1, 1, 1};
     float radius = 0, intensity = 0;
+    float core = 0.1f;  // source core radius as a share of the reach (Aurora 0480)
+    // before branch indoor-light (test aids CF_INDOOR_LEGACY / CF_INDOOR_AB)
+    float oldCentre[3] = {}, oldColor[3] = {1, 1, 1}, oldRadius = 0, oldIntensity = 0;
     std::vector<std::string> gameMats;  // glow-helper materials: their amount switches the light
     bool shadow = false;
+    bool roomLamp = false;  // item light kind 2: the game's room brightening follows it
     std::string model;  // the model it was made for (addresses are reused)
 };
 struct ItemInfo {
@@ -270,6 +274,7 @@ std::unordered_map<u64, std::pair<float, u32>> sAmount;  // hash(MDL0, material)
 std::unordered_map<u32, u32> sDone;                     // actor -> record already mapped
 u32 sR13 = 0;                                           // the game's r13 (current stage byte at r13 - 0x6384)
 int sStage = -1;
+u32 sLitFrame = 0;  // last frame a lit light-kind 2 lamp / candle was submitted (the room-light damping needs one)
 
 u64 key2(u32 a, u32 b) { return (u64(a) << 32) | b; }
 u64 matKey(u32 mdl, const std::string& mat) { return key2(mdl, u32(std::hash<std::string>{}(mat))); }
@@ -287,6 +292,7 @@ struct Acc {
     double cen[3] = {}, area = 0;
     float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
     double col[3] = {}, wsum = 0;
+    double ccol[3] = {}, cwsum = 0;  // weighted by chroma too: the part's dominant hue (branch indoor-light)
 };
 
 // Accumulates one object's triangles (model space) into `acc`: area-weighted centre, bounds, mean
@@ -425,6 +431,13 @@ void accumulateObject(u32 mdl, u32 obj, const std::vector<u32>& verts, const std
             const double w = ar * std::max(tx[3], 0.05f);
             for (int k = 0; k < 3; k++) acc.col[k] += double(tx[k] * vc[k]) * w;
             acc.wsum += w;
+            {
+                const float c0 = tx[0] * vc[0], c1 = tx[1] * vc[1], c2 = tx[2] * vc[2];
+                const double chroma = double(std::max({c0, c1, c2}) - std::min({c0, c1, c2}));
+                const double cw = w * (0.02 + chroma * chroma * 8.0);
+                acc.ccol[0] += c0 * cw, acc.ccol[1] += c1 * cw, acc.ccol[2] += c2 * cw;
+                acc.cwsum += cw;
+            }
         }
     };
     std::vector<V> vs;
@@ -663,10 +676,17 @@ Light analyse(u32 mdl, const std::string& modelName, const ItemInfo* item) {
     for (int k = 0; k < 3; k++) lo[k] = std::min(all.lo[k], bbLo[k]), hi[k] = std::max(all.hi[k], bbHi[k]);
     // A small flame (candle: the wax and its flame are one part) casts shadows from its tip: from
     // the part's centre the wax around the light would hide it from its own shadow map.
-    if (kind == KFire && std::max(part.hi[0] - part.lo[0], part.hi[2] - part.lo[2]) < 20.0f) L.centre[1] = part.hi[1] + 2.0f;
+    const bool smallFlame = kind == KFire && std::max(part.hi[0] - part.lo[0], part.hi[2] - part.lo[2]) < 20.0f;
+    if (smallFlame) L.centre[1] = part.hi[1] + 2.0f;
+    std::memcpy(L.oldCentre, L.centre, sizeof L.centre);
+    // Lamps light from their glowing part's centre and cast no shadow (second pass): the first pass
+    // put the light 2 units below the shade's lower rim for a shadow origin, but a lamp's glowing
+    // material often spans the base too (the lovely lamp's light went to the floor) or the rim sits
+    // in the lamp's own body (the regal lamp's table top hid most of its light).
     if (ex && ex->heightShare >= 0.0f) {
         L.centre[0] = (lo[0] + hi[0]) / 2, L.centre[2] = (lo[2] + hi[2]) / 2;
         L.centre[1] = lo[1] + ex->heightShare * (hi[1] - lo[1]);
+        std::memcpy(L.oldCentre, L.centre, sizeof L.centre);
     }
     // colour / radius / intensity (the scanner's propose())
     float c[3] = {1.0f, 0.85f, 0.6f};
@@ -674,25 +694,74 @@ Light analyse(u32 mdl, const std::string& modelName, const ItemInfo* item) {
         for (int k = 0; k < 3; k++) c[k] = std::max(float(part.col[k] / part.wsum), 0.0f);
     float mx = std::max({c[0], c[1], c[2], 1e-3f});
     for (float& v : c) v = 0.35f + 0.65f * v / mx;
-    static const float kCool[3] = {0.62f, 0.80f, 1.0f}, kWarm[3] = {1.0f, 0.62f, 0.3f};
+    {
+        // the numbers before branch indoor-light (test aids CF_INDOOR_LEGACY / CF_INDOOR_AB)
+        float o[3] = {c[0], c[1], c[2]};
+        static const float kCool0[3] = {0.62f, 0.80f, 1.0f}, kWarm0[3] = {1.0f, 0.62f, 0.3f};
+        if (kind == KScreen)
+            for (int k = 0; k < 3; k++) o[k] = 0.45f * o[k] + 0.55f * kCool0[k];
+        if (kind == KFire)
+            for (int k = 0; k < 3; k++) o[k] = 0.6f * o[k] + 0.4f * kWarm0[k];
+        const float om = std::max({o[0], o[1], o[2], 1e-3f});
+        for (int k = 0; k < 3; k++) L.oldColor[k] = o[k] / om;
+        const float size0 = std::max({bbHi[0] - bbLo[0], bbHi[1] - bbLo[1], bbHi[2] - bbLo[2]});
+        L.oldRadius = std::clamp(110.0f + 2.2f * size0, 120.0f, 320.0f);
+        static const float kInt0[7] = {1.0f, 1.4f, 0.8f, 1.6f, 0.0f, 1.0f, 0.9f};
+        L.oldIntensity = kInt0[kind] * (item && item->lightKind == 2 ? 1.15f : 1.0f);
+        if (ex) {
+            if (ex->color[0] >= 0) std::memcpy(L.oldColor, ex->color, sizeof L.oldColor);
+            L.oldRadius = ex->radius, L.oldIntensity = ex->intensity;
+        }
+    }
+    // Colours and reach (branch indoor-light, second pass after the user's review: "the candle should
+    // only light its corner, in flickering red / orange"). Flames are deep orange-red (~1700-1900 K;
+    // the texture only tints them), lamps warm but softer, screens their picture's colour with a
+    // touch of cool. The colour is made vivid afterwards (F1 "Light vibrance", vividFurn).
+    // Third pass: the light's hue from the glowing part's texels weighted by their chroma (the plain
+    // mean let white and grey parts wash a pink shade out to salmon, a blue lava lamp to near white).
+    if (part.cwsum > 0) {
+        for (int k = 0; k < 3; k++) c[k] = std::max(float(part.ccol[k] / part.cwsum), 0.0f);
+        const float cm = std::max({c[0], c[1], c[2], 1e-3f});
+        for (float& v : c) v /= cm;
+    }
+    const bool fire = kind == KFire;
+    static const float kCool[3] = {0.62f, 0.80f, 1.0f}, kWarm[3] = {1.0f, 0.86f, 0.66f};
+    static const float kCandle[3] = {1.0f, 0.36f, 0.08f}, kHearth[3] = {1.0f, 0.45f, 0.12f};
     if (kind == KScreen)
-        for (int k = 0; k < 3; k++) c[k] = 0.45f * c[k] + 0.55f * kCool[k];
-    if (kind == KFire)
-        for (int k = 0; k < 3; k++) c[k] = 0.6f * c[k] + 0.4f * kWarm[k];
+        for (int k = 0; k < 3; k++) c[k] = 0.85f * c[k] + 0.15f * kCool[k];
+    if (kind == KLamp)
+        {  // a coloured shade keeps its colour, a plain one turns warm white
+            const float sat = 1.0f - std::min({c[0], c[1], c[2]}) / std::max({c[0], c[1], c[2], 1e-3f});
+            const float keep = sat > 0.25f ? 0.85f : 0.4f;
+            for (int k = 0; k < 3; k++) c[k] = keep * c[k] + (1.0f - keep) * kWarm[k];
+        }
+    if (fire)
+        for (int k = 0; k < 3; k++) c[k] = 0.1f * c[k] + 0.9f * (smallFlame ? kCandle[k] : kHearth[k]);
     mx = std::max({c[0], c[1], c[2], 1e-3f});
     for (int k = 0; k < 3; k++) L.color[k] = c[k] / mx;
+    // Physical falloff (Aurora 0480 ExtraLightPhysical: inverse square from a small core, windowed
+    // to 0 at the reach): a strong pool around the source with a short cut-off.
     const float size = std::max({bbHi[0] - bbLo[0], bbHi[1] - bbLo[1], bbHi[2] - bbLo[2]});
-    L.radius = std::clamp(110.0f + 2.2f * size, 120.0f, 320.0f);
-    static const float kInt[7] = {1.0f, 1.4f, 0.8f, 1.6f, 0.0f, 1.0f, 0.9f};
+    //                             none  lamp  screen fire  water neon  lava
+    static const float kInt[7] = {3.0f, 5.6f, 3.0f, 5.4f, 0.0f, 4.4f, 4.4f};  // (pass 4: a touch less than pass 3)
+    static const float kCore[7] = {0.09f, 0.12f, 0.14f, 0.09f, 0.1f, 0.10f, 0.10f};
+    static const float kReach[7] = {220.0f, 320.0f, 230.0f, 380.0f, 0.0f, 250.0f, 250.0f};
+    L.radius = kReach[kind] + std::min(size, 80.0f);
     L.intensity = kInt[kind];
-    if (item && item->lightKind == 2) L.intensity *= 1.15f;
+    L.core = kCore[kind];
+    if (smallFlame) L.radius = 180.0f, L.core = 0.08f, L.intensity = 7.0f;  // a candle: its table / corner
+    if (item && item->lightKind == 2 && !fire) L.intensity *= 1.1f;
     if (ex) {
-        if (ex->color[0] >= 0) std::memcpy(L.color, ex->color, sizeof L.color);
-        L.radius = ex->radius, L.intensity = ex->intensity;
+        if (ex->color[0] >= 0 && !fire) std::memcpy(L.color, ex->color, sizeof L.color);
+        if (!fire) L.radius = ex->radius * 1.1f, L.intensity = ex->intensity * 3.0f;  // (numbers made for the old falloff)
+        else L.radius = 260.0f;                                                       // the tall lantern: a lantern's reach
     }
     L.kind = kind;
     L.flicker = ex ? ex->flicker : kind == KFire;
-    L.shadow = kind == KFire || kind == KScreen;  // a lamp's light sits inside its own shade
+    L.shadow = kind == KFire || kind == KScreen;  // (lamps: the light inside the shade, no shadow)
+    // the game brightens the whole room for its lamps (light kind 1 and 2: the lovely lamp, kind 1,
+    // brightened the room too) and candles
+    L.roomLamp = (item && item->lightKind != 0) || kind == KFire;
     L.lit = true;
     if (sLog)
         log("[furn] model %08X '%s' item %04X '%s': %s at %.1f %.1f %.1f colour %.2f %.2f %.2f r %.0f I %.2f%s mats %zu glow%s%s",
@@ -711,6 +780,33 @@ std::vector<Drawn> sCur, sPrev;
 std::unordered_set<u32> sCurSet;
 u32 sCurFrame = ~0u;
 
+// Smooth 1D value noise in 0..1 (hashed lattice values, smoothstep between them).
+float flameNoise(float x, u32 seed) {
+    const float fl = std::floor(x);
+    const s32 i = s32(fl);
+    auto h = [&](s32 k) {
+        u32 v = u32(k) * 0x27D4EB2Du ^ seed;
+        v ^= v >> 15, v *= 0x85EBCA6Bu, v ^= v >> 13, v *= 0xC2B2AE35u, v ^= v >> 16;
+        return float(v & 0xFFFFFFu) / float(0xFFFFFF);
+    };
+    const float f = x - fl, u = f * f * (3.0f - 2.0f * f);
+    return h(i) + (h(i + 1) - h(i)) * u;
+}
+
+// F1 "Light vibrance" for furniture lights (LM's "Light color vibrance" idea, branch indoor-light):
+// the colour's HSV saturation x v (up to fully saturated), hue and brightest channel kept, so a
+// flame stays deep orange instead of drifting toward white.
+void vividFurn(const float in[3], float v, float out[3]) {
+    const float mx = std::max({in[0], in[1], in[2]}), mn = std::min({in[0], in[1], in[2]});
+    if (!(mx > 1e-5f)) {
+        std::memcpy(out, in, 3 * sizeof(float));
+        return;
+    }
+    const float sat = (mx - mn) / mx, ns = std::clamp(sat * v, 0.0f, 1.0f);
+    // each channel's distance below the max scales with the saturation
+    for (int k = 0; k < 3; k++) out[k] = mx - (mx - in[k]) * (sat > 1e-5f ? ns / sat : 0.0f);
+}
+
 float hostSeconds() {
     using namespace std::chrono;
     static const auto t0 = steady_clock::now();
@@ -722,6 +818,8 @@ float hostSeconds() {
 bool enabled() {
     return enh::masterOn() && port::settings().enhancedLighting.furnitureLights;
 }
+
+bool litRecently() { return copyDispCount() - sLitFrame < 30; }
 
 void noteModel(u32 obj, u32 mdl, const std::string& name) {
     if (!mdl || name.rfind("int_", 0) != 0 || !enabled()) return;
@@ -753,7 +851,14 @@ void submit(const float* view, bool viewValid) {
     if (sAb && ((copyDispCount() + 1) / 2) % 2 == 1) return;
     const auto& s = port::settings().enhancedLighting;
     const float t = hostSeconds();
+    // Test aid CF_FURN_FLICKER=0: steady flames (frame compares).
+    static const bool sFlicker = [] {
+        const char* v = std::getenv("CF_FURN_FLICKER");
+        return !v || std::atoi(v) != 0;
+    }();
     std::array<aurora::gfx::ExtraLight, 48> out{};
+    const bool legacy = cflight::indoorLegacy();
+    bool roomLamp = false;  // a lit lamp / candle the game brightens the whole room for
     u32 n = 0;
     for (const auto& d : sPrev) {
         // still the same model there (the furniture may have been put away since)
@@ -785,27 +890,71 @@ void submit(const float* view, bool viewValid) {
         float W[12];
         for (int r = 0; r < 12; r++) W[r] = rdf32(d.obj + 0x3C + 4 * r);
         float w[3], v[3];
-        for (int r = 0; r < 3; r++) w[r] = W[r * 4] * L.centre[0] + W[r * 4 + 1] * L.centre[1] + W[r * 4 + 2] * L.centre[2] + W[r * 4 + 3];
+        const float* C = legacy ? L.oldCentre : L.centre;
+        for (int r = 0; r < 3; r++) w[r] = W[r * 4] * C[0] + W[r * 4 + 1] * C[1] + W[r * 4 + 2] * C[2] + W[r * 4 + 3];
         for (int r = 0; r < 3; r++) v[r] = view[r * 4] * w[0] + view[r * 4 + 1] * w[1] + view[r * 4 + 2] * w[2] + view[r * 4 + 3];
         if (!std::isfinite(v[0] + v[1] + v[2])) continue;
         const float scale = std::sqrt(W[0] * W[0] + W[4] * W[4] + W[8] * W[8]);
         float flick = 1.0f;
-        if (L.flicker) {
+        float jit[3] = {0.0f, 0.0f, 0.0f};
+        if (L.flicker && legacy) {
             const float ph = float(d.obj & 0xFFF) * 0.0137f;
             flick = 1.0f + 0.10f * std::sin(t * 9.1f + ph) + 0.06f * std::sin(t * 15.3f + ph * 1.7f) + 0.04f * std::sin(t * 23.7f + ph * 2.3f);
+        } else if (L.flicker && sFlicker) {
+            // A flame: irregular, slow-ish flicker of +-20 % (smoothed value noise at ~1.3, ~4 and
+            // ~9 Hz, not a sine: a sine reads as a pulse), occasional deeper gutters, and the light
+            // moves a little with the flame (sideways more than up), so its shadows waver too. Host
+            // time, per-object seed; lights are interpolated by id, so 120 fps is smooth.
+            const u32 seed = d.obj * 2654435761u;
+            const float slow = flameNoise(t * 1.3f, seed), mid = flameNoise(t * 4.1f, seed ^ 0x9E37u), fast = flameNoise(t * 9.3f, seed ^ 0x51EDu);
+            const float gutter = std::max(0.0f, flameNoise(t * 0.7f, seed ^ 0x3C6Fu) - 0.78f) * 2.5f;  // 0..0.55, now and then
+            flick = 1.0f + 0.38f * (0.45f * slow + 0.35f * mid + 0.20f * fast - 0.5f) - 0.35f * gutter;
+            const float amp = 1.4f * (std::isfinite(scale) && scale > 0.1f && scale < 10.0f ? scale : 1.0f);
+            const float wx = amp * 2.0f * (flameNoise(t * 2.2f, seed ^ 0x1111u) - 0.5f);
+            const float wz = amp * 2.0f * (flameNoise(t * 2.6f, seed ^ 0x2222u) - 0.5f);
+            const float wy = amp * 1.2f * (fast - 0.5f);
+            // world offset -> view (rotation part of the view matrix)
+            for (int r = 0; r < 3; r++) jit[r] = view[r * 4] * wx + view[r * 4 + 1] * wy + view[r * 4 + 2] * wz;
         }
         aurora::gfx::ExtraLight l{};
-        std::memcpy(l.pos, v, sizeof v);
-        std::memcpy(l.color, L.color, sizeof l.color);
+        for (int r = 0; r < 3; r++) l.pos[r] = v[r] + jit[r];
+        {
+            // Plain warm lamps get only part of the vibrance (warm but softer); a coloured shade
+            // (saturation over 0.2: the lovely lamp's pink-red) and lava / neon lamps the full one,
+            // the latter at least 60 % saturated (their texture mean is pale: the blue lava lamp
+            // gave (0.89, 0.93, 1.0)), as their light colours the room.
+            const float vib = std::clamp(s.furnitureVibrance, 0.0f, 2.5f);
+            const float mx = std::max({L.color[0], L.color[1], L.color[2]}), mn = std::min({L.color[0], L.color[1], L.color[2]});
+            const float sat = mx > 1e-5f ? (mx - mn) / mx : 0.0f;
+            float v = vib;
+            if (L.kind == KLamp && sat <= 0.2f) v = 1.0f + (vib - 1.0f) * 0.35f;
+            if ((L.kind == KLava || L.kind == KNeon) && sat > 0.02f && vib > 1.0f) v = std::max(v, 0.6f / sat);
+            vividFurn(L.color, v, l.color);
+        }
         l.radius = L.radius * (std::isfinite(scale) && scale > 0.1f && scale < 10.0f ? scale : 1.0f);
         l.intensity = L.intensity * amount * flick * std::clamp(s.furnitureLightIntensity, 0.0f, 3.0f);
         l.flags = aurora::gfx::ExtraLightTranslucent | (L.kind == KFire ? aurora::gfx::ExtraLightFire : 0u) |
-                  (L.shadow && s.furnitureLightShadows ? aurora::gfx::ExtraLightCastShadows : 0u);
+                  (L.shadow && s.furnitureLightShadows ? aurora::gfx::ExtraLightCastShadows : 0u) | aurora::gfx::ExtraLightPhysical;
+        l.box[0] = L.core;
+        if (s.rimLight > 0.0f) {  // coloured rim on characters / furniture (Aurora 0520a)
+            l.flags |= aurora::gfx::ExtraLightRim;
+            l.box[11] = 1.3f * std::clamp(s.rimLight, 0.0f, 2.0f);
+        }
+        if (legacy) {
+            std::memcpy(l.color, L.oldColor, sizeof l.color);
+            l.radius = L.oldRadius * (std::isfinite(scale) && scale > 0.1f && scale < 10.0f ? scale : 1.0f);
+            l.intensity = L.oldIntensity * amount * flick * std::clamp(s.furnitureLightIntensity, 0.0f, 3.0f);
+            l.flags = aurora::gfx::ExtraLightTranslucent | (L.kind == KFire ? aurora::gfx::ExtraLightFire : 0u) |
+                      ((L.kind == KFire || L.kind == KScreen) && s.furnitureLightShadows ? aurora::gfx::ExtraLightCastShadows : 0u);
+            l.box[0] = 0.0f;
+        }
         l.id = 0x46000000u ^ (d.obj & 0x00FFFFFFu);
         out[n++] = l;
+        if (L.roomLamp && !legacy) roomLamp = true;
         if (n == out.size()) break;
     }
     submitExtraLights(out.data(), n);
+    if (roomLamp) sLitFrame = copyDispCount();
     if (sLog && copyDispCount() % 120 == 0)
         for (u32 i = 0; i < n; i++)
             log("[furn] f%u light %u id %08X view %.1f %.1f %.1f colour %.2f %.2f %.2f r %.0f I %.2f flags %X", copyDispCount(), i, out[i].id,
@@ -832,7 +981,10 @@ void noteHelper(u32 h) {
     // cf_light.cpp gives the structures' lit materials. Not for water (wa_m / wb_m).
     if (name != "wa_m" && name != "wb_m") {
         const s32 dl = s32at(mat + 0x3C);
-        if (dl) cflight::markLitMaterial(mat + u32(dl) + 0x20, e.first);
+        bool fire = false;  // a flame's material: also a bloom source (its own glow)
+        for (const auto& [key, L] : sLights)
+            if (u32(key >> 32) == mdl && L.lit && L.kind == KFire) fire = true;
+        if (dl) cflight::markLitMaterial(mat + u32(dl) + 0x20, e.first, fire);
     }
 }
 
@@ -866,8 +1018,9 @@ void noteActor(Ctx& c, u32 actor) {
             li = (li->first >> 32) == mdl ? sLights.erase(li) : std::next(li);
     }
     if (sLog)
-        log("[furn] actor %08X item %04X '%s' model %08X at %.1f %.1f %.1f (vtable %08X, is-on %08X)", actor, info.number, info.name.c_str(),
-            mdl, rdf32(actor + 0x64), rdf32(actor + 0x68), rdf32(actor + 0x6C), vt, rd32(vt + 0x1B0));
+        log("[furn] actor %08X item %04X '%s' model %08X at %.1f %.1f %.1f (vtable %08X, is-on %08X, on bytes +408 %02X %02X %02X)", actor,
+            info.number, info.name.c_str(), mdl, rdf32(actor + 0x64), rdf32(actor + 0x68), rdf32(actor + 0x6C), vt, rd32(vt + 0x1B0),
+            rd8(actor + 0x408), rd8(actor + 0x409), rd8(actor + 0x40A));
 }
 
 }  // namespace cffurn
@@ -879,9 +1032,35 @@ static void ftrGlowHelper(Ctx& c) {
 }
 static HleReg sFtrGlowReg("d_a_ftrNP::fn_15_767C", &ftrGlowHelper);
 
+namespace cffurn {
+// FTR= route action: every furniture of that item switched during the next 30 frames (each once).
+u16 sSwitchItem = 0;
+int sSwitchOn = 0;
+u32 sSwitchUntil = 0;
+std::unordered_set<u32> sSwitched;
+void requestSwitch(u16 item, int on) {
+    sSwitchItem = item, sSwitchOn = on, sSwitchUntil = copyDispCount() + 30;
+    sSwitched.clear();
+}
+}  // namespace cffurn
+static bool gptrFtr(u32 p) { return (p >= 0x80000000u && p < 0x81800000u) || (p >= 0x90000000u && p < 0x94000000u); }
+
 static void ftrExecute(Ctx& c) {
     const u32 actor = c.r[3];
     callOriginal(c, "d_a_ftrNP::fn_15_3100");
+    // Route action FTR=<item hex>/<0|1> (test aid): switch that furniture through its own switch
+    // (daFTR_c virtual +0x1C4 (this, on, immediate = 0), what touching it with A calls via fn_15_A88).
+    if (cffurn::sSwitchItem && copyDispCount() > cffurn::sSwitchUntil) cffurn::sSwitchItem = 0;
+    if (cffurn::sSwitchItem && gptrFtr(rd32(actor + 0x3A0)) && rd16(rd32(actor + 0x3A0) + 8) == cffurn::sSwitchItem &&
+        cffurn::sSwitched.insert(actor).second) {
+        const u32 vt = rd32(actor + 0x60);
+        const u32 r3 = c.r[3], r4 = c.r[4];
+        if (gptrFtr(vt) && gptrFtr(rd32(vt + 0x1C4))) {
+            log("[furn] f%u switch item %04X actor %08X -> %d", copyDispCount(), cffurn::sSwitchItem, actor, cffurn::sSwitchOn);
+            guestCall(c, rd32(vt + 0x1C4), actor, u32(cffurn::sSwitchOn), 0);
+        }
+        c.r[3] = r3, c.r[4] = r4;
+    }
     if (cffurn::enabled()) {
         // keep the return registers the caller may look at
         const u32 r3 = c.r[3], r4 = c.r[4];
@@ -890,5 +1069,50 @@ static void ftrExecute(Ctx& c) {
     }
 }
 static HleReg sFtrExecReg("d_a_ftrNP::fn_15_3100", &ftrExecute);
+
+// The game's own room light (branch indoor-light; docs/RENDERING.md "Indoor lighting"): fn_80197E1C
+// is dEnvAmbLight_c's per-frame update (vtable 0x804FAA68, after its type name). It moves the
+// room-light helper at 0x806244A0 (+0 amount 0..1) toward on / off (the target from the
+// "a light-kind 2 lamp is on" byte at r13 - 0x2C90, which d_a_ftrNP sets) and writes
+// this + 4 = lerp((0, 0, 0, 255), colour at r13 - 0x56AC, amount): a colour added to the room's
+// ambient light, which brightens the whole room evenly when a candle or lamp is switched on. With
+// furniture lights the light comes from the lamp itself, so only "Room fill from lamps" of it is
+// kept (the RGB scaled; the lerp starts at black, so this is the same as a smaller amount).
+// Indoors only; master or furniture lights off: untouched.
+HLE(fn_80197E1C) {
+    const u32 self = c.r[3];
+    callOriginal(c, "fn_80197E1C");
+    static const int sLog = [] {
+        const char* v = std::getenv("CF_ROOMLIGHT_LOG");
+        return v ? std::max(std::atoi(v), 1) : 0;
+    }();
+    const bool indoor = relBase(107, 1) != 0 && relBase(108, 1) == 0;
+    const u32 before = rd32(self + 4);
+    // Only while a furniture light of ours lights the room (a lamp the analysis does not light keeps
+    // the game's brightening); eased, so the room does not pop when the last light fades out.
+    float target = 1.0f;
+    if (cffurn::enabled() && indoor && cffurn::litRecently()) {
+        target = std::clamp(port::settings().enhancedLighting.furnitureRoomFill, 0.0f, 1.0f);
+        // Test aid CF_ROOMLIGHT_FILL=<f>: overrides the setting.
+        static const float sFill = std::getenv("CF_ROOMLIGHT_FILL") ? float(std::atof(std::getenv("CF_ROOMLIGHT_FILL"))) : -1.0f;
+        if (sFill >= 0.0f) target = std::clamp(sFill, 0.0f, 1.0f);
+    }
+    static float sK = 1.0f;
+    static u32 sKFrame = 0;
+    if (copyDispCount() != sKFrame) {
+        sK = copyDispCount() - sKFrame > 4 ? target : sK + (target - sK) * 0.1f;
+        sKFrame = copyDispCount();
+    }
+    const float k = cflight::indoorLegacy() ? 1.0f : sK;
+    if (k < 0.999f) {
+        for (u32 i = 0; i < 3; i++) wr8(self + 4 + i, u8(std::lround(float(rd8(self + 4 + i)) * k)));
+    }
+    static u32 sLast = ~0u;
+    if (sLog && (before != sLast || copyDispCount() % (600 * sLog) == 0)) {
+        sLast = before;
+        log("[roomlight] f%u obj %08X colour %08X -> %08X (fill %.2f, %s)", copyDispCount(), self,
+            before, rd32(self + 4), k, indoor ? "indoors" : "outdoors");
+    }
+}
 
 }  // namespace recomp

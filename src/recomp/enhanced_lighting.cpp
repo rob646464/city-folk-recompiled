@@ -42,7 +42,11 @@ bool sPerfNoMap = false;
 bool sGhostPass = false;
 bool sCharPass = false;
 bool sEmissive = false;
+bool sEmissiveGlow = false;  // branch indoor-light: a flame, also a bloom source
+int sRim = 0;                // branch indoor-light: 1 a character, 2 furniture (Aurora 0520a rim light)
 bool sShadowOnly = false;  // branch shadow-casters: an off-screen object drawn into the shadow maps only
+bool sNoCast = false;      // branch indoor-light: a room's shell (receives shadows, casts none)
+const bool sNoCastAll = std::getenv("CF_NOCAST_ALL") != nullptr;  // test aid: no world draw casts a shadow
 u8 sMaterial = 0xFF;  // last material hint sent
 
 // Extra lights submitted for the coming main view (guest thread only). Providers (ghost lights,
@@ -606,7 +610,9 @@ void emitClass() {
     if (!masterOn()) return;
     u8 cls = AURORA_DRAW_CLASS_OTHER;
     if (sInScene && !sInCaster && active())
-        cls = sShadowOnly ? AURORA_DRAW_CLASS_SHADOW : sGhostPass ? AURORA_DRAW_CLASS_GHOST : AURORA_DRAW_CLASS_WORLD;
+        cls = sShadowOnly ? AURORA_DRAW_CLASS_SHADOW : sGhostPass ? AURORA_DRAW_CLASS_GHOST
+              : (sNoCast || sNoCastAll) ? AURORA_DRAW_CLASS_WORLD_NOCAST
+                          : AURORA_DRAW_CLASS_WORLD;
     if (cls == sClass) return;
     GXSetDrawClassAurora(cls);
     sClass = cls;
@@ -631,7 +637,9 @@ void emitMaterial() {
     }();
     const bool allowed = sMode == 1 || (sMode == 2 && (sSceneCount & 1) == 0);
     u8 m = allowed && sInScene && sCharPass && !sGhostPass && !sInCaster ? AURORA_MATERIAL_CHARACTER : AURORA_MATERIAL_WORLD;
-    if (sEmissive && sInScene && !sGhostPass && !sInCaster) m = AURORA_MATERIAL_EMISSIVE;
+    if (m == AURORA_MATERIAL_WORLD && sRim && sInScene && !sGhostPass && !sInCaster)
+        m = sRim == 1 ? AURORA_MATERIAL_WORLD_RIM : AURORA_MATERIAL_WORLD_RIM_SOFT;
+    if (sEmissive && sInScene && !sGhostPass && !sInCaster) m = sEmissiveGlow ? AURORA_MATERIAL_EMISSIVE_GLOW : AURORA_MATERIAL_EMISSIVE;
     if (m == sMaterial) return;
     GXSetMaterialHintAurora(m);
     sMaterial = m;
@@ -642,15 +650,29 @@ void setCharacterPass(bool on) {
     emitMaterial();
 }
 bool characterPass() { return sCharPass; }
-void setEmissive(bool on) {
-    if (sEmissive == on) return;
+void setEmissive(bool on, bool glow) {
+    glow = on && glow;
+    if (sEmissive == on && sEmissiveGlow == glow) return;
     sEmissive = on;
+    sEmissiveGlow = glow;
     emitMaterial();
 }
 
 void setShadowOnly(bool on) {
     if (sShadowOnly == on) return;
     sShadowOnly = on;
+    emitClass();
+}
+bool noCast() { return sNoCast; }
+int rimMaterial() { return sRim; }
+void setRimMaterial(int kind) {
+    if (sRim == kind) return;
+    sRim = kind;
+    emitMaterial();
+}
+void setNoCast(bool on) {
+    if (sNoCast == on) return;
+    sNoCast = on;
     emitClass();
 }
 bool casterPass() { return sInCaster; }
@@ -677,6 +699,8 @@ void beginScene() {
     sSceneCount++;
     sInScene = true;
     sShadowOnly = false;
+    sNoCast = false;
+    sRim = 0;
     emitClass();
     emitMaterial();
     if (!active()) return;
@@ -705,6 +729,8 @@ void endScene() {
     sInScene = false;
     sEmissive = false;
     sShadowOnly = false;
+    sNoCast = false;
+    sRim = 0;
     emitClass();
     emitMaterial();
     if (active()) GXSceneEndAurora();
@@ -742,6 +768,12 @@ uint32_t sGameLightFrame = ~0u;
 std::array<GameLight, 64> sPrevLights{};
 uint32_t sPrevCount = 0;
 }  // namespace
+
+namespace {
+float sGameLightScale = 1.0f;
+}
+void setGameLightScale(float s) { sGameLightScale = std::clamp(s, 0.0f, 1.0f); }
+float gameLightScale() { return sInScene && !sInCaster && active() ? sGameLightScale : 1.0f; }
 
 void noteGameLight(const float* obj, uint32_t idMask) {
     const u32 f = copyDispCount();

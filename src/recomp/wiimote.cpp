@@ -268,7 +268,8 @@ std::vector<ScriptItem> parseScript(const std::string& script) {
                 if (b == name) p.buttons |= bit;
             // TP=<target>: player teleport (cf_region.cpp, CF_TELEPORT syntax, '/' for ',');
             // WARP=<target>: stage warp (cf_warp.cpp, docs/WARPS.md).
-            if (b.rfind("TP=", 0) == 0 || b.rfind("WARP=", 0) == 0) {
+            // POKE=<hex addr>/<hex byte>: one guest byte written (test aid, e.g. a furniture's on byte).
+            if (b.rfind("TP=", 0) == 0 || b.rfind("WARP=", 0) == 0 || b.rfind("POKE=", 0) == 0 || b.rfind("FTR=", 0) == 0) {
                 p.action = b;
                 p.frames = 1;
                 continue;

@@ -366,7 +366,13 @@ bool tab(const char* name) {
     return ImGui::BeginTabItem(name, nullptr, select ? ImGuiTabItemFlags_SetSelected : 0);
 }
 
-void applyResolution() { VISetFrameBufferScale(float(port::settings().video.resolutionScale)); }
+void applyResolution() {
+    // Test aid CF_RENDER_SCALE=<float>: a fractional render scale instead of the setting (the setting
+    // is a whole multiple of the game's 608x456 frame: 3 = 1368 lines, 2432x1368 in a 16:9 window).
+    // True 4K (3840x2160) shots: CF_RENDER_SCALE=4.7369 in a 16:9 window (docs/CONTROLS.md "Test aids").
+    static const float sOverride = std::getenv("CF_RENDER_SCALE") ? float(std::atof(std::getenv("CF_RENDER_SCALE"))) : 0.0f;
+    VISetFrameBufferScale(sOverride > 0.0f ? sOverride : float(port::settings().video.resolutionScale));
+}
 
 void applyWindowSettings() {
     const auto& v = port::settings().video;
@@ -1040,13 +1046,33 @@ void enhancedLightingTab() {
     ImGui::SetItemTooltip("Lamps, TVs, computers, stereos, fireplaces, candles, lava lamps, festive trees and other\n"
                           "glowing furniture light the room around them in their own colour, in your house, villagers'\n"
                           "houses and shops. Switchable furniture follows the game: a lamp you turn off stops lighting.\n"
-                          "Fires flicker, screens are cool. Cost grows with the lights in view.");
+                          "Light falls off from the source like a real lamp: a bright pool, a faint tail. Flames are\n"
+                          "warm orange and flicker, screens take their picture's colour. Cost grows with the lights in view.");
     ImGui::BeginDisabled(!l.furnitureLights);
     ImGui::Indent();
     sDirty |= recomp::menu::SliderFloat("Furniture light intensity", &l.furnitureLightIntensity, 0.0f, 3.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
     sDirty |= recomp::menu::Checkbox("Furniture light shadows", &l.furnitureLightShadows);
-    ImGui::SetItemTooltip("Fires and screens cast shadows (shares the night lights' shadow slots; the preset sets how\n"
-                          "many). Lamps light without shadows: their own shade would block them.");
+    ImGui::SetItemTooltip("Fires, screens and lamps cast shadows (lamps from just below their shade; the nearest and\n"
+                          "strongest get the night lights' shadow slots, the preset sets how many). Flames' shadows\n"
+                          "waver with the flame.");
+    sDirty |= recomp::menu::SliderFloat("Room fill from lamps", &l.furnitureRoomFill, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetItemTooltip("In the original game a lamp or candle switched on brightens the whole room evenly. With\n"
+                          "furniture lights the light comes from the lamp itself (a pool of light, shadows); this\n"
+                          "keeps that share of the game's whole-room brightening as soft bounce light.\n"
+                          "1 = the game's full brightening, 0 = only the lamp's own light (default: a candle\n"
+                          "is the only light in its corner).");
+    sDirty |= recomp::menu::SliderFloat("Light vibrance##furniture", &l.furnitureVibrance, 0.0f, 2.5f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetItemTooltip("How saturated the furniture lights' colour is: flames deep orange-red, screens in their\n"
+                          "picture's colour. 1 = the colour as the source gives it; higher = punchier coloured pools.");
+    sDirty |= recomp::menu::SliderFloat("Rim light", &l.rimLight, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetItemTooltip("Characters (and, subtler, furniture) standing against a lamp, candle or screen pick up\n"
+                          "its colour on the edges facing away from you: a pink rim on one side and a blue one on the\n"
+                          "other between two lamps instead of a dark silhouette. Outdoors at night street lamps,\n"
+                          "windows and fireflies give a fainter rim. 0 = off.");
+    sDirty |= recomp::menu::SliderFloat("Room ambient under lamps", &l.furnitureNightAmbient, 0.05f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetItemTooltip("Indoors at night while lamps or candles are lit: how much of the game's own room light\n"
+                          "stays (1 = all of it). Lower makes the room around the lamps darker and their coloured\n"
+                          "pools stand out more (with a gentle contrast lift). Daytime and unlit rooms are unchanged.");
     ImGui::Unindent();
     ImGui::EndDisabled();
 

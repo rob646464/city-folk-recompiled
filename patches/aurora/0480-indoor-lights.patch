@@ -1,0 +1,169 @@
+diff --git a/include/aurora/enhanced.h b/include/aurora/enhanced.h
+--- a/include/aurora/enhanced.h
++++ b/include/aurora/enhanced.h
+@@ -30,6 +30,10 @@ extern "C" {
+ // depth / normal pre-pass, ambient occlusion, the glow buffer, world-effect masks or EFB copies.
+ // Draws of this class are always dropped from the main pass, also with shadow maps off.
+ #define AURORA_DRAW_CLASS_SHADOW 3
++// 0480: a world draw that receives light and shadows like AURORA_DRAW_CLASS_WORLD (same pipelines)
++// but casts no shadow into the light shadow maps: the shell of a room (floor, walls) around its
++// lights, which would otherwise block a window light coming over a wall.
++#define AURORA_DRAW_CLASS_WORLD_NOCAST 4
+ 
+ typedef struct {
+   bool enabled; // master switch
+@@ -147,6 +151,9 @@ void GXSetDrawClassAurora(uint8_t drawClass);
+ // 0420: a light-emitting surface (a lit window, a glowing sign, a lamp head): no directional
+ // (sun / moon) shadow or terminator and no ambient occlusion darkens it; extra lights still add.
+ #define AURORA_MATERIAL_EMISSIVE 2
++// 0480: an emissive surface that is also a bloom source of its own (a candle's or a fire's flame):
++// as AURORA_MATERIAL_EMISSIVE, and drawn into the bloom's glow buffer like additive draws.
++#define AURORA_MATERIAL_EMISSIVE_GLOW 3
+ void GXSetMaterialHintAurora(uint8_t hint);
+ // End of the 3D scene of this frame (before the HUD). GX FIFO command; no effect when the
+ // enhanced mode or all of its screen-space parts are off, or inside an offscreen pass.
+diff --git a/include/aurora/lights.h b/include/aurora/lights.h
+--- a/include/aurora/lights.h
++++ b/include/aurora/lights.h
+@@ -46,6 +46,14 @@ constexpr uint32_t ExtraLightRoomBox = 1u << 4;
+ // [6] the distance behind the view toward the light within which casters are rendered (world units).
+ // With ExtraLightCastShadows it takes a shadow slot: four orthographic cascades in its atlas cell.
+ constexpr uint32_t ExtraLightDirectional = 1u << 5;
++// 0480 (point lights without ExtraLightRoomBox): inverse-square falloff from a small source,
++// windowed to zero at `radius`; box[0] = the source's core radius as a share of `radius` (0.02..,
++// 0 = 0.02). The light is then mostly a local pool (a candle, a lamp, a screen).
++constexpr uint32_t ExtraLightPhysical = 1u << 6;
++// 0480 (directional lights): the shadow tint darkens only the share of a pixel's light that is not
++// the extra (point) lights' (those have their own shadows): a room's window light in a room lit by
++// lamps.
++constexpr uint32_t ExtraLightSpareExtra = 1u << 7;
+ // 0441 (optional, directional lights): a world anchor for the cascades' texel snapping. Aurora gets
+ // only view-space data, so it snapped the cascade centres in a frame that moves and turns with the
+ // camera: the shadow map's texel grid slid over the world whenever the camera moved (shadow edges
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -2954,7 +2954,7 @@ DrawUniform draw_uniform() noexcept {
+     // still reach them, with a matte wrap-around response (shader: enh_material).
+     u.flags &= ~(1u | 8u);
+     u.material = 1.f;
+-  } else if (gx::g_gxState.materialHint == AURORA_MATERIAL_EMISSIVE) {
++  } else if (gx::g_gxState.materialHint == AURORA_MATERIAL_EMISSIVE || gx::g_gxState.materialHint == AURORA_MATERIAL_EMISSIVE_GLOW) {
+     // 0420: light-emitting surfaces are not shadowed (shader: enh_material 2) nor occluded.
+     u.flags &= ~0x30010u;
+     u.material = 2.f;
+@@ -3593,8 +3593,9 @@ bool note_draw(const gx::PipelineConfig& config, uint8_t drawClass, uint32_t vtx
+   if (st.projType != GX_PERSPECTIVE) {
+     drawClass = AURORA_DRAW_CLASS_OTHER; // 2D quads inside the 3D view (ghost-layer composite, screen copies)
+   }
+-  if (drawClass != AURORA_DRAW_CLASS_OTHER && g_cfg.bloom && g_cfg.bloomEmissive > 0.f && is_emissive(config) &&
+-      !is_offscreen()) {
++  // 0480: and the flames the game draws opaque (material hint EMISSIVE_GLOW).
++  if (drawClass != AURORA_DRAW_CLASS_OTHER && g_cfg.bloom && g_cfg.bloomEmissive > 0.f &&
++      (is_emissive(config) || (st.materialHint == AURORA_MATERIAL_EMISSIVE_GLOW && config.colorUpdate)) && !is_offscreen()) {
+     note_glow_draw(config, data);
+   }
+   const bool pointShadows = g_shadowCount > 0 && g_cfg.extraLights && g_cfg.extraShadows;
+@@ -3619,7 +3620,8 @@ bool note_draw(const gx::PipelineConfig& config, uint8_t drawClass, uint32_t vtx
+       variants.emplace(data.pipeline, g.data.pipeline);
+     }
+     g.data.dstAlpha = UINT32_MAX;
+-    if (pointShadows && shadow_maps() && config.shaderConfig.lineMode == 0 && config.shaderConfig.zTexOp == 0) {
++    // 0480: AURORA_DRAW_CLASS_WORLD_NOCAST draws (a room's shell) are in the pre-pass but cast nothing.
++    if (pointShadows && shadow_maps() && config.shaderConfig.lineMode == 0 && config.shaderConfig.zTexOp == 0 && !st.noCast) {
+       static std::unordered_map<PipelineRef, PipelineRef> sCasters;
+       if (const auto it = sCasters.find(data.pipeline); it != sCasters.end()) {
+         g.lightPipe = it->second;
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -1794,7 +1794,20 @@ void handle_aurora(ByteReader& reader) noexcept {
+       g_gxState.dirty |= DirtyPipeline;
+     }
+   } else if (subCmd == GX_AURORA_SET_DRAW_CLASS) {
+-    const u8 drawClass = reader.read<u8>();
++    u8 drawClass = reader.read<u8>();
++    // 0480: WORLD_NOCAST is a world draw (same pipelines) that is not a shadow caster. A change
++    // also ends the draw being extended: a non-casting draw merged into the last recorded caster
++    // command (same GX state) would be drawn into the shadow maps with it.
++    const bool noCast = drawClass == AURORA_DRAW_CLASS_WORLD_NOCAST;
++    if (g_gxState.noCast != noCast) {
++      g_gxState.noCast = noCast;
++      if (gfx::enhanced::config().enabled) {
++        g_gxState.dirty |= DirtyPipeline;
++      }
++    }
++    if (g_gxState.noCast) {
++      drawClass = AURORA_DRAW_CLASS_WORLD;
++    }
+     if (g_gxState.drawClass != drawClass) {
+       g_gxState.drawClass = drawClass;
+       static const bool sNoDirty = std::getenv("AURORA_ENH_NODIRTY") != nullptr; // debug aid
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -360,6 +360,7 @@ struct GXState {
+   u32 wireColor = 0xFFFFFFFF;   // RGBA8
+   bool twoSided = false;        // GX_AURORA_SET_CULL_OVERRIDE
+   u8 drawClass = 0;             // GX_AURORA_SET_DRAW_CLASS (AURORA_DRAW_CLASS_*)
++  bool noCast = false;          // 0480: AURORA_DRAW_CLASS_WORLD_NOCAST (drawClass is then WORLD)
+   u8 materialHint = 0;          // GX_AURORA_SET_MATERIAL_HINT (AURORA_MATERIAL_*)
+   u8 surfaceKind = 0;           // 0350: GX_AURORA_SET_SURFACE (AURORA_SURFACE_*)
+   std::array<float, 256> appXf{}; // 0350: application XF memory 0x0700-0x07FF (aurora/world_fx.h)
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1040,6 +1040,10 @@ var<private> enh_dir_tint: vec3f = vec3f(1.0);
+ // 0450: the tint full shadows of the directional lights reaching the pixel would give (their tints
+ // multiplied): what of the pixel's light is not their direct light, the ambient that AO occludes.
+ var<private> enh_dir_full: vec3f = vec3f(1.0);
++// 0480: the shadow tint of directional lights flagged ExtraLightSpareExtra (indoor key light): it
++// darkens only the share of the pixel's light that is not the extra (point) lights', which have
++// their own shadows (a candle's light is not dimmed by the window light's shadow).
++var<private> enh_dir_tint_x: vec3f = vec3f(1.0);
+ fn enh_dir_light(b: u32, p: vec3f, n: vec3f, ghost: bool, frag: vec2f, flags: u32) -> vec3f {
+   let l = normalize(vec3f(enh_ld(b), enh_ld(b + 1u), enh_ld(b + 2u)) + vec3f(0.0, 0.0, 1e-7));
+   let nl = dot(n, l);
+@@ -1058,7 +1062,11 @@ fn enh_dir_light(b: u32, p: vec3f, n: vec3f, ghost: bool, frag: vec2f, flags: u3
+   // 0420: light-emitting surfaces (enh_material 2) are never in the sun's / moon's shadow.
+   let s = select(select(max(sh, away), sh * 0.5, ghost), 0.0, ubuf.enh_material > 1.5);
+   let tint = vec3f(enh_ld(b + 12u), enh_ld(b + 13u), enh_ld(b + 14u));
+-  enh_dir_tint = enh_dir_tint * mix(vec3f(1.0), clamp(tint, vec3f(0.0), vec3f(1.0)), s);
++  if ((flags & 128u) != 0u) {
++    enh_dir_tint_x = enh_dir_tint_x * mix(vec3f(1.0), clamp(tint, vec3f(0.0), vec3f(1.0)), s);
++  } else {
++    enh_dir_tint = enh_dir_tint * mix(vec3f(1.0), clamp(tint, vec3f(0.0), vec3f(1.0)), s);
++  }
+   if (!ghost) { enh_dir_full = enh_dir_full * clamp(tint, vec3f(0.0), vec3f(1.0)); }
+   var ndl = select(max(nl, 0.0), nl * 0.5 + 0.5, ghost);
+   ndl = select(ndl, clamp((nl + 0.45) / 1.45, 0.0, 1.0) * 0.85, ubuf.enh_material > 0.5 && ubuf.enh_material < 1.5 && !ghost);
+@@ -1086,6 +1094,14 @@ fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
+     let x2 = dist2 / (radius * radius);
+     let w = (1.0 - x2) * (1.0 - x2);
+     var fall = w / (1.0 + 8.0 * x2);
++    if ((flags & 80u) == 64u) {
++      // 0480 (ExtraLightPhysical): inverse-square falloff from a small source (box[0] = its core
++      // radius as a share of the reach), windowed to zero at the reach: a lamp or a candle lights
++      // a pool around it instead of a wide, even disc.
++      let core = max(enh_ld(b + 12u), 0.02);
++      let win = clamp(1.0 - x2 * x2, 0.0, 1.0);
++      fall = win * win / (1.0 + x2 / (core * core));
++    }
+     if ((flags & 16u) != 0u) {
+       // 0187: limited to its room's box (fading out over 24 units past it): no light through
+       // walls into the next room for lights without a shadow there.
+@@ -2587,7 +2603,13 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+   if (enh) {
+     // 0032: forward ambient occlusion (opaque world draws: enh_flags bit 16; mask slot 16 since 0187).
+     // 0340: directional-light (sun / moon) shadows darken the pixel toward the light's shadow tint.
+-    fragmentFn += "\n    prev = vec4f(prev.rgb * enh_dir_tint, prev.a);";
++    // 0480: ExtraLightSpareExtra lights' tint spares the extra lights' share of channel 0.
++    fragmentFn += "\n    {"
++                  "\n      var enh_xs = 0.0;"
++                  "\n      if (enh_s_lit >= 0.0 && enh_s_lit + enh_s_xl > 1e-4) { enh_xs = clamp(enh_s_xl / (enh_s_lit + enh_s_xl), 0.0, 1.0); }"
++                  "\n      enh_dir_tint = enh_dir_tint * mix(enh_dir_tint_x, vec3f(1.0), enh_xs);"
++                  "\n    }"
++                  "\n    prev = vec4f(prev.rgb * enh_dir_tint, prev.a);";
+     // 0450: AO darkens only the ambient (indirect) share of the pixel's light, as real AO does. It
+     // used to multiply the whole colour, so a contact shadow in full sun was as dark as a sun
+     // shadow and the two read alike. Not occluded: the directional lights' direct light (the part

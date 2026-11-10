@@ -16,9 +16,25 @@ bool onRootDraw(Ctx& c, bool xlu, bool begin);
 void onCamera(Ctx& c, u32 cameraData);
 // G3dProc of a g3d scene model (cf_tags.cpp): night-light sources by model name.
 bool onModel(Ctx& c, u32 scnObj);  // false: do not draw (blob shadows hidden)
+// Indoors: world draws outside g3d objects (the room background: floor, walls) cast no shadow
+// (branch indoor-light); false outdoors or with enhanced lighting off.
+bool roomShellMode();
+bool hasModel(u32 scnObj);      // a g3d object with a ResMdl (MDL0)
+bool isLightModel(u32 scnObj);  // a model of light itself (sun_*: a window's light shafts / floor patch)
+// Indoors: a g3d object that casts shadows (a model that is not light itself; ScnProcs without a
+// model are the room background).
+bool castsIndoors(u32 scnObj, u32 task);
+// Rim-light kind of a g3d object (branch indoor-light): 1 a character (a model name without '_', up
+// to 8 characters: the player 'boy' / 'girl', villagers' species codes), 2 furniture ('int_*'),
+// 0 anything else or with enhanced lighting / the rim light off.
+int rimKind(u32 scnObj);  // task: the G3dProc task (6 opa, 7 xlu: translucent parts never cast)
+// Test aids CF_INDOOR_LEGACY=1 / CF_INDOOR_AB=<n>: indoor lighting as before branch indoor-light
+// (always / in every other block of n frames, for same-frame A/B shots).
+bool indoorLegacy();
 // A furniture glow material's TEV colour data with its light amount (cf_furniture_light.cpp):
 // drawn with the emissive hint while lit (Aurora 0420), like the structures' lit materials.
-void markLitMaterial(u32 tevColorData, float amount);
+// glow: a flame (branch indoor-light): also a bloom source of its own (Aurora 0480 EMISSIVE_GLOW).
+void markLitMaterial(u32 tevColorData, float amount, bool glow = false);
 // The town's "rolling log" (branch interp-town): the point where the view's forward ray meets the
 // log's ground, from a cylinder fitted to the placed objects (g3d world; false until fitted, or
 // indoors). wantGroundFit(): keep fitting this frame even with enhanced lighting off.

@@ -2033,9 +2033,16 @@ GXHLE(GXSetChanMatColor) {
     GXSetChanMatColor(GXChannelID(c.r[3]), col);
     interp::noteColors(at);
 }
+// Branch indoor-light: enh::gameLightScale() < 1 (indoors at night while our lamps light the room)
+// darkens the game's own ambient and GX light colours inside the enhanced scene.
+static GXColor scaledGameLight(GXColor col) {
+    const float k = enh::gameLightScale();
+    if (k < 1.0f) col.r = u8(float(col.r) * k + 0.5f), col.g = u8(float(col.g) * k + 0.5f), col.b = u8(float(col.b) * k + 0.5f);
+    return col;
+}
 GXHLE(GXSetChanAmbColor) {
     const u32 at = interp::mark();
-    GXSetChanAmbColor(GXChannelID(c.r[3]), color(c.r[4]));
+    GXSetChanAmbColor(GXChannelID(c.r[3]), scaledGameLight(color(c.r[4])));
     interp::noteColors(at);
 }
 GXHLE_CPU(GXInitLightPos) { GXInitLightPos(light(c.r[3]), farg(c, 1), farg(c, 2), farg(c, 3)); }
@@ -2075,7 +2082,13 @@ GXHLE_CPU(GXGetLightDir) {
 GXHLE(GXLoadLightObjImm) {
     // Position and direction (view space) are blended by frame interpolation.
     const u32 at = interp::mark();
-    GXLoadLightObjImm(light(c.r[3]), GXLightID(c.r[4]));
+    {
+        GXColor* lc = reinterpret_cast<GXColor*>(hostp(c.r[3]));  // (Aurora's layout: the colour first)
+        const GXColor keep = *lc;
+        *lc = scaledGameLight(keep);
+        GXLoadLightObjImm(light(c.r[3]), GXLightID(c.r[4]));
+        *lc = keep;
+    }
     enh::noteGameLight(reinterpret_cast<const float*>(hostp(c.r[3])), c.r[4]);
     static const int sTrace = [] {
         const char* v = std::getenv("CF_LIGHT_TRACE");

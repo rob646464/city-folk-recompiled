@@ -26,6 +26,7 @@
 // Mother's/Father's Day: one event each for every language (#45 fn_800895E0, #46 fn_800897B0);
 // their date rule reads the town's language nibble. The hook runs them with the chosen
 // language in that nibble for the duration of the call.
+#include "game/cf_furniture_light.h"
 #include "game/cf_region.h"
 #include "game/cf_warp.h"
 
@@ -749,6 +750,15 @@ void actorAids(u32 frame) {
         if (act.rfind("TP=", 0) == 0) {
             std::replace(act.begin(), act.end(), '/', ',');
             teleport(frame, act.c_str() + 3);
+        } else if (act.rfind("FTR=", 0) == 0) {
+            unsigned item = 0, on = 0;
+            if (std::sscanf(act.c_str() + 4, "%x/%u", &item, &on) == 2) cffurn::requestSwitch(u16(item), int(on));
+        } else if (act.rfind("POKE=", 0) == 0) {
+            unsigned a = 0, b = 0;
+            if (std::sscanf(act.c_str() + 5, "%x/%x", &a, &b) == 2 && a >= 0x80000000u) {
+                log("[input] f%u poke %08X = %02X (was %02X)", frame, a, b, rd8(a));
+                wr8(a, u8(b));
+            }
         } else if (act.rfind("WARP=", 0) == 0) {
 #ifdef CF_DEV_TOOLS
             warp::requestFromScript(act.substr(5));  // cf_warp.cpp (docs/WARPS.md)

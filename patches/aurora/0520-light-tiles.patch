@@ -1,5 +1,4 @@
 diff --git a/include/aurora/lights.h b/include/aurora/lights.h
-index 61130ae..09f89f1 100644
 --- a/include/aurora/lights.h
 +++ b/include/aurora/lights.h
 @@ -28,7 +28,11 @@ struct ExtraLight {
@@ -16,7 +15,6 @@ index 61130ae..09f89f1 100644
  constexpr uint32_t ExtraLightTranslucent = 1u << 1;
  constexpr uint32_t ExtraLightSpecular = 1u << 2;
 diff --git a/lib/dolphin/gx/GXAurora.cpp b/lib/dolphin/gx/GXAurora.cpp
-index e22413f..9c2e8c4 100644
 --- a/lib/dolphin/gx/GXAurora.cpp
 +++ b/lib/dolphin/gx/GXAurora.cpp
 @@ -214,7 +214,7 @@ namespace aurora::gfx {
@@ -29,7 +27,6 @@ index e22413f..9c2e8c4 100644
      const auto& l = lights[i];
      GX_WRITE_F32(l.pos[0]);
 diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
-index 64e4ad5..eaa55f6 100644
 --- a/lib/gfx/enhanced.cpp
 +++ b/lib/gfx/enhanced.cpp
 @@ -2790,8 +2790,385 @@ void encode_scene(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, co
@@ -470,7 +467,7 @@ index 64e4ad5..eaa55f6 100644
    uint32_t n = 0;
    uint32_t anchors = 0;
    for (uint32_t i = 0; i < std::min(count, MaxExtraLights); ++i) {
-@@ -3887,7 +4289,8 @@ static void directional_records(const ExtraLight& l, uint32_t s, uint32_t cols,
+@@ -3889,7 +4291,8 @@ static void directional_records(const ExtraLight& l, uint32_t s, uint32_t cols,
    xb[0] = 0.f, xb[1] = 0.f, xb[2] = fS, xb[3] = 1.f;
  }
  
@@ -480,7 +477,7 @@ index 64e4ad5..eaa55f6 100644
    // The mask is computed before every EFB pass that added opaque world draws, from all of the
    // frame's opaque world draws so far (the pass's own included: they are recorded, not yet run).
    if (g_log && g_depthDraws.size() != g_depthFlushed) {
-@@ -3899,7 +4302,7 @@ void flush_shadows() noexcept {
+@@ -3901,7 +4304,7 @@ void flush_shadows() noexcept {
      }
    }
    if (g_depthDraws.size() == g_depthFlushed || !g_maskReserved || !g_camera.valid) {
@@ -489,7 +486,7 @@ index 64e4ad5..eaa55f6 100644
    }
    for (size_t i = g_depthFlushed; i < g_depthDraws.size(); ++i) {
      auto& g = g_depthDraws[i];
-@@ -4109,7 +4512,11 @@ void flush_shadows() noexcept {
+@@ -4111,7 +4514,11 @@ void flush_shadows() noexcept {
    ops.emplace_back([job = std::move(job)](const wgpu::CommandEncoder& cmd, detail::FramePacket&) {
      encode_mask(cmd, job);
    });
@@ -502,7 +499,7 @@ index 64e4ad5..eaa55f6 100644
  }
  
  void after_submit() noexcept {
-@@ -4180,6 +4587,24 @@ gx::DrawData* last_caster_only_draw() noexcept {
+@@ -4182,6 +4589,24 @@ gx::DrawData* last_caster_only_draw() noexcept {
  }
  
  void begin_frame() noexcept {
@@ -527,7 +524,7 @@ index 64e4ad5..eaa55f6 100644
    g_lastCasterOnly = SIZE_MAX;
    g_statShadowClass.store(g_shadowClassDraws, std::memory_order_relaxed);
    g_shadowClassDraws = 0;
-@@ -4556,6 +4981,9 @@ void run_prewarm(const PrewarmJob& j) {
+@@ -4558,6 +4983,9 @@ void run_prewarm(const PrewarmJob& j) {
    const bool shadows = c.extraLights && c.extraShadows;
    ensure_composite(j.format, j.msaa);
    ensure_glow_depth_pipe();
@@ -538,7 +535,6 @@ index 64e4ad5..eaa55f6 100644
      ensure_mask_pipes(ao);
      init_dirty();
 diff --git a/lib/gfx/enhanced.hpp b/lib/gfx/enhanced.hpp
-index cbfa74f..a82e721 100644
 --- a/lib/gfx/enhanced.hpp
 +++ b/lib/gfx/enhanced.hpp
 @@ -38,8 +38,13 @@ struct DrawUniform {
@@ -567,7 +563,6 @@ index cbfa74f..a82e721 100644
  void set_lights(const ExtraLight* lights, uint32_t count) noexcept;
  // A draw is about to be recorded while the mode is on (world class: camera projection /
 diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
-index 8b41e8e..5cb66fa 100644
 --- a/lib/gx/command_processor.cpp
 +++ b/lib/gx/command_processor.cpp
 @@ -361,7 +361,8 @@ s64 aurora_payload_len(u16 subCmd, const u8* p, size_t avail) noexcept {
@@ -590,7 +585,7 @@ index 8b41e8e..5cb66fa 100644
    const bool uniformValid = (state.dirty & DirtyUniform) == 0 && cache.uniformRange.size != 0;
    if (!uniformValid) {
      cache.uniformRange = build_uniform(cache.shaderInfo);
-@@ -1809,8 +1813,8 @@ void handle_aurora(ByteReader& reader) noexcept {
+@@ -1822,8 +1826,8 @@ void handle_aurora(ByteReader& reader) noexcept {
        g_gxState.dirty |= DirtyUniform;
      }
    } else if (subCmd == GX_AURORA_SET_EXTRA_LIGHTS) {
@@ -602,10 +597,9 @@ index 8b41e8e..5cb66fa 100644
        auto& l = lights[i];
        for (float& v : l.pos) v = reader.read<f32>();
 diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
-index 7ef1093..3f15669 100644
 --- a/lib/gx/shader.cpp
 +++ b/lib/gx/shader.cpp
-@@ -1065,23 +1065,21 @@ fn enh_dir_light(b: u32, p: vec3f, n: vec3f, ghost: bool, frag: vec2f, flags: u3
+@@ -1075,23 +1075,21 @@ fn enh_dir_light(b: u32, p: vec3f, n: vec3f, ghost: bool, frag: vec2f, flags: u3
    let col = vec3f(enh_ld(b + 4u), enh_ld(b + 5u), enh_ld(b + 6u)) * enh_ld(b + 7u);
    return col * (ndl * (1.0 - sh));
  }
@@ -636,7 +630,7 @@ index 7ef1093..3f15669 100644
      let l = d * inverseSqrt(max(dist2, 1e-6));
      let x2 = dist2 / (radius * radius);
      let w = (1.0 - x2) * (1.0 - x2);
-@@ -1097,7 +1095,7 @@ fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
+@@ -1115,7 +1113,7 @@ fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
          ex[k] = max(abs(dot(q, ax)) / al - al, 0.0);
        }
        fall = fall * (1.0 - smoothstep(0.0, 24.0, length(ex)));
@@ -645,17 +639,13 @@ index 7ef1093..3f15669 100644
      }
      var ndl = dot(n, l);
      ndl = select(max(ndl, 0.0), ndl * 0.5 + 0.5, ghost);
-@@ -1118,10 +1116,47 @@ fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
-       let sw = (flags >> 8u) & 0xFFu;
-       col = col * (1.0 - enh_mask(frag, slot) * select(1.0, f32(sw) / 255.0, sw != 0u));
-     }
--    sum = sum + col * (ndl * fall);
-+    *sum = *sum + col * (ndl * fall);
-     if ((flags & 4u) != 0u && ubuf.enh_material < 0.5) {
+@@ -1141,8 +1139,45 @@ fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
        let h = normalize(l + v);
--      sum = sum + col * (fall * 0.35 * pow(max(dot(n, h), 0.0), 24.0));
-+      *sum = *sum + col * (fall * 0.35 * pow(max(dot(n, h), 0.0), 24.0));
-+    }
+       add = add + col * (fall * 0.35 * pow(max(dot(n, h), 0.0), 24.0));
+     }
+-    sum = sum + add;
++    *sum = *sum + add;
+     if ((flags & 64u) != 0u) { enh_xl_phys = enh_xl_phys + add; }
 +}
 +fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
 +  var sum = vec3f(0.0);
@@ -692,10 +682,11 @@ index 7ef1093..3f15669 100644
 +  } else {
 +    for (var i = 0u; i < cnt; i++) {
 +      enh_xl_one(i, p, n, v, ghost, frag, &sum);
-     }
++    }
    }
+   enh_xl_phys = enh_xl_phys * ubuf.enh_extra_scale;
    return sum * ubuf.enh_extra_scale;
-@@ -2573,7 +2608,13 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+@@ -2600,7 +2635,13 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
          "\n    enh_beam_gain: f32,"
          "\n    enh_beam_dref2: f32,"
          "\n    enh_beam_floor: f32,"

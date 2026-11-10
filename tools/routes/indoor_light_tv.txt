@@ -1,0 +1,17 @@
+# Indoor lighting with a TV (docs/RENDERING.md "Indoor lighting"), saved town CF_FIXTURE=user-town-clean:
+# the house's tape deck (item grid 0x90E94B9E in this fixture) is turned into a retro TV (item BDE,
+# code 0x9000 + 4 x item = BF78) before the warp, then the TV is switched on with the route action
+# POKE on its glow helper's target (+4 = 1.0f; the helper is at 0x9021F708 in this fixture: CF_FURN_LOG
+# lists it), the candle (C45) with FTR (its own switch), later the TV off again.
+include warp.txt
++1000:POKE=90E94B9E/BF
++1:POKE=90E94B9F/78
++599:WARP=house1
+after link d_bgi_drawNP 2
++300:TP=256/0/420
++40:STICKUP*4
++360:POKE=9021F70C/3F
++1:POKE=9021F70D/80
++499:FTR=C45/1
++500:POKE=9021F70C/00
++1:POKE=9021F70D/00

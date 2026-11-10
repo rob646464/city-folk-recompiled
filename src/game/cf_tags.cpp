@@ -15,6 +15,8 @@
 #include "recomp/runtime.h"
 #include "recomp/version.h"
 #include "game/cf_light.h"
+#include "recomp/enhanced_lighting.h"
+#include "recomp/gx_bridge.h"
 
 #include <array>
 #include <cstdio>
@@ -73,7 +75,7 @@ HLE(DrawXlu__Q34nw4r3g3d7ScnRootFv) {
 }
 
 namespace {
-void objectScope(Ctx& c, const char* name) {
+void objectScope(Ctx& c, const char* name, bool proc = false) {
     const u32 obj = c.r[3];
     // A culled object kept for its shadow (cf_shadow_casters.cpp): a shadow caster only, never
     // drawn in the picture; tagged like any other object, so it blends when it comes into view.
@@ -83,7 +85,20 @@ void objectScope(Ctx& c, const char* name) {
     interp::TagScope t(interp::TagCat::Object, obj, rd32(obj), c.r[4]);
     interp::tagGroupIfNone(obj);
     if (cast == 1) cfcast::shadowOnlyBegin();
+    // Indoors the room background outside the objects casts no shadow (cflight::roomShellMode): an
+    // object does.
+    // (ScnProcs without a model are the room background's own draws, sun_* models the window light's
+    // shafts and floor patches: they stay non-casting.)
+    (void)proc;
+    const bool shell = enh::noCast() && cflight::castsIndoors(obj, c.r[4]);
+    if (shell) gx::endPendingDraw(), enh::setNoCast(false);
+    // Characters and furniture take the coloured rim of our point lights (Aurora 0520a).
+    const int rim = cflight::rimKind(obj);
+    const int rimBefore = enh::rimMaterial();
+    if (rim != rimBefore) gx::endPendingDraw(), enh::setRimMaterial(rim);
     callOriginal(c, name);
+    if (rim != rimBefore) gx::endPendingDraw(), enh::setRimMaterial(rimBefore);
+    if (shell) gx::endPendingDraw(), enh::setNoCast(true);
     if (cast == 1) cfcast::shadowOnlyEnd();
 }
 }  // namespace
@@ -194,6 +209,6 @@ void efEnd() { interp::setEffectParticles({}); }
 
 HLE(G3dProc__Q34nw4r3g3d12ScnMdlSimpleFUlUlPv) { objectScope(c, "G3dProc__Q34nw4r3g3d12ScnMdlSimpleFUlUlPv"); }
 HLE(G3dProc__Q34nw4r3g3d6ScnMdlFUlUlPv) { objectScope(c, "G3dProc__Q34nw4r3g3d6ScnMdlFUlUlPv"); }
-HLE(G3dProc__Q34nw4r3g3d7ScnProcFUlUlPv) { objectScope(c, "G3dProc__Q34nw4r3g3d7ScnProcFUlUlPv"); }
+HLE(G3dProc__Q34nw4r3g3d7ScnProcFUlUlPv) { objectScope(c, "G3dProc__Q34nw4r3g3d7ScnProcFUlUlPv", true); }
 
 }  // namespace recomp
