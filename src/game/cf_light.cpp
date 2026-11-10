@@ -240,7 +240,9 @@ void fitSample(float py, float pz, float uy, float uz) {
         const int k = int(std::lround(r));
         const u32 cnt = ++sFit.radii[k];
         // (a clear majority to switch: the ground must not hop between terraces as views change)
-        if (!sFit.valid || cnt > 2 * sFit.radii[int(sFit.r)] + 8) sFit.r = float(k);
+        // (and only while the fit is young: a later switch moved the effects' centre and frame in
+        // one step, e.g. after a long walk on the lower terrace; branch leaves-slope)
+        if (!sFit.valid || (sFit.n < 2000 && cnt > 2 * sFit.radii[int(sFit.r)] + 8)) sFit.r = float(k);
         sFit.valid = true;
     }
 }

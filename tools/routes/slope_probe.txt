@@ -1,0 +1,18 @@
+# Looking for the town's slopes between the upper and the lower level (branch leaves-slope): the
+# player is placed on the upper level at several x and walks south; CF_WFX_FOCUS_LOG=1 shows where
+# the camera's height changes. CF_FIXTURE=user-town-clean.
+include warp.txt
++400:TP=800/84/2250
++40:STICKDOWN*220
++260:TP=1100/84/2250
++40:STICKDOWN*220
++260:TP=1400/84/2250
++40:STICKDOWN*220
++260:TP=1700/84/2250
++40:STICKDOWN*220
++260:TP=2000/84/2250
++40:STICKDOWN*220
++260:TP=2300/84/2250
++40:STICKDOWN*220
++260:TP=2600/84/2250
++40:STICKDOWN*220
