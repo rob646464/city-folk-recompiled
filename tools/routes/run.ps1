@@ -57,7 +57,13 @@ if ($Shots) { $vars.CF_SHOT = "$(Join-Path $run 'shots'),$Shots" }
 foreach ($kv in ($Env -split ';')) {
     if ($kv -match '^([^=]+)=(.*)$') { $vars[$Matches[1]] = $Matches[2] }
 }
-foreach ($k in $vars.Keys) { Set-Item -Path "env:$k" -Value $vars[$k] }
+# Set for this run only: the previous values come back afterwards, so a second run.ps1 call in the
+# same PowerShell (a batch of runs) does not inherit this run's -Env (CF_FIXTURE, CF_POKE, ...).
+$savedEnv = @{}
+foreach ($k in $vars.Keys) {
+    $savedEnv[$k] = [Environment]::GetEnvironmentVariable($k)
+    Set-Item -Path "env:$k" -Value $vars[$k]
+}
 
 $exe = Join-Path $root "build\$Build\$Exe"
 $argList = @("--disc", $Disc)
@@ -67,4 +73,6 @@ $log = Join-Path $run "log.txt"
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $ErrorActionPreference = "Continue"  # stderr lines arrive as error records
 & $exe @argList 2>&1 | ForEach-Object { "$_" } | Out-File -Encoding utf8 $log
-"exit $LASTEXITCODE after $([int]$sw.Elapsed.TotalSeconds) s, log $log"
+$code = $LASTEXITCODE
+foreach ($k in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($k, $savedEnv[$k]) }
+"exit $code after $([int]$sw.Elapsed.TotalSeconds) s, log $log"

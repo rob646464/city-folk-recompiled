@@ -7,6 +7,8 @@
 #include "recomp/sched.h"
 #include "recomp/version.h"
 
+#include <aurora/efb_ram.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -254,6 +256,35 @@ u32 overlayLength(s32 e) { return region::overlayLength(e); }
 s32 overlayRead(s32 e, void* dst, s32 len, s32 off) { return region::overlayRead(e, dst, len, off); }
 void onBoot(Ctx&) {}
 void onFrame() {}
+
+// The game's texture capture (fn_802B7A7C(capture, w, h, fmt, ...): GXInitTexObj over the
+// capture's buffer at +0x24, then GXCopyTex of the EFB into it). The photo taken with the 1
+// button goes through it (640x456 RGB565 at 0x814E02C0 in the USA game), and the CPU then reads
+// that buffer without a DCInvalidateRange, which is what tells the port to read a copy back into
+// guest memory (efb_copy.cpp): every photo came out black in the Photos window. The buffer is
+// watched before its first copy (aurora_efb_ram_watch: copies there are always read back, also
+// with "EFB copies to RAM" off; a DCInvalidateRange-style mark only counts where a copy already
+// is). Cost: one readback per capture, nothing per frame (docs/TEST_COVERAGE.md).
+HLE(fn_802B7A7C) {
+    const u32 buf = rd32(c.r[3] + 0x24);
+    // Upper bound of the buffer for any copy format (32 bits per texel, 4x4 tiles); r9 != 0 = a
+    // half-size copy, still inside it.
+    const u32 w = (c.r[4] & 0xFFFF), h = (c.r[5] & 0xFFFF);
+    const u32 size = ((w + 3) & ~3u) * ((h + 3) & ~3u) * 4;
+    static std::mutex m;
+    static std::vector<std::pair<u32, u32>> watched;
+    if (buf >= 0x80000000u && size && size <= 0x400000u) {
+        std::lock_guard lk(m);
+        bool known = false;
+        for (auto& [b, s] : watched) known = known || (buf >= b && buf + size <= b + s);
+        if (!known && watched.size() < 16) {
+            watched.push_back({buf, size});
+            aurora_efb_ram_watch(hostp(buf), size);
+            log("[capture] texture capture buffer %08X (+%X) watched: its EFB copies are read back", buf, size);
+        }
+    }
+    callOriginal(c, "fn_802B7A7C");
+}
 
 }  // namespace game
 }  // namespace recomp

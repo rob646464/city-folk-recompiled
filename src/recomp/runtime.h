@@ -23,7 +23,10 @@ void callOther(Ctx& c, u32 addr);
 // REL modules (rel.cpp): the recompiled function at a code address of a linked module, or null.
 GuestFn lookupRelFunc(u32 addr);
 // "module:function+0xOFF" for an address inside a linked module, or "" (diagnostics).
-std::string relSymbolize(u32 addr);void initTimeBase();
+std::string relSymbolize(u32 addr);
+// Size of section `section` of a linked REL module, 0 when the module is not linked (rel.cpp).
+u32 relSectionSize(u32 module, u32 section);
+void initTimeBase();
 // Runtime-switchable instruction patches declared in tools/recomp/hooks.txt as
 // "patch <id> <address> <instruction word> [us] [pal]" (id < kMaxPatches).
 void setPatch(u32 id, bool on);
