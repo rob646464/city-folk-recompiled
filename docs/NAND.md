@@ -291,7 +291,173 @@ online-letter-test-2 Frunch profile (friend in the roster) with and without a le
 friend in Pelly's outbox (letter queued and sent over the letters link, save completes); saving
 while hosting a room (`CF_ONLINE_HOST`).
 
+## Importing a Wii or Dolphin save (branch save-import)
+
+F1 > Game > **Save data** (src/game/cf_save_import.cpp, data side src/game/cf_save_data.cpp):
+shows this version's save (town, residents, file date), **Import a Wii / Dolphin save...**,
+**Export to Dolphin...** and the **Backups** list.
+
+### Sources
+
+| Picked | Found there |
+|---|---|
+| Dolphin's user folder (`%APPDATA%\Dolphin Emulator`, `Documents\Dolphin Emulator`, a portable `User`) | its Wii NAND (`Wii/`, or `[General] NANDRootPath` of `Config/Dolphin.ini`) `/title/00010000/5255554x/data/` |
+| a Wii NAND folder (Dolphin's `Wii`, an extracted BootMii NAND backup, a folder holding `nand/`) | `title/00010000/5255554x/data/` for each of the four versions |
+| the title folder or the data folder itself, or `rvforest.dat` / `banner.bin` in it | that folder |
+| an SD card, a folder holding `private/wii/title/RUUx/data.bin`, or `data.bin` itself | the SD-card export (below) |
+| any file of exactly 4,256,576 bytes | a renamed rvforest.dat |
+
+"Find Dolphin saves" looks in Dolphin's usual user folders (Windows: the `UserConfigPath` registry
+value Dolphin reads, `%APPDATA%\Dolphin Emulator`, `Documents\Dolphin Emulator`; Linux:
+`$XDG_DATA_HOME/dolphin-emu`, `~/.local/share/dolphin-emu`, `~/.dolphin-emu`, the Flatpak folder;
+macOS `~/Library/Application Support/Dolphin`), only when clicked. Every save found is listed with
+its version, town, residents and file date; the player picks one. Dolphin keeps a Wii save as the
+same plain files (a file copied into its NAND folder is used as is: tools/dolphin/dolphin_run.ps1
+does that before every run), so Dolphin needs no format of its own; its "Export Wii Save" writes the
+SD-card format.
+
+### Checks
+
+- **The game's own checksums** (`cfsave::checksums()`, the save writers fn_8010E1CC ->
+  fn_80115E08 / fn_8011719C / fn_80115D0C, disassembled; the load checks compare the same ranges,
+  e.g. fn_8013476C): 14 big-endian CRC-32s (the game's fn_802A9A20 = the reflected 0xEDB88320
+  CRC, start value and final XOR as passed):
+
+  | Stored at | Covers | What |
+  |---|---|---|
+  | 0x0 | 0x4 + 0x1C | file header |
+  | resident n + 0x0 (resident n = 0x20 + n x 0x86C0) | + 0x4, 0x111C bytes | resident part 1 |
+  | resident n + 0x1120 | + 0x1124, 0x759C | resident part 2 |
+  | 0x5E240 | 0x5E244 + 0x1C | block after the residents (0x21B20) |
+  | 0x5EC60 | 0x5EC64 + 0x1497C | town data (to 0x735E0; holds the town byte 0x735C2) |
+  | 0x735E0 | 0x735E4 + 0x1C | second block header |
+  | 0x73600 | 0x73604 + 0x19BD1C | second block (to 0x20F320) |
+  | 0x20F320 | 0x20F324 + 0x200000, start value 0x04201018 | third block |
+
+  The functions are identical apart from addresses in all four versions (`gen_version_map.py diff`).
+  All three fixtures pass. A file of another size, a failing checksum (the message names the part)
+  or a save without a resident is refused: "the file is damaged: its checksum does not match (town
+  data), so the game would refuse it".
+- **Region**: a save's version is its title (`5255554A/45/50/4B` = Japan / USA / Europe / Korea;
+  the folder name, or the title id in data.bin) or, for a loose rvforest.dat, the town byte 0x735C2
+  (low nibble = region the town was made in). **Decision**: the formats are identical (same size,
+  same checksums and offsets in all four versions, the struct checks of docs/SETUP.md "Version-aware
+  code") and the game loads another version's save (parity-1: the USA fixture renamed loads on PAL,
+  Japan and Korea), but a Wii never does that. So a mismatch is refused with "this is a save of the
+  USA version, and you play the Europe version", and the player can tick **"Import it into this
+  version anyway"** (the town keeps its own region's holidays, which follow the town byte,
+  REGION_CONTENT.md section 9). It is then written to the running version's title folder. Another
+  version's banner.bin is not taken when this version has its own (its text is that version's).
+
+### When it is applied: at the next start
+
+The game reads the save at boot (the title shows the saved town) and keeps it in memory, and it
+writes the file whenever it saves, so a running game's save is never replaced. **Import and
+restart** / **Import at the next start** stage the checked files in `<data folder>/save_import/
+pending/` (written to `pending.cf-tmp` and renamed, so a half-staged import never applies); the
+next start applies them in `ios::nandRoot()` before any NAND file is opened (`applyAtStart`):
+
+1. the staged rvforest.dat is checked again;
+2. the whole current data folder is copied to `<data folder>/save_backups/<YYYY-MM-DD_hh-mm-ss>/
+   files/`, every copy read back and compared, with `backup.ini` (reason, date, title folder, town,
+   residents, each file's size and NAND attributes); if that fails, nothing is changed;
+3. rvforest.dat and banner.bin are replaced (each written beside and renamed over), with the
+   attributes the game gives its files (`00001001 3031 3 0 0 0` in `~attributes.txt`). The
+   WiiConnect24 files (`wc24dl.vff`, `wc24pubk.mod`) stay: the game makes them itself and they
+   belong to the console's WiiConnect24 tasks (`/shared2/wc24`), not to the town;
+4. if a write fails, the backup is put back.
+
+A failed apply leaves the save as it was, moves the request to `save_import/failed/` (not retried
+at every start) and shows the reason in F1. "Import and restart" is greyed while the game has a
+file of its data folder or a `/tmp` safe copy open (a save in progress). The staged request can be
+cancelled in F1 until the restart.
+
+**Restore** (Backups list): staged the same way; the current save is backed up first (folder
+`<time>-before-restore`), then the data folder is put back exactly as in the backup (files that
+were not in it are removed; they are in the new backup).
+
+### data.bin (the Wii's SD-card export)
+
+Format (public Wii documentation): a 0xF0C0-byte header encrypted with AES-128-CBC with the
+console family's **SD key and IV** (title id, banner size, permissions, MD5, banner), a plain "Bk"
+header at 0xF0C0 (0x70 + 0x10 padding: NG id, file count, sizes, the title id again at +0x60, MAC
+address), per file a plain 0x80-byte header (magic 0x03ADF17E, size, permissions, attributes, type,
+name from +0x0B, the data's IV at +0x50) and the data padded to 0x40 bytes, AES-128-CBC with the SD
+key and that IV, then the console's ECDSA signature and its NG/AP certificates.
+
+- The SD key and IV are Nintendo's (the same in every Wii, part of IOS) and are **not in this port,
+  its repository or its settings**. BootMii's `keys.bin` does not contain them (it is the console's
+  OTP: common key, NAND key, NG key...).
+- **Reading needs only the key**: the signature and certificates let a Wii check which console
+  made the file; they are not needed to decrypt it. The header's MD5 needs a further Nintendo
+  constant (the "MD5 blanker"), so the key is checked instead by the decrypted header naming the
+  same title as the plain Bk header and starting the banner with "WIBN". The save inside is then
+  checked by its own checksums like any other.
+- Without a key, F1 shows the save's version (from the plain Bk header) and how to get plain files:
+  import data.bin into Dolphin (Tools > Import Wii Save...) and pick Dolphin's folder, or copy
+  `title/00010000/<title>/data` out of a NAND backup with a NAND extractor. A player who has the key
+  and IV can type them (32 hex digits each) or load the files `sd-key` / `sd-iv` (16 bytes or hex
+  text) from a folder; they are kept in memory until the game closes, never written.
+- `cfsave::decryptDataBin` / `parseDataBin`; AES-128 written from FIPS 197 (known-answer test in
+  cf_save_import_test). Not verified against a data.bin made by a real Wii or by Dolphin (no such
+  file here, and making one needs the key): the test builds one with a made-up key.
+
+### Export to Dolphin
+
+Copies this version's rvforest.dat and banner.bin (read under the NAND lock; refused while the game
+is saving or when the save fails its checksums) into a Dolphin user folder's NAND (`Wii/title/
+00010000/<title>/data/`, the NAND root from Dolphin.ini when set) or a picked Wii NAND folder. A
+save already there is first copied to `save_backups/<time>-dolphin/` (restore it by hand; the
+Restore button is only for the port's own). Close Dolphin first.
+
+### Test aids
+
+- `CF_SAVE_IMPORT=<folder or file>[;any]`: at start, scans that place, logs every save found
+  (`[save] CF_SAVE_IMPORT found ...` with the refusal reason), stages the first one the running
+  version may take (`any` = the "import anyway" box) and applies it at once (same code as F1).
+- `CF_SD_KEY=<32 hex>`, `CF_SD_IV=<32 hex>`: the player's own SD key / IV for a data.bin with
+  CF_SAVE_IMPORT.
+- `CF_SAVE_RESTORE=<backup folder name|latest>`: restores a backup at start.
+- `CF_SAVE_EXPORT=<Dolphin user / NAND folder>[,<guest frame>]`: exports at that frame (default 600).
+- `CF_DOLPHIN_DIRS=<dir>;<dir>`: replaces the default Dolphin user folders "Find Dolphin saves"
+  looks in (tests never look at a real Dolphin folder).
+- `CF_SAVE_IMPORT_PICK=<path>` / `CF_SAVE_EXPORT_PICK` / `CF_SAVE_IMPORT_KEYS_PICK`: the path the
+  "Pick ..." buttons use instead of the file dialog (CF_MENU_CLICK runs); `CF_SAVE_NO_RELAUNCH=1`:
+  "... and restart" quits instead of starting again.
+- `cf_save_import_test` (`CF_SAVE_FILE=<rvforest.dat>` also checks a real save).
+
+### Verified (2026-11-09, USA dev build, scratch folders, copies of the fixtures only)
+
+- A Dolphin-style user folder made from a copy of `user-town-clean` (`User/Wii/title/00010000/
+  52555545/data` + `Config/Dolphin.ini`) imported into a fresh install (empty APPDATA and NAND):
+  "Imported town Frunch (rob64) ... (There was no save before.)", continue route -> "Preparing saved
+  data" -> in town at the house; attributes `00001001 3031 3 0 0 0`; the game made its WiiConnect24
+  files itself.
+- Refused, nothing changed: the same save in a `52555550` (Europe) folder on the USA game ("this is
+  a save of the Europe version, and you play the USA version"); one flipped byte at 0x60000 ("its
+  checksum does not match (town data)"); a data.bin without a key ("needs the SD key") and with a
+  wrong key ("the SD key or IV is not right"). With `;any` the Europe-folder save imports (the USA
+  banner kept).
+- A synthetic data.bin (made-up key) of `user-town2` over the `user-town-clean` save: backup
+  `<time>/` with all four files + backup.ini (town Frunch, attributes), the import, continue ->
+  "Have a grand old time in test!" and the town. Restore of that backup: a `-before-restore` backup
+  of town test, then rvforest.dat byte-identical to the fixture and "... in Frunch!" in the game.
+- F1 path by CF_MENU_CLICK: Game tab -> "Import a Wii / Dolphin save..." -> "Find Dolphin saves"
+  (two Dolphin folders via CF_DOLPHIN_DIRS: the USA save OK, the Europe one listed as refused) ->
+  "Pick a folder..." -> "Import and restart" -> the next start imports it; the page captured.
+- Export: into a Dolphin user folder (files at `Wii/title/00010000/52555545/data`), a second export
+  backs up Dolphin's save first (`-dolphin`), a non-Dolphin folder is refused. **Real Dolphin round
+  trip**: the exported save run in Dolphin (scratch user folder, tools/dolphin/dolphin_run.ps1 with
+  a continue script) -> town; Dolphin rewrote the save at "Preparing saved data"; that Dolphin-made
+  save imported into a fresh install -> town (Mr. Resetti greets: the Dolphin session was ended
+  without saving, as the game intends).
+
 ## Not done / next
+
+- Save import: a data.bin made by a real Wii or by Dolphin's "Export Wii Save" (only synthetic
+  ones, made-up key); BootMii's raw `nand.bin` (needs the console's own NAND key from keys.bin and a
+  NAND file-system reader: plain-file exports only for now); PAL/Japan/Korea runs (same code, title
+  folder per version); exporting to a data.bin (needs the key and the console's signature).
 
 - **First save through the HUD** (house from Tom Nook, Save icon, "Save and quit") played by a
   script end to end, and the bed save; "Saving..." duration against a console.

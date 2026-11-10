@@ -5,6 +5,7 @@
 #include "game/cf_calendar.h"
 #include "game/cf_features.h"
 #include "game/cf_mii.h"
+#include "game/cf_save_import.h"
 #include "recomp/system.h"
 #include "recomp/game.h"
 #include "recomp/gx_bridge.h"
@@ -794,6 +795,7 @@ void gameTab() {
     // The Wii's own settings as the game reads them (SYSCONF; src/recomp/sysconf.cpp, docs/NAND.md).
     ImGui::SeparatorText("Console");
     sDirty |= recomp::sys::drawMenu();
+    recomp::cf::saveimport::menuSection();  // import / export / backups (src/game/cf_save_import.cpp)
     dataSection();
     updatesSection();
 }
