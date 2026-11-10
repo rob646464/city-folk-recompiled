@@ -392,4 +392,13 @@ HLE(OSNotifyLink) {}
 HLE(OSNotifyUnlink) {}
 HLE(OSSetStringTable) { wr32(kStringTable, c.r[3]); }
 
+// Size of a section of a linked module (0 when not linked), from its header's section table.
+u32 relSectionSize(u32 module, u32 section) {
+    if (section >= kRelMaxSections) return 0;
+    std::lock_guard lk(sLinkedM);
+    for (const Linked& l : sLinked)
+        if (l.id == module && section < hdr32(l.header, 0x0C)) return rd32(secInfoAddr(l.header, section) + 4);
+    return 0;
+}
+
 }  // namespace recomp

@@ -35,7 +35,8 @@ bool sIrqPendingFlag = false;
 std::atomic_ref<bool> irqPending() { return std::atomic_ref<bool>(sIrqPendingFlag); }
 }  // namespace
 bool* g_irqPending = &sIrqPendingFlag;  // read by guest code (Ctx::poll)
-bool g_shutdown = false;
+// Exit (sched::shutdown): every guest thread leaves at its next scheduling point or safe point.
+std::atomic<bool> g_shutdown{false};
 
 struct GuestThread {
     u32 guest = 0;
@@ -46,6 +47,7 @@ struct GuestThread {
     u32 waitQueue = 0;
     bool cancelled = false;
     bool detached = false;
+    bool killed = false;  // ended by the exit, not by the game: never shown to the game as terminated
     u32 entry = 0, arg = 0;
     std::condition_variable cv;
 };
@@ -116,12 +118,19 @@ void handOff(GuestThread* next) {
     }
 }
 
+// The calling guest thread leaves because the program exits (shutdown()).
+[[noreturn]] void exitForShutdown(const char* where) {
+    static const bool sLog = std::getenv("CF_SHUTDOWN_LOG") != nullptr;
+    if (sLog) log("[sched] thread %08X leaves at %s (exit)", tSelf ? tSelf->guest : 0, where);
+    throw ThreadExit{};
+}
+
 void waitForCpu(std::unique_lock<std::mutex>& lk, GuestThread* self) {
     self->cv.wait(lk, [&] { return sRunning == self || g_shutdown; });
     cpu::tick();
     if (g_shutdown) {
         lk.unlock();
-        throw ThreadExit{};
+        exitForShutdown("a scheduling point");
     }
     if (self->cancelled) {
         lk.unlock();
@@ -180,6 +189,18 @@ void runIrqs() {
 void finishThread(GuestThread* t, u32 val) {
     std::unique_lock lk(sM);
     t->st = GuestThread::St::Moribund;
+    if (g_shutdown) {
+        // Ended by the exit: the game must not see it (crash-120: the main thread, still running
+        // until its next safe point, saw a killed worker thread as finished in OSIsThreadTerminated
+        // and used its half-built result, `call to 00010000 (lr=8030852C)`). No guest writes, no
+        // joiners woken.
+        static const bool sLog = std::getenv("CF_SHUTDOWN_LOG") != nullptr;
+        if (sLog) log("[sched] thread %08X ends (exit), %d left", t->guest, sLive - 1);
+        t->killed = true;
+        if (sRunning == t) sRunning = nullptr;
+        if (--sLive == 0) sExitCv.notify_all();
+        return;
+    }
     if (t->guest) {
         wr32(t->guest + kVal, val);
         writeState(t, kStateMoribund);
@@ -319,9 +340,15 @@ void exitThread(u32 val) {
 }
 
 bool isTerminated(u32 guest) {
-    std::lock_guard lk(sM);
+    std::unique_lock lk(sM);
+    // At the exit the asking thread leaves here (a scheduling point) instead of acting on threads
+    // the exit has ended.
+    if (g_shutdown && tSelf && !tInIrq) {
+        lk.unlock();
+        exitForShutdown("OSIsThreadTerminated");
+    }
     GuestThread* t = find(guest);
-    return !t || t->st == GuestThread::St::Moribund;
+    return !t || (t->st == GuestThread::St::Moribund && !t->killed);
 }
 
 s32 priority(u32 guest) {
@@ -608,6 +635,9 @@ void shutdown() {
     std::lock_guard lk(sM);
     g_shutdown = true;
     for (auto* t : sThreads) t->cv.notify_all();
+    // The thread running guest code leaves at its next safe point (Ctx::poll -> serviceOnThread)
+    // rather than playing on with the others gone.
+    irqPending().store(true);
 }
 
 bool waitForThreads(double seconds) {
@@ -618,6 +648,7 @@ bool waitForThreads(double seconds) {
 void serviceOnThread(Ctx& c) {
     GuestThread* self = c.thread;
     if (!self || tInIrq || self != tSelf) return;
+    if (g_shutdown.load(std::memory_order_relaxed)) exitForShutdown("a safe point");  // see shutdown()
     runIrqs();
     std::unique_lock lk(sM);
     if (sRunning == self) reschedule(lk, self);

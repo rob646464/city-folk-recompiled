@@ -366,7 +366,7 @@ HLE(WPADControlMotor) {
         if (on == sChan[chan].motor) return;
         sChan[chan].motor = on;
     }
-    if (sLog) log("[wpad] remote %u motor %s", chan + 1, on ? "on" : "off");
+    if (sLog) log("[wpad] remote %u motor %s (guest frame %u)", chan + 1, on ? "on" : "off", game::guestFrames());
     wiimote::rumble(int(chan), on);
 }
 HLE(WPADEnableMotor) {

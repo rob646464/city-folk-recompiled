@@ -34,6 +34,11 @@
 #include <vector>
 
 namespace recomp {
+namespace cftags {
+void efBegin(u32 effect);  // cf_tags.cpp
+void efEnd();
+}  // namespace cftags
+
 u32 copyDispCount();  // hle_gx.cpp
 
 namespace cflight {
@@ -1500,7 +1505,9 @@ HLE(LoadResMatTevColor__Q34nw4r3g3d8G3DStateFQ34nw4r3g3d14ResMatTevColor) {
 // nw4r::ef::DrawOrder::Draw(Effect*, const DrawInfo&): an effect's particle managers are drawn.
 HLE(Draw__Q34nw4r2ef9DrawOrderFPQ34nw4r2ef6EffectRCQ34nw4r2ef8DrawInfo) {
     if (enh::masterOn()) cflight::noteEffectDraw(c.r[4], c.r[5]), enh::setEmissive(false);
+    cftags::efBegin(c.r[4]);  // (frame interpolation: every particle its own identity, cf_tags.cpp)
     callOriginal(c, "Draw__Q34nw4r2ef9DrawOrderFPQ34nw4r2ef6EffectRCQ34nw4r2ef8DrawInfo");
+    cftags::efEnd();
 }
 
 namespace game {

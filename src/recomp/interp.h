@@ -11,6 +11,7 @@
 // behind real time.
 #include "recomp/ctx.h"
 
+#include <array>
 #include <string>
 #include <memory>
 #include <vector>
@@ -88,6 +89,11 @@ struct SiteTag {
     s8 ageStep = 0;
 };
 void addSiteTag(const SiteTag& t);
+// nw4r::ef particles of every draw strategy (cf_tags.cpp): while an effect draws, all its particles
+// (address, manager, birth frame). A GX call whose callee-saved registers hold one of them is drawn as
+// that particle (a Particle scope of its own), unless a particle scope is already open (the billboard
+// DrawQuad hook). Empty: none.
+void setEffectParticles(std::vector<std::array<u32, 3>>&& parts);
 
 // --- guest thread ---------------------------------------------------------------
 bool capturing();
@@ -309,7 +315,7 @@ void drawEnd(u32 end);
 void noteDraw(u64 id);
 // The next noteDraw's vertex count (immediate-mode draws) and kind (1 display list, 2 immediate with
 // indexed positions, 3 immediate with direct positions): part of its fingerprint (matchDraws).
-void noteDrawExtra(u32 n, u8 kind);
+void noteDrawExtra(u32 n, u8 kind, u64 loose = 0);  // loose: the draw's identity without its position array
 // Values noted since noteDraw (a display list's own colour writes, found while parsing it) belong
 // to that draw too, not to the next one.
 void claimForLastDraw();

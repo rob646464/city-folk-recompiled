@@ -1,0 +1,29 @@
+# Blathers' "Donate what?" picker by D-pad with "Snap pointer to menu items" (docs/CONTROLS.md;
+# saved town CF_FIXTURE=user-town-clean, sea bass in the pockets: run.ps1 -Env
+# "CF_FF=1-4400;CF_GIVE_ITEM=5600:9BB0"). Museum by warp, Blathers by TP (module 48), the talk with
+# the pointer away (A takes the highlighted "Donation!"), then on the picker (d_menu_item02NP, the
+# same picker as Nook's "What do you want to sell?"): D-pad right x4 (centre row), up (top row),
+# right (sea bass), A, down x3 (Donate button), A. Verified 2026-11-10 (branch snap-donate): donated.
+include continue_any.txt
+5240:A
++60:A ~6
+after link d_bgo_drawNP 2
++1600:WARP=museum
+after link d_bgi_drawNP 2
++300:TP=mod48:0/30
++30:STICKUP*4
++80:@off
++30:A ~60
+after link d_menu_item02NP 1
++1900:RIGHT
++40:RIGHT
++40:RIGHT
++40:RIGHT
++40:UP
++40:RIGHT
++60:A
++120:DOWN
++40:DOWN
++40:DOWN
++60:A
++150:A ~14

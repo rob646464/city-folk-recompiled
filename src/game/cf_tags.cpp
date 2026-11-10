@@ -18,9 +18,12 @@
 #include "recomp/enhanced_lighting.h"
 #include "recomp/gx_bridge.h"
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace recomp {
 namespace world {
@@ -157,6 +160,47 @@ static void fgObjDraw(Ctx& c) {
     }
 }
 static HleReg sFgObjReg("d_fg_drawNP::fn_112_2184", &fgObjDraw);
+
+// nw4r::ef particles of every draw strategy (the billboard strategy is tagged per particle in DrawQuad
+// above; the others, e.g. DrawQuad(VEC3, VEC3, VEC3) of the fireflies and the fireworks bursts, and
+// fn_8028FF0C's of Mr. Resetti's dirt and the running dust, drew every particle of an emitter under
+// one scope, keyed by draw order or matched by place). While DrawOrder::Draw(Effect*, DrawInfo&)
+// draws an effect (cf_light.cpp hooks it), every particle of its managers (Effect + 0x90: list of
+// ParticleManagers; + 0x38: list of 0xE4-byte Particles, age u16 at + 0xDC) is handed to the
+// interpolation with its manager and birth frame; a strategy's loop keeps the particle it draws in a
+// callee-saved register (interp gxCall). A/B: CF_EF_TAG_ALL=0.
+namespace cftags {
+void efBegin(u32 effect) {
+    static const bool sOn = [] { const char* v = std::getenv("CF_EF_TAG_ALL"); return !(v && *v == '0'); }();
+    if (!sOn || !interp::capturing() || effect < 0x80000000u) return;
+    std::vector<std::array<u32, 3>> parts;
+    const u32 list = effect + 0x90;
+    const u32 off = rd16(list + 0xA);
+    u32 pm = rd32(list);
+    const u32 now = game::guestFrames();
+    for (int g = 0; g < 256 && pm >= 0x80000000u && pm < 0x94000000u; g++, pm = rd32(pm + off + 4)) {
+        static const bool sLog = std::getenv("CF_EF_TAG_LOG") != nullptr;
+        static std::unordered_map<u32, u32> sNamed;
+        if (sLog && sNamed.size() < 4096 && sNamed.emplace(pm, rd32(pm + 0x24)).second) {
+            std::string n;
+            const u32 res = rd32(pm + 0x24), str = res >= 0x80000000u ? rd32(res) : 0;
+            for (u32 k = 0; str >= 0x80000000u && k < 40; k++) {
+                const char ch = char(rd8(str + k));
+                if (!ch) break;
+                n += ch >= 32 && ch < 127 ? ch : '?';
+            }
+            log("[eftag] manager %08X emitter '%s'", pm, n.c_str());
+        }
+        const u32 plist = pm + 0x38;
+        const u32 poff = rd16(plist + 0xA);
+        u32 p = rd32(plist);
+        for (u32 n = 0; n < 2048 && p >= 0x80000000u && p < 0x94000000u; n++, p = rd32(p + poff + 4))
+            parts.push_back({p, pm, (now - rd16(p + 0xDC)) & 0xFFFFu});
+    }
+    interp::setEffectParticles(std::move(parts));
+}
+void efEnd() { interp::setEffectParticles({}); }
+}  // namespace cftags
 
 HLE(G3dProc__Q34nw4r3g3d12ScnMdlSimpleFUlUlPv) { objectScope(c, "G3dProc__Q34nw4r3g3d12ScnMdlSimpleFUlUlPv"); }
 HLE(G3dProc__Q34nw4r3g3d6ScnMdlFUlUlPv) { objectScope(c, "G3dProc__Q34nw4r3g3d6ScnMdlFUlUlPv"); }

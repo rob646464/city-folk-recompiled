@@ -626,8 +626,12 @@ std::vector<ActorHit> findActors(std::initializer_list<u32> modules) {
     struct Range { u32 lo, hi, mod; };
     std::vector<Range> rs;
     for (u32 m : modules) {
+        // Vtables lie in the module's own data section: its real size, not a fixed window (0x4000
+        // reached into other modules' memory, so an unrelated object at 176,0,96 matched modules 22
+        // and 40 and TP=mod22 put the player outside the town).
         const u32 b = relBase(m, 5);
-        if (b) rs.push_back({b, b + 0x4000, m});
+        const u32 size = relSectionSize(m, 5);
+        if (b) rs.push_back({b, b + (size ? size : 0x4000u), m});
     }
     if (rs.empty()) return out;
     auto scan = [&](u32 lo, u32 hi) {

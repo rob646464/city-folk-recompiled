@@ -80,6 +80,24 @@ format description):
   instructions (none; the recompiler marks them unsupported), hooks on REL functions by name
   through the automatic name lookup (use hooks.txt).
 
+## Exit: stopping the guest threads (branch crash-120)
+At exit (window closed, F1 quit, `CF_QUIT_AFTER`) `frame::stop` -> `sched::shutdown` ends every guest
+thread with `ThreadExit` (C++ unwinding back to `threadMain`). Threads waiting at a scheduling point
+leave at once; the one running guest code only at its next scheduling point. Until 2026-11-09 that
+one played on with the others already gone, and they looked terminated: City Folk's main thread
+polls a worker thread (0x805A0228) with OSIsThreadTerminated (`fn_800C7C84`), took its half-built
+result and called through it (`call to 00010000 (lr=8030852C)` in `fn_80308500`, or `call to null
+(lr=8030BC4C)`; ~half the exits at 120 fps, where the main thread is decoupled and usually running).
+Now:
+- a thread ended by the exit is never shown to the game as terminated: no OSThread state or exit
+  value written, joiners not woken, `isTerminated` false (`GuestThread::killed`);
+- `shutdown` sets the interrupt flag, so the running thread leaves at its next safe point
+  (`Ctx::poll` -> `serviceOnThread` throws), and OSIsThreadTerminated / OSJoinThread from a guest
+  thread throw too.
+The whole stop takes a few ms. Test aid `CF_SHUTDOWN_LOG=1` (thread list before and after, where
+each thread left, `CF_LOG_TIME=1` for times); a `call to <addr>` fatal prints r3, its vtable, r4 and
+r31.
+
 ## Instruction coverage
 Gekko = Broadway: LM's coverage (integer, branch, load/store incl. update and indexed forms,
 lmw/stmw, single/double FP, paired singles incl. quantized loads/stores).

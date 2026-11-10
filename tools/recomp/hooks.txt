@@ -237,3 +237,7 @@ fn_802B6B48 all
 # dEnvAmbLight_c's per-frame update, the room's ambient brightening when a lamp or candle is on
 # (scaled to "Room fill from lamps" with furniture lights).
 fn_80197E1C all
+
+# The game's texture capture (src/game/cf_game.cpp): its buffer is marked as CPU-read before the
+# EFB copy, so photos (1 button) are read back into guest memory (they were black).
+fn_802B7A7C all

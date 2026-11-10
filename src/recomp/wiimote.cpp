@@ -627,11 +627,44 @@ std::vector<std::string> takeScriptActions() {
     return out;
 }
 
+// Test aid CF_AUTO_A_MOTOR=<frames>[,<hold>] (scripted fishing, docs/TEST_COVERAGE.md): once the
+// game has kept a Remote's motor on for <frames> guest frames, A is held for <hold> guest frames
+// (default 6), once per rumble. City Folk rumbles the Remote for each nibble and for the bite.
+namespace {
+struct AutoAConfig {
+    bool on = false;
+    u32 after = 0, hold = 6;
+};
+const AutoAConfig sAutoA = [] {
+    AutoAConfig a;
+    if (const char* v = std::getenv("CF_AUTO_A_MOTOR"); v && *v) {
+        a.on = true;
+        unsigned x = 0, h = 6;
+        const int n = std::sscanf(v, "%u,%u", &x, &h);
+        a.after = n >= 1 ? x : 0;
+        a.hold = n >= 2 ? h : 6;
+    }
+    return a;
+}();
+std::atomic<u32> sMotorOnFrame[kRemotes];  // guest frame the motor went on + 1 (0 = off)
+u32 sAutoAFrom[kRemotes], sAutoAUntil[kRemotes], sAutoADoneFor[kRemotes];
+}  // namespace
+
 void sample(int chan, State& out) {
     out = State{};
     if (chan < 0 || chan >= kRemotes) return;
     const double now = double(timeBase()) / kTimerClock;
     sourceFor(chan).read(chan, now, out);
+    if (sAutoA.on) {
+        const u32 f = game::guestFrames(), onAt = sMotorOnFrame[chan].load(std::memory_order_relaxed);
+        if (onAt && onAt != sAutoADoneFor[chan] && f + 1 >= onAt + sAutoA.after) {
+            sAutoADoneFor[chan] = onAt;
+            sAutoAFrom[chan] = f;
+            sAutoAUntil[chan] = f + sAutoA.hold;
+            log("[wpad] remote %d: auto A at guest frame %u (motor on since %u)", chan + 1, f, onAt - 1);
+        }
+        if (f >= sAutoAFrom[chan] && f < sAutoAUntil[chan]) out.buttons |= kBtnA;
+    }
     menunav::notePointer(chan, out.connected && out.pointerValid, out.px, out.py);
     {
         std::lock_guard lk(sStateMutex);
@@ -648,7 +681,9 @@ void sample(int chan, State& out) {
 }
 
 void rumble(int chan, bool on) {
-    if (chan >= 0 && chan < kRemotes) sourceFor(chan).rumble(chan, on);
+    if (chan < 0 || chan >= kRemotes) return;
+    sMotorOnFrame[chan].store(on ? game::guestFrames() + 1 : 0, std::memory_order_relaxed);
+    sourceFor(chan).rumble(chan, on);
 }
 
 void speakerControl(int chan, int cmd) {
