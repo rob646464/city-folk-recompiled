@@ -6,6 +6,8 @@
 
 #include <nod.h>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -218,6 +220,75 @@ bool Disc::readFile(const char* path, std::vector<std::uint8_t>& out) const {
     while (done < length) {
         const int64_t n = nod_read(file, out.data() + done, length - done);
         if (n <= 0) break;
+        done += size_t(n);
+    }
+    nod_free(file);
+    return done == length;
+}
+
+namespace {
+thread_local double tCrcSeconds = 0;
+// CRC-32 (IEEE, reflected: zlib's crc32()).
+std::uint32_t crcUpdate(std::uint32_t crc, const std::uint8_t* p, size_t n) {
+    static const auto kTable = [] {
+        std::array<std::uint32_t, 256> t{};
+        for (std::uint32_t i = 0; i < 256; i++) {
+            std::uint32_t c = i;
+            for (int k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+            t[i] = c;
+        }
+        return t;
+    }();
+    const auto t0 = std::chrono::steady_clock::now();
+    crc = ~crc;
+    for (size_t i = 0; i < n; i++) crc = kTable[(crc ^ p[i]) & 0xFF] ^ (crc >> 8);
+    tCrcSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    return ~crc;
+}
+}  // namespace
+
+double crcSecondsOnThisThread() { return tCrcSeconds; }
+
+bool Disc::fileCrc(const char* path, std::uint32_t& size, std::uint32_t& crc, bool& found) const {
+    found = false;
+    size = 0;
+    crc = 0;
+    static thread_local std::vector<std::uint8_t> buf(1u << 20);
+    if (!folder_.empty()) {
+        std::string rel = path;
+        while (!rel.empty() && rel[0] == '/') rel.erase(0, 1);
+        const auto p = port::longPath(folder_ / "files" / u8path(rel));
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(p, ec)) return false;
+        const auto length = std::filesystem::file_size(p, ec);
+        if (ec) return false;
+        found = true;
+        size = std::uint32_t(length);
+        std::ifstream in(p, std::ios::binary);
+        if (!in) return false;
+        std::uint64_t done = 0;
+        while (in) {
+            in.read(reinterpret_cast<char*>(buf.data()), std::streamsize(buf.size()));
+            const auto n = in.gcount();
+            if (n <= 0) break;
+            crc = crcUpdate(crc, buf.data(), size_t(n));
+            done += std::uint64_t(n);
+        }
+        return done == length;
+    }
+    NodNodeKind kind{};
+    uint32_t length = 0;
+    const uint32_t index = nod_partition_find_file(part_, path, &kind, &length);
+    if (index == NOD_FST_STOP || kind != NOD_NODE_KIND_FILE) return false;
+    found = true;
+    size = length;
+    NodHandle* file = nullptr;
+    if (nod_partition_open_file(part_, index, &file) != NOD_RESULT_OK) return false;
+    size_t done = 0;
+    while (done < length) {
+        const int64_t n = nod_read(file, buf.data(), std::min<size_t>(buf.size(), length - done));
+        if (n <= 0) break;
+        crc = crcUpdate(crc, buf.data(), size_t(n));
         done += size_t(n);
     }
     nod_free(file);

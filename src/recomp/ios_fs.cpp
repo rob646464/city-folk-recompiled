@@ -497,7 +497,7 @@ private:
             if (!fs::is_directory(p, ec)) return FS_EINVAL;
             std::vector<std::string> names;
             for (const auto& e : fs::directory_iterator(p, ec)) {
-                const std::string n = unescapeName(e.path().filename().string());
+                const std::string n = unescapeName(port::displayPath(e.path().filename()));
                 if (n == "~attributes.txt") continue;
                 names.push_back(n);
             }
@@ -582,10 +582,10 @@ const fs::path& nandRoot() {
             if (fs::is_directory(src)) {
                 for (const auto& e : fs::directory_iterator(p, ec)) fs::remove_all(e.path(), ec);
                 fs::copy(src, p, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-                recomp::log("[nand] fixture %s copied from %s%s", fx, src.string().c_str(),
+                recomp::log("[nand] fixture %s copied from %s%s", fx, port::displayPath(src).c_str(),
                             ec ? (" FAILED: " + ec.message()).c_str() : "");
             } else {
-                recomp::log("[nand] ERROR: fixture %s not found (%s)", fx, src.string().c_str());
+                recomp::log("[nand] ERROR: fixture %s not found (%s)", fx, port::displayPath(src).c_str());
             }
         }
         // What the System Menu and IOS leave on every console: the disc title's data folder,
@@ -611,7 +611,7 @@ const fs::path& nandRoot() {
             else sAttrs[ch.nandPath] = ch.attr;
         }
         if (!changes.empty()) saveAttrs();
-        recomp::log("[nand] %s", p.string().c_str());
+        recomp::log("[nand] %s", port::displayPath(p).c_str());
         sys::prepareNand();
     });
     return root;
@@ -643,14 +643,14 @@ bool writeHostFile(const std::string& nandPath, const std::vector<u8>& data, std
         out.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
         out.flush();
         if (!out) {
-            error = "could not write " + tmp.string();
+            error = "could not write " + port::displayPath(tmp);
             fs::remove(tmp, ec);
             return false;
         }
     }
     fs::rename(tmp, p, ec);
     if (ec) {
-        error = "could not replace " + p.string() + ": " + ec.message();
+        error = "could not replace " + port::displayPath(p) + ": " + ec.message();
         fs::remove(tmp, ec);
         return false;
     }

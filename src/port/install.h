@@ -37,6 +37,9 @@ struct InstallState {
     GameVersion running = GameVersion::USA;  // version of the game that is running
 
     bool staticBuild = false;  // cfrecomp: one version linked in, no setup
+    // Setup's disc file check found differences in the running version's disc (setup/disc_check.h):
+    // named as the probable cause of a fatal error. Empty when the disc matches the retail disc.
+    std::string discProblem;
 
     std::string& discOf(GameVersion v) { return disc[int(v)]; }
     const std::string& discOf(GameVersion v) const { return disc[int(v)]; }

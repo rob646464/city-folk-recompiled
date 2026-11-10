@@ -470,7 +470,7 @@ std::vector<LocalEnc> localFiles() {
     std::error_code ec;
     for (auto it = fs::directory_iterator(folder(), ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
         if (!it->is_regular_file(ec)) continue;
-        std::string ext = it->path().extension().string();
+        std::string ext = port::displayPath(it->path().extension());
         for (char& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
         if (ext != ".enc" && ext != ".wc24") continue;
         auto d = readFile(it->path());
@@ -1370,7 +1370,7 @@ bool drawMenuPage() {
     ImGui::SetItemTooltip("Files the Wii downloaded from Nintendo (rvforestdl_us.enc and the like). They are given to the\n"
                           "game as they are: KD checks Nintendo's signature with the game's key, so only genuine files work.");
     for (const auto& l : localFiles()) {
-        const std::string p = l.path.string();
+        const std::string p = port::displayPath(l.path);
         ImGui::PushID(p.c_str());
         const long long at = receivedNowAt(encKey(l.data));
         ImGui::BeginDisabled(!es.mode || !sTownSeen || at || sState.pendingLocal == p);

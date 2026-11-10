@@ -96,54 +96,11 @@ struct AudioSettings {
 struct EnhancementSettings {
     bool showFps = false;
     bool pauseOnFocusLoss = true;
-    bool hiddenMansionPal = true;  // default Hidden Mansion rules for saves that have not chosen in E. Gadd's lab
-    int palLanguage = 1;           // PAL game only: 1 English, 2 German, 3 French, 4 Spanish, 5 Italian (next launch)
-    bool gbhClock = false;         // cut E3 GBH clock/radar screen, toggled in game with D-pad Left
-    bool gbhTracker = false;       // unused GBH ghost tracker, cycled in game with D-pad Down (off/far/close)
-    bool gbhCamera = false;        // unused Game Boy Horror live camera, toggled in game with D-pad Up (docs/UNUSED_CONTENT.md)
-    bool betaSkybox = false;            // unused sky in the game archive (iwamoto/vrbox) on map 2
-    bool heartDoor = false;             // unused heart door (type 07) on Chauncey's room
-    bool starDoor = false;              // unused star door (type 08) on the Twins' room
-    bool betaMapLuigi = false;          // unused full Luigi model on the Game Boy Horror map
-    bool unusedPortraitModels = false;  // each ghost's own model in the Portrificationizer scene
-    bool earlyLuigi = false;            // unused early Luigi model /model/luige.szp (src/recomp/early_luigi.cpp)
-    bool airWaterNozzles = false;       // unused wpair/wpwater Poltergust nozzles (src/recomp/nozzles.cpp)
-    bool earlyPoltergust = false;       // E3 2001 Poltergust body /model/vbody.szp (src/recomp/unused_models.cpp)
-    bool earlyBogmire = false;          // early Bogmire model /model/shadow.szp (src/recomp/unused_models.cpp)
-    bool greenToad = false;             // Toads use kinopio2's green texture set (src/recomp/unused_models.cpp)
-    bool twoPlayer = false;             // unused 2-player mode, P2 on controller port 2 (src/recomp/coop.cpp)
-    bool coopImprovements = false;      // co-op fixes on top of the 2-player mode (src/recomp/coop_fixes.cpp)
-    bool earlyGhostLighting = false;  // "Ghost shading: Beta" = the known beta-shading cheat (fn_800581E8 channel setup)
-    bool skipCutscenes = false;  // START skips cutscenes (src/recomp/skip.cpp)
-    bool fastForwardKey = true;  // holding Tab runs the game at high speed (src/recomp/skip.cpp)
-    bool portalClipFix = true;   // rooms behind a doorway near the camera don't vanish (src/recomp/portal_fix.cpp)
-    // Debug: the game's own compiled-in debug switches (src/recomp/dev_tools.cpp)
-    bool dbgParticleReport = false;  // particle manager JUTReport text
-    bool dbgDepthBlur = false;       // unused depth blur screen pass
-    bool dbgLuigiFlags = false;      // "Debug Mode" AR code: Luigi debug flags 0xCB
-    bool dbgInfoDisplay = false;     // Luigi's debug text (dust, aura, water, heart)
-    bool dbgScanBoxes = false;       // Game Boy Horror scan boxes
-    bool dbgAxes = false;            // XYZ axes at Luigi
-    int dbgHudTest = 0;              // 0 off, 1 icons, 2 numbers, 3 element meter
-    bool dbgFontTest = false;        // font test screen text
-    bool dbgFontTestLatin = false;   // PAL fix: last font-test line shows "alphabet 123"
-    bool dbgWarpSkipEvents = true;   // warps don't start the destination's entry cutscene/event
 };
 
-// Gameplay / difficulty options (F1 > Enhancements > Gameplay). Defaults are neutral: the
-// original game is unchanged until one is moved. They apply in every mansion and variant
-// (docs/GAMEPLAY_OPTIONS.md).
+// Gameplay options (F1 > Enhancements > Gameplay; docs/FEATURES.md). Defaults are the original game.
 struct GameplaySettings {
-    bool palDarknessEverywhere = false;  // PAL Hidden Mansion lighting (ambient x0.2) in every mansion
-    float ambientScale = 1.0f;           // room ambient light multiplier, 0.05..1.5 (composes with the above)
-    float damageScale = 1.0f;            // damage Luigi takes, 0..5
-    float healthScale = 1.0f;            // Luigi's starting and maximum health, 0.25..5
-    float ghostHealthScale = 1.0f;       // ghost HP, 0.25..5
-    bool noHeartDrops = false;           // recovery hearts never appear (and any that do heal nothing)
-    float vacuumStrength = 1.0f;         // Poltergust drain rate on ghost HP, 0.25..4
-    bool alwaysRide = false;             // Luigi always uses the Poltergust-riding movement (PAL Boolossus mode)
-    bool mirrorWorld = false;            // the European Hidden Mansion's left/right mirror in every mode (hm::mirrorWorld)
-    // City Folk (docs/FEATURES.md): grass wear 0 Original, 1 New Leaf style, 2 Off (src/game/cf_grass.cpp).
+    // Grass wear 0 Original, 1 New Leaf style, 2 Off (src/game/cf_grass.cpp).
     int grassWear = 0;
     // Skin tone per resident (src/game/cf_skin.cpp): "<town id>-<player id>" (hex) -> fixed tone 1..8
     // (absent = the game's tanning). Saved as the [skin_tone] section by cf_skin.cpp.
@@ -189,51 +146,6 @@ struct RenderingSettings {
     // flicker (CPU/GPU timing race; docs/RENDERING.md "Vertex snapshots"). Interpolated frame
     // rates snapshot anyway.
     bool vtxSnapshot = true;
-    // Shadows (docs/RENDERING.md, "Shadows"). The game's shadow map (light's-view depth, copied
-    // as Z16 and compared in the TEV) at the internal render resolution instead of 640x480.
-    bool shadowRenderResolution = true;
-    // Widescreen: the shadow light's frustum is widened by the same factor as the view, so
-    // shadows reach the extra side areas (the game only covers what a 4:3 screen shows).
-    bool shadowWidescreen = true;
-    // The game's shadow light only covers a depth band around Luigi (e.g. 619..2322 units from the
-    // room light), so shadows vanish on things farther away. On: the band is extended to what the
-    // player's view shows (enhancement). Off: the original range.
-    bool shadowAnyDistance = true;
-};
-
-// ---- Enhanced lighting > Ghost lights (src/recomp/ghost_lights.cpp; docs/RENDERING.md) ----
-// Every visible ghost lights the room around it in its own glow colour. Part of the optional
-// "Enhanced lighting" group: on by default, so it comes on with the Enhanced lighting master
-// switch (itself OFF by default: the original look stays one click away).
-struct GhostLightSettings {
-    bool enabled = true;
-    float intensity = 1.0f;     // 0..4, multiplies every ghost light
-    float radiusScale = 1.0f;   // 0.25..3, multiplies the per-ghost-size radius
-    bool dramatic = true;       // pulse, flare on appearing/attacking, flicker when stunned, vacuum struggle, capture burst
-    int maxLights = 48;         // 1..64, strongest/nearest visible ghosts first (shared 64-light budget)
-    bool shadows = true;        // the 1-2 strongest ghost lights cast shadows (if the renderer supports it)
-};
-
-// ---- Enhanced lighting > World lights (src/recomp/world_lights.cpp; docs/RENDERING.md) ----
-// Candles, fireplaces, lamps, element sprays, fire, lightning and sparkles as coloured lights.
-// Only with the Enhanced lighting master switch (and its "Dynamic colored lights" part).
-enum WorldLightCategory {
-    kWlCandles,     // candles and candelabras
-    kWlFires,       // fireplaces, torches
-    kWlLamps,       // lamps, chandeliers, lit-room lights
-    kWlSprays,      // Poltergust fire/water/ice spray
-    kWlFireFx,      // fireballs, burning objects/characters, fire ghosts
-    kWlLightning,   // lightning through the windows
-    kWlSparkles,    // treasure, coins, keys, Boo and pickup glows
-    kWlCount
-};
-struct WorldLightSettings {
-    bool enabled = true;
-    bool on[kWlCount] = {true, true, true, true, true, true, true};
-    float intensity[kWlCount] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};  // 0..3 each
-    float masterIntensity = 1.0f;  // 0..3
-    bool flicker = true;           // natural flame flicker (off: steady flames)
-    bool mergeNearby = true;       // nearby flames of one kind become one light (a candelabra = one light)
 };
 
 // Enhanced lighting (F1 > Visuals > Enhanced lighting; docs/RENDERING.md "Enhanced lighting"):
@@ -342,55 +254,6 @@ struct EnhancedLightingSettings {
     int sunShaftQuality = 1;           // 0..2: march steps 12 / 20 / 32 (preset)
 };
 
-// Second batch of restored unused content (src/recomp/unused2.*, docs/UNUSED_CONTENT.md
-// "Second batch"). Everything OFF by default: retail is unchanged until an option is turned on.
-struct Unused2Settings {
-    bool playAsMario = false;      // the player uses the unused bmario model (play_as_mario.cpp)
-    bool marioP2 = false;          // 2-player mode: player 2 is Mario
-    bool borderedView = false;     // fixed 560x430 bordered 3D view (hidden code at 0x80010FD4)
-    bool poisonState = false;      // poison mushroom poisons (doku_* animations, slow health loss) instead of shrinking
-    float poisonDamage = 25.0f;    // total health lost, 1..100
-    float poisonSeconds = 5.0f;    // over this many seconds, 1..20
-    bool crawlFear = false;        // scared from behind -> the unused crawling-fear state
-    bool overheat = false;         // vacuum overheat meter (cut feature)
-    float overheatFillSeconds = 20.0f;  // continuous vacuuming until the Poltergust overheats, 5..120
-    float overheatCoolSeconds = 30.0f;  // full meter back to empty while idle, 5..120
-    float overheatBlowCool = 3.0f;      // cooling speed multiplier while blowing air (L), 1..10
-    int overheatDamage = 10;            // health lost when it catches fire, 0..50
-    bool endingPictures = false;   // unused Luigi pictures (luigi_V/g/b) on the ending rank screen
-    bool ghostPlacements = false;  // unused ghost placements (Slim in the Hidden Room, Mr. Bones in the Courtyard, ...)
-    bool pinkMice = false;         // mice use the unused pink variant (rat2)
-    bool blueGhostGuys = false;    // Ghost Guys use the unused blue/cyan colour sets (heypo9/heypo10 .prm)
-    bool extraSpeedySpirits = false;  // Speedy Spirits 16-20 at invented spots (NOT original placements)
-};
-
-// F1 > Enhancements > Silly: world options (src/recomp/silly_world.cpp; docs/ENHANCEMENTS.md
-// "Silly options: world"). Cosmetic fun; every default is the retail game.
-struct SillyWorldSettings {
-    float ghostSize = 1.0f;        // ghost size (whole model, visual only), 0.5..3 (1 = off)
-    int ghostSizeTargets = 0;      // 0 all ghosts, 1 Boos only
-    bool ghostColorShuffle = false;  // every ghost gets its own random body/glow colour
-    bool disco = false;            // room lights cycle through colours
-    float discoSpeed = 1.0f;       // colour cycles per 10 s, 0.1..5
-    float luigiVoicePitch = 1.0f;  // Luigi's voice pitch, 0.5..2 (1 = off)
-    bool moonGravity = false;      // spilled treasure falls slowly, bounces higher
-    float moonGravityScale = 0.25f;  // gravity multiplier while on, 0.05..1
-    bool confettiCoins = false;    // money bursts throw confetti sparkles
-};
-
-// F1 > Enhancements > Silly: Luigi options (src/recomp/silly.cpp, docs/ENHANCEMENTS.md "Silly").
-// Visual only; the defaults are the retail look.
-enum SillyPiece { kSillyHat, kSillyShirt, kSillyOveralls, kSillyShoes, kSillyPoltergust, kSillyPieceCount };
-struct SillyLuigiSettings {
-    float headScale = 1.0f;       // Luigi's head (and hat, face) about the neck, 0.25..3
-    float bodyScale = 1.0f;       // whole model about his feet, 0.25..3 (camera/collision unchanged)
-    bool wobble = false;          // head on a spring driven by his movement
-    float wobbleStrength = 1.0f;  // 0.25..3
-    bool paper = false;           // flat along his facing axis (Paper Mario)
-    bool colorOn[kSillyPieceCount] = {};
-    unsigned colorRgb[kSillyPieceCount] = {0x3CA03C, 0x3CA03C, 0x2C3C8C, 0x6A3A1E, 0xD82020};  // 0xRRGGBB
-};
-
 // Self-updater (F1 > Game > Updates; src/port/update.cpp, docs/SETUP.md "Updates").
 struct UpdateSettings {
     bool checkAtStartup = true;  // look for a newer GitHub release in the background at startup
@@ -464,16 +327,11 @@ struct Settings {
     UnusedContentSettings unusedContent;
     VideoSettings video;
     RenderingSettings rendering;
-    GhostLightSettings ghostLights;
-    WorldLightSettings worldLights;
     EnhancedLightingSettings enhancedLighting;
     CrtSettings crt;
     AudioSettings audio;
     EnhancementSettings enhancements;
     GameplaySettings gameplay;
-    Unused2Settings unused2;
-    SillyWorldSettings sillyWorld;
-    SillyLuigiSettings sillyLuigi;
     UpdateSettings updates;
     NintendoEventSettings events;
     OnlineSettings online;

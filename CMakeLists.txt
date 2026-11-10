@@ -222,6 +222,32 @@ set(CF_LLVM_DIR "${_cxx_dir}" CACHE PATH "LLVM bin directory whose clang and lld
 install(TARGETS CityFolkRecomp RUNTIME DESTINATION .)
 install(FILES data/pipelines.bin DESTINATION . OPTIONAL)
 install(FILES packaging/LLVM-LICENSE.TXT DESTINATION llvm)
+# Third-party licence texts (packaging/THIRD-PARTY.txt lists them): copied from the sources the
+# program was built from. The prebuilt Dawn / DXC / nod downloads carry no licence file; their
+# texts go into packaging/licenses/<name>.txt (installed when present).
+install(FILES packaging/THIRD-PARTY.txt DESTINATION .)
+set(_deps_src ${CMAKE_BINARY_DIR}/_deps)
+foreach (_lic
+        "aurora|${CMAKE_SOURCE_DIR}/extern/aurora/LICENSE"
+        "imgui|${_deps_src}/imgui-src/LICENSE.txt"
+        "sdl3|${_deps_src}/sdl3_prebuilt-src/licenses/SDL3/LICENSE.txt"
+        "libpng|${_deps_src}/png-src/LICENSE"
+        "zlib|${_deps_src}/zlib-src/LICENSE.md"
+        "freetype|${_deps_src}/freetype-src/LICENSE.TXT"
+        "freetype-FTL|${_deps_src}/freetype-src/docs/FTL.TXT"
+        "fmt|${_deps_src}/fmt-src/LICENSE"
+        "xxhash|${_deps_src}/xxhash-src/LICENSE"
+        "zstd|${_deps_src}/zstd-src/LICENSE"
+        "abseil|${_deps_src}/abseil-cpp-src/LICENSE"
+        "tracy|${_deps_src}/tracy-src/LICENSE"
+        "dawn|${CMAKE_SOURCE_DIR}/packaging/licenses/dawn.txt"
+        "dxc|${CMAKE_SOURCE_DIR}/packaging/licenses/dxc.txt"
+        "nod|${CMAKE_SOURCE_DIR}/packaging/licenses/nod.txt")
+    string(REPLACE "|" ";" _lic "${_lic}")
+    list(GET _lic 0 _name)
+    list(GET _lic 1 _file)
+    install(FILES "${_file}" DESTINATION licenses RENAME "${_name}.txt" OPTIONAL)
+endforeach ()
 if (WIN32)
     install(FILES packaging/windows/README.txt DESTINATION .)
     install(CODE "

@@ -151,12 +151,12 @@ void loadKey(const std::string& section, const std::string& key, const std::stri
 }
 void saveConfig(std::ostream& out) {
     out << "\n[region]\n";
-    for (int i = 0; i < kEventCount; i++) out << kEvents[i].key << " = " << (sCfg.event[i] ? "true" : "false") << "\n";
-    for (int i = 0; i < kFlagCount; i++) out << kFlags[i].key << " = " << (sCfg.flag[i] ? "true" : "false") << "\n";
-    out << "autumn_moon = " << sCfg.moon << "\n";
-    out << "parents_days = " << sCfg.parents << "\n";
-    out << "villager_houses = " << sCfg.houses << "\n";
-    out << "title_screen = " << sCfg.title << "\n";
+    for (int i = 0; i < kEventCount; i++) out << kEvents[i].key << "=" << (sCfg.event[i] ? "true" : "false") << "\n";
+    for (int i = 0; i < kFlagCount; i++) out << kFlags[i].key << "=" << (sCfg.flag[i] ? "true" : "false") << "\n";
+    out << "autumn_moon=" << sCfg.moon << "\n";
+    out << "parents_days=" << sCfg.parents << "\n";
+    out << "villager_houses=" << sCfg.houses << "\n";
+    out << "title_screen=" << sCfg.title << "\n";
 }
 const bool sRegistered = [] {
     port::addSettingsExtension({&resetConfig, &loadKey, &saveConfig});

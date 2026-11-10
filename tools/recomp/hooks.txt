@@ -99,6 +99,18 @@ d_a_strNP::fn_99_2B04 all
 d_a_strNP::fn_99_2548 all
 fn_80166CDC all
 fn_8018ABC8 all
+# Branch shadow-casters-2: villagers / NPCs (base draw + its flat window test), other players
+# (draw + window test), the line behind the camera (trees fn_112_17F0, d_fgobj_managerNP's object
+# draw fn_111_E4C), a main.dol actor with the frustum test, blob shadow registrations.
+fn_8001665C all
+fn_800284F8 all
+d_a_playerNP::fn_80_E20 all
+d_a_playerNP::fn_80_248C all
+fn_8018AB88 all
+d_fgobj_managerNP::fn_111_E4C all
+fn_80181978 all
+fn_801C863C all
+fn_801C874C all
 
 # Online letters research (src/recomp/online_mail.cpp CF_MAIL_PROBE): Pelly's post office checks.
 fn_80177D78

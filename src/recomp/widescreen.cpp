@@ -74,17 +74,23 @@ float windowAspect() {
 }  // namespace
 
 // The target aspect (fixed, or the window's) narrower than or equal to the base aspect: Aurora fits
-// the frame at the base aspect into the window (letter/pillarbox); wider: stretched + Hor+.
+// the frame at the base aspect into the window (letter/pillarbox). Wider: Hor+, the window's own
+// shape for "Match window" (stretched), and a fixed ratio (21:9, 32:9...) fitted at that ratio, so a
+// window of another shape gets black bars instead of a squeezed or stretched picture.
+float sFitAspect = 0.0f;  // display aspect given to Aurora's fit (0: stretched to the window)
 void applyPolicy(float aspect) {
     sBaseAspect = baseAspect();
     const float target = aspect > 0.0f ? aspect : windowAspect();
     const bool original = target > 0.0f && target <= sBaseAspect + 1e-3f;
-    if (original != sOriginal || !sPolicySet) {
+    const float fit = original ? sBaseAspect : aspect > 0.0f ? aspect : 0.0f;
+    if (original != sOriginal || fit != sFitAspect || !sPolicySet) {
         sOriginal = original;
+        sFitAspect = fit;
         sPolicySet = true;
-        VISetDisplayAspect(sBaseAspect);  // Aurora 0301: the fit is to the display aspect, not 640x456
-        AuroraSetViewportPolicy(sOriginal ? AURORA_VIEWPORT_FIT : AURORA_VIEWPORT_STRETCH);
-        log("[ws] aspect %s, game frame %s", sOriginal ? "fitted (base aspect)" : aspect > 0.0f ? "fixed" : "auto (window)",
+        VISetDisplayAspect(fit > 0.0f ? fit : sBaseAspect);  // Aurora 0301: the fit is to the display aspect, not 640x456
+        AuroraSetViewportPolicy(fit > 0.0f ? AURORA_VIEWPORT_FIT : AURORA_VIEWPORT_STRETCH);
+        log("[ws] aspect %s, game frame %s",
+            sOriginal ? "fitted (base aspect)" : aspect > 0.0f ? "fixed (fitted at that ratio)" : "auto (window)",
             gameWidescreen() ? "16:9" : "4:3");
     }
 }

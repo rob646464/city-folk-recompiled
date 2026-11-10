@@ -26,3 +26,4 @@ WHERE FILES GO
     ~/Library/Caches/Animal Crossing City Folk Recompiled/               shader caches
 
 The bundled clang/ld64.lld are from the LLVM project (llvm/LLVM-LICENSE.TXT).
+Third-party software and its licences: THIRD-PARTY.txt and the licenses folder.

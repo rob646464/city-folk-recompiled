@@ -1,0 +1,15 @@
+# Shadows of villagers outside the view (branch shadow-casters-2; docs/RENDERING.md "Shadows of
+# objects outside the view"), CF_FIXTURE=user-town-clean: warp to the plaza, then (with
+# CF_TELEPORT=5800:mod22#0:-560,140, the player 560 units west of the plaza's villager, the first
+# d_a_npc_outNP actor; route items cannot carry '#') stand still while the villager is just outside
+# the game's NPC window (x +-416 around the camera's point) on the east: in the morning (sun in the
+# east) its shadow falls west into the view. Then step west (the villager further out), and east
+# toward it until it walks into the view (120 fps: no pop). Evening: CF_TELEPORT=5800:mod22#0:560,140
+# and the sticks mirrored (shadow_casters_npc_pm.txt). Villagers inside their houses are not shown
+# by the game (NPC + 0x1C38 = 0) and cast nothing either way.
+include warp.txt
++1600:WARP=town.plaza
+after link d_bgo_drawNP 3
++1500:STICKLEFT*60
++600:STICKRIGHT*150
++400:STICKRIGHT*150

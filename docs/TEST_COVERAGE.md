@@ -99,3 +99,25 @@ The letters link needs each friend's address: with ports other than the profiles
 
 Nothing regressed in the online paths after the merges; the first attempts failed only on route
 timing (the host's extra A presses reopened Copper's menu, "Please halt conversations.").
+
+## F1 options, setup and installation of the shipped program (branch test-options, 2026-11-09)
+
+Full table: docs/OPTIONS_AUDIT.md. The shipped program (CityFolkRecomp) from main d8f7225 + this
+branch (main af9103f..e7b12d1 merged during the audit), fresh scratch APPDATA installs
+(`--setup-auto`) and installed copies (`cmake --install`); the PC was shared with other agents'
+builds (module builds 2-7 min instead of ~1).
+
+| Area | Result |
+|---|---|
+| ID conflict sweep of every page (title and town, after merging main) | 0 conflicts |
+| Every settings.ini key round trip (extensions included) | **fixed**: `[region]` never loaded back (`key = value` not trimmed); 108 dead LM keys removed |
+| Live changes in town (aspect, HUD, FOV, CRT, Enhanced world, Show FPS, Restore defaults) | OK; **fixed** fixed aspect ratios squeezed instead of letterboxed, mouse pointer mapping in fitted pictures |
+| Tooltips | **fixed** LM text on the Rendering tab, quit dialog, Real Wii Remotes help; dead shadow options removed |
+| Controls with a virtual pad: hot-plug, defaults, rebinding capture + restart, stick pointer, pointer timeout | OK |
+| Fresh install, four discs (folder, whole-disc folder, RVZ), each version from one install | OK |
+| Modified disc copy | **fixed**: new disc file check (warning, Play anyway, probable cause on fatal errors) |
+| Recovery prompt | **fixed**: "Put saves aside" acts on the NAND saves |
+| Portable mode, data folder move both ways, long paths (230 chars) | OK; Windows cannot start the program 236+ characters deep |
+| Non-ASCII install and data folders | **fixed**: crash at the first NAND access, run state not written |
+| Updater (no network, GitHub without a release) | OK, message reworded |
+| Package contents | **fixed**: third-party licence texts; open: Dawn / DXC / nod texts |

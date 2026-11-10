@@ -81,7 +81,6 @@ std::vector<Field> fields() {
     auto& g = sSettings.gameplay;
     auto& r = sSettings.rendering;
     auto& l = sSettings.enhancedLighting;
-    auto& u = sSettings.unused2;
     return {
         num("interface", "menu_scale", sSettings.ui.menuScale),
         flag("interface", "start_hint", sSettings.ui.startHint),
@@ -105,35 +104,6 @@ std::vector<Field> fields() {
         flag("rendering", "texture_copy_filter", r.textureCopyFilter),
         flag("rendering", "efb_copy_to_ram", sSettings.rendering.efbCopyToRam),
         flag("rendering", "vertex_snapshot", r.vtxSnapshot),
-        flag("rendering", "shadow_render_resolution", r.shadowRenderResolution),
-        flag("rendering", "shadow_widescreen", r.shadowWidescreen),
-        flag("rendering", "shadow_any_distance", r.shadowAnyDistance),
-        // Enhanced lighting > Ghost lights
-        flag("ghost_lights", "enabled", sSettings.ghostLights.enabled),
-        num("ghost_lights", "intensity", sSettings.ghostLights.intensity),
-        num("ghost_lights", "radius_scale", sSettings.ghostLights.radiusScale),
-        flag("ghost_lights", "dramatic", sSettings.ghostLights.dramatic),
-        num("ghost_lights", "max_lights_64", sSettings.ghostLights.maxLights),
-        flag("ghost_lights", "shadows", sSettings.ghostLights.shadows),
-        // Enhanced lighting > World lights
-        flag("world_lights", "enabled", sSettings.worldLights.enabled),
-        num("world_lights", "intensity", sSettings.worldLights.masterIntensity),
-        flag("world_lights", "flicker", sSettings.worldLights.flicker),
-        flag("world_lights", "merge_nearby", sSettings.worldLights.mergeNearby),
-        flag("world_lights", "candles", sSettings.worldLights.on[port::kWlCandles]),
-        num("world_lights", "candles_intensity", sSettings.worldLights.intensity[port::kWlCandles]),
-        flag("world_lights", "fires", sSettings.worldLights.on[port::kWlFires]),
-        num("world_lights", "fires_intensity", sSettings.worldLights.intensity[port::kWlFires]),
-        flag("world_lights", "lamps", sSettings.worldLights.on[port::kWlLamps]),
-        num("world_lights", "lamps_intensity", sSettings.worldLights.intensity[port::kWlLamps]),
-        flag("world_lights", "sprays", sSettings.worldLights.on[port::kWlSprays]),
-        num("world_lights", "sprays_intensity", sSettings.worldLights.intensity[port::kWlSprays]),
-        flag("world_lights", "fire_effects", sSettings.worldLights.on[port::kWlFireFx]),
-        num("world_lights", "fire_effects_intensity", sSettings.worldLights.intensity[port::kWlFireFx]),
-        flag("world_lights", "lightning", sSettings.worldLights.on[port::kWlLightning]),
-        num("world_lights", "lightning_intensity", sSettings.worldLights.intensity[port::kWlLightning]),
-        flag("world_lights", "sparkles", sSettings.worldLights.on[port::kWlSparkles]),
-        num("world_lights", "sparkles_intensity", sSettings.worldLights.intensity[port::kWlSparkles]),
         flag("enhanced_lighting", "enabled", l.enabled),
         enm("enhanced_lighting", "preset", l.preset),
         flag("enhanced_lighting", "per_pixel_lighting", l.perPixelLighting),
@@ -252,88 +222,7 @@ std::vector<Field> fields() {
         flag("audio", "sinc_resampler", a.sincResampler),
         flag("enhancements", "show_fps", e.showFps),
         flag("enhancements", "pause_on_focus_loss", e.pauseOnFocusLoss),
-        flag("enhancements", "hidden_mansion_pal", e.hiddenMansionPal),
-        num("enhancements", "pal_language", e.palLanguage),
-        flag("enhancements", "gbh_camera", e.gbhCamera),
-        flag("enhancements", "gbh_tracker", e.gbhTracker),
-        flag("enhancements", "gbh_clock", e.gbhClock),
-        flag("enhancements", "early_ghost_lighting", e.earlyGhostLighting),
-        flag("enhancements", "beta_skybox", e.betaSkybox),
-        flag("enhancements", "heart_door", e.heartDoor),
-        flag("enhancements", "star_door", e.starDoor),
-        flag("enhancements", "beta_map_luigi", e.betaMapLuigi),
-        flag("enhancements", "early_luigi", e.earlyLuigi),
-        flag("enhancements", "air_water_nozzles", e.airWaterNozzles),
-        flag("enhancements", "early_poltergust", e.earlyPoltergust),
-        flag("enhancements", "early_bogmire", e.earlyBogmire),
-        flag("enhancements", "green_toad", e.greenToad),
-        flag("enhancements", "two_player", e.twoPlayer),
-        flag("enhancements", "coop_improvements", e.coopImprovements),
-        flag("enhancements", "unused_portrait_models", e.unusedPortraitModels),
-        flag("enhancements", "skip_cutscenes", e.skipCutscenes),
-        flag("enhancements", "fast_forward_key", e.fastForwardKey),
-        flag("enhancements", "portal_clip_fix", e.portalClipFix),
-        flag("gameplay", "pal_darkness_everywhere", g.palDarknessEverywhere),
-        num("gameplay", "ambient_scale", g.ambientScale),
-        num("gameplay", "damage_scale", g.damageScale),
-        num("gameplay", "health_scale", g.healthScale),
-        num("gameplay", "ghost_health_scale", g.ghostHealthScale),
-        flag("gameplay", "no_heart_drops", g.noHeartDrops),
-        num("gameplay", "vacuum_strength", g.vacuumStrength),
-        flag("gameplay", "always_ride", g.alwaysRide),
-        flag("gameplay", "mirror_world", g.mirrorWorld),
         num("gameplay", "grass_wear", g.grassWear),
-        flag("debug", "particle_report", e.dbgParticleReport),
-        flag("debug", "depth_blur", e.dbgDepthBlur),
-        flag("debug", "luigi_debug_flags", e.dbgLuigiFlags),
-        flag("debug", "info_display", e.dbgInfoDisplay),
-        flag("debug", "scan_boxes", e.dbgScanBoxes),
-        flag("debug", "axes", e.dbgAxes),
-        num("debug", "hud_test", e.dbgHudTest),
-        flag("debug", "font_test", e.dbgFontTest),
-        flag("debug", "font_test_latin", e.dbgFontTestLatin),
-        flag("debug", "warp_skip_events", e.dbgWarpSkipEvents),
-        flag("unused2", "play_as_mario", u.playAsMario),
-        flag("unused2", "mario_p2", u.marioP2),
-        flag("unused2", "bordered_view", u.borderedView),
-        flag("unused2", "poison_state", u.poisonState),
-        num("unused2", "poison_damage", u.poisonDamage),
-        num("unused2", "poison_seconds", u.poisonSeconds),
-        flag("unused2", "crawl_fear", u.crawlFear),
-        flag("unused2", "overheat", u.overheat),
-        num("unused2", "overheat_fill_seconds", u.overheatFillSeconds),
-        num("unused2", "overheat_cool_seconds", u.overheatCoolSeconds),
-        num("unused2", "overheat_blow_cool", u.overheatBlowCool),
-        num("unused2", "overheat_damage", u.overheatDamage),
-        flag("unused2", "ending_pictures", u.endingPictures),
-        flag("unused2", "ghost_placements", u.ghostPlacements),
-        flag("unused2", "pink_mice", u.pinkMice),
-        flag("unused2", "blue_ghost_guys", u.blueGhostGuys),
-        flag("unused2", "extra_speedy_spirits", u.extraSpeedySpirits),
-        num("silly_world", "ghost_size", sSettings.sillyWorld.ghostSize),
-        num("silly_world", "ghost_size_targets", sSettings.sillyWorld.ghostSizeTargets),
-        flag("silly_world", "ghost_color_shuffle", sSettings.sillyWorld.ghostColorShuffle),
-        flag("silly_world", "disco", sSettings.sillyWorld.disco),
-        num("silly_world", "disco_speed", sSettings.sillyWorld.discoSpeed),
-        num("silly_world", "luigi_voice_pitch", sSettings.sillyWorld.luigiVoicePitch),
-        flag("silly_world", "moon_gravity", sSettings.sillyWorld.moonGravity),
-        num("silly_world", "moon_gravity_scale", sSettings.sillyWorld.moonGravityScale),
-        flag("silly_world", "confetti_coins", sSettings.sillyWorld.confettiCoins),
-        num("silly_luigi", "head_scale", sSettings.sillyLuigi.headScale),
-        num("silly_luigi", "body_scale", sSettings.sillyLuigi.bodyScale),
-        flag("silly_luigi", "wobble", sSettings.sillyLuigi.wobble),
-        num("silly_luigi", "wobble_strength", sSettings.sillyLuigi.wobbleStrength),
-        flag("silly_luigi", "paper", sSettings.sillyLuigi.paper),
-        flag("silly_luigi", "hat_color_on", sSettings.sillyLuigi.colorOn[kSillyHat]),
-        rgb("silly_luigi", "hat_color", sSettings.sillyLuigi.colorRgb[kSillyHat]),
-        flag("silly_luigi", "shirt_color_on", sSettings.sillyLuigi.colorOn[kSillyShirt]),
-        rgb("silly_luigi", "shirt_color", sSettings.sillyLuigi.colorRgb[kSillyShirt]),
-        flag("silly_luigi", "overalls_color_on", sSettings.sillyLuigi.colorOn[kSillyOveralls]),
-        rgb("silly_luigi", "overalls_color", sSettings.sillyLuigi.colorRgb[kSillyOveralls]),
-        flag("silly_luigi", "shoes_color_on", sSettings.sillyLuigi.colorOn[kSillyShoes]),
-        rgb("silly_luigi", "shoes_color", sSettings.sillyLuigi.colorRgb[kSillyShoes]),
-        flag("silly_luigi", "poltergust_color_on", sSettings.sillyLuigi.colorOn[kSillyPoltergust]),
-        rgb("silly_luigi", "poltergust_color", sSettings.sillyLuigi.colorRgb[kSillyPoltergust]),
         flag("updates", "check_at_startup", sSettings.updates.checkAtStartup),
         str("updates", "skip_version", sSettings.updates.skipVersion),
         num("nintendo_events", "mode", sSettings.events.mode),
@@ -374,6 +263,14 @@ std::vector<Field> fields() {
 }
 
 void writeSettings(std::ostream& out);
+
+// Spaces and tabs around an ini key or value ("key = value": [region] was written that way, and
+// hand-edited files) are not part of it.
+std::string trim(const std::string& s) {
+    const size_t a = s.find_first_not_of(" \t");
+    if (a == std::string::npos) return {};
+    return s.substr(a, s.find_last_not_of(" \t") - a + 1);
+}
 
 template <typename T>
 void clampTo(T& v, T lo, T hi) {
@@ -422,10 +319,9 @@ void sanitize() {
     clampTo(a.masterVolume, 0.0f, 1.0f);
     clampTo(a.musicVolume, 0.0f, 1.0f);
     clampTo(a.sfxVolume, 0.0f, 1.0f);
+    clampTo(a.voiceVolume, 0.0f, 1.0f);
+    clampTo(a.remoteVolume, 0.0f, 1.0f);
     clampEnum(a.output, AudioOutput::Surround71);
-    auto& e = sSettings.enhancements;
-    clampTo(e.palLanguage, 1, 5);
-    clampTo(e.dbgHudTest, 0, 3);
     auto& l = sSettings.enhancedLighting;
     clampEnum(l.preset, EnhancedPreset::Custom, EnhancedPreset::High);
     clampTo(l.softShadowQuality, 0, 3);
@@ -457,37 +353,8 @@ void sanitize() {
     clampTo(l.bloomEmissive, 0.0f, 2.0f);
     clampTo(l.ssaoIntensity, 0.0f, 2.0f);
     clampTo(l.ssaoRadius, 10.0f, 200.0f);
-    auto& gl = sSettings.ghostLights;
-    clampTo(gl.intensity, 0.0f, 4.0f);
-    clampTo(gl.radiusScale, 0.25f, 3.0f);
-    clampTo(gl.maxLights, 1, 64);
-    auto& wl = sSettings.worldLights;
-    clampTo(wl.masterIntensity, 0.0f, 3.0f);
-    for (float& i : wl.intensity) clampTo(i, 0.0f, 3.0f);
     auto& g = sSettings.gameplay;
-    clampTo(g.ambientScale, 0.05f, 1.5f);
-    clampTo(g.damageScale, 0.0f, 5.0f);
-    clampTo(g.healthScale, 0.25f, 5.0f);
-    clampTo(g.ghostHealthScale, 0.25f, 5.0f);
-    clampTo(g.vacuumStrength, 0.25f, 4.0f);
     clampTo(g.grassWear, 0, 2);
-    auto& u = sSettings.unused2;
-    clampTo(u.poisonDamage, 1.0f, 100.0f);
-    clampTo(u.poisonSeconds, 1.0f, 20.0f);
-    clampTo(u.overheatFillSeconds, 5.0f, 120.0f);
-    clampTo(u.overheatCoolSeconds, 5.0f, 120.0f);
-    clampTo(u.overheatBlowCool, 1.0f, 10.0f);
-    clampTo(u.overheatDamage, 0, 50);
-    auto& sw = sSettings.sillyWorld;
-    clampTo(sw.ghostSize, 0.5f, 3.0f);
-    clampTo(sw.ghostSizeTargets, 0, 1);
-    clampTo(sw.discoSpeed, 0.1f, 5.0f);
-    clampTo(sw.luigiVoicePitch, 0.5f, 2.0f);
-    clampTo(sw.moonGravityScale, 0.05f, 1.0f);
-    auto& sl = sSettings.sillyLuigi;
-    clampTo(sl.headScale, 0.25f, 3.0f);
-    clampTo(sl.bodyScale, 0.25f, 3.0f);
-    clampTo(sl.wobbleStrength, 0.25f, 3.0f);
 }
 
 }  // namespace
@@ -579,7 +446,7 @@ void loadSettings() {
         }
         const auto eq = line.find('=');
         if (eq == std::string::npos) continue;
-        const std::string key = line.substr(0, eq), value = line.substr(eq + 1);
+        const std::string key = trim(line.substr(0, eq)), value = trim(line.substr(eq + 1));
         if (section == "video" && key == "frame_rate") {  // before target_fps: 0 = 30, 1 = 60, 2 = unlimited
             const int old = std::atoi(value.c_str());
             sSettings.video.targetFps = old == 1 ? 60 : 30;
@@ -624,7 +491,7 @@ void forEachLine(const std::string& text, const std::function<void(const std::st
         }
         const auto eq = line.find('=');
         if (eq == std::string::npos) continue;
-        f(section, line.substr(0, eq), line.substr(eq + 1));
+        f(section, trim(line.substr(0, eq)), trim(line.substr(eq + 1)));
     }
 }
 
@@ -648,7 +515,7 @@ std::string fileText() {
         if (!line.empty() && line[0] == '[') section = line.substr(1, line.find(']') - 1);
         const auto eq = line.find('=');
         if (!line.empty() && line[0] != '[' && line[0] != ';' && line[0] != '#' && eq != std::string::npos) {
-            const std::string key = line.substr(0, eq);
+            const std::string key = trim(line.substr(0, eq));
             const auto it = own.find({section, key});
             if (sOverride.synced(section, key) && it != own.end()) line = key + "=" + it->second;
         }

@@ -1,0 +1,28 @@
+Animal Crossing: City Folk Recompiled - third-party software
+=============================================================
+
+The program is built from these open-source components. Their licence texts are in the
+licenses folder (one file each, copied from the sources the program was built from).
+
+Component                  Licence                         File
+Aurora                     MIT                             licenses/aurora.txt
+Dear ImGui                 MIT                             licenses/imgui.txt
+SDL 3                      zlib                            licenses/sdl3.txt
+Dawn (webgpu_dawn.dll)     BSD 3-Clause                    licenses/dawn.txt (when present)
+DirectX Shader Compiler    NCSA / Microsoft (dxil.dll)     licenses/dxc.txt (when present)
+nod (nod.dll)              MIT or Apache-2.0               licenses/nod.txt (when present)
+libpng                     libpng licence                  licenses/libpng.txt
+zlib                       zlib                            licenses/zlib.txt
+FreeType                   FreeType Licence (FTL)          licenses/freetype.txt, licenses/freetype-FTL.txt
+{fmt}                      MIT                             licenses/fmt.txt
+xxHash                     BSD 2-Clause                    licenses/xxhash.txt
+Zstandard                  BSD                             licenses/zstd.txt
+Abseil                     Apache-2.0                      licenses/abseil.txt
+Tracy (client)             BSD 3-Clause                    licenses/tracy.txt
+SQLite                     public domain                   -
+LLVM clang / lld-link      Apache-2.0 WITH LLVM-exception  llvm/LLVM-LICENSE.TXT
+
+Portions of this software are copyright (c) The FreeType Project (www.freetype.org).
+All rights reserved.
+
+No Nintendo code or data is included: the game is built on your PC from your own disc.

@@ -6,6 +6,7 @@
 #include "recomp/precache.h"
 #include "recomp/ui_scale.h"
 #include "setup/disc.h"
+#include "setup/disc_check.h"
 #include "setup/module_builder.h"
 
 #include <aurora/aurora.h>
@@ -35,7 +36,31 @@ struct Slot {
     bool valid = false;
     std::string message;           // validation result
     std::shared_ptr<Disc> disc;    // opened and verified (valid only)
+    std::optional<DiscCheck> check;  // disc file check (disc_check.h); empty until it ran
 };
+
+// The disc file check of one slot, on a worker thread (reads every game file once).
+struct CheckJob {
+    int slot = -1;
+    std::string path;
+    GameVersion version = GameVersion::USA;
+    std::atomic<float> fraction{0.0f};
+    std::atomic<bool> cancel{false}, done{false};
+    std::optional<DiscCheck> result;  // written before done
+    double seconds = 0;
+    std::thread thread;
+    ~CheckJob() {
+        cancel = true;
+        if (thread.joinable()) thread.join();
+    }
+};
+
+void logCheck(const Slot& s) {
+    if (s.check && s.disc)
+        std::printf("[disc] %s disc file check: %s%s\n", port::regionName(s.disc->version()), s.check->summary(8).c_str(),
+                    s.check->accepted ? " (playing anyway: chosen on the setup screen)" : "");
+    std::fflush(stdout);
+}
 
 // State shared with the worker thread.
 struct Job {
@@ -75,7 +100,10 @@ void place(Slot slots[], int slot, const std::string& path) {
     s.valid = true;
     s.message = describe(d->version()) + ", " + d->kind();
     const int target = int(d->version());
+    if (!discCheckEnabled()) s.check = DiscCheck{};
+    else s.check = cachedDiscCheck(path, d->version());
     s.disc = std::move(d);
+    logCheck(s);
     if (target != slot) {
         s.message += " (moved here from the " + std::string(port::regionName(kVersions[slot])) + " row)";
         if (!slots[slot].valid) slots[slot] = Slot{};
@@ -167,7 +195,7 @@ void browseFolder(int slot, const std::string& current) {
                              dir.empty() ? nullptr : dir.c_str(), false);
 }
 
-enum class Screen { Pick, Working, Shaders, Failed };
+enum class Screen { Pick, Checking, Working, Shaders, Failed };
 
 }  // namespace
 
@@ -214,6 +242,14 @@ bool run(const Options& opts, LaunchInfo& launch) {
     std::chrono::steady_clock::time_point jobStart;
 
     auto begin = [&] {
+        // Playing with a disc the check warned about: not asked again for this disc.
+        for (Slot& s : slots) {
+            if (s.valid && s.check && !s.check->ok() && !s.check->accepted) {
+                s.check->accepted = true;
+                saveDiscCheck(s.path, s.disc->version(), *s.check);
+                logCheck(s);
+            }
+        }
         for (GameVersion v : kVersions) inst.discOf(v) = slots[int(v)].valid ? slots[int(v)].path : "";
         inst.base = base;
         port::saveInstall();
@@ -225,8 +261,22 @@ bool run(const Options& opts, LaunchInfo& launch) {
         screen = Screen::Working;
         started = true;
     };
-    if (!showUi) begin();
-    else if (opts.autoStart && anyValid()) begin();
+    // Begin once every disc is checked: at once when there is nothing to ask (or --setup-auto),
+    // unless the check finds a damaged or modified disc the player has not chosen to play anyway:
+    // then the setup screen shows what differs (disc_check.h).
+    bool wantBegin = !showUi || (opts.autoStart && anyValid());
+    std::unique_ptr<CheckJob> check;
+    auto pendingCheck = [&]() -> int {
+        for (int i = 0; i < kVersionCount; i++)
+            if (slots[i].valid && !slots[i].check) return i;
+        return -1;
+    };
+    auto warned = [&] {
+        for (const Slot& s : slots)
+            if (s.valid && s.check && !s.check->ok() && !s.check->accepted) return true;
+        return false;
+    };
+    if (wantBegin && pendingCheck() >= 0) screen = Screen::Checking;
 
     port::setPhase("setup");
     bool finished = false;
@@ -253,6 +303,40 @@ bool run(const Options& opts, LaunchInfo& launch) {
                         if (slots[int(v)].valid && slots[int(v)].path == *picked[i] && !slots[int(base)].valid) base = v;
                     chooseBase();
                 }
+        }
+        if (check && check->done) {
+            Slot& s = slots[check->slot];
+            if (check->result && s.valid && s.path == check->path) {
+                s.check = check->result;
+                saveDiscCheck(s.path, check->version, *s.check);
+                logCheck(s);
+                std::printf("[disc] (disc read in %.1f s; cached until its files change)\n", check->seconds);
+                std::fflush(stdout);
+            }
+            check.reset();
+        }
+        if (!check && (screen == Screen::Pick || screen == Screen::Checking)) {
+            if (const int i = pendingCheck(); i >= 0) {
+                check = std::make_unique<CheckJob>();
+                CheckJob* cj = check.get();
+                cj->slot = i;
+                cj->path = slots[i].path;
+                cj->version = slots[i].disc->version();
+                cj->thread = std::thread([cj] {
+                    const auto t0 = std::chrono::steady_clock::now();
+                    cj->result = checkDiscFiles(cj->path, cj->version, &cj->cancel, [cj](float f) { cj->fraction = f; });
+                    cj->seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+                    cj->done = true;
+                });
+            } else if (screen == Screen::Checking || wantBegin) {
+                wantBegin = false;
+                if (warned() && !opts.autoStart) {
+                    screen = Screen::Pick;  // show what differs; "Play anyway" goes on
+                    showUi = true;
+                } else {
+                    begin();
+                }
+            }
         }
         if (job && screen == Screen::Working && framesDrawn > 0) {
             std::lock_guard lk(job->m);
@@ -346,6 +430,19 @@ bool run(const Options& opts, LaunchInfo& launch) {
                         ImGui::TextWrapped("%s", slots[i].message.c_str());
                         ImGui::PopStyleColor();
                     }
+                    if (slots[i].valid && check && check->slot == i) {
+                        ImGui::TextDisabled("Checking the disc's game files... %d%%", int(check->fraction * 100.0f));
+                    } else if (slots[i].valid && slots[i].check && !slots[i].check->ok()) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.4f, 1));
+                        ImGui::TextWrapped(
+                            "Warning: this disc is damaged or modified. %s. The game will probably crash or show "
+                            "errors where it uses those files (a changed title screen file crashes at once). Make a "
+                            "new dump of your disc, or check this one in Dolphin (right-click the game > Properties > "
+                            "Verify).%s",
+                            slots[i].check->summary().c_str(),
+                            slots[i].check->accepted ? " You chose to play with it anyway." : "");
+                        ImGui::PopStyleColor();
+                    }
                 }
                 ImGui::Dummy(ImVec2(0, 8 * scale));
                 ImGui::PopID();
@@ -370,8 +467,8 @@ bool run(const Options& opts, LaunchInfo& launch) {
                 ImGui::TextDisabled("Every disc chosen here is prepared; you can switch later in the F1 menu (Game tab).");
             }
             ImGui::Dummy(ImVec2(0, 8 * scale));
-            ImGui::BeginDisabled(validCount == 0);
-            if (ImGui::Button(started ? "Continue" : "Install and play")) begin();
+            ImGui::BeginDisabled(validCount == 0 || check || pendingCheck() >= 0);
+            if (ImGui::Button(started ? "Continue" : warned() ? "Play anyway" : "Install and play")) begin();
             ImGui::EndDisabled();
             ImGui::SameLine();
             if (ImGui::Button("Quit")) {
@@ -379,6 +476,11 @@ bool run(const Options& opts, LaunchInfo& launch) {
                 aurora_end_frame();
                 return false;
             }
+        } else if (screen == Screen::Checking) {
+            ImGui::TextWrapped("Checking the disc's game files against the retail disc. This happens once per disc "
+                               "(and again when its files change).");
+            ImGui::Dummy(ImVec2(0, 8 * scale));
+            ImGui::ProgressBar(check ? check->fraction.load() : 0.0f, ImVec2(-1, 0));
         } else {
             std::string stage, error;
             float f = 0.0f;
@@ -429,6 +531,10 @@ bool run(const Options& opts, LaunchInfo& launch) {
     // Ready: report what is installed and what to launch.
     for (GameVersion v : kVersions) inst.ready[int(v)] = slots[int(v)].valid;
     inst.running = base;
+    {
+        const Slot& s = slots[int(base)];
+        inst.discProblem = s.check && !s.check->ok() ? "the disc is damaged or modified: " + s.check->summary(6) : "";
+    }
     launch.version = base;
     launch.disc = slots[int(base)].disc->runPath();
     launch.module = modulePath(base);

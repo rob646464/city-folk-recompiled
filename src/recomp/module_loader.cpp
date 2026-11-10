@@ -79,12 +79,12 @@ bool loadGameModule(const std::filesystem::path& path, std::string& error) {
     auto init = reinterpret_cast<ModuleInitFn>(dlsym(h, CF_MODULE_INIT_SYMBOL));
 #endif
     if (!init) {
-        error = path.string() + " is not a game module";
+        error = port::displayPath(path) + " is not a game module";
         return false;
     }
     const GameModule* m = init(&api);
     if (!m) {
-        error = path.string() + " was built for a different version of the game executable";
+        error = port::displayPath(path) + " was built for a different version of the game executable";
         return false;
     }
     g_module = m;
