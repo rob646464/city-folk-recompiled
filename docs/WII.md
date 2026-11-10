@@ -497,12 +497,59 @@ number of visible defects means what it says (`E <a|b|c> <reason>` lines, `CLASS
   (two runs) / ~950 / ~19. Open: the city's "pops" are walking villagers (skinned g3d draws, site
   ResTev::CallDisplayList) that go there and back at every in-between around game frames 6040-6880;
   their matrices pair correctly (same sources and slots, CF_MATCH_TAPE), and they also pop with
-  `CF_MATCH=0` (94), so the cause is in the replay's blend of that instance, not in the pairing.
+  `CF_MATCH=0` (94), so the cause is not the pairing (it was unnoted indexed matrix loads after a
+  list's first draw: fixed, "Skinned villagers in the city" below).
   Resetti re-dumped (out/interp-match-3/rest3_dirt.png): the clod cloud evolves smoothly in both builds
   now (the per-particle ef tags apply with CF_MATCH=0 too).
 - Running dust: the game changes its speed every frame; a curve through three game frames needs the
   next one (a frame more latency) or extrapolates backwards (C1 only at the start, overshoots on a
   turn), so the straight blend stays.
+
+### Skinned villagers in the city (branch city-skin)
+
+Round 3's open item: at 120 fps the walking villagers of the city plaza (city_plaza_warp.txt, game
+frames ~5980-7000) went there and back at every in-between, visible defects 233-280 (1395 in a run
+on a busy PC; 94 with `CF_MATCH=0`), all at the draw site ResTev::CallDisplayList (g3d shapes whose
+primitive lists the game writes straight into the pipe).
+
+- **Not the blend**: the popping point stood still on screen within each game frame while the
+  camera blended (the same view-space matrix at alpha 0.25 and 0.75). With `CF_JUDGE_DIAG=1` (below)
+  the matrix it was drawn with was neither the blended value the replay wrote for the noted load in
+  that slot nor any noted value of either game frame: an unnoted matrix load, frame b's.
+- **Cause**: NW4R g3d draws an envelope (skinned) shape as one display list that loads a group of
+  envelope matrices with indexed loads (LOAD_INDX_A/B from the matrix array g3d rewrites every
+  frame), draws the triangles of that group, loads the next group, draws, and so on.
+  `convertListIndexed` (hle_gx.cpp; inlining the list with its indexed loads made immediate and
+  noted, "Rendering status (branch render-3)" above) followed the list only up to its **first draw**, so every group
+  after the first kept its indexed loads: replayed, they read the tape's copy of the matrix array
+  (frame b's matrices, never blended) while the first group's matrices blended. The town's villagers
+  and the player have one group per list in the shapes seen, so only the city's walkers (14 matrices,
+  several groups) tore.
+- **Fix**: the conversion steps over draws, sized with the vertex layout as the list itself sets it
+  (its VCD/VAT LOAD_CP_REG writes applied to a copy of the layout mirror, which is put back
+  afterwards: the list is parsed again from its start by vtxDisplayList), so the loads of every group
+  are made immediate and noted (city: ~70 more converted loads per game frame). A list with a draw
+  that cannot be sized is followed only up to it, as before. A/B `CF_DL_INDEXED=first` (old), `=0`
+  (no conversion).
+- **Results** at 120 fps, visible defects / by design / detector mismatches (same PC load, same day;
+  main = b561412): city plaza 1395 / 2688 / 20 -> **0 / 139 / 16** (the ResTev::CallDisplayList
+  "motion" events, 2489, were the same tearing and are gone too); a second pair of city runs 228 / 362
+  / 16 (main) -> 0 / 136 / 19; city with `CF_MATCH=0` 0 / 205 / 196; fireworks (2026-08-02 20:00)
+  0 / 9564 / 8547 (round 3: 1 / 9486 / 7965); town walk 0 / 912 / 111 (main) -> 0 / 926 / 99; house 0 / 73 / 30 (main) -> 0 / 72 / 35. The
+  city's remaining (b) are things that appeared (culled the interval before), effects shown at the
+  game frame (`fn_801C8828`, no sure partner) and game-frame velocity changes; (c) the detector's
+  own nearest-point mismatches.
+- Original 60: nothing is captured, so the conversion never runs (it is reached only from the
+  capture paths, GXCallDisplayList's and hw::fifoWrite's `interp::capturing()` branches; an Original
+  60 run of the city route logs no capture at all). Frame dumps of the city route every 100 game
+  frames: 2000-3400 (title, bus) identical in main, this build and a second main run; from 3500 on
+  even the two main runs differ (the city route is not deterministic run to run: its visitors and
+  their animation phases), so they prove nothing there.
+- Test aid `CF_JUDGE_DIAG=1` (with `CF_MATCH_JUDGE`): keeps the slot table and writes, after each
+  visible defect, a `D` line (the patch its slot held, key / source / group / partner / policy,
+  whether the drawn matrix is what the replay wrote for it, the translations in a, b and as drawn) and
+  `DM` lines (the captured values of either game frame equal to the drawn matrix, or `none`: an
+  unnoted load).
 
 ## IOS (Starlet)
 

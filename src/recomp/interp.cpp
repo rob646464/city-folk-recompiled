@@ -331,6 +331,10 @@ FILE* const sProbeOut = [] {
     const char* p = std::getenv("CF_JUDDER_LOG");
     return p && *p ? std::fopen(p, "w") : nullptr;
 }();
+// CF_JUDGE_DIAG=1 (with CF_MATCH_JUDGE): the slot table is kept too, and each visible defect gets a
+// D line: the patch its slot held, its pairing and policy, and whether the drawn matrix is what the
+// replay wrote for it.
+const bool sJudgeDiag = std::getenv("CF_JUDGE_DIAG") != nullptr;
 const float sProbeThresh = [] {
     const char* v = std::getenv("CF_JUDDER_PX");
     return v ? float(std::atof(v)) : 1.5f;
@@ -3029,7 +3033,7 @@ void note(u32 at, Kind kind, u32 source, u32 slot, int nFloats, int first) {
     p.untagged = !p.key && p.bucket && p.inScope;
     if (kind == Kind::TexMtx && sShadowRecv > 0) p.role = 1;
     else if (sOrtho && kind != Kind::Projection) p.role = 2;
-    if (sProbeOut && kind == Kind::PosMtx && nFloats == 12 && slot % 3 == 0 && slot / 3 < 10)
+    if ((sProbeOut || sJudgeDiag) && kind == Kind::PosMtx && nFloats == 12 && slot % 3 == 0 && slot / 3 < 10)
         sSlotPatch[slot / 3] = s32(sPatches.size());
     p.tgroup = sTextCur;
     if (kind == Kind::PosMtx && slot % 3 == 0 && slot / 3 < 10) sLastPosMtx[slot / 3] = s32(sPatches.size());
@@ -3999,7 +4003,7 @@ void pushBundle(u64 id) {
     sBundleRange.push_back({~0u, ~0u});
     sBundlePass.push_back(u8(sPass));
     sBundleCentre.push_back({std::nanf(""), 0.0f, 0.0f});
-    if (sProbeOut) sBundleSlots.push_back(sSlotPatch);
+    if (sProbeOut || sJudgeDiag) sBundleSlots.push_back(sSlotPatch);
     // Fingerprint (matchDraws): what is drawn (list / layout), its vertex count and the textures it shows.
     sBundleFp.push_back(mix(id ^ u64(sDrawExtra) << 32 ^ u64(boundTexture(0)) * 0x9E3779B97F4A7C15ull ^
                             mix(u64(boundTexture(1)) ^ u64(boundTexture(2)) << 32)));
@@ -4194,7 +4198,7 @@ void vtxEnd() { detail::drawEnd(mark()); }
 // A display list or the stream loaded XF matrix memory directly (indexed or raw loads): the
 // detector's slot table no longer knows those slots.
 void detail::xfMatrixWritten(u32 addr, u32 words) {
-    if (!sProbeOut || !capturing()) return;
+    if ((!sProbeOut && !sJudgeDiag) || !capturing()) return;
     for (u32 s = 0; s < 10; s++)
         if (addr < 12 * s + 12 && addr + words > 12 * s) sSlotPatch[s] = -1;
 }
@@ -4766,7 +4770,7 @@ void probeBeforeReplay(const Tape* a, const Tape& b, float alpha, std::vector<u8
         return;
     }
     auto replayed = std::make_shared<std::unordered_map<s32, std::array<f32, 12>>>();
-    if (oldJudge)  // (the matrix detector's slot table; matchJudge needs none)
+    if (oldJudge || sJudgeDiag)  // (the matrix detector's slot table; matchJudge needs none)
         for (const auto& slots : b.bundleSlots)
             for (const s32 pi : slots) {
                 if (pi < 0 || u32(pi) >= b.patches.size() || replayed->count(pi)) continue;
@@ -5040,6 +5044,7 @@ void matchJudge(const ProbeReplay& pr, const std::vector<ProbeRec>& recs) {
         bool evHas = false;
         bool stepIn = false;  // that velocity was taken within one game frame's in-betweens
         bool own = false;     // drawn with its own camera: w is its view-space place
+        f32 m[12];            // the matrix it was drawn with (CF_JUDGE_DIAG)
     };
     static std::vector<Pt> prev, cur;
     static u64 prevSeq = 0;
@@ -5089,6 +5094,7 @@ void matchJudge(const ProbeReplay& pr, const std::vector<ProbeRec>& recs) {
             p.site = k < b.bundleSite.size() ? b.bundleSite[k] : 0;
             p.k = k;
             p.slot = r.mtxIdx;
+            std::memcpy(p.m, r.mtx, sizeof(p.m));
             cur.push_back(p);
         }
     }
@@ -5287,6 +5293,50 @@ void matchJudge(const ProbeReplay& pr, const std::vector<ProbeRec>& recs) {
                 std::fprintf(sMatchJudgeOut, "E %c %s %u %llu f%u %.3f %s jerk %.1f raw %.1f site %08X match %u draw %u partner %d at %.0f %.0f\n",
                              "abc"[cls - 1], why, pr.present, (unsigned long long)b.seq, b.gameFrame, pr.alpha, same ? "in" : "at", exJerk, rawJerk,
                              p.site, u32(p.match), p.k, p.k < b.bundlePartner.size() ? b.bundlePartner[p.k] : -9, p.s[0], p.s[1]);
+                if (sJudgeDiag && cls == 1) {
+                    const s32 pi = p.k < b.bundleSlots.size() ? b.bundleSlots[p.k][p.slot] : -1;
+                    if (pi < 0 || u32(pi) >= b.patches.size()) {
+                        std::fprintf(sMatchJudgeOut, "D slot %u patch none drawn %.1f %.1f %.1f\n", p.slot, p.m[3], p.m[7], p.m[11]);
+                    } else {
+                        const Patch& P = b.patches[pi];
+                        const s32 j = b.partner[pi];
+                        int wrote = -1;
+                        if (pr.replayed) {
+                            const auto it = pr.replayed->find(pi);
+                            if (it != pr.replayed->end()) {
+                                wrote = 1;
+                                for (int e = 0; e < 12; e++)
+                                    if (std::fabs(it->second[e] - p.m[e]) > 1e-3f * (1.0f + std::fabs(p.m[e]))) wrote = 0;
+                            }
+                        }
+                        f32 ta[3] = {NAN, NAN, NAN};
+                        if (a && j >= 0)
+                            for (int c = 0; c < 3; c++) ta[c] = val(*a, a->patches[j], 4 * c + 3);
+                        std::fprintf(sMatchJudgeOut,
+                                     "D slot %u patch %d key %016llX src %08X site %08X group %016llX bucket %016llX partner %d gsnap %u view %u own %d replayed %d a %.1f %.1f %.1f b %.1f %.1f %.1f drawn %.1f %.1f %.1f\n",
+                                     p.slot, pi, (unsigned long long)P.key, P.source, P.site, (unsigned long long)P.group,
+                                     (unsigned long long)P.bucket, j, b.groupSnap ? u32(b.groupSnap[pi].load()) : 9u, P.view, int(P.ownCamera), wrote,
+                                     ta[0], ta[1], ta[2], val(b, P, 3), val(b, P, 7), val(b, P, 11), p.m[3], p.m[7], p.m[11]);
+                    }
+                    // Which captured values of b or a equal the drawn matrix (the load that really filled the slot).
+                    for (int side = 0; side < 2; side++) {
+                        const Tape* t = side ? a : &b;
+                        if (!t) continue;
+                        int shown = 0;
+                        for (u32 q = 0; q < t->patches.size() && shown < 4; q++) {
+                            const Patch& Q = t->patches[q];
+                            if (Q.count != 12) continue;
+                            bool eq = true;
+                            for (int e = 0; e < 12 && eq; e++) eq = std::fabs(val(*t, Q, e) - p.m[e]) <= 1e-3f * (1.0f + std::fabs(p.m[e]));
+                            if (!eq) continue;
+                            shown++;
+                            std::fprintf(sMatchJudgeOut, "DM %c patch %u kind %u key %016llX src %08X site %08X slot %u group %016llX bundle %u partner %d gsnap %u off %u\n",
+                                         side ? 'a' : 'b', q, u32(Q.kind), (unsigned long long)Q.key, Q.source, Q.site, Q.slot, (unsigned long long)Q.group, Q.bundle,
+                                         side ? -9 : t->partner[q], !side && t->groupSnap ? u32(t->groupSnap[q].load()) : 9u, Q.offset);
+                        }
+                        if (!shown) std::fprintf(sMatchJudgeOut, "DM %c none\n", side ? 'a' : 'b');
+                    }
+                }
             }
         }
     }

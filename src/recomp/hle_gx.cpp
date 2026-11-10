@@ -1592,8 +1592,8 @@ namespace {
 // is replayed (the tape's array copy: frame b's matrices, never blended, so a walking character's
 // parts were drawn a frame apart from the blended rest). The list is inlined as a copy in which
 // those loads are immediate loads of the values in memory now, noted for blending like the raw
-// stream's (indexedAsImmediate). The copy follows whole commands up to the first draw (or anything
-// it cannot size); the rest is copied unchanged. CF_DL_INDEXED=0: lists inlined as they are (A/B).
+// stream's (indexedAsImmediate). The copy follows whole commands, draws included, up to anything it
+// cannot size; the rest is copied unchanged. CF_DL_INDEXED=0: lists inlined as they are (A/B).
 struct ListLoad {
     u32 off, src, xf, n;
     int array;
@@ -1613,6 +1613,19 @@ bool convertListIndexed(const u8* p, u32 size) {
     auto put32 = [](u32 v) {
         for (int b = 3; b >= 0; b--) sListCopy.push_back(u8(v >> (8 * b)));
     };
+    // Draws are stepped over with the vertex layout as the list itself sets it (its LOAD_CP_REG
+    // VCD/VAT writes), on a copy of the layout mirror that is put back afterwards: the list is parsed
+    // again from its start when it is inlined (vtxDisplayList). NW4R g3d's skinned shapes load each
+    // group of envelope matrices right before the group's draw, so a list holds loads after its first
+    // draw; stopping there left them indexed (frame b's matrices from the tape's array copy) while
+    // the matrices of the first group blended: a walking villager's limbs went back and forth at
+    // every in-between (city plaza; docs/WII.md "Skinned villagers in the city").
+    // CF_DL_INDEXED=first: stop at the first draw (old).
+    static const bool sFirstOnly = [] { const char* v = std::getenv("CF_DL_INDEXED"); return v && std::strcmp(v, "first") == 0; }();
+    u8 descSaved[GX_VA_MAX_ATTR];
+    VatEntry vatSaved[GX_MAX_VTXFMT][GX_VA_MAX_ATTR];
+    std::memcpy(descSaved, sDesc, sizeof(sDesc));
+    std::memcpy(vatSaved, sVat, sizeof(sVat));
     while (i < size) {
         const u8 op = p[i];
         u32 len;
@@ -1622,13 +1635,28 @@ bool convertListIndexed(const u8* p, u32 size) {
         else if (op == 0x20 || op == 0x28 || op == 0x30 || op == 0x38) len = 5;
         else if (op == 0x40) len = 9;
         else if (op == 0x61) len = 5;
-        else break;  // a draw or an unknown command: the rest as it is
+        else if (op >= 0x80 && op <= 0xBF && !sFirstOnly) {  // a draw: its vertices in the current layout
+            if (i + 3 > size) break;
+            const int fmt = op & 7;
+            u32 vs = 0;
+            bool known = true;
+            for (int a = GX_VA_PNMTXIDX; a <= GX_VA_TEX7 && known; a++) {
+                const int s = attrSize(fmt, a);
+                if (s < 0) known = false;
+                else vs += u32(s);
+            }
+            const u32 count = be16(i + 1);
+            if (!known || (vs == 0 && count != 0)) break;  // cannot be sized: the rest as it is
+            len = 3 + count * vs;
+        }
+        else break;  // an unknown command: the rest as it is
         if (len == 0 || i + len > size) break;
         if (op == 0x08) {  // CP: matrix array base (0xAC-0xAE) / stride (0xBC-0xBE), physical addresses
             const u8 reg = p[i + 1];
             const u32 v = be32(i + 2);
             if (reg >= 0xAC && reg <= 0xAE) base[reg - 0xAC] = dlVirtual(v, 4) ? dlVirtual(v, 4) : 0;
             else if (reg >= 0xBC && reg <= 0xBE) stride[reg - 0xBC] = v & 0xFF;
+            else if (reg >= 0x50 && reg < 0xA0) gx::cpRegWrite(reg, v);  // vertex layout (restored below)
         }
         if (op == 0x20 || op == 0x28 || op == 0x30) {
             const int array = (op - 0x20) / 8;
@@ -1645,6 +1673,8 @@ bool convertListIndexed(const u8* p, u32 size) {
         }
         i += len;
     }
+    std::memcpy(sDesc, descSaved, sizeof(sDesc));
+    std::memcpy(sVat, vatSaved, sizeof(sVat));
     if (sListLoads.empty()) return false;
     sListCopy.insert(sListCopy.end(), p + copied, p + size);
     return true;
