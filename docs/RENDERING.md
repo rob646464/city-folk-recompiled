@@ -1020,6 +1020,22 @@ hook acts outdoors; the shader paths are exact identities without the new flags)
   exactly; a room brightened by a lamp we do not light (out of view, not analysed) keeps it too.
 - AO stays off by default (ambient-only option).
 
+**Checked (first pass, before the user's review; 2026-11-09 after merging main d8f7225)**: A/B
+runs with the user's settings, new vs `CF_INDOOR_LEGACY=1`, same route and frames: the house by
+day (the player's and the box's key-light shadows fall to the right), at night with the candle off
+/ on (a warm pool on the box and the back wall, the rest of the room at the game's night look plus
+a quarter of its brightening), a retro TV on (cool pool in front of it) and TV + candle; villager
+houses by night (a robo-dresser's green light now local; a room the game brightens for a lamp we do
+not light keeps the game's look) and by day, Nook's and the museum lobby (no change). Shadow masks
+(`AURORA_ENH_GLOWDBG=8`) before / after. Enhanced lighting off: the house frame is byte-identical to
+main c789775. Outdoors: the town at 16:50 (Enhanced world off), new vs legacy in one build: only the
+player's idle animation and the water differ; before the merge the branch matched main c789775 too
+(falling leaves only). Cost (quiet PC, 2026-11-05, house at night, 1280x720 offscreen): GPU busy
+3.3-4.3 ms per frame vs 3.8-3.9 legacy; 120 fps target: 120.0 presented. (Runs on 2026-11-09 shared
+the PC with other agents' instances: their perf numbers are not usable.) Flicker at 120 fps: the
+flame lights are computed per game frame from host time and blended by id in between (no step at
+in-betweens); not measured with a judder detector.
+
 **Test aids**: `CF_INDOOR_LEGACY=1` (everything above as before, for A/B runs: the old key light,
 furniture numbers and falloff, the full room brightening, the shell casting), `CF_INDOOR_AB=<n>`
 (legacy in alternate blocks of n frames: fine for point lights, but the directional cascades do
