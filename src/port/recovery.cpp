@@ -159,21 +159,35 @@ void rebuildGameData() {
     say("[recovery] game data and shader caches will be rebuilt");
 }
 
-std::vector<fs::path> cardFolders() {
+// The NAND folder (ios_fs.cpp: CF_NAND_DIR, default <dataDir>/nand).
+fs::path nandFolder() { return std::getenv("CF_NAND_DIR") ? envPath("CF_NAND_DIR") : dataDir() / "nand"; }
+
+// City Folk's save folders on the emulated NAND: /title/00010000/<RUUE|RUUP|RUUJ|RUUK>/data
+// (rvforest.dat, banner.bin, the WiiConnect24 box; docs/NAND.md).
+std::vector<fs::path> saveFolders() {
     std::vector<fs::path> out;
-    const fs::path user = std::getenv("CF_CARD_DIR") ? envPath("CF_CARD_DIR") : dataDir();
     std::error_code ec;
-    for (const char* region : {"USA", "EUR", "JAP"})
-        for (const char* slot : {"Card A", "Card B"})
-            if (fs::exists(user / region / slot, ec)) out.push_back(user / region / slot);
+    for (const char* title : {"52555545", "52555550", "5255554a", "5255554b"}) {
+        const fs::path d = nandFolder() / "title" / "00010000" / title / "data";
+        if (fs::exists(d, ec) && !fs::is_empty(d, ec)) out.push_back(d);
+    }
     return out;
 }
 
+// Each version's save folder moves out of the NAND into "<NAND folder> saves (put aside <time>)/
+// <title id>" next to it (kept, not deleted); the game then starts as on a Wii without a save.
 void putSavesAside() {
-    const std::string tag = " (put aside " + stamp() + ")";
-    for (const fs::path& dir : cardFolders()) {
-        const fs::path to = dir.string() + tag;
-        say("[recovery] memory card " + u8(dir) + (moveAside(dir, to) ? " moved to " + u8(to.filename()) : " could not be moved"));
+    const auto folders = saveFolders();
+    if (folders.empty()) {
+        say("[recovery] no saves to put aside in " + u8(nandFolder()));
+        return;
+    }
+    const fs::path aside = nandFolder().string() + " saves (put aside " + stamp() + ")";
+    std::error_code ec;
+    fs::create_directories(aside, ec);
+    for (const fs::path& dir : folders) {
+        const fs::path to = aside / dir.parent_path().filename();
+        say("[recovery] save " + u8(dir) + (moveAside(dir, to) ? " moved to " + u8(to) : " could not be moved"));
     }
 }
 
@@ -192,8 +206,8 @@ int ask(const RunState& prev, bool canRebuild) {
     if (canRebuild)
         text += "Rebuild game data: recompile the game from your disc and rebuild the shader caches "
                 "(takes a minute or two).\n";
-    text += "Put saves aside: start without your memory card saves (they are moved to a \"(put aside)\" "
-            "folder next to them, not deleted).\n\n"
+    text += "Put saves aside: start without your town's save (it is moved to a \"nand saves (put aside)\" "
+            "folder next to the Wii NAND folder, not deleted).\n\n"
             "last_run.log and previous_run.log in " +
             u8(configDir()) + " have the details for a bug report.";
     std::vector<SDL_MessageBoxButtonData> buttons;
