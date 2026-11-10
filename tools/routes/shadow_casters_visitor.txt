@@ -1,0 +1,16 @@
+# Shadow of a wandering visitor outside the view (branch shadow-casters-2; docs/RENDERING.md
+# "Shadows of objects outside the view"), CF_FIXTURE=user-town-clean, CF_RNG_SEED 12345678, 07:30:
+# the town's visitor that day (d_a_npc_sp_roranNP = module 57, model cml, an NPC the game keeps
+# shown outside its window) is found by its actor; the player is put 430 units west of it, so it is
+# just outside the game's NPC window (x +-416 around the camera's point) and its morning shadow falls
+# west into the view. Again a few times (it wanders), then a few steps east: it comes into the view
+# (120 fps: no pop), and back. Evening: shadow_casters_visitor_pm.txt (430 units east).
+include warp.txt
++1600:WARP=town.plaza
+after link d_bgo_drawNP 3
++300:TP=mod57:-430/0
++500:TP=mod57:-430/0
++500:TP=mod57:-430/0
++500:STICKRIGHT*30
++300:STICKRIGHT*30
++300:STICKLEFT*60

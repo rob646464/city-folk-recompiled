@@ -1,0 +1,9 @@
+# Evening variant of shadow_casters_npc.txt (CF_TELEPORT=5800:mod22#0:560,140: the player 560 units
+# EAST of the villager; sun in the west, the villager's shadow falls east into the view from beyond
+# the left edge), sticks mirrored.
+include warp.txt
++1600:WARP=town.plaza
+after link d_bgo_drawNP 3
++1500:STICKRIGHT*60
++600:STICKLEFT*150
++400:STICKLEFT*150
