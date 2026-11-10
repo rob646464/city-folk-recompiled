@@ -1,0 +1,60 @@
+# Online visit, host side, robust under load (branch test-regions, verified 2026-11-09 with copies of
+# the test_builds/online-letter-test-2 profiles Frunch-rob64 / test-tester): Copper "Invite guests!" ->
+# "Nintendo WFC.", B through his follow-up question (A would reopen his menu and close the gate:
+# "Please halt conversations."), run out of the gatehouse, B now and then for the visitor's notices.
+# Env: CF_TELEPORT=7600:1790,84,664 CF_ONLINE_HOST=<port> CF_ONLINE_CODE_FILE=<file>
+#      (voice: CF_MIC_WAV=<wav> CF_MIC_LOG=1). Visitor: visit_guest2.txt.
+include continue.txt
+7630:@off
++20:STICKUP*20
++40:STICKUP+B*60
++80:STICKUP*120
+after link d_a_npc_sp_gatekeeper_aNP
++200:STICKRIGHT*45
++60:STICKUP*75
++100:STICKUP*3
++40:A
++60:A ~6
+# Hover "Invite guests!" and A every 100 frames until picked; the A presses then run through
+# Copper's text and pick "Nintendo WFC." (first line).
++94:@0.44/0.14
++6:A
++94:@0.44/0.14
++6:A
++94:@0.44/0.14
++6:A
++94:@0.44/0.14
++6:A
++94:@0.44/0.14
++6:A
++94:@0.44/0.14
++6:A
++94:@0.44/0.14
++6:A
++94:@0.44/0.14
++6:A
++94:@0.44/0.14
++6:A
++94:@0.44/0.14
++6:A
++94:@0.44/0.14
++6:A
++94:@0.44/0.14
++6:A
++94:@0.44/0.14
++6:A
++94:@0.44/0.14
++6:A
++94:@0.44/0.14
++6:A
++94:@0.44/0.14
++6:A
++60:@off
++60:A ~14
+# Gate open; Copper asks again ("Oh, nothing." highlighted): B through it (B never starts a talk).
++100:B ~12
+# Walk (run) out of the gatehouse into town, then stay away from Copper.
++200:STICKDOWN+B*700
++100:STICKLEFT*60
+# Notices of the visitor's arrival: B every 200 frames.
++200:B ~40
