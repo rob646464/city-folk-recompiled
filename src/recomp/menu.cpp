@@ -835,8 +835,9 @@ void renderingTab() {
         const std::string tip = std::string(
             "When the game uses the console's 6-bit-per-channel framebuffer format (RGBA6, with an ordered\n"
             "dither), it is stored that way, and screen/texture copies keep their format's precision\n"
-            "(RGB565, RGB5A3, ...). Off: smooth 8-bit color (less banding and dither grain). Nothing\n"
-            "changes while the game draws in the 8-bit format. No real cost.") +
+            "(RGB565, RGB5A3, ...). Off: smooth 8-bit color (less banding and dither grain).\n"
+            "City Folk draws in the 8-bit format (RGB8) in every scene checked (title, Rover's bus,\n"
+            "the town), so this and the two options below change nothing there. No real cost.") +
                                 (enhOverride ? kEnhNote : "");
         ImGui::SetItemTooltip("%s", tip.c_str());
     }
@@ -895,8 +896,8 @@ void renderingTab() {
     sDirty |= recomp::menu::Checkbox("Texture copy filter", &r.textureCopyFilter);
     ImGui::SetItemTooltip(
         "The console applies the same vertical filter to the screen copies the game reads back as\n"
-        "textures (transitions, snapshots): they are a little softer vertically, as on the Wii.\n"
-        "Off: sharper. Tiny GPU cost.");
+        "textures: they are a little softer vertically, as on the Wii. Off: sharper. City Folk makes\n"
+        "few such copies (none in the title or the town; the Mii pictures are some). Tiny GPU cost.");
     sDirty |= recomp::menu::Checkbox("EFB copies to RAM (accurate)", &r.efbCopyToRam);
     ImGui::SetItemTooltip("Screen copies also exist in console memory format, like on the Wii: textures that\n"
                           "read a copy in another format or size, and the game's own reads of a copy, get the\n"
