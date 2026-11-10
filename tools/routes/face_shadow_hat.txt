@@ -1,0 +1,16 @@
+# The wizard's cap on the player (branch face-shadow): CF_FIXTURE=user-town-clean, Env
+# CF_FF=1-4400;CF_GIVE_ITEM=5600:AC9C (the wizard's cap, item 0x727, into the first free pocket
+# slot 0.56/-0.26). Continue, then pockets -> the cap -> Wear (second entry): the cap is on and the
+# pockets are closed at ~+1990 after the town's arrival (~guest frame 7450).
+include continue_any.txt
+5240:A
++60:A ~6
+after link d_bgo_drawNP 2
++1400:@-0.82/0.82
++30:A
++200:@0.56/-0.26
++60:A
++200:@0.77/-0.38
++60:A
++200:@off
++100:B

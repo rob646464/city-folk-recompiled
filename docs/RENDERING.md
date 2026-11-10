@@ -578,7 +578,8 @@ unchanged (the hooks call the original and return). Presets Low / Medium / High 
   is multiplied by in full shadow), terminator strength / width, angular size (PCSS), caster
   distance toward the light. With `ExtraLightCastShadows` it takes shadow slot 0 (always first,
   shadow maps only) and renders **four orthographic cascades** into its atlas cell (the cube
-  layout's faces 0-3; faces 4/5 clip everything and carry the cascade data): practical split
+  layout's faces 0-3; faces 4/5 clipped everything and carried the cascade data; since 0530 face 4
+  is the character focus cascade and face 5 carries the data, below): practical split
   (log 0.7 / uniform 0.3), bounding spheres (size steady under camera rotation), centres snapped to
   texels (no crawling edges). The mask pass picks the cascade by view depth, blends into the next
   over the last 12 %, receiver-plane PCF (8 / 12 / 20 taps by preset) with PCSS from the light's
@@ -623,6 +624,76 @@ unchanged (the hooks call the original and return). Presets Low / Medium / High 
   default 0.40 (never tuned) gets the new defaults (AO off, 0.30; the user's file: on, 0.40, radius
   32 -> off, 0.30, 32); a tuned intensity is kept with AO on/off as it was, converted to the same strength on the new curve (i + 0.5); radius 60 (old default)
   becomes 40, any other radius is kept. Saved with `ao_version=2` afterwards.
+
+### Character shadow cascade (branch face-shadow, Aurora 0530)
+
+User report (4K, 120 Hz, Ultra): "the shadow around the character's face is a bit jittery and looks
+off, more noticeable in motion, under the hat in particular" (the wizard's cap).
+
+- **Cause**: the view cascades are fitted to the view frustum, not to what is in it. At the town and
+  room cameras the player stands 340-420 units in front of the camera, i.e. in **cascade 1** (view
+  depth ~305-682 with the default 3500 shadow distance): its bounding sphere gives texels of ~0.4
+  world units at 2048 per cascade, ~8 px at 4K on a head that is ~30 units / ~500 px tall
+  (`AURORA_ENH_GLOWDBG=9` shows the cascade in red: one third at the player). A hat brim a few
+  units above the forehead has a penumbra of `tanSun x 3-5 units` = well under one texel, so the
+  edge was decided by the texel grid and the PCF's floor of 1.5 texels: a ragged, speckled band
+  under the brim, scattered further by the per-pixel rotated Vogel taps (noise that only the mask's
+  4x4 tent averages). Each small move of the character (the idle animation is enough) moves it
+  against the world-anchored grid (0441) and re-rolls which texels and taps fall on the edge:
+  the speckles crawl. Not the cause: the cascade selection (the whole character is in one cascade),
+  the light direction (steady), bias (no acne on the face), interpolation (the shadow map and mask
+  are made from each present's own replayed geometry).
+- **Fix**: a fifth cascade around one sphere, the **focus**. The app sends it as an anchor
+  pseudo-light (`AURORA_EXTRA_LIGHT_ANCHOR` + id `AURORA_SHADOW_FOCUS_ID`: `pos` = view-space centre,
+  `radius`), so frame interpolation blends it like a light (world place under the blended camera).
+  Shadowed directional lights render it into **face 4** of their atlas cell (until now clipped:
+  the cascade data moved from face 4 to face 5's first rows, whose fourth row still gives w = -1),
+  an orthographic square of the sphere's diameter at the same texel count: 80 / 2048 = 0.04 units
+  per texel, ~10x finer than cascade 1. Same world-anchored texel grid, same caster reach toward
+  the light, same receiver-plane PCF / PCSS from the light's angular size, so its penumbra is the
+  light's real one instead of the texel floor. Receivers inside the sphere use it, blended into the
+  view cascades between 72 % and 95 % of the radius. Its receiver offset (normal / toward the
+  light) has a floor of 0.3 world units instead of its texel: with the texel offset alone the
+  low-poly head shadowed itself along its facets near the terminator (a hard polygonal line across
+  the cheek with the sun from the side, `AURORA_ENH_FOCUS_BIAS=0`); 0.6 shortened the brim's
+  shadow visibly, 0.3 keeps it. No new pipelines (the casters' instances
+  already covered six faces per light: face 4 only stops being clipped), no precache change.
+- **City Folk** (src/game/cf_light.cpp submitFocus): the player being played = the `boy` / `girl`
+  model (draw opa) nearest the view centre; its MDL0 has no bounding box (skinned), so a fixed
+  sphere of radius 40 about the point 12 units above the model's origin (feet to the tip of a tall
+  hat), from the world matrix the stage's scene calc set for THIS frame (read at the scene begin,
+  before the draws: no frame of lag). F1 > Visuals > Enhanced lighting > Sun and moon shadows
+  **"Sharp character shadows"** (`[enhanced_lighting] character_shadows`, on). Indoors the room key
+  light is also a directional light: the same focus there.
+- **Verified** (user's settings: Enhanced lighting Ultra + world, 2048 per cascade; true 4K,
+  `CF_RENDER_SCALE=4.7369`; user-town-clean with the wizard's cap; shots in the agent scratch
+  `face-shadow/out/`): the house's main room by day (room key light from the left): main's ragged,
+  speckled band under the brim is a clean brim shadow across the forehead; the same frame with
+  `CF_FOCUS=0` is byte-identical to main (21 shots). Outdoors at 10:00 and 15:00 (`CF_FOCUS_AB=1`,
+  same run, consecutive frames): the same, also while walking; the player's ground shadow is
+  sharper and without the PCF dither; scenery outside the sphere unchanged. 120 fps (4K, VSync
+  off, `CF_SHOT_RUN` of every present): the band under the brim stays put from present to present
+  while the player turns and walks (main: its speckles change every present). Judder detector at
+  120 fps, outdoor route at 15:00: off 8.41 M tagged draws judged in 6883 in-betweens, on 8.45 M in
+  6879: 0 defects either way, identity check 0 jumps. Enhanced lighting off: nothing new runs
+  (onModel returns before the focus code, submitFocus only inside the enhanced scene, no pseudo-light
+  reaches Aurora); indoor route shots of main vs the branch: 7 of 9 byte-identical, the two at the
+  warp's load differ as much between two runs of main (load timing).
+- **Cost** (RTX 3090 Ti, 2 other agents' instances running, true 4K at 120 fps, the player standing
+  outdoors at 15:00, `CF_FOCUS_AB=600 AURORA_GPU_PROFILE=5`, route face_shadow_still.txt; windows
+  that lie fully inside an on / off block): GPU busy 5.27 vs 5.22 ms per frame (+0.05), shadow-map
+  atlas 0.146 vs 0.110 ms, shadow mask 0.532 vs 0.514 ms; the four-window pattern repeated
+  identically over 9 cycles. Host side: a few guest-memory reads per frame.
+- Test aids: `CF_FOCUS=0` (off: frames identical to main), `CF_FOCUS_AB=<n>` (off in every other
+  block of n game frames), `CF_FOCUS_LOG=<n>` (`[focus]` candidates with world / view place and
+  MDL0 box, the sphere), `CF_FOCUS_RADIUS=<units>`, `CF_FOCUS_CENTRE=<model y>`,
+  `AURORA_ENH_FOCUS=0` (Aurora side off), `AURORA_ENH_FOCUS_SOFT=<units>` (a filter radius floor in
+  the focus cascade, default 0), `AURORA_ENH_FOCUS_BIAS=<units>` (receiver offset floor, 0.3), `AURORA_ENH_GLOWDBG=9` (the focus area in full red). `CF_SHOT_RUN=<dir>,<frame>,<count>[+<frame>,<count>]`
+  (main.cpp): a render-resolution screenshot of every present from that game frame on, in-betweens
+  included (r<frame>_<k>.ppm). Wizard's cap for tests: `CF_GIVE_ITEM=5600:AC9C` (item 0x727; the
+  item number is item.bin's second field, not the record index) + routes
+  `tools/routes/face_shadow_hat.txt` (pockets -> Wear), `face_shadow.txt` (outdoors at the house:
+  stand, walk toward the camera / left / right), `face_shadow_indoor.txt` (the house's main room), `face_shadow_still.txt` (standing, for cost A/B).
 
 ### Shadows of objects outside the view (branch shadow-casters, Aurora 0470)
 

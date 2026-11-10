@@ -1,0 +1,4 @@
+# The wizard's cap on (face_shadow_hat.txt), then the player stands still in front of the house
+# (branch face-shadow: GPU cost A/B with CF_FOCUS_AB=600 AURORA_GPU_PROFILE=5).
+include face_shadow_hat.txt
++300:STICKDOWN*12

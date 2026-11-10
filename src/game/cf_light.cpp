@@ -627,6 +627,7 @@ void submitSky() {
 
 void submitNightLights();
 void submitEffectLights();
+void submitFocus();
 
 void endScene() {
     if (!sSceneOpen) return;
@@ -655,6 +656,7 @@ void onCamera(Ctx& c, u32 data) {
             submitNightLights();
             submitEffectLights();
             cffurn::submit(sView, sViewValid);  // furniture lights (cf_furniture_light.cpp)
+            submitFocus();                      // the player's shadow focus (Aurora 0530)
             enh::beginScene();
             if (roomShellMode()) enh::setNoCast(true);  // indoors: the room background casts no shadow
         } else if (sSceneOpen) {
@@ -728,6 +730,103 @@ const ModelInfo& modelInfo(u32 obj) {
     return mi;
 }
 const bool sModelLog = std::getenv("CF_MODEL_LOG") != nullptr;
+
+// ---- character shadow focus (branch face-shadow; docs/RENDERING.md "Character shadow cascade") ----
+// The sun / moon / room key light cascades cover the whole view (cascade 1 at the player: texels
+// of ~0.4 units, ~8 px at 4K on a 30-unit head), so the self-shadows on a character's face (a hat
+// brim, the hair) came out blotchy and crawled with every small move. Aurora 0530 renders a fifth
+// cascade around one sphere at the same texel count: the player being played (the 'boy' / 'girl'
+// model nearest the view centre), from its MDL0 bounding box through the world matrix the scene
+// calc set for this frame (read when the scene begins, so no frame of lag). F1 "Sharp character
+// shadows"; test aids CF_FOCUS=0 (off), CF_FOCUS_AB=<n> (off in every other block of n frames),
+// CF_FOCUS_LOG=<n> (the candidates and the sphere every n frames), CF_FOCUS_RADIUS=<units> (fixed
+// radius), CF_FOCUS_CENTRE=<model y> (sphere centre above the model's origin).
+struct FocusCand {
+    u32 obj = 0, mdl = 0, off = 0, frame = ~0u;
+    float score = 0.0f;
+};
+FocusCand sFocusBest, sFocusLast;
+constexpr float kFocusCentreY = 12.0f, kFocusRadius = 40.0f;  // player sphere (model units)
+const int sFocusLog = [] {
+    const char* v = std::getenv("CF_FOCUS_LOG");
+    return v ? std::max(std::atoi(v), 1) : 0;
+}();
+bool mdlBox(u32 mdl, float lo[3], float hi[3]) {
+    if (!guestPtr(mdl) || rd32(mdl) != 0x4D444C30u) return false;
+    const u32 ver = rd32(mdl + 8);
+    const u32 info = mdl + 0x10 + 4 * (ver >= 10 ? 14 : 11) + 4;
+    for (int k = 0; k < 3; k++) lo[k] = rdf32(info + 0x28 + 4 * k), hi[k] = rdf32(info + 0x34 + 4 * k);
+    for (int k = 0; k < 3; k++)
+        if (!std::isfinite(lo[k]) || !std::isfinite(hi[k]) || hi[k] < lo[k] || hi[k] - lo[k] > 5000.0f) return false;
+    return hi[0] > lo[0] || hi[1] > lo[1];
+}
+bool focusOn() {
+    static const bool sOff = [] {
+        const char* v = std::getenv("CF_FOCUS");
+        return v && *v == '0';
+    }();
+    return !sOff && port::settings().enhancedLighting.characterShadows;
+}
+void noteFocusCandidate(u32 obj, const ModelInfo& mi) {
+    const bool player = mi.name == "boy" || mi.name == "girl";
+    if (sFocusLog && copyDispCount() % u32(sFocusLog) == 0 && !mi.name.empty() && mi.name.size() <= 8 && mi.name.find('_') == std::string::npos) {
+        float lo[3] = {}, hi[3] = {};
+        const bool box = mdlBox(mi.mdl, lo, hi);
+        log("[focus] f%u candidate %08X '%s'%s world %.1f %.1f %.1f view %.1f %.1f %.1f box %s %.1f %.1f %.1f .. %.1f %.1f %.1f", copyDispCount(), obj,
+            mi.name.c_str(), player ? " (player)" : "", rdf32(obj + 0x3C + 12), rdf32(obj + 0x3C + 28), rdf32(obj + 0x3C + 44), rdf32(obj + 0x6C + 12),
+            rdf32(obj + 0x6C + 28), rdf32(obj + 0x6C + 44), box ? "" : "(none)", lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+    }
+    if (!player || !focusOn()) return;
+    // The player being played is the one the camera follows: nearest the view centre.
+    const float x = rdf32(obj + 0x6C + 12), y = rdf32(obj + 0x6C + 28), z = -rdf32(obj + 0x6C + 44);
+    if (!(z > 1.0f) || !std::isfinite(x + y)) return;
+    const float score = (x * x + y * y) / (z * z);
+    if (sFocusBest.frame != copyDispCount() || score < sFocusBest.score) sFocusBest = {obj, mi.mdl, mi.off, copyDispCount(), score};
+}
+void submitFocus() {
+    if (!focusOn() || !sViewValid) return;
+    // Test aid CF_FOCUS_AB=<n>: no focus in every other block of n game frames (same-run A/B shots).
+    static const u32 sAb = [] {
+        const char* v = std::getenv("CF_FOCUS_AB");
+        return v ? u32(std::max(std::atoi(v), 0)) : 0u;
+    }();
+    if (sAb && (copyDispCount() / sAb) % 2 == 1) return;
+    // The last complete frame's choice (this frame's draws have not run yet).
+    if (sFocusBest.frame != copyDispCount()) sFocusLast = sFocusBest;
+    const FocusCand& f = sFocusLast;
+    if (!f.obj || f.frame + 3 < copyDispCount() || rd32(f.obj + f.off) != f.mdl) return;
+    // The players' MDL0 ('boy' / 'girl', skinned) has no bounding box: a fixed sphere about the
+    // model's origin (test aids CF_FOCUS_CENTRE=<model y>, CF_FOCUS_RADIUS).
+    static const float sCy = [] {
+        const char* v = std::getenv("CF_FOCUS_CENTRE");
+        return v ? float(std::atof(v)) : kFocusCentreY;
+    }();
+    float lo[3] = {0.0f, sCy, 0.0f}, hi[3] = {0.0f, sCy, 0.0f}, blo[3], bhi[3];
+    const bool box = mdlBox(f.mdl, blo, bhi);
+    if (box) std::memcpy(lo, blo, sizeof lo), std::memcpy(hi, bhi, sizeof hi);
+    // World matrix of this frame (the stage's scene calc ran before the draw).
+    float W[12];
+    for (int k = 0; k < 12; k++) W[k] = rdf32(f.obj + 0x3C + 4 * k);
+    const float c[3] = {(lo[0] + hi[0]) * 0.5f, (lo[1] + hi[1]) * 0.5f, (lo[2] + hi[2]) * 0.5f};
+    float w[3];
+    for (int r = 0; r < 3; r++) w[r] = W[r * 4] * c[0] + W[r * 4 + 1] * c[1] + W[r * 4 + 2] * c[2] + W[r * 4 + 3];
+    const float scale = std::sqrt(W[1] * W[1] + W[5] * W[5] + W[9] * W[9]);
+    const float dx = hi[0] - lo[0], dy = hi[1] - lo[1], dz = hi[2] - lo[2];
+    // Steady radius: the box's half diagonal with room for a hat and the animation, in steps of 8.
+    static const float sFixed = [] {
+        const char* v = std::getenv("CF_FOCUS_RADIUS");
+        return v ? float(std::atof(v)) : 0.0f;
+    }();
+    float radius = box ? std::ceil(0.5f * std::sqrt(dx * dx + dy * dy + dz * dz) * scale * 1.25f / 8.0f) * 8.0f : kFocusRadius * scale;
+    radius = sFixed > 0.0f ? sFixed : std::clamp(radius, 24.0f, 160.0f);
+    float v[3];
+    for (int r = 0; r < 3; r++) v[r] = sView[r * 4] * w[0] + sView[r * 4 + 1] * w[1] + sView[r * 4 + 2] * w[2] + sView[r * 4 + 3];
+    if (!std::isfinite(v[0] + v[1] + v[2] + radius)) return;
+    enh::setShadowFocus(v, radius);
+    if (sFocusLog && copyDispCount() % u32(sFocusLog) == 0)
+        log("[focus] f%u sphere obj %08X world %.1f %.1f %.1f view %.1f %.1f %.1f radius %.0f (box %.1f x %.1f x %.1f, scale %.3f)", copyDispCount(), f.obj,
+            w[0], w[1], w[2], v[0], v[1], v[2], radius, dx, dy, dz, scale);
+}
 }  // namespace
 
 bool mainView(float view[12]) {
@@ -1400,6 +1499,7 @@ bool onModel(Ctx& c, u32 obj) {
             sUpCount++;
         }
     }
+    if (proc == 6) noteFocusCandidate(obj, mi);
     if (proc == 6 && sNight > 0.01f) noteNightSource(obj, mi.name);
     if (proc == 6 || proc == 7) cffurn::noteModel(obj, mi.mdl, mi.name);  // furniture lights
     return true;

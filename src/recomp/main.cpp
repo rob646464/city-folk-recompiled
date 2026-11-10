@@ -46,6 +46,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <vector>
 #include <thread>
 #include <chrono>
 
@@ -518,6 +519,40 @@ int main(int argc, char* argv[]) {
             if (!sFz.dir.empty() && sFz.every && sFz.k < sFz.count && ++sFz.n % sFz.every == 0) {
                 char path[512];
                 std::snprintf(path, sizeof path, "%s/z%03u.ppm", sFz.dir.c_str(), sFz.k++);
+                aurora_request_screenshot(path);
+            }
+        }
+        // Test aid CF_SHOT_RUN=<dir>,<frame>,<count>[+<frame>,<count>...] (branch face-shadow): from that
+        // game frame (copyDispCount) on, a CF_SHOT-style render-resolution screenshot of every loop
+        // iteration (each present, in-betweens included) for <count> iterations, <dir>/r<frame>_<k>.ppm
+        // (the game frame when requested, the iteration). The writes slow the presentation down; the
+        // in-betweens still come from the presentation clock (alpha logged by CF_INTERP_LOG).
+        {
+            struct ShotRun {
+                u32 frame = 0, count = 0, k = 0;
+            };
+            static std::string sRunDir;
+            static std::vector<ShotRun> sRuns = [] {
+                std::vector<ShotRun> v;
+                if (const char* e = std::getenv("CF_SHOT_RUN")) {
+                    std::string s = e;
+                    const auto c = s.find(',');
+                    if (c != std::string::npos) {
+                        sRunDir = s.substr(0, c);
+                        for (std::string rest = s.substr(c + 1); !rest.empty();) {
+                            const auto semi = rest.find_first_of(";+");  // ('+' in run.ps1 -Env, which splits on ';')
+                            ShotRun r;
+                            if (std::sscanf(rest.c_str(), "%u,%u", &r.frame, &r.count) == 2) v.push_back(r);
+                            rest = semi == std::string::npos ? "" : rest.substr(semi + 1);
+                        }
+                    }
+                }
+                return v;
+            }();
+            for (ShotRun& r : sRuns) {
+                if (paused || hold || r.k >= r.count || copyDispCount() < r.frame) continue;
+                char path[512];
+                std::snprintf(path, sizeof path, "%s/r%05u_%03u.ppm", sRunDir.c_str(), copyDispCount(), r.k++);
                 aurora_request_screenshot(path);
             }
         }

@@ -60,6 +60,11 @@ bool noCast();
 // rim-light material hints (shaded as world draws otherwise). 0 = none. Reset by the caller.
 void setRimMaterial(int kind);
 int rimMaterial();
+// Branch face-shadow (Aurora 0530): a sphere around a character (view space of the coming scene,
+// radius in world units) for the directional lights' high-resolution focus cascade. Sent with the
+// next beginScene's lights (as the AURORA_SHADOW_FOCUS_ID pseudo-light), then cleared: a provider
+// sets it every game frame, before beginScene.
+void setShadowFocus(const float view[3], float radius);
 bool casterPass();  // inside setCasterPass(true) (City Folk: the stage's second root pass)
 bool inScene();     // inside beginScene .. endScene
 // Main view bracket (fn_8000BB98 hook): sends the frame's extra lights / the scene-end marker.

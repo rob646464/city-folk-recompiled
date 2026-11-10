@@ -150,6 +150,7 @@ std::vector<Field> fields() {
         num("enhanced_lighting", "sun_shadow_softness", l.sunShadowSoftness),
         num("enhanced_lighting", "sun_shadow_map_size", l.sunShadowMapSize),
         num("enhanced_lighting", "sun_shadow_quality", l.sunShadowQuality),
+        flag("enhanced_lighting", "character_shadows", l.characterShadows),
         flag("enhanced_lighting", "sun_light", l.sunLight),
         num("enhanced_lighting", "sun_light_intensity", l.sunLightIntensity),
         num("enhanced_lighting", "blob_shadows", l.blobShadows),
