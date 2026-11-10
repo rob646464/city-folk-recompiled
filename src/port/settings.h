@@ -223,6 +223,7 @@ struct EnhancedLightingSettings {
     float sunShadowSoftness = 1.0f;    // 0..3: penumbra (the light's apparent size)
     int sunShadowMapSize = 1;          // 0..2: 512 / 1024 / 2048 texels per cascade (preset)
     int sunShadowQuality = 1;          // 0..2: filter taps 8 / 12 / 20 (preset)
+    bool characterShadows = true;      // branch face-shadow: high-resolution focus cascade around the player (Aurora 0530)
     bool sunLight = true;              // warm sunlight added on sun-facing surfaces (shadowed)
     float sunLightIntensity = 0.3f;    // 0..1
     int blobShadows = 1;               // the game's round blob shadows: 0 keep, 1 fade under real shadows, 2 hide

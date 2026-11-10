@@ -46,6 +46,8 @@ bool sEmissiveGlow = false;  // branch indoor-light: a flame, also a bloom sourc
 int sRim = 0;                // branch indoor-light: 1 a character, 2 furniture (Aurora 0520a rim light)
 bool sShadowOnly = false;  // branch shadow-casters: an off-screen object drawn into the shadow maps only
 bool sNoCast = false;      // branch indoor-light: a room's shell (receives shadows, casts none)
+float sFocus[4] = {};       // branch face-shadow: shadow focus sphere for the next beginScene (view xyz, radius)
+bool sFocusPending = false;
 const bool sNoCastAll = std::getenv("CF_NOCAST_ALL") != nullptr;  // test aid: no world draw casts a shadow
 u8 sMaterial = 0xFF;  // last material hint sent
 
@@ -664,6 +666,12 @@ void setShadowOnly(bool on) {
     emitClass();
 }
 bool noCast() { return sNoCast; }
+void setShadowFocus(const float view[3], float radius) {
+    if (!(radius > 0.0f) || !std::isfinite(view[0] + view[1] + view[2] + radius)) return;
+    std::memcpy(sFocus, view, 3 * sizeof(float));
+    sFocus[3] = radius;
+    sFocusPending = true;
+}
 int rimMaterial() { return sRim; }
 void setRimMaterial(int kind) {
     if (sRim == kind) return;
@@ -718,7 +726,19 @@ void beginScene() {
     }
     static const bool sBeamLog = std::getenv("CF_BEAM_LOG") != nullptr;
     if (sBeamLog) log("[beam] main view of dump frame %u", copyDispCount() + 1);
-    const uint32_t sent = addBeamAnchor(sPending.data(), count);
+    uint32_t sent = addBeamAnchor(sPending.data(), count);
+    // Branch face-shadow (Aurora 0530): the shadow focus sphere (the player) as a pseudo-light,
+    // after the selection (it is no light), so it always reaches Aurora.
+    if (sFocusPending) {
+        sFocusPending = false;
+        if (sent == aurora::gfx::MaxExtraLights) sent--;
+        aurora::gfx::ExtraLight f{};
+        std::memcpy(f.pos, sFocus, sizeof f.pos);
+        f.radius = sFocus[3];
+        f.flags = AURORA_EXTRA_LIGHT_ANCHOR;
+        f.id = AURORA_SHADOW_FOCUS_ID;
+        sPending[sent++] = f;
+    }
     const u32 at = interp::mark();
     aurora::gfx::set_extra_lights(sPending.data(), sent);
     // (all of them: the realistic flashlight's anchors too, so they follow the blended camera)

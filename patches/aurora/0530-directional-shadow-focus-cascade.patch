@@ -1,0 +1,276 @@
+diff --git a/include/aurora/enhanced.h b/include/aurora/enhanced.h
+--- a/include/aurora/enhanced.h
++++ b/include/aurora/enhanced.h
+@@ -138,6 +138,15 @@ typedef struct {
+ // effects can anchor detail (dust, haze) in the world; frame interpolation blends them like lights.
+ #define AURORA_EXTRA_LIGHT_ANCHOR 0x40000000u
+ #define AURORA_BEAM_ANCHOR_ID 0xBEA0A000u
++// 0530: an anchor pseudo-light with this id is the shadow focus of the frame: `pos` = the view-space
++// centre and `radius` the radius of a sphere around a character (keep the radius steady). Shadowed
++// directional lights (ExtraLightDirectional) render a fifth, small orthographic cascade around it
++// into the free face 4 of their atlas cell (same texel count as the other cascades, so a 40-unit
++// sphere gets ~20x finer texels than a view cascade), used by receivers inside the sphere and
++// blended into the view cascades over its outer quarter: sharp, stable self-shadows on the
++// character (a hat brim on the face) that do not depend on the view cascades' coarse texels.
++// Frame interpolation blends it like a light (by id).
++#define AURORA_SHADOW_FOCUS_ID 0xBEA0A100u
+ 
+ // Replaces the configuration (any thread; takes effect at the next draw / scene end).
+ void aurora_enhanced_set_config(const AuroraEnhancedConfig* config);
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -97,6 +97,30 @@ BeamShadow g_beam;
+ // World anchor (AURORA_EXTRA_LIGHT_ANCHOR pseudo-lights): view positions of world points.
+ std::array<std::array<float, 3>, 3> g_anchor{};
+ bool g_anchorValid = false;
++// 0530: the directional lights' focus cascade (AURORA_SHADOW_FOCUS_ID pseudo-light of this frame):
++// view-space sphere around a character drawn into face 4 of the light's cell at high resolution.
++struct ShadowFocus {
++  float pos[3] = {0.f, 0.f, 0.f};
++  float radius = 0.f;
++  bool valid = false;
++};
++ShadowFocus g_focus;
++// AURORA_ENH_FOCUS=0: no focus cascade (A/B); AURORA_ENH_FOCUS_SOFT=<world units>: its filter
++// radius floor (default 0: the light's own penumbra, at least 1.5 texels).
++const bool g_focusOff = [] {
++  const char* v = std::getenv("AURORA_ENH_FOCUS");
++  return v != nullptr && *v == '0';
++}();
++const float g_focusSoft = [] {
++  const char* v = std::getenv("AURORA_ENH_FOCUS_SOFT");
++  return v != nullptr ? std::max(float(std::atof(v)), 0.f) : 0.f;
++}();
++// AURORA_ENH_FOCUS_BIAS=<world units>: floor of the focus cascade's receiver offset (normal /
++// toward the light, scaled like the texel-based one).
++const float g_focusBias = [] {
++  const char* v = std::getenv("AURORA_ENH_FOCUS_BIAS");
++  return v != nullptr ? std::max(float(std::atof(v)), 0.f) : 0.3f;
++}();
+ // Flash / flare detection: the flashlight's brightness relative to its recent steady level.
+ float g_flashLevel = 0.f;
+ float g_flare = 0.f;
+@@ -542,13 +566,22 @@ fn cube_proj(m: mat4x4f, w: vec3f, adims: vec2f) -> vec3f {
+ // size), blended into the next cascade over the last 12% of a slice and faded out toward the
+ // shadow distance. Surfaces turned away from the light are left to the receiving shader's
+ // terminator (this is only the shadow map's verdict).
++// 0530: the cascade data lives in face 5 (face 4 is the focus cascade, c = 4): [0..3] far view
++// depths, [4..7] texel sizes, [8..11] focus centre (view) + radius (0 = none), [16..19] depth
++// ranges, [20] the light's angular radius, [21] focus texel, [22] focus range, [23] focus filter
++// radius floor (world units).
+ fn dir_cascade(s: u32, c: u32, q0: vec3f, n: vec3f, l: vec3f, ndl: f32, mp: vec2f) -> f32 {
+   let b = (s * 6u + c) * 24u;
+-  let mb = (s * 6u + 4u) * 24u;
+-  let texel = xrec[mb + 20u + c];
+-  let range = xrec[mb + 24u + 16u + c];
+-  let tanSun = xrec[mb + 24u + 20u];
+-  let q = q0 + n * texel * (1.0 + 2.0 * (1.0 - clamp(ndl, 0.0, 1.0))) + l * texel * 1.5;
++  let m5 = (s * 6u + 5u) * 24u;
++  let focus = c >= 4u;
++  let texel = select(xrec[m5 + 4u + min(c, 3u)], xrec[m5 + 21u], focus);
++  let range = select(xrec[m5 + 16u + min(c, 3u)], xrec[m5 + 22u], focus);
++  let tanSun = xrec[m5 + 20u];
++  // 0530: the focus cascade's receiver offset has a floor in world units (fx.xl[33].z): its texels
++  // are so small that a low-poly character shadowed itself along its facets near the terminator
++  // (a hard polygonal line across the cheek), which the view cascades' larger offset never showed.
++  let ob = select(texel, max(texel, fx.xl[33].z), focus);
++  let q = q0 + n * ob * (1.0 + 2.0 * (1.0 - clamp(ndl, 0.0, 1.0))) + l * ob * 1.5;
+   let fm = mat4x4f(xrow(b), xrow(b + 4u), xrow(b + 8u), xrow(b + 12u));
+   let adims = fx.xl[32].xy;
+   let tile = xrow(b + 20u);
+@@ -558,7 +591,8 @@ fn dir_cascade(s: u32, c: u32, q0: vec3f, n: vec3f, l: vec3f, ndl: f32, mp: vec2
+   let rot = ign(mp) * 6.2831853;
+   let tu = normalize(select(cross(n, vec3f(0.0, 1.0, 0.0)), cross(n, vec3f(1.0, 0.0, 0.0)), abs(n.y) > 0.9));
+   let tv = cross(n, tu);
+-  var radius = fx.xl[32].w * texel;
++  let floorR = select(0.0, xrec[m5 + 23u], focus);
++  var radius = max(fx.xl[32].w * texel, floorR);
+   let rev = fx.xl[33].y > 0.5;
+   if (tanSun > 0.0) {
+     let t0 = cube_proj(fm, q, adims);
+@@ -577,7 +611,7 @@ fn dir_cascade(s: u32, c: u32, q0: vec3f, n: vec3f, l: vec3f, ndl: f32, mp: vec2
+     }
+     if (cnt < 0.5) { return 0.0; }
+     if (cnt > f32(ns) - 0.5) { return 1.0; }
+-    radius = clamp(radius + tanSun * (sum / cnt), texel, 24.0 * texel);
++    radius = clamp(radius + tanSun * (sum / cnt), max(texel, floorR), max(24.0 * texel, floorR));
+   }
+   var lit = 0.0;
+   for (var k = 0u; k < taps; k++) {
+@@ -594,17 +628,31 @@ fn dir_occlusion(s: u32, p: vec3f, nr: vec4f, mp: vec2f) -> f32 {
+   if (vz >= maxd || vz <= 0.0) { return 0.0; }
+   let n = select(l, nr.xyz, nr.w > 0.5);
+   let ndl = dot(n, l);
+-  let mb = (s * 6u + 4u) * 24u;
++  let mb = (s * 6u + 5u) * 24u; // 0530: cascade data in face 5
+   var c = 0u;
+   for (; c < 3u; c++) {
+-    if (vz < xrec[mb + 16u + c]) { break; }
++    if (vz < xrec[mb + c]) { break; }
++  }
++  var o = 0.0;
++  // 0530: the focus cascade (a small high-resolution map around a character, face 4) inside its
++  // sphere, blended into the view cascades over the sphere's outer quarter.
++  let fr = xrec[mb + 11u];
++  var fw = 0.0;
++  if (fr > 0.0) {
++    fw = 1.0 - smoothstep(fr * 0.72, fr * 0.95, length(p - vec3f(xrec[mb + 8u], xrec[mb + 9u], xrec[mb + 10u])));
++  }
++  if (fw < 1.0) {
++    o = dir_cascade(s, c, p, n, l, ndl, mp);
++    let far = xrec[mb + c];
++    let near = select(0.0, xrec[mb + c - 1u], c > 0u);
++    let t = (vz - near) / max(far - near, 1e-3);
++    if (c < 3u && t > 0.88) {
++      o = mix(o, dir_cascade(s, c + 1u, p, n, l, ndl, mp), smoothstep(0.88, 1.0, t));
++    }
+   }
+-  var o = dir_cascade(s, c, p, n, l, ndl, mp);
+-  let far = xrec[mb + 16u + c];
+-  let near = select(0.0, xrec[mb + 16u + c - 1u], c > 0u);
+-  let t = (vz - near) / max(far - near, 1e-3);
+-  if (c < 3u && t > 0.88) {
+-    o = mix(o, dir_cascade(s, c + 1u, p, n, l, ndl, mp), smoothstep(0.88, 1.0, t));
++  if (fw > 0.0) {
++    o = mix(o, dir_cascade(s, 4u, p, n, l, ndl, mp), fw);
++    c = 4u;
+   }
+   // Debug (AURORA_ENH_GLOWDBG=9): cascade (red), shadow (green), N.L (blue).
+   if (fx.pp.w > 0.5) { dbg = vec4f(f32(c) / 3.0, o, ndl * 0.5 + 0.5, 1.0); }
+@@ -1520,7 +1568,7 @@ fn fs_shafts(in: VsOut) -> @location(0) vec4f {
+   let dir = normalize(view_pos(px, 0.5));
+   var tend = maxd;
+   if (d0 > 1e-7) { tend = min(length(view_pos(px, d0)), maxd); }
+-  let mb = (s * 6u + 4u) * 24u;
++  let mb = (s * 6u + 5u) * 24u; // 0530: the cascades' far depths in face 5 [0..3]
+   let adims = fx.xl[32].xy;
+   let jit = ign(mp);
+   var acc = 0.0;
+@@ -1529,7 +1577,7 @@ fn fs_shafts(in: VsOut) -> @location(0) vec4f {
+     let vz = -x.z;
+     var c = 0u;
+     for (; c < 3u; c++) {
+-      if (vz < xrec[mb + 16u + c]) { break; }
++      if (vz < xrec[mb + c]) { break; }
+     }
+     let b = (s * 6u + c) * 24u;
+     let fm = mat4x4f(xrow(b), xrow(b + 4u), xrow(b + 8u), xrow(b + 12u));
+@@ -3409,8 +3457,16 @@ void set_lights(const ExtraLight* in, uint32_t count) noexcept {
+   static std::array<ExtraLight, MaxExtraLights> real{}; // (FIFO thread; 0520: 22 KB)
+   uint32_t n = 0;
+   uint32_t anchors = 0;
++  g_focus.valid = false;
+   for (uint32_t i = 0; i < std::min(count, MaxExtraLights); ++i) {
+     if ((in[i].flags & AURORA_EXTRA_LIGHT_ANCHOR) != 0) {
++      if (in[i].id == AURORA_SHADOW_FOCUS_ID) { // 0530
++        const auto& p = in[i].pos;
++        if (std::isfinite(p[0] + p[1] + p[2] + in[i].radius) && in[i].radius > 0.f) {
++          g_focus = {{p[0], p[1], p[2]}, in[i].radius, true};
++        }
++        continue;
++      }
+       const uint32_t k = in[i].id - AURORA_BEAM_ANCHOR_ID;
+       if (k < 3) {
+         g_anchor[k] = {in[i].pos[0], in[i].pos[1], in[i].pos[2]};
+@@ -4236,23 +4292,10 @@ static void directional_records(const ExtraLight& l, uint32_t s, uint32_t cols,
+   }
+   const float p00 = std::fabs(g_camera.p00) > 1e-4f ? g_camera.p00 : 1.f, p11 = std::fabs(g_camera.p11) > 1e-4f ? g_camera.p11 : 1.f;
+   const float fS = float(S);
+-  for (uint32_t c = 0; c < 4; ++c) {
+-    const float n0 = c == 0 ? camNear : split[c - 1], n1 = split[c];
+-    float ctr[3] = {0, 0, 0}, pts[8][3];
+-    for (int k = 0; k < 8; ++k) {
+-      const float dz = (k & 4) ? n1 : n0;
+-      const float nx = (k & 1) ? 1.f : -1.f, ny = (k & 2) ? 1.f : -1.f;
+-      pts[k][0] = dz * (nx + g_camera.p02) / p00;
+-      pts[k][1] = dz * (ny + g_camera.p12) / p11;
+-      pts[k][2] = -dz;
+-      for (int a = 0; a < 3; ++a) ctr[a] += pts[k][a] / 8.f;
+-    }
+-    float R = 0.f;
+-    for (const auto& p : pts) {
+-      const float dx = p[0] - ctr[0], dy = p[1] - ctr[1], dz = p[2] - ctr[2];
+-      R = std::max(R, std::sqrt(dx * dx + dy * dy + dz * dz));
+-    }
+-    R = std::ceil(R * 1.04f / 8.f) * 8.f; // steady size; room for the filter at the edge
++  // One orthographic cascade into face c of the light's cell: the light-space square of half size
++  // R around `ctr` (view space), its centre snapped to whole texels of the world-anchored grid
++  // (0441), casters from `back` toward the light. Returns its texel size and depth range.
++  const auto cascade = [&](uint32_t c, const float* ctr, float R) {
+     const float texel = 2.f * R / fS;
+     float cr = dot3(r, ctr), cu = dot3(up, ctr);
+     cr = anchor[0] + std::floor((cr - anchor[0]) / texel) * texel;
+@@ -4281,14 +4324,50 @@ static void directional_records(const ExtraLight& l, uint32_t s, uint32_t cols,
+     o[21] = ty;
+     o[22] = tx + fS;
+     o[23] = ty + fS;
+-    rec[4 * 24 + 16 + c] = n1;
+-    rec[4 * 24 + 20 + c] = texel;
++    return std::pair<float, float>{texel, range};
++  };
++  for (uint32_t c = 0; c < 4; ++c) {
++    const float n0 = c == 0 ? camNear : split[c - 1], n1 = split[c];
++    float ctr[3] = {0, 0, 0}, pts[8][3];
++    for (int k = 0; k < 8; ++k) {
++      const float dz = (k & 4) ? n1 : n0;
++      const float nx = (k & 1) ? 1.f : -1.f, ny = (k & 2) ? 1.f : -1.f;
++      pts[k][0] = dz * (nx + g_camera.p02) / p00;
++      pts[k][1] = dz * (ny + g_camera.p12) / p11;
++      pts[k][2] = -dz;
++      for (int a = 0; a < 3; ++a) ctr[a] += pts[k][a] / 8.f;
++    }
++    float R = 0.f;
++    for (const auto& p : pts) {
++      const float dx = p[0] - ctr[0], dy = p[1] - ctr[1], dz = p[2] - ctr[2];
++      R = std::max(R, std::sqrt(dx * dx + dy * dy + dz * dz));
++    }
++    R = std::ceil(R * 1.04f / 8.f) * 8.f; // steady size; room for the filter at the edge
++    const auto [texel, range] = cascade(c, ctr, R);
++    // 0530: the cascade data moved from face 4 to face 5 (face 4 is the focus cascade).
++    rec[5 * 24 + 0 + c] = n1;
++    rec[5 * 24 + 4 + c] = texel;
+     rec[5 * 24 + 16 + c] = range;
+   }
+-  for (uint32_t c = 4; c < 6; ++c) {
+-    float* o = rec + c * 24;
+-    std::fill(o, o + 16, 0.f);
+-    o[15] = -1.f; // w < 0: every caster instance of this face is clipped
++  // 0530: face 4 = the focus cascade (a character's sphere, set_lights' AURORA_SHADOW_FOCUS_ID), or
++  // clipped; face 5 stays clipped (its first three rows carry data, the fourth gives w = -1).
++  std::fill(rec + 4 * 24, rec + 4 * 24 + 16, 0.f);
++  rec[4 * 24 + 15] = -1.f; // w < 0: every caster instance of this face is clipped
++  rec[5 * 24 + 12] = rec[5 * 24 + 13] = rec[5 * 24 + 14] = 0.f;
++  rec[5 * 24 + 15] = -1.f;
++  rec[5 * 24 + 8] = rec[5 * 24 + 9] = rec[5 * 24 + 10] = rec[5 * 24 + 11] = 0.f;
++  if (g_focus.valid && !g_focusOff) {
++    const float* fc = g_focus.pos;
++    const float vz = -fc[2];
++    const float fR = std::clamp(g_focus.radius, 4.f, 400.f);
++    if (vz > 0.f && vz + fR < maxDist * 0.85f) {
++      const auto [texel, range] = cascade(4, fc, fR);
++      for (int a = 0; a < 3; ++a) rec[5 * 24 + 8 + a] = fc[a];
++      rec[5 * 24 + 11] = fR;
++      rec[5 * 24 + 21] = texel;
++      rec[5 * 24 + 22] = range;
++      rec[5 * 24 + 23] = g_focusSoft;
++    }
+   }
+   rec[5 * 24 + 20] = std::clamp(l.box[5], 0.f, 0.2f);
+   xa[0] = d[0], xa[1] = d[1], xa[2] = d[2], xa[3] = maxDist;
+@@ -4492,6 +4571,7 @@ bool flush_mask() noexcept {
+     u.xl[32][3] = 1.5f; // base filter radius in texels (larger maps: sharper)
+     u.xl[33][0] = std::max(g_cfg.extraShadowSoftness, 0.f);
+     u.xl[33][1] = gx::UseReversedZ ? 1.f : 0.f;
++    u.xl[33][2] = g_focusBias; // 0530: the focus cascade's receiver offset floor (world units)
+   }
+   if (g_log) {
+     Log.info("  mask uniform: size {} {} vp {} {} {} {} proj {} {} {} {} projz {} {} {} {} dr {} {} pass {} {} {}", u.size[0],
+@@ -4626,6 +4706,7 @@ void begin_frame() noexcept {
+   g_cone = {};
+   g_spotCount = 0;
+   g_anchorValid = false;
++  g_focus.valid = false; // 0530
+   g_shaftsQueued = false;
+ }
+ 

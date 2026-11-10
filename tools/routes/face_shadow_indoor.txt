@@ -1,0 +1,14 @@
+# Face shadows indoors (branch face-shadow): the wizard's cap on (face_shadow_hat.txt), then the
+# player's house main room (room key light: from the left by day, overhead at night), the player
+# in the middle of the room, standing, walking toward the camera, left, right, with pauses.
+# Items after the room loads (d_bgi_drawNP #2): +300 stand, +600 toward, +900 left, +1200 right,
+# +1500 toward.
+include face_shadow_hat.txt
++300:WARP=house1
+after link d_bgi_drawNP 2
++300:TP=256/0/360
++40:STICKDOWN*6
++560:STICKDOWN*20
++300:STICKLEFT*60
++300:STICKRIGHT*60
++300:STICKDOWN*20

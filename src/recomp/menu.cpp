@@ -986,6 +986,11 @@ void enhancedLightingTab() {
     sDirty |= ImGui::Combo("Shadow filter", &l.sunShadowQuality, kQ, 3);
     ImGui::SetItemTooltip("Filter taps of the soft edge. More: smoother edges, more GPU time.%s", presetNote(custom));
     ImGui::EndDisabled();
+    sDirty |= recomp::menu::Checkbox("Sharp character shadows", &l.characterShadows);
+    ImGui::SetItemTooltip("A small high-resolution shadow map around your character: clean, steady shadows on\n"
+                          "the face and body (a hat brim on the face, the hair) instead of the coarse, blotchy\n"
+                          "edges of the scene-wide shadow map, which also shimmered as the character moved.\n"
+                          "Outdoors and indoors. Cost: about 0.05 ms of GPU time at 4K.");
     static const char* kBlob[] = {"Keep", "Fade under real shadows", "Hide"};
     sDirty |= ImGui::Combo("Round blob shadows", &l.blobShadows, kBlob, 3);
     ImGui::SetItemTooltip("The game's own round shadows under characters and objects: kept as they are, faded\n"

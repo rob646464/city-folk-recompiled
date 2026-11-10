@@ -1,0 +1,15 @@
+# Shadows on the player's face under a hat (branch face-shadow; docs/RENDERING.md "Character
+# shadow cascade"), CF_FIXTURE=user-town-clean, Env CF_FF=1-4400;CF_GIVE_ITEM=5600:AC9C: the
+# wizard's cap on (face_shadow_hat.txt), then in town at the house the player stands still, walks
+# toward the camera (face in view), stands, walks left / right / toward the camera again with
+# pauses (7600 toward, 7900 left, 8200 toward, 8500 right, 8800 toward, 9100 a long walk toward
+# the camera). Pair with CF_SUN_HOUR (12: the sun behind the camera; 9 / 15: from the side) and
+# CF_RENDER_SCALE=4.7369 for true 4K shots; CF_SHOT_RUN for every present (in-betweens).
+include face_shadow_hat.txt
++300:STICKDOWN*24
++300:STICKLEFT*90
++300:STICKDOWN*12
++300:STICKRIGHT*90
++300:STICKDOWN*12
++300:STICKDOWN*160
++400:STICKUP*6
