@@ -759,6 +759,12 @@ void gameTab() {
             else ImGui::TextDisabled("not installed");
         }
         ImGui::Text("Playing: %s version (%s)", port::regionName(inst.running), port::gameId(inst.running));
+        if (!inst.discProblem.empty()) {  // setup's disc file check (setup/disc_check.h)
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.4f, 1.0f));
+            ImGui::TextWrapped("Warning: %s. Errors or crashes may come from that; a new dump of the disc fixes them.",
+                               inst.discProblem.c_str());
+            ImGui::PopStyleColor();
+        }
         if (inst.readyCount() > 1) {
             int base = int(inst.base);
             ImGui::Text("Version to play:");
