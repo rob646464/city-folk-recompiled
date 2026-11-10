@@ -1,0 +1,59 @@
+# Fishing at the sea: rod (first free slot 0.56/-0.26) -> Carry, warp to the beach, walk to the
+# water, then stand 110 units north of a fish shadow (its position at 0x90537384, found in a
+# CF_MEM_DUMP of the same route and seed), face the sea, cast; CF_AUTO_A_MOTOR answers the bite.
+# Env: CF_FF=1-4400;CF_GIVE_ITEM=5600:CEA4;CF_AUTO_A_MOTOR=4 (fish shadow addresses for user-town-clean and run.ps1's seed; branch test-gameplay-2)
+include continue_any.txt
+5240:A
++60:A ~6
+after link d_bgo_drawNP 2
++1400:@-0.82/0.82
++30:A
++200:@0.56/-0.26
++60:A
++150:@0.77/-0.38
++60:A
++150:@off
++100:B
++100:WARP=town.beach
+after link d_bgo_drawNP 3
++300:STICKDOWN*120
++200:TP=addr90538424:0/-110
++5:STICKDOWN*3
++40:A
++700:A
++150:B ~3
++200:TP=addr90538424:0/-100
++5:STICKDOWN*3
++40:A
++700:A
++150:B ~3
++200:TP=addr90538424:20/-110
++5:STICKDOWN*3
++40:A
++700:A
++150:B ~3
++200:TP=addr90537384:0/-110
++5:STICKDOWN*3
++40:A
++700:A
++150:B ~3
++200:TP=addr90538424:0/-110
++5:STICKDOWN*3
++40:A
++700:A
++150:B ~3
++200:TP=addr90537384:0/-110
++5:STICKDOWN*3
++40:A
++700:A
++150:B ~3
++200:TP=addr90538424:-20/-110
++5:STICKDOWN*3
++40:A
++700:A
++150:B ~3
++200:TP=addr90537384:0/-100
++5:STICKDOWN*3
++40:A
++700:A
++150:B ~3

@@ -1,0 +1,37 @@
+# Nook's catalog (snap off): walk up, A (pointer away) opens the talk, then his lines with the
+# pointer on the screen away from the choices, wiggle onto "Catalog, please." and A; look at the catalog.
+# Env: CF_FF=1-4400;CF_POKE=5700:90E27D35:01,5700:90E27D36:86,5700:90E27D37:9F + snap off (branch test-gameplay-2)
+include continue_any.txt
+5240:A
++60:A ~6
+after link d_bgo_drawNP 2
++1600:WARP=nook
+after link d_bgi_drawNP 2
++150:A ~4
++100:STICKUP*35
++20:@off
++40:A
++100:A
++60:@-0.3/-0.5
++100:A ~4
++10:@0.4625/0.333
++10:@0.4725/0.343
++10:@0.4625/0.333
++10:@0.4725/0.343
++10:@0.4625/0.333
++10:@0.4725/0.343
++10:@0.4625/0.333
++10:@0.4725/0.343
++10:@0.4625/0.333
++10:@0.4725/0.343
++10:@0.4625/0.333
++10:@0.4725/0.343
++20:A
++150:A ~6
+after link d_menu_catalogNP 1
++400:@0.1/0.1
++20:@0/0
++300:@0.3/-0.3
++20:@0.31/-0.31
++300:@-0.3/0.3
++20:@-0.31/0.31

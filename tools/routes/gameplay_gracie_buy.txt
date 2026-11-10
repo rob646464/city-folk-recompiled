@@ -1,0 +1,18 @@
+# GracieGrace purchase: past Labelle's greeting, stand in front of (south of) the one display that is
+# not sold out (352/0/372), face up, A; pointer away = first choices (How much is it? / I'll take it!).
+# Env: CF_FF=1-4400;CF_POKE=5700:90E27D35:01,5700:90E27D36:86,5700:90E27D37:9F + snap off (branch test-gameplay-2)
+include continue_any.txt
+5240:A
++60:A ~6
+after link d_bgo_drawNP 2
++1600:WARP=city.gracie
+after link d_bgi_drawNP 2
++300:A ~6
++100:TP=352/0/372
++10:STICKUP*3
++40:A
++100:A ~14
++200:TP=362/0/368
++10:STICKUP*3
++40:A
++100:A ~14

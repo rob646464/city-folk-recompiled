@@ -228,3 +228,80 @@ Every log of these runs (about 60) was free of `FATAL`, `[hle] MISSING` and `[ha
 - **Resetti**: what makes him come after an unsaved quit was not found; the port and Dolphin agree
   for the sessions above (run 2 of every test started without a fixture copy: check the run log
   for `[nand] fixture ... copied`).
+- Round 2 below (branch test-gameplay-2) took up the "not reached" list; see its own Open list.
+
+## Gameplay, round 2 (branch test-gameplay-2, 2026-11-10)
+
+Same setup as round 1 (USA disc, `cfrecomp`, `user-town-clean` copies, run.ps1 rules, continue
+fast-forwarded with `CF_FF=1-4400`, the wallet poked to 99,999 Bells where money is spent), about
+60 runs. The routes that worked are in tools/routes/gameplay_*.txt (fish at the beach, Halloween
+reward, GracieGrace purchase, Nook's catalog, letter to a villager with save, tourney entry; each
+names its `-Env` in a comment). Every log was free of `FATAL`, `[hle] MISSING`, `[hang]` and `call to`. No port bug was
+found in these systems; what failed in early runs was the route (details under "Route lessons").
+
+| System | Tested how | Result |
+| --- | --- | --- |
+| Catching a fish | fish shadows are not actors: two `CF_MEM_DUMP`s 30 frames apart at the beach, `memsearch` for moving float x/y/z near the player (the shadow records at 0x90537384 / 0x90538424 in this route, model name `af_fsh_shadow` beside them); then rod Carry, `WARP=town.beach`, `TP=addr90537384:0/-110` (new test aid: 110 units north of that shadow), face the sea, cast, `CF_AUTO_A_MOTOR=4` | ok: the shadow swims to the bobber, nibble = one 3-frame rumble, bite = 4+ frames, auto A: **"I caught a boot!"** (run fishbeach1) and **"I caught a sea horse!"** (fishbeach2); casting straight out from the shore (round 1) only missed the shadows. River/pond not retried |
+| Catching a bug | net Carry, `TP=addr` next to moving objects of a 0x902Dxxxx pool from the same dumps, swing | not reached: those objects were not insects (the swings hit nothing; no `ins_*` instance was found in the dump, only the static name table at 0x804E8700). Open |
+| Fossil assessment | Blathers: "Check a fossil!" was not picked (route timing), "Donation!" with the unidentified fossil (item 9018) instead | ok: "Hoo now? An unidentified... If you wish to donate this, shall I first identify it?" Please do! -> "In a large, ancient nutshell, this is a stego skull." -> donated ("away it goes to our fine collection!") |
+| Donating a fish | sea bass in the "Donate what?" picker by pointer | the picker takes pointer clicks when they are timed from its link (`after link d_menu_item02NP 1`): probe run, sea bass hovered and ticked; earlier clicks made before the picker was ready did nothing. The donation itself is covered by branch snap-donate (D-pad route `museum_donate.txt`) |
+| Able Sisters | grid of `TP` spots, A at each | the mannequin row reached (x 290 behind the row, facing down): Mabel "Oh, yes, that design was made by Ann from Treehut. I believe it's called checked cloth, yeah. Are you into it?" Display mine! / I want it! / Switch it out. / Just looking...; "Display mine!" -> "Your design will replace the one we're currently displaying" -> I don't mind. -> the "Display which?" design picker (the player's designs). "I want it!" (the purchase) was not hit by the scripted pointer in three runs (the choice box came up between pointer moves). Open |
+| GracieGrace | grid of `TP` spots; the one display not sold out (right of 312/330): from the side nothing, from the front (`TP=352/0/372`, face up, A, first choices) | ok: "The piece you're admiring is a modern umbrella. It works in rain or sun..." How much is it? -> "Because it's a sale item, you save 50%. So, that will be 1,600 Bells." I'll take it! -> wallet 99,999 -> 98,399, "Thank you so much. I hope you enjoy your purchase". Ground floor otherwise "SOLD OUT" on most pedestals (Dolphin not compared) |
+| Nook's catalog | walk up to the counter, Tom Nook's menu I want to sell! / Catalog, please. / Turnip prices? / Nothing., the pointer wiggled onto "Catalog, please." | ok: "This catalog is specifically for you, rob64. Just pick out whatever you want to order", the catalog (d_menu_catalogNP: category tabs, list orange chair / tape deck / cardboard box..., the item model turning, "Bells: 700"); the tape deck ticked by pointer. Confirming the order and the next-day delivery were not run (see "Multi-day chain") |
+| Letter to a villager | stationery (CF_GIVE_ITEM 9643) -> Write a Letter -> address book "Frunch" tab, first entry Bluebear -> two keys -> Done -> Confirm; post office: Pelly "Send mail." -> "Frunch." -> letter picker "To Bluebear" -> Confirm | ok: "Dear Bluebear, ... From rob64", Pelly "OK, I'll take it from here!", "Do you have any other letters you need to send out?" Nope. -> "Thank you for visiting, and please come again!", out, HUD "Save and quit" -> "Save completed!" (run c2-letter). The villager's reply next day: not checked (see "Multi-day chain") |
+| K.K. Slider / Dr. Shrunk | Saturday 2026-11-07 20:30, Club LOL ticket hall: clerk, "Sounds good!" (800 Bells paid), newcomers' special performance, "Please make your way into the theater and take your seat"; then the show room by `WARP=city.theatre_show` (the hall's own way in) | the show room (seats, the stage, Dr. Shrunk = module 60 at 256,28,224 on the stage; no K.K. actor, module 41, at 20:30); A at the seat backs from behind the last row (z 431, the only walkable strip: the player cannot pass the rows) and from the left aisle did not sit the player down, so no show started. Open (needs a check of how a seat is taken, e.g. in Dolphin) |
+| HRA score letter | join with Lyle (round 1 dialogue), save in the city, continue the next day, mailbox | not run (route hra_save.txt written; see "Multi-day chain") |
+| Villager moving in | continue the fixture on later dates (`CF_CLOCK_START`), `CF_WARP_DUMP` (villager house structures D009-D012), map, `WARP=town.villager7` / `villager7` | ok: 2026-10-27 (the save's own day) 6 villager houses; 2026-11-03 a 7th house (structure D00F at 2192,28,2208) with a rabbit villager inside among moving boxes; 2026-12-06 the 7th house elsewhere (2736,28,2720), the newcomer Tank: "So you're from Frunch, right? ... This is my first day living here. They call me Tank.", "My place isn't ready for guests yet!"; 2027-05-15 the 7th house at 912,28,2496 |
+| Villager moving out | the same date jumps (up to 200 days) | not seen: all six villagers' houses (D009-D00E) stay on every date; nobody asked to move in the talks reached. Open (in the game a villager announces the move on a played day first) |
+| Auction (Lyle's / Lloid) | 2026-10-31 10:00 (a bidding day), walk up, talk, first choices | ok: "Our humble auction house is currently accepting bids!", the newcomer explanation (displays, reserve price, mail return, one display per customer), menu Displays! / Bidding! / Nothing.; no bid placed (one player, no other player's display; not tried) |
+| Festival reward (Halloween) | 2026-10-31 19:30, candy given (CF_GIVE_ITEM 9144 / 9148), `TP` 40 units north of Jack (south of him is below a cliff), talk, "Here you go!", "Give which?" picker: red candy, Give | ok: "Ahhhh...scrumptious!", "I should give you something in return... Take this as my thanks! It's my own personal spooky wall, pumpkin!" |
+| Fishing Tourney entry | 2026-11-21 (3rd Saturday), Chip, with and without a rod | ok: without a rod Chip sells one ("How does a fishing rod at 500 Bells..."); with one: "So, wanna hear the rules for the Carp Fishing Tourney?" OK -> "You've got until 6:00 p.m. tonight ... biggest fish is the winner", "Only one type of fish is allowed! ... if it's not a carp, I won't measure it". 2027-05-15 (3rd Saturday) the town's announcement "Hey, everybody! The Fishing Tourney is going on now!" |
+
+**Multi-day chain (letter reply, catalog delivery, HRA letter)**: day 1 on a fixture copy (no
+fixture in later runs, `-Nand` shared): the letter run above ended with "Save completed!"; day 2
+(`CF_CLOCK_START=2026-10-28 10:00`) continued that save without Mr. Resetti, but the walk to the
+mailbox (tools/routes/mailbox.txt's steps from the house door) went past it behind the house and
+the pockets' letters panel was empty. A third run on the same NAND (`TP` in front of the mailbox,
+10:30) began with Mr. Resetti, because the second run had ended without saving, and his talk used
+up the route. So the reply, the catalog delivery (order not confirmed) and the HRA letter are not
+checked yet; a next try should save at the end of every day's run (HUD "Save and quit") and open
+the mailbox by `TP`.
+
+### Route lessons (scripted input in City Folk)
+
+- `+N:A ~K` presses A K times **N frames apart** (the repeat spacing is the `+N`), so `+300:A ~8`
+  waits 2400 frames; several first runs only looked stuck because of this.
+- In the field and in rooms, A with the pointer **on the screen** acts on the pointed spot instead
+  of talking to whoever the player faces: start every talk with `@off`.
+- A dialogue choice is taken by the pointer only if the pointer **moves while the choice box is
+  up**; a pointer that was put on the right spot before the box appeared is not drawn and A takes
+  the highlighted first choice. Wiggle between two nearby spots every 10 frames across the time
+  the box can appear, with A presses in between (tools/routes/gameplay_catalog.txt / gameplay_letter_villager.txt). With the
+  pointer on the screen away from the choices, A advances text but did not pick a choice at Tom
+  Nook's menu; at Pelly's "other letters?" it did take "Yes." (unclear why).
+- Item pickers ("Donate what?", "Give which?") take clicks timed from their own
+  module link (`after link d_menu_item02NP 1`), as branch snap-donate found.
+- Fish shadows, insects and other field objects are not actors (`TP=mod<N>` cannot find them):
+  two `CF_MEM_DUMP`s a few frames apart and a search for moving float x/y/z near the player find
+  them; with the same route and `CF_RNG_SEED` they stay at the same addresses, so
+  `TP=addr<hex>:dx/dz` reaches them in a later run.
+
+**Mr. Resetti after an unsaved quit (round 1's open question)**: a continue of the NAND that run
+letter3 left behind (fixture, a letter written and handed to Pelly, then the run ended by
+`CF_QUIT_AFTER` without saving) began with Mr. Resetti ("...over at the Reset Center, we got us
+a switchboard that lights up when someone resets"), unlike round 1's unsaved sessions that only
+walked around. The same happened after run c2-mail (a short session that only walked around the
+house, ended unsaved): Mr. Resetti came on the next continue, popping up as soon as the player
+moved ("Ah, so it's you.. Oh, I ain't surprised, kid. ... Ya either sleep in the attic bed, or
+ya hit that save button."). So he does come in the port, as the game intends; why round 1's unsaved sessions (same clock
+on both runs) did not bring him was not narrowed down (these runs continued on a later date or
+after a session with a sent letter).
+
+### Open (gameplay, round 2)
+
+- Catching a bug: insect objects not located (the 0x902Dxxxx pool tried was something else).
+- Next-day results: the villager's reply to the letter, the catalog order (Confirm) and its
+  delivery, the HRA score letter (see "Multi-day chain").
+- Able Sisters purchase ("I want it!" at a mannequin), sitting down at Club LOL (show, K.K.'s
+  song, Dr. Shrunk's emotion), a villager moving out, placing a bid at the auction (needs a
+  display by another player), the river/pond fishing spots, PAL/JP/KR.
