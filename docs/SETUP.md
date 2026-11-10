@@ -35,9 +35,9 @@ libxml2 only for lld-link manifests; packaging/linux/libxml2_stub.c). macOS: `ll
 Same pipeline as LM (LM .github/workflows/build.yml, tools/release_windows.ps1, docs/LINUX.md,
 docs/MACOS.md), with City Folk's names:
 
-- **GitHub Actions** (`.github/workflows/build.yml`): on pushes to `main`, `ci/**` (push any branch
-  as `ci/<name>` to have it built) and `perf-ci`, on tags `v*`, pull requests and
-  `workflow_dispatch` (works once the file is on main). Three jobs build only `CityFolkRecomp`
+- **GitHub Actions** (`.github/workflows/build.yml`): only on tags `v*` and `workflow_dispatch`
+  (`gh workflow run build.yml --ref <branch>`; Actions minutes are limited, pushes to any branch build
+  nothing). Three jobs build only `CityFolkRecomp`
   (no disc: `CF_DISC=/nonexistent`, the cfrecomp dev build is skipped) and upload
   `CityFolkRecompiled-<version>-windows-x64.zip` / `-linux-x86_64.tar.gz` / `-macos-arm64.tar.gz`
   as artifacts (version = `project(cfport ... VERSION)` in CMakeLists.txt). Windows bundles the
@@ -65,7 +65,7 @@ docs/MACOS.md), with City Folk's names:
   (packages and notes in `out/`, placeholder notes when the file is missing) but never pushes,
   starts a workflow, tags or publishes; it prints the `gh release create` command instead.
 
-No releases or tags exist yet; the repository is private (the updater reports "not public yet").
+No releases or tags exist yet; the repository is private (the updater reports "No published release was found yet").
 
 ## Discs
 
@@ -207,9 +207,11 @@ an empty folder for a fresh install, `CF_CACHE_DIR`/`CF_NAND_DIR`/`CF_CARD_DIR` 
 **rob646464/city-folk-recompiled**, tags `v<version>`, assets
 `CityFolkRecompiled-<version>-windows-x64.zip` / `-linux-x86_64.tar.gz` / `-macos-arm64.tar.gz`
 (the `cmake --install` layout), SHA-256 from the API's asset digest or the release notes' table.
-The repository is private for now: the unauthenticated check gets HTTP 404, reported as "No
-published release was found (the project's releases are not public yet)." in F1 > Game and as an
-`[update] check failed` log line; nothing else happens and the game runs normally. The startup
+The repository is private for now: the unauthenticated check gets HTTP 404 (also what a public
+repository without a release answers), reported as "No published release was found yet (none is
+public)." in F1 > Game and as an `[update] check failed` log line; nothing else happens and the game
+runs normally. Without a network: "Could not reach GitHub: could not connect (offline or
+blocked?)." (checked 2026-11-09 from an installed copy, startup check and the F1 button). The startup
 check runs only in a release folder (`llvm/bin/clang` next to the program; `pipelines.bin` is not
 required) and not with `CF_UPDATE_CHECK=0`. Staging in `<install>/upd`,
 `.old` renames, rollback, cleanup and the portable-mode rules are LM's (LM docs/SETUP.md

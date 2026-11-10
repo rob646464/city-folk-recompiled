@@ -1072,7 +1072,7 @@ std::string fetchFeed(std::string& body) {
             return "GitHub's limit for update checks from this network was reached; try again" + when + ".";
         }
         // A private repository (or one without releases) answers 404 to an unauthenticated request.
-        if (r.status == 404) return "No published release was found (the project's releases are not public yet).";
+        if (r.status == 404) return "No published release was found yet (none is public).";
         return "GitHub answered HTTP " + std::to_string(r.status) + ".";
     }
     return "too many redirects";
