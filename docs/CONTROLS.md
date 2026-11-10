@@ -420,7 +420,12 @@ run).
   (the game's clock and the Wii Remote report timing follow guest frames) make it repeatable; run.ps1 sets all three
   (12345678, 2026-10-27 10:00). Diagnostics: `CF_RNG_LOG=1` (every setSeed), `CF_RNG_DRAWS=a,b`
   (every main-generator draw in frames a..b), `CF_TIME_LOG=1` (who reads the clock).
-- `CF_WPAD_LOG=1`: Remote state changes, callbacks, motor/DPD/speaker commands.
+- `CF_WPAD_LOG=1`: Remote state changes, callbacks, motor/DPD/speaker commands (motor lines carry
+  the guest frame).
+- `CF_AUTO_A_MOTOR=<frames>[,<hold>]` (scripted fishing, docs/TEST_COVERAGE.md): once the game has
+  kept a Remote's motor on for `<frames>` guest frames, A is held for `<hold>` frames (default 6),
+  once per rumble. City Folk rumbles the Remote for each nibble and for the bite, so the threshold
+  picks the bite.
 - Route from boot to the town (USA, guest frames, see docs/WII.md "Scripted route to the town").
 
 PowerShell note: a script parameter named `$Input` is PowerShell's automatic pipeline variable, so a
