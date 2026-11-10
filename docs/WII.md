@@ -449,6 +449,32 @@ no effect-by-effect tags; the fallback for everything a library does not tag mus
   fireworks) 2 %). Display lists written straight into the pipe (most g3d shapes) show up only in
   the runtime part, by the last GX call's site (ResTev::CallDisplayList, LoadResShpPrimitive).
 
+### Matching untagged draws, round 2 (branch interp-match-2)
+
+User: "still a lot of jumps, shouldn't there be 0?". The detector now classifies every event, so its
+number of visible defects means what it says (`E <a|b|c> <reason>` lines, `CLASSIFIED` in the 5 s line):
+- It follows each point along its **exact** path too: the same draw and slot within a game frame's
+  in-betweens, the interpolator's partner draw (`Tape::bundlePartner`, now also for draws placed by
+  another draw's matrix: `bundleOwner`) across the change.
+- (a) visible defect: both the exact and the on-screen (nearest same-kind point) paths jerk, and either
+  the speed changes inside one interval, or the point turns back where the game frames do not
+  (`pop`), or a draw of its kind was much nearer in the previous game frame than its partner, also
+  with the last step as prediction and also in the draw's own matrix space (`wrong-pair`).
+- (b) by design: `motion` (the game's own velocity change at a game frame: logic at 60), `arc` (a
+  rigid blend turning a part: same speed, turning direction), `game-pop` (the game frames themselves
+  go there and back), `game-frame` / `born` (no partner: shown at the newest game frame / new),
+  `appeared` (its partner was not drawn in the previous present), `cut`.
+- (c) the detector's own mismatch: `detector` (its nearest point was another identical one; the exact
+  path is smooth), `detector-new`, `exact-only` (the exact path jerks but on screen the point moves
+  smoothly: a partner table that is not what is drawn there).
+- Fixes found by it: draws without values of their own get the partner of the draw whose matrix
+  places them; things drawn with a camera of their own (the fireworks show, a sky backdrop: view-space
+  matrix the same in both game frames while the town camera moved) are blended as drawn
+  (`cameraAttached`, Patch::ownCamera; `CF_CAM_ATTACHED=0`, `CF_CAM_ATTACHED_LOG=1`), matched in the
+  space they are steadier in (`CF_MATCH_SPACE=0`), and the detector follows them on screen; the
+  alignment now covers classes up to 200000 draw pairs (fireworks bursts).
+- `SNAP <site> <n>` lines: point-presents shown at the game frame per draw site (effects at 60 fps).
+
 ## IOS (Starlet)
 
 The game reaches every device through IPC to IOS (`IOS_Open/Ioctl(v)/Read/Write`). Decision
