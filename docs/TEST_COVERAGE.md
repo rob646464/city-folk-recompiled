@@ -209,17 +209,17 @@ Drop / Carry / (Bury, Plant, Wear, Add to Wallet, ...) / Quit; "Carry" equips a 
 | Wallet | `CF_POKE=5700:90E27D35:01,5700:90E27D36:86,5700:90E27D37:9F` (u32 at 0x90E27D34 with `user-town-clean` and run.ps1's seed; found by diffing memory dumps before / after "Add to Wallet") | ok: 99,999 Bells in the HUD and spent at Club LOL | |
 | Bed (house loft) | warp, A at the bed | the bed offers "Swap this for another bed?" (no save at a bed in City Folk; saving is the HUD button, verified before) | |
 | Museum (Blathers) | warp, `TP`, A | ok: greeting, menu Donation! / Check a fossil! / Where am I? / Never mind., "Donate what?" pockets screen with the donatable items lit | |
-| Museum donation | Donation! -> common butterfly (pointer `@-0.45/0.17`) -> Donate, with `[wiimote] remote1_snap=off` | ok: "I daresay that is a common butterfly. STOP! Do NOT free it!", "Our thanks for the donation", "Do you wish to donate anything else?" Yep -> the screen again. With "Snap pointer to menu items" on Auto (default) the scripted pointer clicks on that screen selected nothing in two runs, and the cursor is not drawn until the pointer moves (see Open) | |
+| Museum donation | Donation! -> common butterfly (pointer `@-0.45/0.17`) -> Donate, with `[wiimote] remote1_snap=off` | ok: "I daresay that is a common butterfly. STOP! Do NOT free it!", "Our thanks for the donation", "Do you wish to donate anything else?" Yep -> the screen again. With "Snap pointer to menu items" on Auto (default) the scripted pointer clicks on that screen selected nothing in two runs, and the cursor is not drawn until the pointer moves | branch snap-donate: the route's `STICKUP*4` (walking up for the second talk) landed while the picker was still open, Auto took it as menu navigation and kept the pointer on Quit, so the later clicks went elsewhere; the cursor was missing because the picker opened while the route pointed away (`@off`). Timed from the picker's link, scripted clicks donate with Auto and Off alike. The real bug found there: by D-pad / stick only Quit and Donate were reachable (the slots were left out as "behind" the hit-tested buttons; docs/CONTROLS.md "Screens drawn but not hit-tested"): fixed, `tools/routes/museum_donate.txt` donates by D-pad, `nook_sell.txt` sells |
 | Quitting without saving (Resetti) | run 1: continue `user-town-clean`, play ~40 s (and once ~5 min, in and out of the house), quit (no save); run 2: continue that NAND (clock 10:00 again, 10:30, 11:30) | no Resetti in run 2. The session-start save ("Preparing saved data") is committed (`[save] result word 1`, rvforest.dat rewritten) and sets file byte 0x8670 (player 1 + 0x8650) 00 -> 02; Dolphin does exactly the same: Dolphin's own run-1 save is byte-identical to the port's apart from two random words, and Dolphin shows no Resetti either, from its own save or from the port's | none needed (matches Dolphin) |
 
 Every log of these runs (about 60) was free of `FATAL`, `[hle] MISSING` and `[hang]`.
 
 ### Open (gameplay)
 
-- **Museum screens with "Snap pointer to menu items" on Auto**: scripted `@x/y` clicks on the
-  "Donate what?" screen selected nothing (twice) and the cursor was not drawn until the pointer
-  moved; with snap off the same clicks donate. Not checked with a real mouse or a controller; the
-  menu-nav work never reached the museum (docs/CONTROLS.md "Snap pointer to menu items").
+- ~~Museum screens with "Snap pointer to menu items" on Auto~~: done on branch snap-donate (see
+  the museum donation row; docs/CONTROLS.md "Scripted routes and the snap"). Still open there: the
+  recycle box, giving an item to a villager, sending an item with a letter (the same pockets
+  picker family, not reached by script), a real mouse / controller.
 - **Not reached yet**: catching a fish (no nibble at the pond by the house) or a bug, Able
   Sisters / GracieGrace purchases (the scripted walk did not face a display), catalog ordering,
   letters to villagers and their replies, K.K. Slider's show and Dr. Shrunk's emotions (the

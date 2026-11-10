@@ -1,0 +1,28 @@
+# Tom Nook's "What do you want to sell?" picker by D-pad with "Snap pointer to menu items"
+# (docs/CONTROLS.md; saved town CF_FIXTURE=user-town-clean, sea bass in the pockets: run.ps1 -Env
+# "CF_FF=1-4400;CF_GIVE_ITEM=5600:9BB0"). Nook's Cranny by warp, Nook talked to from TP=256/0/410
+# (docs/FEATURES.md), "I want to sell!" = first choice with the pointer away, then the picker
+# (d_menu_item02NP): the same D-pad moves as museum_donate.txt, ending on Sell. Verified 2026-11-10
+# (branch snap-donate): sea bass ticked, Sell -> "Yes, yes, I'll take that for 200 Bells!".
+include continue_any.txt
+5240:A
++60:A ~6
+after link d_bgo_drawNP 2
++1600:WARP=nook
+after link d_bgi_drawNP 2
++300:TP=256/0/410
++30:STICKUP*4
++80:@off
++30:A ~50
+after link d_menu_itemNP 1
++1600:RIGHT
++40:RIGHT
++40:RIGHT
++40:RIGHT
++40:UP
++40:RIGHT
++60:A
++120:DOWN
++40:DOWN
++40:DOWN
++60:A

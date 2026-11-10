@@ -140,8 +140,13 @@ bool overlapping(const Item& a, const Item& b) {
 }
 
 // The navigable set as apply() sees it. The screen in front is modal, as in the game:
-//   - a screen the game hit-tests (a choice box over the pockets, the map) is in front of items
-//     only seen drawn: those are left out;
+//   - a screen the game hit-tests (a choice box over the pockets) is in front of the layouts
+//     only seen drawn that it overlaps (the whole layout's extent): those are left out. Drawn
+//     layouts beside the tested items stay: the "Donate what?" / sell / give pickers hit-test
+//     their Quit / OK buttons every frame (fn_80008ADC) but their item slots only while the
+//     pointer is on the grid (or from stored positions), so "tested" alone does not mean "in
+//     front" (it left only the two buttons navigable there). Drawn-only HUD items are left out
+//     while any tested menu item is up (the toolbar is hit-tested whenever the game uses it);
 //   - of two menu layouts that overlap (a submenu over the design list, both hit-tested), the one
 //     drawn later is in front: every item of the one behind is left out (only menu items: the
 //     toolbar stays reachable below every screen, and layouts side by side, e.g. the map's house
@@ -150,9 +155,41 @@ bool overlapping(const Item& a, const Item& b) {
 std::vector<Item> navigable(const std::vector<Item>& in, bool& menu, bool& hud) {
     std::vector<Item> items;
     const bool front = std::any_of(in.begin(), in.end(), [](const Item& it) { return it.tested && !it.hud; });
+    // Drawn-only layouts covered by a tested menu item of another layout (CF_NAV_OLD: every
+    // drawn-only item while anything is tested, the first version's rule).
+    std::vector<u32> covered;
+    if (front && !sOld) {
+        struct Extent {
+            u32 group;
+            Box b;
+        };
+        std::vector<Extent> ext;  // union of each drawn-only layout's visible items
+        for (const auto& it : in) {
+            Box b;
+            if (it.tested || it.hud || !visibleBox(it, b)) continue;
+            auto e = std::find_if(ext.begin(), ext.end(), [&](const Extent& x) { return x.group == it.group; });
+            if (e == ext.end()) {
+                ext.push_back({it.group, b});
+            } else {
+                e->b = {std::min(e->b.x0, b.x0), std::min(e->b.y0, b.y0), std::max(e->b.x1, b.x1), std::max(e->b.y1, b.y1)};
+            }
+        }
+        for (const auto& e : ext)
+            for (const auto& t : in) {
+                Box b;
+                if (!t.tested || t.hud || t.group == e.group || !visibleBox(t, b)) continue;
+                if (std::min(b.x1, e.b.x1) > std::max(b.x0, e.b.x0) && std::min(b.y1, e.b.y1) > std::max(b.y0, e.b.y0)) {
+                    covered.push_back(e.group);
+                    break;
+                }
+            }
+    }
     for (const auto& it : in) {
         Box b;
-        if ((front && !it.tested) || !visibleBox(it, b)) continue;
+        if (!visibleBox(it, b)) continue;
+        if (front && !it.tested &&
+            (sOld || it.hud || std::find(covered.begin(), covered.end(), it.group) != covered.end()))
+            continue;
         items.push_back(it);
     }
     if (!sOld) {
