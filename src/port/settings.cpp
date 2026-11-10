@@ -262,6 +262,14 @@ std::vector<Field> fields() {
 
 void writeSettings(std::ostream& out);
 
+// Spaces and tabs around an ini key or value ("key = value": [region] was written that way, and
+// hand-edited files) are not part of it.
+std::string trim(const std::string& s) {
+    const size_t a = s.find_first_not_of(" \t");
+    if (a == std::string::npos) return {};
+    return s.substr(a, s.find_last_not_of(" \t") - a + 1);
+}
+
 template <typename T>
 void clampTo(T& v, T lo, T hi) {
     if (!(v >= lo)) v = lo;  // (also catches NaN)
@@ -436,7 +444,7 @@ void loadSettings() {
         }
         const auto eq = line.find('=');
         if (eq == std::string::npos) continue;
-        const std::string key = line.substr(0, eq), value = line.substr(eq + 1);
+        const std::string key = trim(line.substr(0, eq)), value = trim(line.substr(eq + 1));
         if (section == "video" && key == "frame_rate") {  // before target_fps: 0 = 30, 1 = 60, 2 = unlimited
             const int old = std::atoi(value.c_str());
             sSettings.video.targetFps = old == 1 ? 60 : 30;
@@ -481,7 +489,7 @@ void forEachLine(const std::string& text, const std::function<void(const std::st
         }
         const auto eq = line.find('=');
         if (eq == std::string::npos) continue;
-        f(section, line.substr(0, eq), line.substr(eq + 1));
+        f(section, trim(line.substr(0, eq)), trim(line.substr(eq + 1)));
     }
 }
 
@@ -505,7 +513,7 @@ std::string fileText() {
         if (!line.empty() && line[0] == '[') section = line.substr(1, line.find(']') - 1);
         const auto eq = line.find('=');
         if (!line.empty() && line[0] != '[' && line[0] != ';' && line[0] != '#' && eq != std::string::npos) {
-            const std::string key = line.substr(0, eq);
+            const std::string key = trim(line.substr(0, eq));
             const auto it = own.find({section, key});
             if (sOverride.synced(section, key) && it != own.end()) line = key + "=" + it->second;
         }
