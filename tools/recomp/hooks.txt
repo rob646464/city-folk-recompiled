@@ -76,10 +76,10 @@ fn_801C92F0 all
 
 # Nintendo events (docs/DISTRIBUTIONS.md): the game keeps a Nintendo letter from a WiiConnect24
 # package (save letter slot, letter, item, letter id); src/recomp/distributions.cpp records which
-# distribution the town received and calls the original. USA only.
-fn_8010F194
+# distribution the town received and calls the original (all versions; live delivery too).
+fn_8010F194 all
 # Pete hands a kept Nintendo letter over (copies it into the player's mail); logged by distributions.cpp.
-fn_80104520
+fn_80104520 all
 
 # Enhanced lighting (src/game/cf_light.cpp, docs/RENDERING.md "Enhanced lighting (City Folk)"): the
 # stage draw (both ScnRoot passes + effects of the field/room scene) brackets the 3D scene.
