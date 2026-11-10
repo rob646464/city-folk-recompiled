@@ -1,0 +1,65 @@
+diff --git a/include/aurora/world_fx.h b/include/aurora/world_fx.h
+--- a/include/aurora/world_fx.h
++++ b/include/aurora/world_fx.h
+@@ -105,6 +105,12 @@
+                          // else, and without a focus, the scale comes from the focus distance)
+ 
+   bool freezeTime;       // test aid: effect time fixed (deterministic shots)
++
++  // 0443: height of the particle volume's top above the focus point (effect metres; 0 = 19, the
++  // original box). A taller volume keeps the density near the ground (the count grows with the
++  // height) and fades its particles in at the top, so a camera that looks up over the horizon sees
++  // them against the sky without a band where they pop in.
++  float particleTop;
+ } AuroraWorldFxConfig;
+ 
+ // Replaces the configuration (any thread; used from the next scene end).
+diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
+--- a/lib/gfx/world_fx.cpp
++++ b/lib/gfx/world_fx.cpp
+@@ -571,7 +571,9 @@
+   let h2 = hash31(f32(ii) * 2.718 + 4.1);
+   // world-space box around the focus point (wrapped, so particles stay around the player)
+   let fw = world_pos(fvv);
+-  let box = vec3f(46.0, 22.0, 46.0) * ws;
++  // 0443: the box's top from the configuration (pp.z, metres above the focus; 0 = 19)
++  let tall = u.pp.z > 0.5;
++  let box = vec3f(46.0, select(22.0, u.pp.z + 3.0, tall), 46.0) * ws;
+   var fall = 0.55;
+   var sway = 0.6;
+   var size = 0.16;
+@@ -584,7 +586,8 @@
+   pos.z += u.wind.y * ws * t + cos(t * (0.5 + h.x * 0.7) + ph) * sway * ws * 0.7;
+   let rel = pos - fw;
+   let wrapped = (fract(rel.xz / box.xz + 0.5) - 0.5) * box.xz;
+-  let y = fw.y - 3.0 * ws + fract(h.y - t * fall * ws / box.y) * box.y;
++  let yf = fract(h.y - t * fall * ws / box.y);  // 0 bottom .. 1 top of the box
++  let y = fw.y - 3.0 * ws + yf * box.y;
+   let wpos = vec3f(fw.x + wrapped.x, y, fw.z + wrapped.y);
+   // view space
+   let t3 = vec3f(u.view0.w, u.view1.w, u.view2.w);
+@@ -622,7 +625,10 @@
+   } else {
+     colr = vec3f(1.0, 1.0, 1.0);
+   }
+-  let edgeFade = 1.0 - smoothstep(0.38, 0.5, max(abs(wrapped.x) / box.x, abs(wrapped.y) / box.z));
++  var edgeFade = 1.0 - smoothstep(0.38, 0.5, max(abs(wrapped.x) / box.x, abs(wrapped.y) / box.z));
++  // 0443: a tall box can be seen to its top (a camera looking over the horizon): particles fade in
++  // as they leave it instead of popping in where the box wraps
++  if (tall) { edgeFade *= 1.0 - smoothstep(0.88, 1.0, yf); }
+   o.color = vec4f(colr * shade * u.ambient.xyz, edgeFade * select(0.95, 0.85, kind == 3u));
+   o.vz = q.z;
+   return o;
+@@ -1204,7 +1210,11 @@
+   const float ws = c.worldScale > 0.f ? c.worldScale : 1.f;
+   const uint32_t kind = viewValid ? std::min(c.particles, 3u) : 0u;
+   const float baseCount = kind == AURORA_WORLD_FX_PARTICLES_SNOW ? 900.f : kind == AURORA_WORLD_FX_PARTICLES_PETALS ? 500.f : 350.f;
+-  job.particles = kind != 0 ? uint32_t(std::clamp(c.particleDensity, 0.f, 2.f) * baseCount) : 0u;
++  // 0443: a taller box (particleTop) gets proportionally more particles: the same density
++  const float top = c.particleTop > 0.5f ? std::clamp(c.particleTop, 1.f, 200.f) : 0.f;
++  const float heightScale = top > 0.f ? (top + 3.f) / 22.f : 1.f;
++  job.particles = kind != 0 ? uint32_t(std::clamp(c.particleDensity, 0.f, 2.f) * baseCount * heightScale) : 0u;
++  u.pass[2] = top;
+   u.part[0] = float(kind);
+   u.part[1] = float(job.particles);
+   u.part[2] = ws;

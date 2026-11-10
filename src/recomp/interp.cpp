@@ -313,6 +313,7 @@ ShadowLight sShadow;
 int sShadowRecv = 0;
 u32 sPass = 0;
 bool sOrtho = false;
+u32 sViewOverride = 0;  // setViewOverride: the camera values are noted under (0: the current one)
 std::vector<TextGroupRec> sTextGroups;
 int sTextDepth = 0;
 std::vector<TextView> sTextViews;
@@ -488,7 +489,7 @@ u32 occurrence(OccTable& m, u64 k) {
 // view's identity is the structural scope path it is used in (pass, view, sub-view) and the
 // order of distinct cameras in that path.
 u16 sampleView() {
-    const u32 src = viewMatrixSource();
+    const u32 src = sViewOverride ? sViewOverride : viewMatrixSource();
     if (!src) return 0xFFFF;
     M34 m;
     for (int i = 0; i < 12; i++) m[i] = std::bit_cast<f32>(rd32(src + 4 * i));
@@ -3032,7 +3033,7 @@ void note(u32 at, Kind kind, u32 source, u32 slot, int nFloats, int first) {
     p.inScope = sTagDepth > 0 || sVirtActive;
     p.untagged = !p.key && p.bucket && p.inScope;
     if (kind == Kind::TexMtx && sShadowRecv > 0) p.role = 1;
-    else if (sOrtho && kind != Kind::Projection) p.role = 2;
+    else if (sOrtho && !sViewOverride && kind != Kind::Projection) p.role = 2;
     if ((sProbeOut || sJudgeDiag) && kind == Kind::PosMtx && nFloats == 12 && slot % 3 == 0 && slot / 3 < 10)
         sSlotPatch[slot / 3] = s32(sPatches.size());
     p.tgroup = sTextCur;
@@ -3990,6 +3991,7 @@ void noteShadowLight(const float lightView[12], const float kProj[12], const flo
 }
 void pushShadowReceivers() { sShadowRecv++; }
 void setOrthographic(bool ortho) { sOrtho = ortho; }
+void setViewOverride(u32 viewSrc) { sViewOverride = viewSrc; }
 void popShadowReceivers() { sShadowRecv = sShadowRecv > 0 ? sShadowRecv - 1 : 0; }
 
 void setPass(u32 pass) { sPass = pass; }

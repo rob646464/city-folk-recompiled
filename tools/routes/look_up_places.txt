@@ -1,0 +1,22 @@
+# Looking at the sky (D-pad Up) on a slope, at a cliff edge and at the beach, walking and running in
+# between (branch wfx-sky: Enhanced world's particle centre must not move as the camera looks up).
+# CF_FIXTURE=user-town-clean. Upper level at x 1100 walking south down the slope; x 1400 a few
+# steps south to the upper level's edge; then the beach by warp (the town reloads: d_bgo_drawNP #3).
+include warp.txt
++1500:TP=1100/84/2250
++60:STICKDOWN*220
++260:UP*200
++260:STICKUP*100
++160:UP*200
++260:STICKRIGHT+B*120
++200:TP=1400/84/2250
++60:STICKDOWN*45
++120:UP*200
++260:STICKLEFT*60
++120:WARP=town.beach
+after link d_bgo_drawNP 3
++300:STICKDOWN*40
++120:UP*200
++260:STICKRIGHT+B*160
++200:UP*200
++260:STICKLEFT*100

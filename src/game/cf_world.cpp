@@ -43,6 +43,7 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <chrono>
@@ -66,6 +67,15 @@ namespace world {
 // gave on flat ground in the town (centre 296 units away, projection p11 5.03: 2 x 296 / 5.03 / 8),
 // so the look there is unchanged. Elsewhere (no centre given) Aurora keeps the distance scale.
 constexpr float kWorldScale = 14.7f;
+// Top of the particle volume above the effects' centre, effect metres (Aurora 0443; 19 = the old
+// box, ~280 units: about the camera's height in the town). Looking at the sky (D-pad Up: the camera
+// sinks to ~180 units and the log curves away under it, so its upper half shows sky), the rays
+// rise in the centre's frame and left the old box within a few hundred units; a taller box keeps
+// leaves / snow / petals against the sky. Test aid CF_WFX_TOP=<metres> (0 = the old box).
+const float kParticleTop = [] {
+    const char* v = std::getenv("CF_WFX_TOP");
+    return v ? float(std::atof(v)) : 34.0f;
+}();
 void endWorld();
 void onLayoutDraw();
 
@@ -475,6 +485,7 @@ void applyConfig(const Settings& s, bool outdoor, bool on) {
         c.particleDensity = s.particleDensity;
         c.wind[0] = 0.35f, c.wind[1] = 0.12f;
         c.worldScale = kWorldScale;
+        c.particleTop = kParticleTop;
         c.freezeTime = envFlag("CF_WFX_FREEZE");
     }
     aurora_world_fx_set_config(&c);
@@ -522,6 +533,56 @@ void onScnRoot(u32 root, bool xlu, bool begin) {
     }
 }
 
+// The effects' centre on the town's rolling log (branch wfx-sky): the ground under the camera's
+// look-at target, a little ahead of it. The game's camera orbits that target (about 64 units above
+// the player's feet) at ~316 units: with D-pad Up ("look at the sky") it sinks from ~280 to ~180
+// units above the ground and its pitch drops from ~52 to ~33 degrees below the horizontal, all
+// about the same point (CF_WFX_FOCUS_LOG frames: every forward ray within 5 units of one point).
+// The centre used to be where the view's forward ray met the log; looking up, that point raced off
+// toward the horizon and then the ray missed the log altogether (the log falls away 38 degrees
+// below the horizontal there), so the centre fell back to Aurora's depth focus (sky: 1500 units)
+// and the frame to the snapped axis: the particle field jumped and zoomed ("the particles freak
+// out"). The target is C + D forward for a fixed D, which does not move as the camera pitches
+// about it; the ground point is its radial projection, moved kAhead along the ground in the
+// camera's horizontal forward (so in the normal view the centre stays about where the forward ray
+// met the ground before, and the look is unchanged). A D off by a few units moves the point by
+// a few units over the whole look-up. Test aids: CF_WFX_CENTRE=ahead (the forward ray's ground
+// point, as before), CF_WFX_TARGET=<D>,<ahead>.
+bool effectsCentre(const float view[12], float out[3]) {
+    static const int sAhead = [] {
+        const char* v = std::getenv("CF_WFX_CENTRE");
+        return v && std::strcmp(v, "ahead") == 0 ? 1 : 0;
+    }();
+    if (sAhead) return cflight::groundAhead(view, out);
+    static const std::array<float, 2> sTarget = [] {
+        std::array<float, 2> v{316.0f, 85.0f};
+        if (const char* e = std::getenv("CF_WFX_TARGET")) std::sscanf(e, "%f,%f", &v[0], &v[1]);
+        return v;
+    }();
+    float cy = 0.0f, cz = 0.0f, rad = 0.0f;
+    if (!cflight::logAxis(cy, cz, rad) || !(rad > 100.0f)) return cflight::groundAhead(view, out);
+    float C[3], f[3];
+    for (int k = 0; k < 3; k++) {
+        C[k] = -(view[k] * view[3] + view[4 + k] * view[7] + view[8 + k] * view[11]);
+        f[k] = -view[8 + k];
+    }
+    float T[3];
+    for (int k = 0; k < 3; k++) T[k] = C[k] + sTarget[0] * f[k];
+    float ny = T[1] - cy, nz = T[2] - cz, nl = std::sqrt(ny * ny + nz * nz);
+    if (!(nl > 1.0f)) return cflight::groundAhead(view, out);
+    ny /= nl, nz /= nl;
+    // the camera's forward along the ground at the target (the log's normal there removed)
+    const float fn = f[1] * ny + f[2] * nz;
+    float h[3] = {f[0], f[1] - fn * ny, f[2] - fn * nz};
+    const float hl = std::sqrt(h[0] * h[0] + h[1] * h[1] + h[2] * h[2]);
+    if (hl > 0.05f)
+        for (int k = 0; k < 3; k++) T[k] += sTarget[1] * h[k] / hl;
+    ny = T[1] - cy, nz = T[2] - cz, nl = std::sqrt(ny * ny + nz * nz);
+    if (!(nl > 1.0f)) return cflight::groundAhead(view, out);
+    out[0] = T[0], out[1] = cy + rad * ny / nl, out[2] = cz + rad * nz / nl;
+    return std::isfinite(out[0]) && std::isfinite(out[1]) && std::isfinite(out[2]);
+}
+
 void endWorld() {
     gx::endPendingDraw();
     if (!sPendingEnd) return;
@@ -563,7 +624,8 @@ void endWorld() {
     // above then flipped by 90 degrees (+z <-> -y) as the camera turned, which turned the leaves'
     // volume and their fall with it, and the world frame never matched the ground under the player
     // anyway (branch interp-town: leaves jumped while walking, at any frame rate). With a fitted
-    // log the effects frame is the log's own flat frame at the ground ahead F: x = the log's axis,
+    // log the effects frame is the log's own flat frame at the centre F (effectsCentre: the ground
+    // under the camera's target, a little ahead; before wfx-sky the forward ray's ground point): x = the log's axis,
     // y = its normal at F, z = along the ground, with F at (F.x, 0, -R theta) (theta F's angle about
     // the axis, unwrapped): the ground near F keeps its effect coordinates as the log turns, so the
     // leaves, ripples and puddles stay on it; the frame turns continuously. CF_WFX_AXIS=snap: the old
@@ -574,7 +636,7 @@ void endWorld() {
     }();
     float F[3], cy = 0.0f, cz = 0.0f, rad = 0.0f;
     bool logFrame = false;
-    if (!sSnapAxis && cflight::groundAhead(view, F) && cflight::logAxis(cy, cz, rad)) {
+    if (!sSnapAxis && effectsCentre(view, F) && cflight::logAxis(cy, cz, rad)) {
         const float ny = F[1] - cy, nz = F[2] - cz, nl = std::sqrt(ny * ny + nz * nz);
         if (nl > 1.0f) {
             static float sTheta = 0.0f;
@@ -604,6 +666,22 @@ void endWorld() {
     if (sLog && game::guestFrames() % 120 < 2)
         log("[wfx] f%u effects frame %s up %.3f %.3f %.3f origin %.1f %.1f %.1f", game::guestFrames(), logFrame ? "log" : "snapped", e1[0],
             e1[1], e1[2], origin[0], origin[1], origin[2]);
+    // Both matrices are noted as drawn from the scene's camera (branch wfx-sky): this runs at the
+    // HUD's first draw, under its orthographic projection, so they were 2D values blended in view
+    // space (the effects frame's origin is thousands of units away, its view-space translation moved
+    // 70-100 units per game frame while the camera swung back from the sky view), and between game
+    // frames the falling leaves lagged the scene and caught up at each game frame (120 fps: every
+    // leaf stepping 4-6 px together). Factored by the camera they blend with the world.
+    // CF_WFX_VIEW_NOTE=0: as before (A/B).
+    static const bool sOwnView = [] {
+        const char* v = std::getenv("CF_WFX_VIEW_NOTE");
+        return !(v && *v == '0');
+    }();
+    struct ViewOverride {
+        explicit ViewOverride(u32 src) { interp::setViewOverride(src); }
+        ~ViewOverride() { interp::setViewOverride(0); }
+    } viewOverride(sOwnView ? sMainRoot + 0xF8 + rd8(sMainRoot + 0xF4) * 0x10C : 0u);
+    static const bool sDepthCentre = envFlag("CF_WFX_DEPTH_FOCUS");  // A/B: the old centre
     {
         interp::TagScope tag(interp::TagCat::Object, 0xCF57F000u, 0x57F0u, 0);
         const u32 at = interp::mark();
@@ -611,8 +689,8 @@ void endWorld() {
         interp::note(at, interp::Kind::PosMtx, 0xCF57F000u, AURORA_WORLD_FX_XF_VIEW, 12);
     }
     {
-        // The effects' centre (Aurora 0440): the ground where the view's forward ray meets the
-        // rolling log (cf_light.cpp groundAhead; the CameraData target is not set by the game), as
+        // The effects' centre (Aurora 0440): the ground under the camera's look-at target on the
+        // rolling log (effectsCentre above; the CameraData target is not set by the game), as
         // the model matrix of a world-aligned object there, so the in-between frames blend it with
         // the world. Before, the centre was the scene depth under one pixel near the view's middle:
         // the player, a tree or the ground behind them as they passed under it, so the falling
@@ -620,15 +698,19 @@ void endWorld() {
         // interp-town). No fit (indoors, the city, the first frames): zero = Aurora's depth centre.
         float fm[12] = {};
         float g[3] = {0.0f, 0.0f, 0.0f};
-        static const bool sDepthCentre = envFlag("CF_WFX_DEPTH_FOCUS");  // A/B: the old centre
-        if (!sDepthCentre && cflight::groundAhead(view, g)) {
+        if (!sDepthCentre && effectsCentre(view, g)) {
             std::memcpy(fm, w, sizeof fm);
             for (int r = 0; r < 3; r++) fm[r * 4 + 3] = view[r * 4] * g[0] + view[r * 4 + 1] * g[1] + view[r * 4 + 2] * g[2] + view[r * 4 + 3];
         }
         static const bool sFocusLog = envFlag("CF_WFX_FOCUS_LOG");  // test aid: the centre every frame
-        if (sFocusLog)
-            log("[wfx] f%u focus world %.1f %.1f %.1f view %.1f %.1f %.1f cam t %.1f %.1f %.1f", game::guestFrames(), g[0], g[1], g[2],
-                fm[3], fm[7], fm[11], view[3], view[7], view[11]);
+        if (sFocusLog) {
+            float lcy = 0, lcz = 0, lr = 0;
+            cflight::logAxis(lcy, lcz, lr);
+            log("[wfx] f%u focus world %.1f %.1f %.1f view %.1f %.1f %.1f cam t %.1f %.1f %.1f r1 %.4f %.4f %.4f r2 %.4f %.4f %.4f "
+                "log %.1f %.1f %.1f",
+                game::guestFrames(), g[0], g[1], g[2], fm[3], fm[7], fm[11], view[3], view[7], view[11], view[4], view[5], view[6],
+                view[8], view[9], view[10], lcy, lcz, lr);
+        }
         interp::TagScope tag(interp::TagCat::Object, 0xCF57F001u, 0x57F1u, 0);
         const u32 at = interp::mark();
         GXLoadAppXfAurora(AURORA_WORLD_FX_XF_FOCUS, fm, 12);

@@ -282,6 +282,43 @@ warp to the plaza, walk / run in 8 directions); runs with a copy of the user's s
   Leaves tracked frame to frame on the slopes at 60 (TP frames excluded): p90 jerk 1.4-1.6 ->
   0.7-0.9 px, frames with every leaf jumping 4 -> 0; beach slope 9 -> 1 (the camera stopping);
   flat town p99 2.6 px, 0. 120 fps on the slopes: 0.
+- **Looking at the sky (branch wfx-sky, user report on main 536ac8b)**: "the enhanced world
+  particles freak out when pressing up on the D-pad to view the sky". D-pad Up is a view the
+  game keeps until the player moves: the camera orbits its look-at target (~64 units above the
+  player's feet, ~316 units along the forward ray: every forward ray of the transition passes
+  within 5 units of one point), sinking from ~280-340 to ~180-240 units above the ground and
+  its pitch from 52 to 33 degrees below the local horizontal. The log falls away 38+ degrees
+  below the horizontal from that height, so the forward ray missed it: the centre (where that
+  ray met the log) first raced off toward the horizon (80 units in 16 frames), then there was
+  none, so Aurora fell back to the depth focus (the sky: 1500 units away, the effects' metre
+  from that distance) and the effects frame to the snapped axis: the leaf field jumped, zoomed
+  and came back with another jump when the player walked on (CF_WFX_FOCUS_LOG: 1016 frames
+  without a centre in one look-up). The centre is now the ground under the look-at target
+  (C + 316 forward, projected onto the log), moved 85 units along the ground in the camera's
+  horizontal forward so the normal view keeps its old centre (cf_world.cpp effectsCentre); it
+  moves ~5-9 units over a whole look-up. The particle box reaches 34 effect metres above the
+  centre instead of 19 (Aurora 0443: count scaled with the height, a fade at the top), so the
+  rays that rise over the horizon in the centre's frame still meet leaves against the sky.
+  **At 120 fps** a second, older fault showed while the camera swung back down: the effects
+  frame and centre are loaded at the HUD's first draw (cf_world.cpp endWorld), under the HUD's
+  orthographic projection, so interpolation took them as 2D values (no camera factoring) and
+  blended them in view space; the frame's origin lies thousands of units away and its view-space
+  translation moved 70-100 units per game frame as the camera turned, so the in-betweens put
+  the leaves a third of the way instead of halfway and every leaf caught up 4-6 px at each game
+  frame. They are now noted as drawn from the scene's camera (`interp::setViewOverride`,
+  BACKPORT 42; A/B `CF_WFX_VIEW_NOTE=0`); main had the same steps whenever the camera turned fast.
+  Route tools/routes/look_up.txt (house door: Up, walk, Up; plaza), look_up_places.txt (slope,
+  upper level's edge, beach). Leaves tracked frame to frame (GLOWDBG=8 dumps, main -> branch;
+  "all" = frames with most leaves jumping > 4 px together). Original 60: house look-up p99 jerk
+  9.6 -> 2.3 px, all 3 -> 0; walking on after it 6 -> 0; slope walk + 2 look-ups + run p99 9.0 ->
+  3.4, all 13 -> 0; upper level's edge 8 -> 1 (the camera halting after the TP); beach 19 -> 1
+  (the camera halting); normal view p99 1.5 / 1.35. 120 fps (CF_INTERP_TEST=2, CF_WFX_FREEZE=1,
+  the in-betweens in order): slope look-up and return p99 11.8 -> 1.9, all 5 -> 0 (35 with only
+  the new centre); house 2.2 / 0, slope walk 1.3 / 0, beach 1.6 / 0. The centre moves at most
+  3.6 units per frame outside TPs / warps (main: 1079 frames without one on this route).
+  Original 60 with default settings: frame dumps identical to main (66 of 66). A/B
+  `CF_WFX_CENTRE=ahead` (the forward ray's ground point), `CF_WFX_TARGET=<distance>,<ahead>`,
+  `CF_WFX_TOP=<metres>` (0 = the old box), `CF_WFX_VIEW_NOTE=0`.
 - **Leaves** (not interpolation): Aurora's world effects centred their particle volume and scale on
   the scene depth under one pixel near the view's middle (the player, a tree, the ground behind as
   they passed under it), and the port's effects frame snapped the world's up to one of six axes,

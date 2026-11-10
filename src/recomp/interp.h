@@ -215,6 +215,12 @@ void setPass(u32 pass);
 // Values noted while an orthographic projection is current are 2D (HUD): not camera-factored,
 // and a jump of more than 96 units (pixels) shows them unblended.
 void setOrthographic(bool ortho);
+// While set (guest address of a 3x4 view matrix, 0 = off): values are noted as drawn from that
+// camera, whatever camera or projection is current. For host code that loads world matrices of
+// the 3D scene while the HUD is being drawn (CF Enhanced world's effects frame at the layout's
+// first draw: noted under the HUD's orthographic projection they were blended in view space, not
+// with the scene's camera, and the falling leaves lagged the scene between game frames).
+void setViewOverride(u32 viewSrc);
 void popShadowReceivers();
 
 // CF_FRAME_DUMP's EFB copy (hle_gx GXCopyDisp), marked at `at`: CF_INTERP_TEST

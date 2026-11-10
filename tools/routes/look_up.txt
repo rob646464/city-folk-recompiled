@@ -1,0 +1,16 @@
+# Look at the sky with D-pad Up (branch wfx-sky: Enhanced world's seasonal particles "freaked out"
+# while the camera looked up). CF_FIXTURE=user-town-clean; in town at the house door after the
+# continue: hold Up, release, walk a little, hold Up again, then the same on the plaza.
+include warp.txt
++1500:UP*240
++420:UP*60
++200:UP*240
++400:STICKDOWN*90
++150:UP*200
++380:STICKLEFT+B*60
++120:UP*240
++400:WARP=town.plaza
+after link d_bgo_drawNP 3
++300:UP*240
++420:STICKUP*120
++180:UP*240

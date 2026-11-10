@@ -456,7 +456,7 @@ stream: frames are byte-identical to the game's.
   view x a translation, the "rolling log" curve is a small rotation about x per acre (seen 7 deg).
   The port picks the world's up axis per frame among the six axes (the one the camera's up points
   along and its forward away from, with hysteresis) and sends view x B, B rotating that axis to +y,
-  so the effects' "world" is always y-up. Since branch interp-town (docs/WII.md "Town interpolation"), with a fitted log the frame is the log's own flat frame at the ground ahead (the snapped axis flipped by 90 degrees as the camera turned about the log) and the centre is that ground point (Aurora 0440). The projection is the main view's own (Hor+ included),
+  so the effects' "world" is always y-up. Since branch interp-town (docs/WII.md "Town interpolation"), with a fitted log the frame is the log's own flat frame at the ground ahead (the snapped axis flipped by 90 degrees as the camera turned about the log) and the centre is that ground point (Aurora 0440). Since branch wfx-sky the centre is the ground under the camera's look-at target instead (the point it orbits, 316 units along the forward ray, moved 85 units ahead along the ground), which stays put when D-pad Up looks at the sky (the forward ray then misses the log), and the particle box reaches 34 effect metres up (Aurora 0443) so leaves / snow / petals show against the sky (docs/WII.md "Looking at the sky"). The projection is the main view's own (Hor+ included),
   taken by Aurora from the surface draws (the sky dome has its own depth range). The focus point
   (particle volume, haze start, effect scale: "one metre" = 1/8 of the view height there, about 20
   units in the town at the default zoom, focus ~390 units away) is the scene depth under the view's
@@ -526,7 +526,9 @@ wet ground, puddles, ripples, haze, leaves), snow (Jan 15 11:00: sparkle, snowfl
 
 ### Test aids
 
-`CF_WFX=1` (on for one run), `CF_WFX_SET="key=value;..."` (`[enhanced_world]` keys, e.g.
+`CF_WFX=1` (on for one run), `CF_WFX_FOCUS_LOG=1` (the centre, camera and log fit every frame),
+`CF_WFX_CENTRE=ahead` / `CF_WFX_TARGET=<distance>,<ahead>` / `CF_WFX_TOP=<metres>` (wfx-sky A/B),
+`CF_WFX_SET="key=value;..."` (`[enhanced_world]` keys, e.g.
 `grade=1;tilt_shift=1`), `CF_WFX_FREEZE=1` (effect time fixed, deterministic shots), `CF_WFX_AB=1`
 (effects on odd guest frames only: consecutive shots compare with / without), `CF_WFX_LOG=1`
 (camera, weather and amounts every 120 frames), `CF_WFX_MAT_LOG=1`, `AURORA_WORLD_FX_LOG=1`
