@@ -92,6 +92,12 @@ void setGradeKeepLights(float amount);
 // A GX light object was loaded (GXLoadLightObjImm HLE, guest thread): Aurora's GXLightObj layout
 // (color u32, a0 a1 a2 k0 k1 k2, pos xyz, dir xyz; view space as loaded), light id mask.
 void noteGameLight(const float* obj, uint32_t idMask);
+// Branch indoor-light: the game's own lighting (GX ambient colours and GX light colours) is scaled
+// by this inside the enhanced scene (1 = unchanged; cf_light.cpp sets it indoors at night while our
+// lamps light the room, so their pools stand out of a darker room). gameLightScale() is 1 outside
+// the scene, in the caster pass and with enhanced lighting off.
+void setGameLightScale(float s);
+float gameLightScale();
 struct GameLight {
     float pos[3], dir[3];
     float a[3], k[3];

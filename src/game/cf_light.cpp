@@ -195,6 +195,7 @@ struct LogFit {
 LogFit sFit;
 // Indoors (branch indoor-light): daylight share of the room key light (0 night .. 1 day).
 float sIndoorDay = 1.0f;
+float sIndoorMood = 0.0f;  // 0..1: the lamp-lit night look (darkened game light, graded contrast)
 }  // namespace
 // Test aids: CF_INDOOR_LEGACY=1 = everything indoors as before branch indoor-light (key light from
 // the game's GX key light, faint; furniture lights' old numbers and falloff; the game's full room
@@ -413,9 +414,23 @@ void submitSky() {
     sNight = indoor ? 0.0f : 1.0f - sstep(-6.0f, 1.0f, sky.sunEl);
     sSunStrength = indoor ? (s.indoorShadows && s.sunShadows ? std::clamp(s.sunShadowStrength, 0.0f, 1.0f) * 0.6f : 0.0f)
                           : (s.sunShadows ? sky.strength : 0.0f);
+    // Third pass (branch indoor-light): indoors at night while our lamps / candles light the room,
+    // the game's own ambient and GX lights are darkened (F1 "Room ambient under lamps", 0.4) and a
+    // gentle saturation / contrast lift is graded on, so the lamps' coloured pools stand out of a dark
+    // room (shapes stay faintly readable). Eased over ~15 frames; by day and with no lamp lit: off.
+    {
+        static float sK = 1.0f;
+        const float target = indoor && !indoorLegacy() && sstep(-6.0f, 6.0f, sky.sunEl) < 0.5f && cffurn::litRecently()
+                                 ? std::clamp(s.furnitureNightAmbient, 0.05f, 1.0f)
+                                 : 1.0f;
+        sK += (target - sK) * 0.12f;
+        if (std::fabs(sK - target) < 0.002f) sK = target;
+        enh::setGameLightScale(indoor ? sK : 1.0f);
+        sIndoorMood = indoor ? std::clamp((1.0f - sK) / 0.6f, 0.0f, 1.0f) : 0.0f;
+    }
     if (indoor) {
         static const float kOne[3] = {1, 1, 1}, kZero[3] = {0, 0, 0};
-        enh::setGrade(kOne, kZero, 1.0f, 1.0f);
+        enh::setGrade(kOne, kZero, 1.0f + 0.30f * sIndoorMood, 1.0f + 0.18f * sIndoorMood);
         enh::setShafts(0.0f);
         if (!s.indoorShadows) return;
         // The room's key light (branch indoor-light): by day a window light from the front-left

@@ -292,6 +292,7 @@ struct Acc {
     double cen[3] = {}, area = 0;
     float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
     double col[3] = {}, wsum = 0;
+    double ccol[3] = {}, cwsum = 0;  // weighted by chroma too: the part's dominant hue (branch indoor-light)
 };
 
 // Accumulates one object's triangles (model space) into `acc`: area-weighted centre, bounds, mean
@@ -430,6 +431,13 @@ void accumulateObject(u32 mdl, u32 obj, const std::vector<u32>& verts, const std
             const double w = ar * std::max(tx[3], 0.05f);
             for (int k = 0; k < 3; k++) acc.col[k] += double(tx[k] * vc[k]) * w;
             acc.wsum += w;
+            {
+                const float c0 = tx[0] * vc[0], c1 = tx[1] * vc[1], c2 = tx[2] * vc[2];
+                const double chroma = double(std::max({c0, c1, c2}) - std::min({c0, c1, c2}));
+                const double cw = w * (0.02 + chroma * chroma * 8.0);
+                acc.ccol[0] += c0 * cw, acc.ccol[1] += c1 * cw, acc.ccol[2] += c2 * cw;
+                acc.cwsum += cw;
+            }
         }
     };
     std::vector<V> vs;
@@ -709,13 +717,24 @@ Light analyse(u32 mdl, const std::string& modelName, const ItemInfo* item) {
     // only light its corner, in flickering red / orange"). Flames are deep orange-red (~1700-1900 K;
     // the texture only tints them), lamps warm but softer, screens their picture's colour with a
     // touch of cool. The colour is made vivid afterwards (F1 "Light vibrance", vividFurn).
+    // Third pass: the light's hue from the glowing part's texels weighted by their chroma (the plain
+    // mean let white and grey parts wash a pink shade out to salmon, a blue lava lamp to near white).
+    if (part.cwsum > 0) {
+        for (int k = 0; k < 3; k++) c[k] = std::max(float(part.ccol[k] / part.cwsum), 0.0f);
+        const float cm = std::max({c[0], c[1], c[2], 1e-3f});
+        for (float& v : c) v /= cm;
+    }
     const bool fire = kind == KFire;
     static const float kCool[3] = {0.62f, 0.80f, 1.0f}, kWarm[3] = {1.0f, 0.86f, 0.66f};
     static const float kCandle[3] = {1.0f, 0.36f, 0.08f}, kHearth[3] = {1.0f, 0.45f, 0.12f};
     if (kind == KScreen)
         for (int k = 0; k < 3; k++) c[k] = 0.85f * c[k] + 0.15f * kCool[k];
     if (kind == KLamp)
-        for (int k = 0; k < 3; k++) c[k] = 0.4f * c[k] + 0.6f * kWarm[k];
+        {  // a coloured shade keeps its colour, a plain one turns warm white
+            const float sat = 1.0f - std::min({c[0], c[1], c[2]}) / std::max({c[0], c[1], c[2], 1e-3f});
+            const float keep = sat > 0.25f ? 0.85f : 0.4f;
+            for (int k = 0; k < 3; k++) c[k] = keep * c[k] + (1.0f - keep) * kWarm[k];
+        }
     if (fire)
         for (int k = 0; k < 3; k++) c[k] = 0.1f * c[k] + 0.9f * (smallFlame ? kCandle[k] : kHearth[k]);
     mx = std::max({c[0], c[1], c[2], 1e-3f});
@@ -724,13 +743,13 @@ Light analyse(u32 mdl, const std::string& modelName, const ItemInfo* item) {
     // to 0 at the reach): a strong pool around the source with a short cut-off.
     const float size = std::max({bbHi[0] - bbLo[0], bbHi[1] - bbLo[1], bbHi[2] - bbLo[2]});
     //                             none  lamp  screen fire  water neon  lava
-    static const float kInt[7] = {2.4f, 5.0f, 2.4f, 4.5f, 0.0f, 3.6f, 3.6f};
-    static const float kCore[7] = {0.10f, 0.14f, 0.16f, 0.10f, 0.1f, 0.12f, 0.12f};
+    static const float kInt[7] = {3.4f, 6.5f, 3.4f, 6.0f, 0.0f, 5.0f, 5.0f};
+    static const float kCore[7] = {0.09f, 0.12f, 0.14f, 0.09f, 0.1f, 0.10f, 0.10f};
     static const float kReach[7] = {220.0f, 360.0f, 230.0f, 380.0f, 0.0f, 260.0f, 260.0f};
     L.radius = kReach[kind] + std::min(size, 80.0f);
     L.intensity = kInt[kind];
     L.core = kCore[kind];
-    if (smallFlame) L.radius = 170.0f, L.core = 0.09f, L.intensity = 5.0f;  // a candle: its table / corner
+    if (smallFlame) L.radius = 180.0f, L.core = 0.08f, L.intensity = 7.0f;  // a candle: its table / corner
     if (item && item->lightKind == 2 && !fire) L.intensity *= 1.1f;
     if (ex) {
         if (ex->color[0] >= 0 && !fire) std::memcpy(L.color, ex->color, sizeof L.color);

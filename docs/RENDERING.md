@@ -1253,6 +1253,28 @@ must add up, colours blend):
   now switches every furniture of that item within 30 frames), `indoor_light_redblue.txt` (the
   lovely lamp and the blue lava lamp side by side).
 
+**Third pass** (user: "on the right track, but much bolder colours, a lot more colour and contrast"):
+- **The light's hue** comes from the glowing part's texels weighted by their chroma (chroma^2): the
+  plain mean let white / grey parts wash the lovely lamp's pink shade out to salmon (1.0, 0.60,
+  0.52 -> now 1.0, 0.37, 0.57) and the blue lava lamp to near white (0.89, 0.93, 1.0 -> 0.24, 0.50,
+  1.0). A lamp with a coloured shade (saturation > 0.25) keeps 85 % of its colour (plain lamps 40 %,
+  the rest warm white). "Light vibrance" default **2.4** (was 1.6).
+- **Brighter cores, steeper falloff**: lamps 6.5 (core 0.12), fires 6.0 (0.09), screens 3.4 (0.14),
+  lava / neon 5.0 (0.10), the candle 7.0 (core 0.08, reach 180).
+- **A darker room around the lamps**: indoors at night while one of our lamps / candles is lit,
+  the game's own GX ambient colours and GX light colours are scaled by F1 **"Room ambient under
+  lamps"** (`furniture_night_ambient`, 0.4) inside the enhanced scene (hle_gx.cpp GXSetChanAmbColor /
+  GXLoadLightObjImm, `enh::gameLightScale`), eased over ~15 frames; with it the indoor grade gets
+  saturation x 1.3 and contrast x 1.18 (Aurora 0342's grade, off indoors otherwise). By day and in
+  rooms with no lamp lit nothing changes. (No Aurora change: 0480 / 0481 / 0520 as before.)
+- Measured (4K, user's settings, 21:00, the lovely lamp + blue lava lamp scene, mean of a floor
+  patch): pink pool hue 312 sat 1.00, blue corner hue 253 sat 0.97, the blend between them hue 284
+  (purple) sat 0.98; pass 2 had the room near the game's beige. Open: characters between the lights
+  stay dark (the matte character response x 0.85 of the light; a coloured rim light for them would
+  need a shader change in the 0520 light loop).
+- **True 4K shots**: `CF_RENDER_SCALE=4.7369` (docs/CONTROLS.md "Test aids"), or `--window 3840x2160`
+  with `resolution_scale=0` (run.ps1 `-ExtraArgs`).
+
 **Checked (first pass, before the user's review; 2026-11-09 after merging main d8f7225)**: A/B
 runs with the user's settings, new vs `CF_INDOOR_LEGACY=1`, same route and frames: the house by
 day (the player's and the box's key-light shadows fall to the right), at night with the candle off

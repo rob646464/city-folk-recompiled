@@ -758,6 +758,12 @@ std::array<GameLight, 64> sPrevLights{};
 uint32_t sPrevCount = 0;
 }  // namespace
 
+namespace {
+float sGameLightScale = 1.0f;
+}
+void setGameLightScale(float s) { sGameLightScale = std::clamp(s, 0.0f, 1.0f); }
+float gameLightScale() { return sInScene && !sInCaster && active() ? sGameLightScale : 1.0f; }
+
 void noteGameLight(const float* obj, uint32_t idMask) {
     const u32 f = copyDispCount();
     if (f != sGameLightFrame) {

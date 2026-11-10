@@ -428,7 +428,15 @@ run).
   stage). `FTR=<item hex>/<0|1>` (same timing) switches the furniture with that item number off / on
   through its own switch (daFTR_c virtual +0x1C4, what touching it calls; cf_furniture_light.cpp);
   `POKE=<hex addr>/<hex byte>` writes one guest byte (e.g. a glow helper's target, an item grid
-  entry; docs/RENDERING.md "Indoor lighting"). Time in retraces, or in guest frames with `CF_INPUT_CLOCK=frames` (matches `CF_SHOT` frame
+  entry; docs/RENDERING.md "Indoor lighting"). **True 4K shots** (3840x2160 `CF_SHOT` frames, the
+  user's rule for every screenshot shown to them): the render size is the game's 608x456 frame x
+  `[video] resolution_scale`, widened to the window's aspect, so scale 3 in the 1280x720 offscreen
+  window gives only 2432x1368; `CF_RENDER_SCALE=4.7369` (a fractional scale; 456 x 4.7369 = 2160
+  lines, 16:9 = 3840) gives 3840x2160 in any 16:9 window (menu.cpp applyResolution). Builds
+  without that test aid: `resolution_scale=0` (render = window pixels) and a 3840x2160 window
+  (`--window 3840x2160`, run.ps1 `-ExtraArgs "--window 3840x2160"`; the offscreen window may be
+  larger than the display). Check the size of the first shot before a long run. Time in
+  retraces, or in guest frames with `CF_INPUT_CLOCK=frames` (matches `CF_SHOT` frame
   numbers). A time `+N` = N after the previous item's start; `~N` after an item repeats it N times
   (`+60:A ~10` = ten presses 60 apart). `after link <REL module> [n]` in a route file: the items
   after it are timed (`+N`) from the n-th time the game links that module (scene changes, e.g.

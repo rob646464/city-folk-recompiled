@@ -247,7 +247,10 @@ struct EnhancedLightingSettings {
     float furnitureRoomFill = 0.0f;
     // 0..2.5: colour vibrance of furniture lights (HSV saturation x this, up to full; 1 = the
     // source's colour). Default punchy, like LM's "Light color vibrance".
-    float furnitureVibrance = 1.6f;
+    float furnitureVibrance = 2.4f;
+    // 0.05..1: the game's own ambient / GX light indoors at night while our lamps light the room
+    // (1 = the game's; lower = darker room around the lamps' pools).
+    float furnitureNightAmbient = 0.4f;
     // Sun shafts: light scattered in the air, cut by the shadows of trees and houses.
     bool sunShafts = true;
     float sunShaftIntensity = 1.0f;    // 0..3

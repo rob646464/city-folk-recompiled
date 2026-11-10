@@ -366,7 +366,13 @@ bool tab(const char* name) {
     return ImGui::BeginTabItem(name, nullptr, select ? ImGuiTabItemFlags_SetSelected : 0);
 }
 
-void applyResolution() { VISetFrameBufferScale(float(port::settings().video.resolutionScale)); }
+void applyResolution() {
+    // Test aid CF_RENDER_SCALE=<float>: a fractional render scale instead of the setting (the setting
+    // is a whole multiple of the game's 608x456 frame: 3 = 1368 lines, 2432x1368 in a 16:9 window).
+    // True 4K (3840x2160) shots: CF_RENDER_SCALE=4.7369 in a 16:9 window (docs/CONTROLS.md "Test aids").
+    static const float sOverride = std::getenv("CF_RENDER_SCALE") ? float(std::atof(std::getenv("CF_RENDER_SCALE"))) : 0.0f;
+    VISetFrameBufferScale(sOverride > 0.0f ? sOverride : float(port::settings().video.resolutionScale));
+}
 
 void applyWindowSettings() {
     const auto& v = port::settings().video;
@@ -1058,6 +1064,10 @@ void enhancedLightingTab() {
     sDirty |= recomp::menu::SliderFloat("Light vibrance##furniture", &l.furnitureVibrance, 0.0f, 2.5f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
     ImGui::SetItemTooltip("How saturated the furniture lights' colour is: flames deep orange-red, screens in their\n"
                           "picture's colour. 1 = the colour as the source gives it; higher = punchier coloured pools.");
+    sDirty |= recomp::menu::SliderFloat("Room ambient under lamps", &l.furnitureNightAmbient, 0.05f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetItemTooltip("Indoors at night while lamps or candles are lit: how much of the game's own room light\n"
+                          "stays (1 = all of it). Lower makes the room around the lamps darker and their coloured\n"
+                          "pools stand out more (with a gentle contrast lift). Daytime and unlit rooms are unchanged.");
     ImGui::Unindent();
     ImGui::EndDisabled();
 

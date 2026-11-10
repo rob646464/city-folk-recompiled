@@ -22,7 +22,9 @@ param(
     # A whole settings.ini copied into the scratch APPDATA instead (e.g. a copy of a user's report).
     [string]$SettingsFile = "",
     # Executable in the build folder (e.g. a copy of an older build for before/after runs).
-    [string]$Exe = "cfrecomp.exe"
+    [string]$Exe = "cfrecomp.exe",
+    # Extra command-line arguments for the game, space-separated (e.g. "--window 3840x2160").
+    [string]$ExtraArgs = ""
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -67,6 +69,7 @@ foreach ($k in $vars.Keys) {
 
 $exe = Join-Path $root "build\$Build\$Exe"
 $argList = @("--disc", $Disc)
+if ($ExtraArgs) { $argList += ($ExtraArgs -split " ") }
 if ($Route) { $argList += @("--input", "@$((Resolve-Path $Route).Path)") }
 elseif ($Script) { $argList += @("--input", $Script) }
 $log = Join-Path $run "log.txt"
