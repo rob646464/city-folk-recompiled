@@ -373,8 +373,11 @@ void callMissing(Ctx& c, u32 addr) {
               c.r[12]);
     }
     const std::string at = relSymbolize(addr);
-    fatal("call to %08X%s%s: no function starts there (lr=%08X%s%s)", addr, at.empty() ? "" : " ", at.c_str(), c.lr,
-          lr.empty() ? "" : " ", lr.c_str());
+    // Usually a virtual call through a bad vtable: r3 is the object, r31 often the caller's this.
+    const u32 obj = c.r[3];
+    const u32 vt = (obj >> 28) == 0x8 || (obj >> 28) == 0x9 ? rd32(obj) : 0;
+    fatal("call to %08X%s%s: no function starts there (lr=%08X%s%s) r3=%08X vtable=%08X r4=%08X r31=%08X", addr,
+          at.empty() ? "" : " ", at.c_str(), c.lr, lr.empty() ? "" : " ", lr.c_str(), obj, vt, c.r[4], c.r[31]);
 }
 
 void Ctx::unimplemented(u32 pc, u32 insn) { fatal("unimplemented instruction %08X at %08X", insn, pc); }

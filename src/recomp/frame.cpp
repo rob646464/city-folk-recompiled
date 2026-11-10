@@ -173,6 +173,11 @@ void pace() {
 }
 
 void stop() {
+    // CF_SHUTDOWN_LOG=1: the guest threads as the exit begins.
+    if (std::getenv("CF_SHUTDOWN_LOG")) {
+        log("[frame] stopping the guest (exit)");
+        sched::dumpThreads();
+    }
     {
         std::lock_guard lk(sM);
         sStopping = true;
@@ -189,7 +194,12 @@ void stop() {
         sCv.wait_until(lk, deadline, [] { return sFinished; });
     }
     const double left = std::chrono::duration<double>(deadline - std::chrono::steady_clock::now()).count();
+    if (std::getenv("CF_SHUTDOWN_LOG")) log("[frame] boot thread %s, %.2f s left", sFinished ? "finished" : "running", left);
     if (!sched::waitForThreads(std::max(left, 0.0))) log("[frame] guest threads still running at exit");
+    if (std::getenv("CF_SHUTDOWN_LOG")) {
+        log("[frame] guest stopped");
+        sched::dumpThreads();
+    }
 }
 
 // While the host is paused (window minimized or unfocused) a decoupled guest
