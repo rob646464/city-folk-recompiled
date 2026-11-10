@@ -420,7 +420,10 @@ run).
   `after link` anchor) moves the player like `CF_TELEPORT` (src/game/cf_region.cpp) with `/` in
   place of `,`: `TP=1300/28/2860` (position x/y/z), `TP=mod102t0100:0/60` (60 units in front of the
   last actor of REL module 102 whose structure type, +0x8 >> 16, is 0100: the museum),
-  `TP=tortimer`. Structure types and positions per place: tools/routes/*.txt comments and
+  `TP=tortimer`, `TP=addr90537384:0/-110` (110 units north of the float x/y/z stored at that guest
+  address: objects that are not actors, e.g. a fish shadow or a flying insect found in a
+  `CF_MEM_DUMP` of the same route and seed; docs/TEST_COVERAGE.md "Gameplay, round 2").
+  Structure types and positions per place: tools/routes/*.txt comments and
   `CF_ACTOR_LOG=<n> CF_ACTOR_MODULES=101,102,103` (lists each actor with its type).
   `WARP=<target>` (route action, same timing as `TP=`) loads another place through the game's
   own stage change: `WARP=museum.cafe`, `WARP=city`, `WARP=town@1880/28/2000`, `WARP=stage:0x25`

@@ -1,0 +1,17 @@
+# Fishing Tourney (3rd Saturday, 2026-11-21) with a fishing rod in the pockets (CF_GIVE_ITEM):
+# 60 units south of Chip (module 63), walk up, talk, A through (first choices = enter). Twice
+# (the first approach sometimes does not face him).
+# Env: CF_FF=1-4400;CF_CLOCK_START=2026-11-21 10:00;CF_GIVE_ITEM=5600:CEA4 (branch test-gameplay-2)
+include continue_any.txt
+5240:A
++60:A ~6
+after link d_bgo_drawNP 2
++1400:@off
++200:TP=mod63:0/60
++5:STICKUP*16
++40:A
++60:A ~30
++200:TP=mod63:0/60
++5:STICKUP*16
++40:A
++60:A ~40

@@ -667,7 +667,18 @@ void teleport(u32 frame, const char* arg) {
         }
         if (*e2 == ':') std::sscanf(e2 + 1, "%f,%f", &dx, &dz);
     }
-    if (mod) {
+    if (!std::strncmp(arg, "addr", 4)) {  // addr<hex>[:dx,dz]: next to the float x/y/z at that guest address
+        char* e2 = nullptr;
+        const u32 a = u32(std::strtoul(arg + 4, &e2, 16));
+        if (*e2 == ':') std::sscanf(e2 + 1, "%f,%f", &dx, &dz);
+        if ((a >= 0x80000000u && a < 0x81800000u - 12) || (a >= 0x90000000u && a < 0x94000000u - 12)) {
+            x = rdf32(a) + dx;
+            y = rdf32(a + 4);
+            z = rdf32(a + 8) + dz;
+            ok = x > 1 && x < 20000 && z > 1 && z < 20000;
+            log("[actor] f%u target address %08X: %.1f %.1f %.1f", frame, a, rdf32(a), rdf32(a + 4), rdf32(a + 8));
+        }
+    } else if (mod) {
         int k = 0;
         for (const ActorHit& h : findActors({mod})) {
             if (pickType && rd32(h.addr + 8) >> 16 != pickType) continue;
@@ -698,7 +709,8 @@ void teleport(u32 frame, const char* arg) {
 // CF_ACTOR_LOG=<every n frames>: player / holiday Tortimer actors and positions.
 // CF_TELEPORT=<frame>:<x>,<y>,<z>|tortimer|mod<N>[:dx,dz][;...]: the player moved there
 // (tortimer = 48 units in front of the holiday Tortimer; mod<N>[#k][t<type>][:dx,dz] = next to the k-th / last actor of
-// module N, e.g. mod13 = the bulletin board's bird).
+// module N, e.g. mod13 = the bulletin board's bird; addr<hex>[:dx,dz] = next to the float x/y/z
+// stored at that guest address, e.g. a fish shadow found in a CF_MEM_DUMP).
 void actorAids(u32 frame) {
     static const u32 every = [] {
         const char* v = std::getenv("CF_ACTOR_LOG");

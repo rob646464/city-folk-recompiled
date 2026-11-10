@@ -1,0 +1,21 @@
+# Halloween reward: candy in the pockets (CF_GIVE_ITEM 9144 blue = top right slot, 9148 red =
+# second row first slot), 40 units north of Jack (south of him is below a cliff) (module 64), walk up, talk; "Here you go!" (first
+# choice, pointer away), then "Give which?": the red candy, Give; A through his thanks + present.
+# Env: CF_FF=1-4400;CF_CLOCK_START=2026-10-31 19:30;CF_GIVE_ITEM=5600:9144,5600:9148 + settings [wiimote] remote1_snap=off (branch test-gameplay-2)
+include continue_any.txt
+5240:A
++60:A ~6
+after link d_bgo_drawNP 2
++1400:@off
++200:TP=mod64:0/-40
++5:STICKDOWN*12
++40:A
++60:A ~24
++250:@-0.40/0.12
++10:@-0.45/0.17
++50:A
++150:@0.62/0.72
++10:@0.66/0.78
++50:A
++150:@off
++100:A ~30
