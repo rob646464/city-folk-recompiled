@@ -95,6 +95,8 @@ struct Attr {
     u8 ownerPerm = 3, groupPerm = 3, otherPerm = 3, attr = 0;
 };
 void setAttr(const std::string& nandPath, const Attr& a);
+// True while the game has a NAND file at or below `nandPath` open (save import: the game is saving).
+bool filesOpenUnder(const std::string& nandPath);
 
 // --- system (ios_devices.cpp) ---
 u64 titleId();                     // the running disc title (00010000 52555545 for RUUE01)

@@ -200,8 +200,8 @@ receive the same item over and over and sell it at Nook's. See "Receive now once
   ("Load your town first").
 - Checked three times: the F1 button, `receiveNow` (refused, `[distrib] receive now refused: ...`)
   and KD's request (`serve`: a request for a distribution the town already has is dropped).
-- Counted when the game keeps the letter: USA through the `fn_8010F194` hook (letter id `4D...`),
-  other bases when KD stored the package (as their "received" record). Original `.enc` files
+- Counted when the game keeps the letter: the `fn_8010F194` hook (letter id `4D...`; every
+  version since branch test-regions, before: other bases when KD stored the package). Original `.enc` files
   from the folder count per file (SHA-1 of the file, `enc:<sha1>`), when KD stored them.
 - **The schedules are independent**: "In turn" and "Original dates" deliveries never write or
   clear the "Receive now" record, and "Receive now" affects the schedules only as before (it
@@ -239,7 +239,7 @@ receive the same item over and over and sell it at Nook's. See "Receive now once
   "Receive now" record; the schedule's record stays) and `CF_DISTRIB_FORGET=1|<key>` (the same,
   all or one distribution, once when the town is first seen).
 
-**Deliver while playing** (USA, on by default): when KD has stored a package while a town is in
+**Deliver while playing** (all versions, on by default): when KD has stored a package while a town is in
 play, the port starts the game's own WiiConnect24 job (`fn_801783B4`, the call player select
 makes), so the game takes the letter at once; once per town it also starts it when the game has
 not registered its distribution task yet (a town whose setting was just switched on registers it
@@ -247,25 +247,24 @@ only at its next load). Pete then hands the letter over **when the town is next 
 greets the player at the house on arrival; seen in the test below), so the player must save
 first. Without the option the game reads the package at that load itself (the job at player
 select runs before the town), with the same result; the option only saves one reload for a town
-whose WiiConnect24 setting was just switched on. PAL/Japan/Korea: always at the next load (no game
-hooks there yet).
+whose WiiConnect24 setting was just switched on. PAL/Japan/Korea too since branch test-regions
+(hooks `all`, VA() addresses; before: always at the next load).
 
 Pete: the letter kept in the save's Nintendo-letter slot (save +0xFC980: letter id, then the
 letter) is handed over by Pete (`d_a_npc_sp_perioNP`, "Perio" is Pete's Japanese name): on the
 next town load he waits at the player's house, says "You have a letter from Nintendo!", and his
 `fn_80104520` copies the slot into the player's letters (pockets > Letters: "From Nintendo", with
 the item as its present, "Remove Present"). The id stays in the slot: the same package read again
-gives no second letter. Hooked (USA) only to log `[distrib] Pete handed Nintendo letter ...`.
+gives no second letter. Hooked (all versions) only to log `[distrib] Pete handed Nintendo letter ...`.
 
-Received tracking: USA through a hook on `fn_8010F194` (the game keeps a Nintendo letter; the hook
-calls the original and records the letter id's distribution for the town); other bases: when KD
-stored the package.
+Received tracking: a hook on `fn_8010F194` (the game keeps a Nintendo letter; the hook calls the
+original and records the letter id's distribution for the town), on every version (`all`).
 
 ## 4. F1 page
 
 F1 > Online > Nintendo events (next to Play together): Delivery mode, How often (In turn), Every
 year (Original dates), Include other regions' distributions, Turn WiiConnect24 on for my town and
-Deliver while playing (USA); status (archive files, task / key / download box, last check, next
+Deliver while playing; status (archive files, task / key / download box, last check, next
 delivery date and item); the town line ("Town: Frunch (F177). "Receive now" works once per
 distribution for each town."; dev builds: "Forget received"); the table of every distribution
 with its original dates per region, its state (available / available (other region) / received /
@@ -359,9 +358,8 @@ console clock 2026-10-27 unless noted; checked in `[distrib]` log lines and `sta
   preserved October 2012 package outside the game: it verifies; a WiiLink file does not).
 - The second download (`RUD/E.enc` -> `prc_list.bin`, profanity list) is not served.
 - Pete hands a letter over only at a town load; a letter taken while playing waits for the next
-  load (save first). Received tracking and live delivery are USA-only (game hooks); other bases
-  deliver at the next town load and count a stored package as received. Not tested on PAL /
-  Japan / Korea.
+  load (save first). Received tracking and live delivery run on every version (hooks `all`,
+  branch test-regions; results there in docs/TEST_COVERAGE.md).
 - Per-town tracking: keyed by the town id + name from the save since "Receive now once" (before:
   one key "town" for the install, adopted by the first town identified).
 - The F1 page itself was not screenshotted (frame shots capture the game image only).

@@ -1,0 +1,36 @@
+# Online visit, visitor side, with visit_host2.txt: Copper "I wanna go out!" -> the town list (pointer on
+# the first row, Confirm), stand in the host's town, then back through the gate and Copper home (the
+# game's return-home save). Env: CF_TELEPORT=10100:1790,84,664 CF_ONLINE_JOIN=file
+# CF_ONLINE_CODE_FILE=<the host's file> (chat: [online] usb_keyboard=1 + CF_KBD_TYPE="<frame>:Hello{ENTER}").
+include continue.txt
+10130:@off
+10150:STICKUP*20
++40:STICKUP+B*60
++80:STICKUP*120
+after link d_a_npc_sp_gatekeeper_aNP
++200:STICKRIGHT*45
++60:STICKUP*75
++100:STICKUP*3
++40:A
++60:A ~30
++900:A
++100:A ~3
+# "Go to which town?" (d_menu_friend03NP): point at the first row, A, then Confirm (visit_guest.txt).
+after link d_menu_friend03NP
++150:@0.0/-0.26
++150:A
++200:@0.66/0.78
++150:A
++60:@off
++60:A ~30
+# In the host's town: stand; close a map the A presses may open.
++3000:B
++60:B ~4
+# Back into the host's gate, Copper, home (the game's return-home save).
++2500:STICKUP*150
+after link d_a_npc_sp_gatekeeper_aNP 2
++200:STICKRIGHT*45
++60:STICKUP*75
++100:STICKUP*3
++40:A
++60:A ~40

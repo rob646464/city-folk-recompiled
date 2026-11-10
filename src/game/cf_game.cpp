@@ -15,6 +15,7 @@
 #include "game/cf_mii.h"
 #include "game/cf_move_in.h"
 #include "game/cf_region.h"
+#include "game/cf_save_import.h"
 #include "game/cf_warp.h"
 
 #include "recomp/distributions.h"
@@ -238,7 +239,10 @@ bool splitScreen() { return false; }
 bool textBoxShown() { return false; }
 int textMode() { return 0; }
 bool viewerOpen() { return false; }
-void drawOverlay() { cf::miiDrawOverlay(); }
+void drawOverlay() {
+    cf::miiDrawOverlay();
+    cf::saveimport::drawOverlay();  // CF_SAVE_EXPORT test aid (cf_save_import.cpp)
+}
 #ifdef CF_DEV_TOOLS
 void debugMenu() { warp::debugMenu(); }
 #else

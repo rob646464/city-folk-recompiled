@@ -9,6 +9,7 @@
 // messages while they run).
 #include "recomp/ios.h"
 
+#include "game/cf_save_import.h"
 #include "port/install.h"
 #include "recomp/hle.h"
 #include "recomp/runtime.h"
@@ -602,6 +603,14 @@ const fs::path& nandRoot() {
             fs::create_directories(hostPath(d), ec);
         for (const auto& e : fs::directory_iterator(hostPath("/tmp"), ec)) fs::remove_all(e.path(), ec);
         loadAttrs();
+        // A save import / restore staged in F1 > Game > Save data (cf_save_import.cpp): applied
+        // here, before the game opens any NAND file.
+        const auto changes = cf::saveimport::applyAtStart([](const std::string& n) { return attrOf(n); });
+        for (const auto& ch : changes) {
+            if (ch.forget) sAttrs.erase(ch.nandPath);
+            else sAttrs[ch.nandPath] = ch.attr;
+        }
+        if (!changes.empty()) saveAttrs();
         recomp::log("[nand] %s", port::displayPath(p).c_str());
         sys::prepareNand();
     });
@@ -655,6 +664,12 @@ bool readHostFile(const std::string& nandPath, std::vector<u8>& data) {
     if (!in) return false;
     data.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     return true;
+}
+
+bool filesOpenUnder(const std::string& nandPath) {
+    nandRoot();
+    std::lock_guard lk(sFsM);
+    return isOpen(nandPath);
 }
 
 void setAttr(const std::string& nandPath, const Attr& a) {
