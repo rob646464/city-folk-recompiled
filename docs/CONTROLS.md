@@ -251,8 +251,15 @@ they open (d_menu_itemNP calls the same pane walk with a REL test function at se
 those stored positions, so they are found through the layouts drawn each frame instead
 (cf_hud.cpp's Pane::Draw hook calls `cf::navLayoutDrawn` for every root pane: visible Bounding
 panes named `B*`, the text box `B_msgWin` left out since A advances text wherever the pointer is).
-Items the game hit-tests this frame are "tested"; while any tested non-HUD item is up only tested
-items are navigable, so a choice box over the pockets ("Drop / Quit") is modal like in the game.
+Items the game hit-tests this frame are "tested". A tested menu layout is in front of the drawn-only
+layouts it overlaps (the drawn layout's whole extent): those are left out, so a choice box over the
+pockets ("Drop / Quit") is modal like in the game; drawn-only HUD items are left out while any tested
+menu item is up. Drawn-only layouts beside the tested items stay navigable (branch snap-donate): the
+item pickers ("Donate what?", Nook's "What do you want to sell?", both d_menu_item02NP) hit-test
+their Quit / Donate / Sell buttons every frame (fn_80008ADC) but their slots only while the pointer
+is on the grid, so the first version's rule (any tested item = only tested items) left just the two
+buttons navigable there, and on a slot the buttons dropped out instead (the set flipped with the
+pointer). `CF_NAV_OLD=1` keeps that rule for A/B.
 
 Verified (USA, fixture `user-town` and the new-game route, scripted D-pad presses and screenshots):
 - Dialogue choices: Rover's "Yeah! / DS Suitcase / ..." chosen with D-pad down (lands on the choice
@@ -270,9 +277,26 @@ Verified (USA, fixture `user-town` and the new-game route, scripted D-pad presse
 - (menu-nav-2) Letters list (pockets > envelope), designs list + its submenu, chat keyboard (toolbar),
   Nook's offer choice box ("I'll take it! / How do I use it? / Never mind."): moved through by
   D-pad, checked by the trace checker below.
-Not tried yet: shops' buy / sell screens, catalog, museum, the letter writing screen, the design
-editor, the HOME Menu (its gui hook reported no items in a run with the HOME Menu open), PAL /
-Japan / Korea.
+- (snap-donate) Item pickers: Blathers' "Donate what?" (D-pad to the sea bass, A, down to Donate,
+  A: donated; tools/routes/museum_donate.txt) and Tom Nook's "What do you want to sell?" (same
+  picker: sea bass ticked, Sell, "I'll take that for 200 Bells"; tools/routes/nook_sell.txt); the
+  field pockets again (wallet -> its "Never Mind" box modal, envelope -> letters modal); scripted
+  pointer clicks on the donate screen donate with snap on Auto and Off alike. Pointer timeout with
+  `CF_POINTER_TIMEOUT=3`: a pointer hidden in the text before the picker / in the field before the
+  pockets is drawn again as soon as the screen is up (`menuUp()`, below).
+Not tried yet: shops' buy screens, catalog, the recycle box, giving an item to a villager (only
+when the villager asks), sending an item with a letter (letter writing screen, address book), the
+design editor, the HOME Menu (its gui hook reported no items in a run with the HOME Menu open), PAL
+/ Japan / Korea.
+
+**Scripted routes and the snap** (the "Donate what?" report of the test-gameplay sweep): with
+"Snap pointer to menu items" on Auto, a route's Nunchuk stick (`STICKUP*4` to face an NPC) that
+lands while a pointer screen is still up moves the selection like a gamepad stick and keeps the
+pointer on that item (Quit, there), so the route's later A presses go elsewhere and the clicks of the
+next screen select nothing; with snap off the same stick does nothing there. A picker that opens
+while the route points away (`@off`) shows no cursor until the next pointer item, as with a Remote
+pointed away. Time a picker's clicks from its module link (`after link d_menu_item02NP 1`) and walk
+only after the screen is gone, or set `[wiimote] remote1_snap=off` for pointer-only routes.
 
 **The screen in front is modal** (menu_nav.cpp `navigable()`): besides the tested/drawn rule above,
 of two menu layouts that both hit-test and overlap (the design list's "Wear / Display on Ground /
@@ -341,7 +365,7 @@ After the fix the checker reports **0 errors** on every logged set, both for the
 game runs of the final build (74 sets) and for the offline replay of all 135 sets (the one set
 recorded before draw order was logged cannot show the submenu rule; the final run of that screen
 passes). Screenshots checked: pockets grid / submenu, letters, designs submenu, map, keyboards.
-Not reached by script: shops (Nook's buy / sell, catalogue), museum, Able's, Copper's gate, letter
+Not reached by script: shops (Nook's buy, catalogue), Able's, Copper's gate, letter
 writing + address book, stationery picker, the design editor itself, HOME Menu (its gui hook
 reports no items: open), title file select (Rover's choices are covered).
 
