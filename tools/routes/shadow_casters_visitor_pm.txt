@@ -1,0 +1,11 @@
+# Evening variant of shadow_casters_visitor.txt (16:30-17:00, sun in the west): the player 430 units
+# EAST of the visitor (module 57), its shadow falls east into the view from beyond the left edge.
+include warp.txt
++1600:WARP=town.plaza
+after link d_bgo_drawNP 3
++300:TP=mod57:430/0
++500:TP=mod57:430/0
++500:TP=mod57:430/0
++500:STICKLEFT*30
++300:STICKLEFT*30
++300:STICKRIGHT*60
