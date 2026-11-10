@@ -453,6 +453,7 @@ void vtxBegin(u32 prim, u32 fmt, u32 nVerts, bool perspective) {
     const bool posIndexed = gx::vtxDesc(GX_VA_POS) == GX_INDEX8 || gx::vtxDesc(GX_VA_POS) == GX_INDEX16;
     u64 id = u64(prim & 0xF8 | fmt) << 56 ^ u64(vertexSize(int(fmt))) << 40 ^ (posIndexed ? sBind[0].guest : 0);
     for (int a = GX_VA_PNMTXIDX; a <= GX_VA_TEX7; a++) id = detail::mix(id ^ gx::vtxDesc(a));
+    detail::noteDrawExtra(nVerts, posIndexed ? 2 : gx::vtxDesc(GX_VA_POS) == GX_DIRECT ? 3 : 0);
     detail::noteDraw(id);
     detail::drawStart(mark());
     detail::drawLog("begin prim %02X fmt %u n %u vsize %u %s pos desc %u size %d tex0 desc %u size %d clr0 desc %u",
@@ -538,6 +539,7 @@ void vtxDisplayList(u32 guestAddr, const u8* data, u32 size) {
     sDrawCount++;
     finishDirect();
     flushPending();
+    detail::noteDrawExtra(0, 1);
     detail::noteDraw(detail::mix(u64(guestAddr) << 24 ^ size ^ 0xD15Bull << 48));
     {
         // Content identity (FNV-1a over 8-byte words): the same mesh wherever its list is stored.
