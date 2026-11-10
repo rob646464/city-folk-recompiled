@@ -168,19 +168,41 @@ const bool sRegistered = [] {
 // ---- Mouse (host thread) -------------------------------------------------------------
 
 struct Mouse {
-    float x = 0, y = 0, w = 1, h = 1;  // window coordinates
+    float x = 0, y = 0;                // window coordinates
+    float x0 = 0, y0 = 0, w = 1, h = 1;  // the game picture inside the window (window coordinates)
     bool inside = false;
     u32 seq = 0;  // bumped on every move
 };
 std::mutex sMouseMutex;
 Mouse sMouse;
 
-// Window position -> KPAD pointer. The game image fills the window (Aurora's stretch viewport);
-// with widescreen on, the game's 2D (where the cursor is drawn) is kept at the game's aspect in
-// the middle (widescreen.h), so x is scaled back by that factor.
+// The game picture's rectangle in the window: Aurora centres it at its own aspect (black bars when
+// it is fitted: Original 4:3, a fixed ratio, a window narrower than 16:9 such as 16:10; the whole
+// window when stretched), webgpu::calculate_present_viewport.
+void pictureRect(int winW, int winH, float& x0, float& y0, float& w, float& h) {
+    x0 = y0 = 0;
+    w = float(std::max(winW, 1));
+    h = float(std::max(winH, 1));
+    const AuroraWindowSize s = aurora_get_window_size();
+    if (!s.fb_width || !s.fb_height) return;
+    const float content = float(s.fb_width) / float(s.fb_height), window = w / h;
+    if (content < window - 1e-3f) {  // pillarbox
+        const float cw = h * content;
+        x0 = (w - cw) * 0.5f;
+        w = cw;
+    } else if (content > window + 1e-3f) {  // letterbox
+        const float ch = w / content;
+        y0 = (h - ch) * 0.5f;
+        h = ch;
+    }
+}
+
+// Window position -> KPAD pointer, through the game picture's rectangle; with widescreen on, the
+// game's 2D (where the cursor is drawn) is kept at the game's aspect in the middle (widescreen.h),
+// so x is scaled back by that factor.
 void mouseToPointer(const Mouse& m, float& px, float& py) {
-    px = m.x / std::max(m.w, 1.0f) * 2.0f - 1.0f;
-    py = m.y / std::max(m.h, 1.0f) * 2.0f - 1.0f;
+    px = (m.x - m.x0) / std::max(m.w, 1.0f) * 2.0f - 1.0f;
+    py = (m.y - m.y0) / std::max(m.h, 1.0f) * 2.0f - 1.0f;
     if (ws::active()) px /= ws::factor();
 }
 
@@ -641,11 +663,15 @@ void handleEvent(const SDL_Event& ev) {
     case SDL_EVENT_MOUSE_MOTION: {
         int w = 1, h = 1;
         if (SDL_Window* win = aurora_get_window()) SDL_GetWindowSize(win, &w, &h);
+        float x0, y0, pw, ph;
+        pictureRect(w, h, x0, y0, pw, ph);
         std::lock_guard lk(sMouseMutex);
         sMouse.x = ev.motion.x;
         sMouse.y = ev.motion.y;
-        sMouse.w = float(std::max(w, 1));
-        sMouse.h = float(std::max(h, 1));
+        sMouse.x0 = x0;
+        sMouse.y0 = y0;
+        sMouse.w = pw;
+        sMouse.h = ph;
         sMouse.inside = ev.motion.x >= 0 && ev.motion.y >= 0 && ev.motion.x < w && ev.motion.y < h;
         sMouse.seq++;
         break;
