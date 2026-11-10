@@ -53,8 +53,10 @@ after link d_menu_mslctNP
 +60:@off
 +150:A
 +300:STICKDOWN*500
-# Save with the HUD's save button (bottom right): the save path runs the WiiConnect24 step.
-+700:@0.84/0.82
-+60:A
-+200:@off
-+100:A ~6
+# Save and quit with the HUD's Save button (top right, as save_quit.txt; the save flow's WiiConnect24
+# step sends Pelly's outbox). Verified 2026-11-09 (branch test-regions).
++700:@0.5/0
++30:@0.88/-0.82
++40:A
++240:@off
++60:A ~12

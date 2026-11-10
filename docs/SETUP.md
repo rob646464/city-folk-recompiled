@@ -154,8 +154,14 @@ folder>/portable`, same layout.
 | `game/<id>/recompiler.log` | recompiler summary |
 | `pipeline_cache.db`, `dawn_cache.db` | GPU caches (Aurora) |
 | `last_run.log`, `previous_run.log`, `last_run_state.ini` | run logs and start-up recovery (as in LM) |
+| `save_backups/<YYYY-MM-DD_hh-mm-ss>/` | the save's data folder as it was before an import or restore (`files/` + `backup.ini`; `-before-restore`, `-dolphin` = Dolphin's save before an export); never deleted by the port |
+| `save_import/pending/`, `save_import/failed/` | a save import / restore staged in F1 > Game > Save data, applied at the next start; the last one that failed |
 
-The NAND (saves, SYSCONF) lives in its own folder (docs/NAND.md).
+The NAND (saves, SYSCONF) lives in its own folder (docs/NAND.md). **Saves from a Wii or Dolphin**:
+F1 > Game > Save data imports them (Dolphin's folder, a Wii NAND backup, the SD card's data.bin
+with the player's own SD key; checked by the game's checksums, the region checked, applied at the
+next start after a backup) and exports the port's save to Dolphin (docs/NAND.md "Importing a Wii or
+Dolphin save"). In portable mode both folders are in `portable/` with the rest.
 
 A module's key is the SHA-1 of: the module ABI version, the program version, the game ID and
 DOL SHA-1, the compile and link flags, and the embedded inputs of that version (symbols.txt,
