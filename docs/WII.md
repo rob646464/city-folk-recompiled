@@ -388,23 +388,30 @@ no effect-by-effect tags; the fallback for everything a library does not tag mus
   positions (or the centroid of its CPU-built vertices), through the inverse of the camera it was
   drawn under: camera motion is out. Each matched draw keeps its step (`bundleVel`) as the prediction
   for the next game frame.
-- **Matching** (`matchDraws`, at pairing, guest thread): values whose bucket (key before occurrence)
-  holds more than one value in either game frame, and untagged values inside a view, lose their
-  order pairing; their draws are matched within their class, first with the full fingerprint, then
+- **Matching** (`matchDraws`, at pairing, guest thread): position / normal matrices and CPU-built
+  vertex blocks whose bucket (key before occurrence) holds more than one value in either game frame,
+  and untagged ones inside a view, lose their order pairing. Texture matrices and colours keep their
+  keys (colours blend only while their draw pairs with the partner's draw, replayPair's existing
+  check): g3d loads its materials' texture-SRT matrices into position matrix rows per material list,
+  and matched by the place of the shape drawn next they paired across materials, so the city's
+  villagers shook (city route: 4023 detector events with them, 453 without, 610-1208 old); their draws are matched within their class, first with the full fingerprint, then
   what is left without textures. One draw of a kind on both sides: the same thing unless it moved
   more than max(40, half its camera distance). Several: an order-preserving alignment (DP over the two
   draw orders, cost = distance to a's place or a's place moved on by its last step, whichever is
-  nearer; gap cost = 2 x the class's median nearest distance, at least 0.05 + 2e-4 x camera distance;
+  nearer; gap cost = 2 x the class's median nearest distance, at least 0.05 + 2e-4 x camera distance, and at
+  least 1.25 x the median step along the best constant shift of the two orders (a burst or stream whose
+  list order holds and which moves more per game frame than its spacing);
   never beyond a fifth of the camera distance). Births and deaths in a particle list or an object
   loop are gaps, the survivors keep their partners; classes over 65536 pairs fall back to mutual
   nearest neighbours with a ratio test (draws at one place taken in order). The values of matched
   draws pair by bucket and their order within the draw. A draw without a partner is shown at the
   newest game frame for that interval (the replay's usual unpaired path). Existing tags are
   unchanged (unique keys still pair by key). A/B `CF_MATCH=0` (old draw-order pairing),
-  `CF_MATCH_ALIGN=0` (mutual nearest only), `CF_MATCH_GAP=<f>`, `CF_MATCH_LIMIT=<f>`,
-  `CF_MATCH_RATIO=<f>`; `[match]` line every 5 s (draws needing a match, matched, new, left at the
+  `CF_MATCH_ALIGN=0` (mutual nearest only), `CF_MATCH_DIAG=0`, `CF_MATCH_GAP=<f>`, `CF_MATCH_LIMIT=<f>`,
+  `CF_MATCH_RATIO=<f>`, `CF_MATCH_KINDS=<mask>` of Kind bits (default 0x23; 0x7F adds texture matrices and colours), `CF_MATCH_GROUPS=0` (model instances keep keys); `[match]` line every 5 s (draws needing a match, matched, new, left at the
   game frame, values paired, time); `CF_MATCH_LOG=1` per tape, `=2[,<first tape>]` every draw left
-  without a partner and why, `CF_MATCH_DUMP=<site>` both frames' draws of a site in draw order;
+  without a partner and why, `CF_MATCH_DUMP=<site>` both frames' draws of a site in draw order, `CF_MATCH_TAPE=<seq>` every draw
+  of one tape that needed a match with its values and partners;
   `CF_MATCH_SITES=<file>` per GX call site (draws, keyed uniquely, matched, left, untagged).
 - **Detector that skips no draw** (`CF_MATCH_JUDGE=<file>[,<px>]`, `matchJudge`): Aurora's draw probe
   gives every draw of the main pass in the full view (first vertex through the matrix it was drawn
@@ -420,7 +427,27 @@ no effect-by-effect tags; the fallback for everything a library does not tag mus
   generated C++, library by name), classified tagged (reached from a per-thing tag hook or inside
   g3d / lyt), fingerprint (shared scope: matched by fingerprint + place, with the fingerprint
   quality), 2D/system, or needs help (a run shows most of its draws left without a partner).
-- Results: see the status entry in CLAUDE.md (numbers per place, before / after).
+- **Results** (120 fps, VSync off, 1280x720, loaded shared PC; whole route incl. boot; detector events
+  per run, old = `CF_MATCH=0` same build; out/interp-match/judge_summary.txt): Mr. Resetti
+  (tools/routes/resetti.txt on a NAND whose last session was not saved) 2438 -> 378 (dirt site
+  `fn_8028FF0C` 2381 -> 322; far leaps within an interval 251 -> 19); town walk (town_trees.txt)
+  1510 -> 403; town with the field-object tags off (`CF_FG_TAG=0`, the generic matcher alone) 7609 ->
+  424 (trees 6273 -> 130, as good as the tags: 403); house 80 -> 81; city plaza 610-1208 (two runs) ->
+  456; fireworks (2026-08-02 20:00) 12398 -> 10197, still high in both (the show is a sky backdrop
+  with its own camera and dense radial bursts: the detector's nearest-point tracking and the world
+  places are least reliable there; open). In-betweens (`CF_INTERP_TEST=4`, out/interp-match/
+  rest_dirt2.png): with draw order the clods reshuffle between game frames, matched the cloud
+  evolves smoothly. Matching cost (guest, per game frame): 0.04 (house) - 0.34 (city) ms average,
+  max 1.5 ms (one 6 ms preemption spike in the city), 0 on the host per present. Original 60: no
+  capture, so none of this runs (no `[match]` lines); frame dumps of the title and bus (game frames
+  2000-3800) identical to main in both runs of each build; town frames differ only in the idle /
+  water animation phase, as two main runs also differ from frame 5400 (out/interp-match/o60diff.png).
+- Static check (out/interp-match/coverage.md): 94 draw call sites (GXBegin / GXCallDisplayList
+  callers): tagged 13 (g3d model drawing 11, the ef billboard, lyt panes), fingerprint 63 (game code
+  39, EGG 14, ef strategies 10), 2D/system 18 (RFL, HOME Menu, ut text); none flagged "needs help" by
+  the runs (the most left at the game frame: ef `fn_8028E7A8` 3.5 %, `DrawQuad(VEC3,VEC3,VEC3)` (the
+  fireworks) 2 %). Display lists written straight into the pipe (most g3d shapes) show up only in
+  the runtime part, by the last GX call's site (ResTev::CallDisplayList, LoadResShpPrimitive).
 
 ## IOS (Starlet)
 

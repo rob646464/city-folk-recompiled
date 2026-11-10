@@ -937,6 +937,11 @@ const float sMatchGap = [] {
     const char* v = std::getenv("CF_MATCH_GAP");
     return v ? float(std::atof(v)) : 2.0f;
 }();
+// CF_MATCH_DIAG=0: the alignment's gap cost from the nearest distances only (A/B).
+const bool sMatchDiag = [] {
+    const char* v = std::getenv("CF_MATCH_DIAG");
+    return !(v && *v == '0');
+}();
 // CF_MATCH_ALIGN=0: classes of several draws pair only as confident mutual nearest neighbours (A/B).
 const bool sMatchAlign = [] {
     const char* v = std::getenv("CF_MATCH_ALIGN");
@@ -1092,8 +1097,17 @@ void matchDraws(const Tape& a, Tape& b) {
         // 1. Values paired by order: their bucket holds more than one value in either game frame.
         static OccTable cntA, cntB;
         cntA.clear(), cntB.clear();
+        // CF_MATCH_KINDS=<mask of Kind bits> (test aid): the kinds matched by place. Default: position and
+        // normal matrices and CPU-built vertices. Texture matrices and colours keep their keys (colours
+        // blend only while their draw pairs with the partner's draw, replayPair's check): g3d loads its
+        // materials' texture-SRT matrices into position matrix rows, per material display list, and
+        // matched by the place of the shape drawn next they paired across materials: the city's
+        // villagers shook (pops ~700 per city route vs 0-140 with draw order; 453 events vs 4023 without).
+        static const u32 sKinds = [] { const char* v = std::getenv("CF_MATCH_KINDS"); return v ? u32(std::strtoul(v, nullptr, 0)) : 0x23u; }();
+        // CF_MATCH_GROUPS=0 (test aid): values of model instances (tagGroup) keep their keys.
+        static const bool sMatchGroups = [] { const char* v = std::getenv("CF_MATCH_GROUPS"); return !(v && *v == '0'); }();
         const auto eligible = [](const Patch& p, u32 nb) {
-            return p.bucket && p.role == 0 && !p.tgroup && p.bundle < nb &&
+            return p.bucket && p.role == 0 && !p.tgroup && p.bundle < nb && (sKinds >> u32(p.kind) & 1) && (sMatchGroups || !p.group) &&
                    (p.kind == Kind::PosMtx || p.kind == Kind::NrmMtx || p.kind == Kind::TexMtx || p.kind == Kind::Verts ||
                     (p.kind == Kind::Color && !p.slot));
         };
@@ -1253,6 +1267,26 @@ void matchDraws(const Tape& a, Tape& b) {
                         if (!near.empty()) {
                             std::nth_element(near.begin(), near.begin() + near.size() / 2, near.end());
                             gap = std::max(floorD, sMatchGap * near[near.size() / 2]);
+                        }
+                        // A swarm whose list order holds (a burst, a stream) and that moves more per game frame
+                        // than its spacing: the nearest distance underrates the step. The best constant shift of
+                        // the two draw orders (survivors at the front or the back) gives the typical step along
+                        // the list; the gap allows it (1.25 x its median), so the alignment keeps the order.
+                        if (sMatchDiag && nA >= 4 && nB >= 4) {
+                            static std::vector<f32> dd;
+                            float bestMed = 1e30f;
+                            for (int sh = -8; sh <= 8; sh++) {
+                                dd.clear();
+                                for (u32 i = 0; i < nA; i++) {
+                                    const s64 j = s64(i) + sh;
+                                    if (j < 0 || j >= s64(nB) || !oka[i] || !okb[j]) continue;
+                                    dd.push_back(dist(i, u32(j)));
+                                }
+                                if (dd.size() * 2 < std::min(nA, nB)) continue;
+                                std::nth_element(dd.begin(), dd.begin() + dd.size() / 2, dd.end());
+                                bestMed = std::min(bestMed, dd[dd.size() / 2]);
+                            }
+                            if (bestMed < 1e29f) gap = std::max(gap, 1.25f * bestMed);
                         }
                         // DP over (nA + 1) x (nB + 1): 0 diagonal (match), 1 skip a, 2 skip b.
                         static std::vector<f32> C;
@@ -1511,6 +1545,29 @@ void matchDraws(const Tape& a, Tape& b) {
         }
         if (++sMatchSitesTapes % 300 == 0) writeMatchSites();
     }
+    // CF_MATCH_TAPE=<seq>: every draw of that tape that needed a match: class, place, partner and its place.
+    static const u64 sTapeDump = [] { const char* v = std::getenv("CF_MATCH_TAPE"); return v ? std::strtoull(v, nullptr, 10) : ~0ull; }();
+    if (b.seq == sTapeDump && ready)
+        for (u32 k = 0; k < nbB; k++) {
+            if (!needB[k]) continue;
+            const s32 ka = drawToA[k];
+            const auto& w = b.bundleWorld[k];
+            log("[match] tape %llu draw %u site %08X kind %u scope %016llX fp %016llX at %.1f %.1f %.1f dist %.0f -> a %d at %.1f %.1f %.1f",
+                (unsigned long long)b.seq, k, b.bundleSite[k], u32(b.bundleKind[k]), (unsigned long long)b.bundleKey[k],
+                (unsigned long long)b.bundleFp[k], w[0], w[1], w[2], w[3], ka, ka >= 0 ? a.bundleWorld[ka][0] : 0.0f,
+                ka >= 0 ? a.bundleWorld[ka][1] : 0.0f, ka >= 0 ? a.bundleWorld[ka][2] : 0.0f);
+            for (u32 i = 0; i < b.patches.size(); i++) {
+                const Patch& p = b.patches[i];
+                if (p.bundle != k) continue;
+                const s32 j = b.partner[i];
+                const Patch* q = j >= 0 ? &a.patches[j] : nullptr;
+                log("[match]    #%u kind %u slot %u src %08X site %08X key %016llX bucket %016llX cat %u group %016llX -> #%d (bundle %d src %08X site %08X) t %.1f %.1f %.1f / %.1f %.1f %.1f",
+                    i, u32(p.kind), p.slot, p.source, p.site, (unsigned long long)p.key, (unsigned long long)p.bucket, u32(p.cat),
+                    (unsigned long long)p.group, j, q ? s32(q->bundle) : -1, q ? q->source : 0, q ? q->site : 0,
+                    p.count == 12 ? val(b, p, 3) : 0.0f, p.count == 12 ? val(b, p, 7) : 0.0f, p.count == 12 ? val(b, p, 11) : 0.0f,
+                    q && q->count == 12 ? val(a, *q, 3) : 0.0f, q && q->count == 12 ? val(a, *q, 7) : 0.0f, q && q->count == 12 ? val(a, *q, 11) : 0.0f);
+            }
+        }
     if (b.mUs > 3000)
         log("[match] tape %llu: matching took %u us (%u draws to match, largest class %u / %u, %u / %u draws, %zu / %zu values)",
             (unsigned long long)b.seq, b.mUs, b.mNeed, bigA, bigB, nbA, nbB, a.patches.size(), b.patches.size());
@@ -4774,6 +4831,7 @@ void matchJudge(const ProbeReplay& pr, const std::vector<ProbeRec>& recs) {
         bool has = false;
         u8 match = 0;
         u32 site = 0;
+        u32 k = 0;  // the draw (index in b)
     };
     static std::vector<Pt> prev, cur;
     static u64 prevSeq = 0;
@@ -4819,6 +4877,7 @@ void matchJudge(const ProbeReplay& pr, const std::vector<ProbeRec>& recs) {
             std::memcpy(p.proj, r.proj, sizeof(p.proj));
             p.match = k < b.bundleMatch.size() ? b.bundleMatch[k] : 0;
             p.site = k < b.bundleSite.size() ? b.bundleSite[k] : 0;
+            p.k = k;
             cur.push_back(p);
         }
     }
@@ -4892,6 +4951,7 @@ void matchJudge(const ProbeReplay& pr, const std::vector<ProbeRec>& recs) {
             std::fprintf(sMatchJudgeOut, "J %u %llu %.3f %s %s jerk %.1f step %.1f %.1f prev %.1f %.1f site %08X match %u at %.0f %.0f\n",
                          pr.present, (unsigned long long)b.seq, pr.alpha, same ? "in" : "at", pop ? "pop" : "-", jerk, p.st[0], p.st[1], q.st[0],
                          q.st[1], p.site, u32(p.match), p.s[0], p.s[1]);
+            std::fprintf(sMatchJudgeOut, "  draw %u partner %d\n", p.k, p.k < b.bundlePartner.size() ? b.bundlePartner[p.k] : -9);
         }
     }
     std::fprintf(sMatchJudgeOut, "P %u %llu %.3f %s points %u jerks %llu pops %llu far %llu new %llu\n", pr.present, (unsigned long long)b.seq,
