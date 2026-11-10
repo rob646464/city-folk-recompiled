@@ -475,6 +475,35 @@ number of visible defects means what it says (`E <a|b|c> <reason>` lines, `CLASS
   alignment now covers classes up to 200000 draw pairs (fireworks bursts).
 - `SNAP <site> <n>` lines: point-presents shown at the game frame per draw site (effects at 60 fps).
 
+### Matching untagged draws, round 3 (branch interp-match-3)
+
+- **Every ef particle is its own identity** (cf_tags.cpp `cftags::efBegin`, hooked from cf_light's
+  DrawOrder::Draw; interp `setEffectParticles` + gxCall): while an effect draws, all particles of its
+  managers (Effect + 0x90 -> + 0x38 lists, birth = frame - age at + 0xDC) are known; a draw strategy's
+  loop keeps the particle it draws in a callee-saved register, so each GX call there becomes that
+  particle's scope (unless the billboard DrawQuad hook already opened one). This covers every strategy
+  (fn_8028E7A8, fn_8028F414, fn_8028FF0C, DrawQuad(VEC3, VEC3, VEC3) ...): fireworks bursts
+  (af_fld_firework, _00/_01/_02, _child, _st_child, _top), fish ripples and shadows (af_fsh_hamon,
+  af_fsh_shadow), emote marks, Mr. Resetti's dirt and the running dust; the fireworks route had no
+  fireflies. A/B `CF_EF_TAG_ALL=0`; `CF_EF_TAG_LOG=1` names each manager's emitter and draw sites.
+- Third fingerprint level without the position array (`bundleFp3`: double-buffered CPU-built arrays).
+- Equal counts in both frames, each draw within reach of the one at its place in the order and no
+  outlier step: the order is the identity (several identical parts of one model; `CF_MATCH_ORDER=0`).
+- Values of matched draws pair by matrix slot too (g3d loads only changed slots: by order alone a
+  skinned villager's envelope matrices swapped slots and the part went there and back).
+- Detector: wrong-pair only for draws matched by place (a tagged identity is the game's own).
+- Results at 120 fps (quiet PC; visible defects / by design / detector mismatches): Resetti 0 / 129 /
+  240, town walk 0 / 958 / 120, house 0 / 67 / 30, fireworks 1 / 9486 / 7965, city plaza 233-280
+  (two runs) / ~950 / ~19. Open: the city's "pops" are walking villagers (skinned g3d draws, site
+  ResTev::CallDisplayList) that go there and back at every in-between around game frames 6040-6880;
+  their matrices pair correctly (same sources and slots, CF_MATCH_TAPE), and they also pop with
+  `CF_MATCH=0` (94), so the cause is in the replay's blend of that instance, not in the pairing.
+  Resetti re-dumped (out/interp-match-3/rest3_dirt.png): the clod cloud evolves smoothly in both builds
+  now (the per-particle ef tags apply with CF_MATCH=0 too).
+- Running dust: the game changes its speed every frame; a curve through three game frames needs the
+  next one (a frame more latency) or extrapolates backwards (C1 only at the start, overshoots on a
+  turn), so the straight blend stays.
+
 ## IOS (Starlet)
 
 The game reaches every device through IPC to IOS (`IOS_Open/Ioctl(v)/Read/Write`). Decision

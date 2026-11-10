@@ -453,7 +453,9 @@ void vtxBegin(u32 prim, u32 fmt, u32 nVerts, bool perspective) {
     const bool posIndexed = gx::vtxDesc(GX_VA_POS) == GX_INDEX8 || gx::vtxDesc(GX_VA_POS) == GX_INDEX16;
     u64 id = u64(prim & 0xF8 | fmt) << 56 ^ u64(vertexSize(int(fmt))) << 40 ^ (posIndexed ? sBind[0].guest : 0);
     for (int a = GX_VA_PNMTXIDX; a <= GX_VA_TEX7; a++) id = detail::mix(id ^ gx::vtxDesc(a));
-    detail::noteDrawExtra(nVerts, posIndexed ? 2 : gx::vtxDesc(GX_VA_POS) == GX_DIRECT ? 3 : 0);
+    u64 loose = u64(prim & 0xF8 | fmt) << 56 ^ u64(vertexSize(int(fmt))) << 40;
+    for (int a = GX_VA_PNMTXIDX; a <= GX_VA_TEX7; a++) loose = detail::mix(loose ^ gx::vtxDesc(a));
+    detail::noteDrawExtra(nVerts, posIndexed ? 2 : gx::vtxDesc(GX_VA_POS) == GX_DIRECT ? 3 : 0, loose);
     detail::noteDraw(id);
     detail::drawStart(mark());
     detail::drawLog("begin prim %02X fmt %u n %u vsize %u %s pos desc %u size %d tex0 desc %u size %d clr0 desc %u",

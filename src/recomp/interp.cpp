@@ -248,6 +248,7 @@ struct Tape {
     // unknown) and that partner (index into pairedWith's draws, -1 none).
     std::vector<u64> bundleFp;
     std::vector<u64> bundleFp2;  // the fingerprint without the textures (matchDraws' second pass)
+    std::vector<u64> bundleFp3;  // also without the position array (double-buffered CPU-built arrays: the town flag)
     std::vector<u64> bundleStruct;
     std::vector<s32> bundleMtx;
     std::vector<u32> bundleSite;
@@ -297,7 +298,8 @@ std::vector<std::array<u32, 2>> sBundleRange;
 std::vector<u8> sBundlePass;
 std::vector<std::array<f32, 3>> sBundleCentre;
 std::vector<SlotCentres> sSlotCentres;  // (by bundle, ascending)
-std::vector<u64> sBundleFp, sBundleFp2, sBundleStruct;  // (Tape::bundleFp / bundleStruct)
+std::vector<u64> sBundleFp, sBundleFp2, sBundleFp3, sBundleStruct;
+u64 sDrawLoose = 0;  // vtxBegin: the draw's identity without its position array  // (Tape::bundleFp / bundleStruct)
 std::vector<s32> sBundleMtx;
 std::vector<u32> sBundleSite;
 std::vector<u8> sBundleKind;
@@ -940,6 +942,11 @@ const float sMatchGap = [] {
     const char* v = std::getenv("CF_MATCH_GAP");
     return v ? float(std::atof(v)) : 2.0f;
 }();
+// CF_MATCH_ORDER=0: equal counts in both frames still go through the alignment (A/B).
+const bool sMatchOrder = [] {
+    const char* v = std::getenv("CF_MATCH_ORDER");
+    return !(v && *v == '0');
+}();
 // CF_MATCH_SPACE=0: always match in the world (no choice of the draw's own camera space; A/B).
 const bool sMatchSpace = [] {
     const char* v = std::getenv("CF_MATCH_SPACE");
@@ -1100,7 +1107,7 @@ void matchDraws(const Tape& a, Tape& b) {
     b.bundleMatch.assign(nbB, 0);
     b.mNeed = b.mMatched = b.mSnapped = b.mValues = b.mUntagged = b.mOrderValues = b.mNew = 0;
     const bool ready = sMatchOn && a.bundleWorld.size() == nbA && b.bundleWorld.size() == nbB && a.bundleFp.size() == nbA &&
-                       b.bundleFp.size() == nbB && a.bundleFp2.size() == nbA && b.bundleFp2.size() == nbB && a.bundleStruct.size() == nbA && b.bundleStruct.size() == nbB;
+                       b.bundleFp.size() == nbB && a.bundleFp2.size() == nbA && b.bundleFp2.size() == nbB && a.bundleFp3.size() == nbA && b.bundleFp3.size() == nbB && a.bundleStruct.size() == nbA && b.bundleStruct.size() == nbB;
     static std::vector<u8> needA, needB, kindB;
     static std::vector<s32> drawToA;  // per draw of b: the draw of a it was matched with
     drawToA.assign(nbB, -1);
@@ -1150,7 +1157,7 @@ void matchDraws(const Tape& a, Tape& b) {
         static std::vector<u8> usedA;
         usedA.assign(nbA, 0);
         for (u32 k = 0; k < nbB; k++) b.mNeed += needB[k];
-        for (int pass = 0; pass < 2; pass++) {
+        for (int pass = 0; pass < 3; pass++) {
             struct Item {
                 u64 cls;
                 u32 k;
@@ -1160,7 +1167,7 @@ void matchDraws(const Tape& a, Tape& b) {
             items.clear();
             const auto cls = [pass](const Tape& t, u32 k) {
                 const u64 scope = t.bundleKey[k] ? t.bundleKey[k] : t.bundleStruct[k];
-                return mix(scope ^ (pass ? t.bundleFp2[k] : t.bundleFp[k]) * 0x9E3779B97F4A7C15ull ^ u64(t.bundlePass[k]) << 56);
+                return mix(scope ^ (pass == 2 ? t.bundleFp3[k] : pass ? t.bundleFp2[k] : t.bundleFp[k]) * 0x9E3779B97F4A7C15ull ^ u64(t.bundlePass[k]) << 56);
             };
             for (u32 k = 0; k < nbA; k++)
                 if (needA[k] && !usedA[k]) items.push_back({cls(a, k), k, 0});
@@ -1189,7 +1196,7 @@ void matchDraws(const Tape& a, Tape& b) {
                 // [g0, s1): a's draws of the class, [s1, g1): b's.
                 const u32 nA = u32(s1 - g0), nB = u32(g1 - s1);
                 bigA = std::max(bigA, nA), bigB = std::max(bigB, nB);
-                if (nB && !nA && pass == 1) {
+                if (nB && !nA && pass == 2) {
                     b.mNew += nB;
                     if (sMatchWhy && matchWhyOk(b.seq)) {
                         const u32 kb = items[s1].k;
@@ -1218,7 +1225,7 @@ void matchDraws(const Tape& a, Tape& b) {
                         }
                         if (ok) drawToA[kb] = s32(ka), usedA[ka] = 1;
                         else {
-                            if (pass == 1 && sMatchWhy && matchWhyOk(b.seq))
+                            if (pass == 2 && sMatchWhy && matchWhyOk(b.seq))
                                 log("[match] tape %llu snap single draw %u site %08X: moved %.1f dist %.0f", (unsigned long long)b.seq, kb,
                                     b.bundleSite[kb], std::hypot(wa[0] - wb[0], wa[1] - wb[1], wa[2] - wb[2]), wb[3]);
                         }
@@ -1327,6 +1334,36 @@ void matchDraws(const Tape& a, Tape& b) {
                             }
                             if (bestMed < 1e29f) gap = std::max(gap, 1.25f * bestMed);
                         }
+                        // The same number of draws in both frames, each within reach of the one at its place in the
+                        // order, and none of those steps an outlier (several identical parts of one model: hands,
+                        // feet, a villager's two of a kind moving together faster than their spacing): the order is
+                        // their identity. (A thing that left while another came in shows as one step far beyond the
+                        // others.) The alignment's gap cost would otherwise pair a part with its neighbour and
+                        // leave the rest without partners: the city's villagers went there and back.
+                        bool inOrder = sMatchOrder && nA == nB;
+                        if (inOrder) {
+                            static std::vector<f32> ds;
+                            ds.clear();
+                            for (u32 i = 0; i < nA && inOrder; i++) {
+                                if (oka[i] != okb[i]) inOrder = false;
+                                else if (oka[i]) {
+                                    const float d = dist(i, i);
+                                    if (d > limb[i]) inOrder = false;
+                                    ds.push_back(d);
+                                }
+                            }
+                            if (inOrder && !ds.empty()) {
+                                std::vector<f32> sorted = ds;
+                                std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+                                const float med = sorted[sorted.size() / 2];
+                                for (const float d : ds)
+                                    if (d > 3.0f * med + 2.0f * gap) inOrder = false;
+                            }
+                        }
+                        if (inOrder) {
+                            for (u32 i = 0; i < nA; i++)
+                                if (oka[i]) drawToA[lb[i]] = s32(la[i]), usedA[la[i]] = 1;
+                        } else {
                         // DP over (nA + 1) x (nB + 1): 0 diagonal (match), 1 skip a, 2 skip b.
                         static std::vector<f32> C;
                         static std::vector<u8> bp;
@@ -1358,6 +1395,7 @@ void matchDraws(const Tape& a, Tape& b) {
                                 j--;
                             }
                         }
+                        }  // (alignment)
                         // Draws without a place: only one of a kind on both sides.
                         u32 noa = 0, nob = 0, lastA = 0, lastB = 0;
                         for (u32 i = 0; i < nA; i++)
@@ -1365,7 +1403,7 @@ void matchDraws(const Tape& a, Tape& b) {
                         for (u32 j = 0; j < nB; j++)
                             if (!okb[j]) nob++, lastB = lb[j];
                         if (noa == 1 && nob == 1) drawToA[lastB] = s32(lastA), usedA[lastA] = 1;
-                        if (pass == 1 && sMatchWhy && matchWhyOk(b.seq)) {
+                        if (pass == 2 && sMatchWhy && matchWhyOk(b.seq)) {
                             u32 left = 0;
                             for (u32 j = 0; j < nB; j++) left += drawToA[lb[j]] < 0;
                             if (left)
@@ -1475,7 +1513,7 @@ void matchDraws(const Tape& a, Tape& b) {
                             }
                             if (!ok) {
                                 // CF_MATCH_LOG=2: why (class sizes, nearest / second distances, limit, camera distance).
-                                if (pass == 1 && sMatchWhy && matchWhyOk(b.seq)) {
+                                if (pass == 2 && sMatchWhy && matchWhyOk(b.seq)) {
                                     const u32 kb = mb[B.first];
                                     const Cluster* A = B.best >= 0 ? &ca[B.best] : nullptr;
                                     log("[match] tape %llu snap draw %u site %08X kind %u class a %u/%u b %u/%u: d1 %.2f d2 %.2f lim %.1f dist %.0f "
@@ -1493,7 +1531,7 @@ void matchDraws(const Tape& a, Tape& b) {
                         // Draws without a place: only one of a kind on both sides.
                         if (noA.size() == 1 && noB.size() == 1) drawToA[noB[0]] = s32(noA[0]), usedA[noA[0]] = 1;
                         else {
-                            if (pass == 1 && sMatchWhy && !noB.empty() && matchWhyOk(b.seq))
+                            if (pass == 2 && sMatchWhy && !noB.empty() && matchWhyOk(b.seq))
                                 log("[match] tape %llu snap %zu draws without a place (a %zu) site %08X kind %u", (unsigned long long)b.seq, noB.size(),
                                     noA.size(), b.bundleSite[noB[0]], u32(b.bundleKind[noB[0]]));
                         }
@@ -1505,13 +1543,16 @@ void matchDraws(const Tape& a, Tape& b) {
         for (u32 k = 0; k < nbB; k++) b.mMatched += needB[k] && drawToA[k] >= 0;
         b.mSnapped = b.mNeed - b.mMatched - std::min(b.mNew, b.mNeed - b.mMatched);
         phase[1] = Clock::now();
-        // 4. The values of matched draws: by bucket and their order within the draw.
+        // 4. The values of matched draws: by bucket, the matrix slot they were loaded into and their order
+        // within the draw. (g3d loads only the slots whose matrix changed, so the n-th load from one site
+        // is not always the same slot: by order alone a skinned villager's envelope matrices swapped
+        // slots between game frames and the part went there and back at every in-between, city route.)
         static OccTable slotA, occA, occB;
         slotA.clear(), occA.clear(), occB.clear();
         for (u32 i = 0; i < a.patches.size(); i++) {
             const Patch& p = a.patches[i];
             if (!orderKeyed(p, nbA)) continue;
-            const u64 k0 = mix(p.bucket ^ u64(p.bundle) << 20 ^ 0x3A7Cull);
+            const u64 k0 = mix(p.bucket ^ u64(p.bundle) << 20 ^ 0x3A7Cull ^ u64(p.slot) << 52);
             const u32 ord = occA.at(k0)++;
             slotA.at(mix(k0 ^ u64(ord) << 44)) = i + 1;
         }
@@ -1519,10 +1560,10 @@ void matchDraws(const Tape& a, Tape& b) {
             Patch& p = b.patches[i];
             if (!orderKeyed(p, nbB)) continue;
             const s32 ka = drawToA[p.bundle];
-            const u64 kb0 = mix(p.bucket ^ u64(p.bundle) << 20 ^ 0x3A7Cull);
+            const u64 kb0 = mix(p.bucket ^ u64(p.bundle) << 20 ^ 0x3A7Cull ^ u64(p.slot) << 52);
             const u32 ord = occB.at(kb0)++;
             if (ka < 0) continue;
-            const u64 k0 = mix(p.bucket ^ u64(u32(ka)) << 20 ^ 0x3A7Cull);
+            const u64 k0 = mix(p.bucket ^ u64(u32(ka)) << 20 ^ 0x3A7Cull ^ u64(p.slot) << 52);
             const u32 v = slotA.find(mix(k0 ^ u64(ord) << 44));
             if (!v || !compatible(a.patches[v - 1], p)) continue;
             b.partner[i] = s32(v - 1);
@@ -2451,6 +2492,7 @@ void beginTape() {
     sSlotCentres.clear();
     sBundleFp.clear();
     sBundleFp2.clear();
+    sBundleFp3.clear();
     sBundleStruct.clear();
     sBundleMtx.clear();
     sBundleSite.clear();
@@ -2549,6 +2591,8 @@ void endTape(u32 retraceCount) {
     sBundleFp.reserve(nBundles + nBundles / 8 + 16);
     tape->bundleFp2 = std::move(sBundleFp2);
     sBundleFp2 = {};
+    tape->bundleFp3 = std::move(sBundleFp3);
+    sBundleFp3 = {};
     sBundleFp2.reserve(nBundles + nBundles / 8 + 16);
     tape->bundleStruct = std::move(sBundleStruct);
     sBundleStruct = {};
@@ -2815,6 +2859,15 @@ void tagFreed(u32 addr, u32 size) {
 
 void addSiteTag(const SiteTag& t) { sSiteTags.push_back(t); }
 
+namespace {
+std::vector<std::array<u32, 3>> sEfParts;  // (particle, manager, birth), sorted by particle
+u64 sEfTagged = 0;
+}  // namespace
+void setEffectParticles(std::vector<std::array<u32, 3>>&& parts) {
+    sEfParts = std::move(parts);
+    std::sort(sEfParts.begin(), sEfParts.end());
+}
+
 void tagGroup(u32 id) {
     if (sCapturing && sTagDepth > 0 && sTagDepth <= kMaxTagDepth) sTagStack[sTagDepth - 1].group = mix(u64(id) ^ 0x6A0Full << 48);
 }
@@ -2875,6 +2928,39 @@ void gxCall(const Ctx& c) {
         sVirt.backStep = parent ? parent->backStep : -1;
         sVirtActive = true;
         break;
+    }
+    // nw4r::ef particles of every draw strategy (setEffectParticles): the particle a strategy's loop
+    // is drawing sits in one of its callee-saved registers at the GX call.
+    if (!sVirtActive && !sEfParts.empty()) {
+        const TagFrame* parent = sTagDepth > 0 && sTagDepth <= kMaxTagDepth ? &sTagStack[sTagDepth - 1] : nullptr;
+        if (!(parent && parent->cat == TagCat::Particle))
+            for (int r = 31; r >= 14; r--) {
+                const u32 v = c.r[r];
+                const auto it = std::lower_bound(sEfParts.begin(), sEfParts.end(), std::array<u32, 3>{v, 0, 0});
+                if (it == sEfParts.end() || (*it)[0] != v) continue;
+                const u64 base = scopeBase(parent ? parent->inst : rootInst(), TagCat::Particle, v, (*it)[1], (*it)[2] * 0x9E3779B1u ^ 0xEF00u);
+                if (base != sVirtBase) {
+                    sVirtBase = base;
+                    sVirt.inst = mix(base ^ u64(occurrence(sTagOcc, base)) << 44);
+                }
+                sVirt.cat = TagCat::Particle;
+                sVirt.object = true;
+                sVirt.structural = parent ? parent->structural : rootInst();
+                sVirt.ownCamera = parent && parent->ownCamera;
+                sVirt.group = 0;
+                sVirt.tumble = parent && parent->tumble;
+                sVirt.tracked = parent && parent->tracked;
+                sVirt.stream = parent && parent->stream;
+                sVirt.backStep = parent ? parent->backStep : -1;
+                sVirtActive = true;
+                sEfTagged++;
+                // CF_EF_TAG_LOG=1: which draw site each particle manager draws at (once per pair).
+                static const bool sLog = std::getenv("CF_EF_TAG_LOG") != nullptr;
+                static std::unordered_set<u64> sSeen;
+                if (sLog && sSeen.size() < 4096 && sSeen.insert(u64((*it)[1]) << 32 | c.lr).second)
+                    log("[eftag] manager %08X draws particles at %08X (register r%d)", (*it)[1], c.lr, r);
+                break;
+            }
     }
     if (sTagLogFrame != ~0ull) {
         char buf[16];
@@ -3918,6 +4004,8 @@ void pushBundle(u64 id) {
     sBundleFp.push_back(mix(id ^ u64(sDrawExtra) << 32 ^ u64(boundTexture(0)) * 0x9E3779B97F4A7C15ull ^
                             mix(u64(boundTexture(1)) ^ u64(boundTexture(2)) << 32)));
     sBundleFp2.push_back(mix(id ^ u64(sDrawExtra) << 32 ^ 0xF2F2ull));
+    sBundleFp3.push_back(sDrawLoose ? mix(sDrawLoose ^ u64(sPass) << 60 ^ u64(sDrawExtra) << 32 ^ 0xF3F3ull) : sBundleFp2.back());
+    sDrawLoose = 0;
     sDrawExtra = 0;
     sBundleKind.push_back(sDrawKind);
     sDrawKind = 0;
@@ -3940,7 +4028,7 @@ void detail::noteDraw(u64 id) {
     sUngrouped = u32(sPatches.size());
 }
 
-void detail::noteDrawExtra(u32 n, u8 kind) { sDrawExtra = n, sDrawKind = kind; }
+void detail::noteDrawExtra(u32 n, u8 kind, u64 loose) { sDrawExtra = n, sDrawKind = kind, sDrawLoose = loose; }
 
 void detail::claimForLastDraw() {
     if (sBundleIds.empty()) return;
@@ -4991,7 +5079,7 @@ void matchJudge(const ProbeReplay& pr, const std::vector<ProbeRec>& recs) {
             const float aspect = r.proj[0] != 0.0f ? r.proj[5] / r.proj[0] : 1.0f;
             if (std::fabs(sc[0]) > 1080.0f * aspect || std::fabs(sc[1]) > 1080.0f) continue;
             Pt p;
-            p.fp = mix((k < b.bundleFp2.size() ? b.bundleFp2[k] : b.bundleFp[k]) ^ u64(r.mtxIdx) << 58);
+            p.fp = mix((k < b.bundleFp3.size() ? b.bundleFp3[k] : b.bundleFp[k]) ^ u64(r.mtxIdx) << 58);
             p.own = k < b.bundleOwnCam.size() && b.bundleOwnCam[k];
             if (p.own) std::copy(av, av + 3, p.w);  // (its own camera: followed on screen as drawn)
             else xform34(icam.data(), av, p.w);
@@ -5151,7 +5239,9 @@ void matchJudge(const ProbeReplay& pr, const std::vector<ProbeRec>& recs) {
                     // (world places, no prediction) than the one it was paired with: a wrong pair.
                     bool wrong = false;
                     const s32 pk = b.bundlePartner[p.k];
-                    if (pk >= 0 && a && p.k < b.bundleWorld.size() && u32(pk) < a->bundleWorld.size() && std::isfinite(b.bundleWorld[p.k][0]) &&
+                    // (Only for draws matched by place: a tagged identity, e.g. one particle of an emitter, is the
+                    // game's own; in a dense swarm another particle is often nearer than the same one.)
+                    if (p.match == 1 && pk >= 0 && a && p.k < b.bundleWorld.size() && u32(pk) < a->bundleWorld.size() && std::isfinite(b.bundleWorld[p.k][0]) &&
                         std::isfinite(a->bundleWorld[pk][0])) {
                         const auto& wb = b.bundleWorld[p.k];
                         // (distance to a draw of a: to its place, or to its place moved on by its own last step)
