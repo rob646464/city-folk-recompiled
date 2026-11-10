@@ -78,21 +78,38 @@ void hueToRgb(float h, float out[3]) {
 void addTestLights() {
     if (sTest.count <= 0) return;
     float luigi[3];
-    if (!game::enhPlayerPos(luigi)) return;
+    // No player position from the game (City Folk): the lights are scattered through the view
+    // (fixed pseudo-random places 250-550 units in front of the camera, the depth of a room in the
+    // player's house, drifting slowly), in view space, without shadows (branch light-tiles: a stress
+    // test of many lights, e.g. 200).
+    const bool viewSpace = !game::enhPlayerPos(luigi);
     static u32 sFrame = 0;
     const float t = float(sFrame++) / 30.0f;
     for (int i = 0; i < sTest.count && sPendingCount < kMaxCandidates; i++) {
         const float a = t * 0.9f * sTest.speed + 6.2831853f * float(i) / float(sTest.count);
-        const float world[3] = {luigi[0] + sTest.dist * std::cos(a),
-                                luigi[1] + sTest.height + 40.0f * sTest.speed * std::sin(t * 1.7f + float(i)),
-                                luigi[2] + sTest.dist * std::sin(a)};
+        const float dist = sTest.dist;
         aurora::gfx::ExtraLight l{};
-        if (!enh::worldToView(world, l.pos)) return;
+        if (viewSpace) {
+            u32 h = u32(i) * 0x9E3779B9u + 0x7F4A7C15u;
+            auto rnd = [&h] {
+                h ^= h >> 15, h *= 0x2C1B3C6Du, h ^= h >> 12, h *= 0x297A2D39u, h ^= h >> 15;
+                return float(h & 0xFFFFFF) / 16777216.0f;
+            };
+            const float z = -(250.0f + 300.0f * rnd());
+            l.pos[0] = (rnd() * 2.0f - 1.0f) * 0.35f * -z + 15.0f * sTest.speed * std::sin(a);
+            l.pos[1] = (rnd() * 2.0f - 1.0f) * 0.2f * -z + 10.0f * sTest.speed * std::sin(t * 1.7f + float(i));
+            l.pos[2] = z;
+        } else {
+            const float world[3] = {luigi[0] + dist * std::cos(a),
+                                    luigi[1] + sTest.height + 40.0f * sTest.speed * std::sin(t * 1.7f + float(i)),
+                                    luigi[2] + dist * std::sin(a)};
+            if (!enh::worldToView(world, l.pos)) return;
+        }
         hueToRgb(float(i) / float(sTest.count), l.color);
         l.radius = sTest.radius;
         l.intensity = sTest.intensity;
         l.flags = aurora::gfx::ExtraLightTranslucent | aurora::gfx::ExtraLightSpecular |
-                  (i < 16 ? aurora::gfx::ExtraLightCastShadows : 0u);
+                  (i < 16 && !viewSpace ? aurora::gfx::ExtraLightCastShadows : 0u);
         l.id = 0x7E570000u + u32(i);
         sPending[sPendingCount++] = l;
     }

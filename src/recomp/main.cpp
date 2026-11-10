@@ -499,6 +499,28 @@ int main(int argc, char* argv[]) {
         }();
         const bool frozen = sFreezeAt && copyDispCount() >= sFreezeAt;
         frame::setHostPaused(paused || hold || frozen);
+        // Test aid CF_FREEZE_SHOTS=<dir>,<every>,<count> (with CF_FREEZE_AT; branch light-tiles): while
+        // frozen, a CF_SHOT-style screenshot of the held frame every <every> loop iterations,
+        // <dir>/z<k>.ppm (with AURORA_ENH_TILES_AB the same frame with and without light tiles).
+        if (frozen && !paused && !hold) {
+            static struct FreezeShots {
+                std::string dir;
+                unsigned every = 0, count = 0, n = 0, k = 0;
+            } sFz = [] {
+                FreezeShots f;
+                if (const char* v = std::getenv("CF_FREEZE_SHOTS")) {
+                    const std::string s = v;
+                    const auto c = s.find(',');
+                    if (c != std::string::npos && std::sscanf(s.c_str() + c + 1, "%u,%u", &f.every, &f.count) == 2) f.dir = s.substr(0, c);
+                }
+                return f;
+            }();
+            if (!sFz.dir.empty() && sFz.every && sFz.k < sFz.count && ++sFz.n % sFz.every == 0) {
+                char path[512];
+                std::snprintf(path, sizeof path, "%s/z%03u.ppm", sFz.dir.c_str(), sFz.k++);
+                aurora_request_screenshot(path);
+            }
+        }
         {
             const auto now = SteadyClock::now();
             // (A gap between iterations is a stall of this thread itself, which the watchdog reports.)

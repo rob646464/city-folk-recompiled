@@ -667,7 +667,7 @@ struct NightSource {
     const NightKind* kind;
 };
 std::vector<NightSource> sNightCur, sNightNext;  // collected in the frame being drawn / to submit
-constexpr size_t kMaxNightSources = 128;         // collected; the nearest 64 are submitted
+constexpr size_t kMaxNightSources = 256;         // collected (light-tiles: was 128, the nearest 64 submitted)
 
 void readMtx(u32 a, float* m) {
     for (int k = 0; k < 12; k++) m[k] = rdf32(a + 4 * k);
@@ -981,10 +981,10 @@ void submitNightLights() {
                 rdf32(m + 0x58), rdf32(m + 0x68));
     const auto& s = port::settings().enhancedLighting;
     if (!s.nightLights || sNight <= 0.01f || !sViewValid || sNightNext.empty()) return;
-    std::array<aurora::gfx::ExtraLight, 64> out{};
+    std::array<aurora::gfx::ExtraLight, aurora::gfx::MaxExtraLights> out{};  // light-tiles: was 64
     uint32_t n = 0;
     if (sNightNext.size() > out.size()) {
-        // More sources than Aurora's lights (the city: shop windows + street lamps): the nearest.
+        // More sources than Aurora's lights: the nearest.
         auto dist = [](const NightSource& a) {
             float v[3];
             toView(a.world, v);
@@ -1138,8 +1138,9 @@ void noteEffectDraw(u32 effect, u32 drawInfo) {
 }
 
 // Light budget: at most this many firefly / firework lights (strongest first); together with the
-// night lights they go through enhanced_lighting.cpp's ranking into Aurora's 64 extra lights.
-constexpr u32 kMaxFireflyLights = 12, kMaxFireworkLights = 8;
+// night lights they go through enhanced_lighting.cpp's ranking into Aurora's 256 extra lights
+// (light-tiles: was 64 lights, 12 fireflies and 8 fireworks).
+constexpr u32 kMaxFireflyLights = 32, kMaxFireworkLights = 12;
 
 void submitEffectLights() {
     sFxNext.clear();

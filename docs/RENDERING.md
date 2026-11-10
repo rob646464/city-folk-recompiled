@@ -750,8 +750,8 @@ is a unit sphere under a node scaled 25 at the lamp head) give the glowing part.
 from the model's centre; a compact one (< 40 units: a lamp head) just below it; a larger volume
 in front of its +z face; a part spanning most of the building in both horizontal directions
 (a facade the game also tints) none. Parts within 40 units merge, at most 3 per model; warm
-windows (radius 210, x1.2), lamps (230, x1.3, shadows). The city has more sources than Aurora's
-64 lights: the nearest 64 to the camera are submitted. Test aid `CF_CITY_LIGHT_LOG=1` (every lit
+windows (radius 210, x1.2), lamps (230, x1.3, shadows). The city had more sources than Aurora's
+64 lights (the nearest 64 to the camera were submitted); since light-tiles all of them (up to 256) are. Test aid `CF_CITY_LIGHT_LOG=1` (every lit
 part with its material entry, size, centre and light position; per model every 600 frames;
 lit materials drawn per frame); route `tools/routes/city_plaza_warp.txt` (the plaza and the
 shop fronts) with `CF_CLOCK_START="2026-10-27 21:30"`.
@@ -803,9 +803,9 @@ come from the game's own particles (cf_light.cpp `noteEffectDraw`, hook on
   pale yellow). The game flashes the scene's ambient colour itself during the show; this adds the
   burst's coloured light from above. Effects drawn with the main camera use world positions
   (submitted with the next frame through the main camera, like night lights).
-- Budget: at most 12 firefly and 8 firework lights (strongest first, sources of one kind closer
-  than 25 / 200 units merged), then the shared ranking in enhanced_lighting.cpp into Aurora's 64
-  extra lights; no shadows. Outdoors scaled by darkness (0.25 + 0.75 x night), indoors full.
+- Budget: at most 32 firefly and 12 firework lights (light-tiles; were 12 and 8; strongest first, sources of one kind closer
+  than 25 / 200 units merged), then the shared ranking in enhanced_lighting.cpp into Aurora's 256
+  extra lights (64 before light-tiles); no shadows. Outdoors scaled by darkness (0.25 + 0.75 x night), indoors full.
 - Ids `0x5A000000 ^ manager address` (stable while the effect lives) for interpolation; backdrop
   lights are view-space fixed, so a camera move between game frames shifts them slightly (not
   checked at 120 fps).
@@ -877,7 +877,7 @@ largest extent (120-320); intensity lamp 1.4 (x 1.15 for light kind 2), fire 1.6
 lava lamp 0.9, other 1.0; x the game's amount for helper materials (a lamp switched off stops
 lighting, fading as the game fades its shade); fire flickers (three host-time sines, per-object
 phase) and gets `ExtraLightFire`. Ids `0x46000000 ^ ScnObj` (interpolated by id at 120+).
-Budget: up to 48 per frame into enhanced_lighting.cpp's shared ranking (64 lights); fires and
+Budget: up to 48 per frame into enhanced_lighting.cpp's shared ranking (256 lights since light-tiles, 64 before); fires and
 screens may cast shadows (they share the night lights' shadow slots, `shadowLightCap`), lamps
 never: the light sits inside the shade, which would hide it from the cube map.
 
@@ -932,6 +932,91 @@ lights every 120 frames; `=2` also every helper amount change. `CF_FURN_AB=1`: f
 only in dump frames 4k+1, not 4k+3. Routes: `tools/routes/house_furniture_warp.txt` (house),
 `house_tv_warp.txt`, `furniture_places_warp.txt` (villager houses, Nook's, museum); the on byte /
 helper target / item grid pokes are in the route comments and above.
+
+### Up to 256 lights: light tiles (branch light-tiles, Aurora 0520)
+
+Aurora's extra lights went from 64 to **256** (`MaxExtraLights`), so the city's night lights, the
+furniture lights, fireflies, fireworks and the sun / moon all fit in the shared ranking at once.
+Every pixel of an enhanced world draw used to loop over all extra lights (64 x the reach test per
+pixel, whether a light could reach it or not); 256 that way would have cost four times as much.
+
+**How it works** (Aurora `enhanced.cpp` "Light tiles", `gx/shader.cpp` `enh_extra_lights`):
+- **A compute pass per EFB pass** ("Enhanced light tiles", queued as a pre-pass op right after
+  the pass's mask job, so it runs before the pass's draws on the GPU): one 8 x 8 workgroup per
+  32 x 32 px screen tile. It takes the tile's depth range from the **depth pre-pass** (the mask's
+  `maskDepthR`, the frame's opaque world draws; the tile's texels plus one around it, since the
+  pre-pass is at mask resolution), then its 64 threads test the lights' spheres (in turns of 64) against
+  the tile's four frustum side planes (from the draw camera's projection and viewport) and the
+  depth range, and set their bits in three 256-bit masks per tile:
+  - list 0: within the tile's pre-pass z range (+ 4 units + 2 %): draws that are in the pre-pass
+    (opaque, depth-writing world draws: the same test as the pre-pass's own),
+  - list 1: in front of the tile's farthest pre-pass surface: other depth-tested draws (water,
+    particles, glass),
+  - list 2: the side planes only: draws without a depth test; all three lists are plain 2D when the
+    frame has no pre-pass (neither light shadows nor AO).
+  Directional lights (sun, moon) are in every list.
+- **The shader** visits its list's set bits in index order (`firstTrailingBit`) and runs the old
+  loop body on each (`enh_xl_one`, same additions in the same order). A light the test drops cannot
+  reach any pixel of the tile (the reach test would have skipped it), so the sum is unchanged.
+- **Where it lives**: in the mask buffer after the mask planes (the fragment stage already uses
+  both of its storage buffers, and the mask buffer is at WebGPU's 128 MiB binding limit): a header
+  word with the job's stamp, then 24 words per tile (0.8 MB at 4K). The draw's uniform carries the
+  stamp; a draw whose pass never got its job (a pass that ended without a flush), whose camera
+  differs from the job's (the first tiled draw of a pass sets it) or that is drawn after the light
+  set changed within the pass sees no match and runs the full loop, as before. Tiles from 4 lights
+  on; offscreen passes and orthographic draws never use them.
+- **FIFO**: the light count is a u16 now (it was a u8; src/recomp/interp.cpp parses it).
+- **Port side**: enhanced_lighting.cpp's ranking keeps the 256 strongest (it kept 64); shadow slots
+  are unchanged (the sun / moon's slot plus the night lights' cap by preset, `shadowLightCap`).
+  cf_light.cpp: night-light sources collected 128 -> 256, all of them submitted (was the nearest
+  64), fireflies 12 -> 32, fireworks 8 -> 12. Furniture lights keep their 48.
+- **Interpolation**: lights are still paired by id per replay (any count), and every replay
+  (in-between frame) runs its own tile job with the blended lights.
+
+**Results** (2026-11-09, USA, user-town-clean, 21:30 in October, Enhanced lighting Ultra + world
+lights, RTX 3090 Ti; the PC was shared with 2-7 other agents' game instances and Dolphin, which
+moved the GPU numbers of whole runs by up to 2x, so the reliable comparison is **within one run**:
+`AURORA_ENH_TILES_AB=900` switches tiles on / off every 15 s, 5 s `AURORA_GPU_PROFILE` windows
+without a switch are taken per state; agent scratch `light-tiles/gpuab.py`):
+
+| 4K (3840x2160 window, 60 fps), EFB pass ms per frame (GPU busy) | tiles | full loop |
+|---|---|---|
+| City plaza at night, 25 lights (street lamps, shop windows, moon) | 3.98 (8.33) | 4.83 (9.00) |
+| Player's house + 64 test lights, radius 60 | 1.81 (3.27) | 2.93 (4.28) |
+| Player's house + 200 test lights, radius 60 | 3.55 (5.26) | 8.42 (9.98) |
+| Player's house + 200 test lights, radius 150 (each reaches most of the room) | 15.1 (17.3) | 14.7 (17.1) |
+
+The tile pass itself: 0.04-0.08 ms at 4K (8160 tiles; 0.34 ms with 16 px tiles and 16 x 16
+workgroups, hence 32 px). The full loop of this branch is the old loop for <= 64 lights. Back-to-back
+runs of main vs the branch agree in the direction but not reliably in size (house + 60 test lights:
+EFB 4.35 main vs 3.24 branch; another pair under heavier load had them the other way round). A
+light that really reaches a pixel still costs what it did: 200 big overlapping lights are as
+expensive as before; what the tiles remove is the cost of the lights that cannot reach.
+- **Same picture**: a frozen city frame (24 lights, `CF_FREEZE_AT=6500`, 120 fps presentation,
+  `AURORA_ENH_TILES_AB=40`, 40 `CF_FREEZE_SHOTS` across the on / off turns, with the pre-pass depth
+  lists in use): all 40 shots byte-identical.
+- **Enhanced lighting off**: main vs branch, 16 `CF_SHOT` frames from the title through Rover to the
+  town: identical except the two frames that also differ between two runs of main (title leaves,
+  Rover's animation timing).
+- **The city at night**: the plaza and streets (`city_warp.txt`, `city_plaza_warp.txt`) never had
+  more than 24 night-light sources at once (the game draws only the structures in view; `[night]`
+  lines), so main's nearest-64 cut never applied there and both builds light it alike; fireflies
+  (June 20 21:30 at the house): 5 firefly lights, the same in both. With more than 64 lights the
+  difference shows with `CF_TEST_LIGHTS=200,60`: main lights the room with 64 of them, the branch
+  with all 200 (agent scratch `light-tiles/out/house_200_*.png`, also the heat map).
+- 0 lost tile jobs in every run (`AURORA_ENH_TILE_LOG`): every pass that drew with tiles got its job,
+  always with the pre-pass depth outdoors and indoors (sun / moon / room key light shadows).
+
+Test aids: `AURORA_ENH_TILES=0` (always the full loop, A/B), `AURORA_ENH_TILE_MIN=<n>` (tiles from
+n lights, default 4), `AURORA_ENH_TILE_SHOW=1` (lights visited per pixel as a heat tint: blue few,
+green ~16, red 32+), `AURORA_ENH_TILE_LOG=<n>` (`light tiles: N jobs (M with pre-pass depth), L
+lost`, light count and grid, every n frames), `AURORA_ENH_TILES_AB=<n>` (tiles on / off in turns of
+n recorded frames, logged), `CF_FREEZE_SHOTS=<dir>,<every>,<count>` (with `CF_FREEZE_AT`: shots of
+the held frame while the host keeps presenting it; with `AURORA_ENH_TILES_AB` the same frame both
+ways), `CF_TEST_LIGHTS=<count>[,<radius>[,<intensity>]]` (now up to 256; City Folk has no player
+position for them, so they are scattered through the view at fixed pseudo-random places 250-550
+units in front of the camera (the depth of the player's house room), drifting slowly, without
+shadows: a many-lights stress test).
 
 ### Indoor places (branch enh-light-2)
 

@@ -1,0 +1,712 @@
+diff --git a/include/aurora/lights.h b/include/aurora/lights.h
+index 61130ae..09f89f1 100644
+--- a/include/aurora/lights.h
++++ b/include/aurora/lights.h
+@@ -28,7 +28,11 @@ struct ExtraLight {
+ };
+ static_assert(sizeof(ExtraLight) == 88);
+ 
+-constexpr uint32_t MaxExtraLights = 64; // 0023: was 16 (world lights: candles, fires, lamps)
++// 0023: was 16 (world lights: candles, fires, lamps). 0520: was 64; the world shaders no longer loop
++// over every light: a compute pass bins the lights into screen tiles (16 px, three lists per tile by
++// the pre-pass depth range) and each pixel loops over its tile's bit mask only (enhanced.cpp
++// "Light tiles"). The FIFO command carries the count as a u16 since then.
++constexpr uint32_t MaxExtraLights = 256;
+ constexpr uint32_t ExtraLightCastShadows = 1u << 0;
+ constexpr uint32_t ExtraLightTranslucent = 1u << 1;
+ constexpr uint32_t ExtraLightSpecular = 1u << 2;
+diff --git a/lib/dolphin/gx/GXAurora.cpp b/lib/dolphin/gx/GXAurora.cpp
+index e22413f..9c2e8c4 100644
+--- a/lib/dolphin/gx/GXAurora.cpp
++++ b/lib/dolphin/gx/GXAurora.cpp
+@@ -214,7 +214,7 @@ namespace aurora::gfx {
+ void set_extra_lights(const ExtraLight* lights, uint32_t count) {
+   count = std::min(count, MaxExtraLights);
+   GX_WRITE_AURORA(GX_AURORA_SET_EXTRA_LIGHTS);
+-  GX_WRITE_U8(count);
++  GX_WRITE_U16(count); // 0520: u16 (up to 256 lights)
+   for (uint32_t i = 0; i < count; ++i) {
+     const auto& l = lights[i];
+     GX_WRITE_F32(l.pos[0]);
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+index 64e4ad5..eaa55f6 100644
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -2790,8 +2790,385 @@ void encode_scene(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, co
+   pass.End();
+ }
+ 
++// ---- 0520: light tiles ------------------------------------------------------------------------
++// The world shaders looped over every extra light per pixel (64 at most). With up to 256 lights
++// (MaxExtraLights) a compute pass bins them first, once per EFB pass that draws with them: per
++// screen tile of 2^shift render-target pixels (32, one 8 x 8 workgroup; larger only when the mask
++// buffer's free tail is too small; 16 px tiles with 16 x 16 workgroups cost 0.34 ms at 4K), three
++// 256-bit masks of the lights whose sphere can reach a surface seen there:
++//   list 0: within the depth range of the depth pre-pass in the tile (draws that are in the
++//           pre-pass: opaque depth-writing world draws),
++//   list 1: in front of the farthest pre-pass surface in the tile (other depth-tested draws),
++//   list 2: the tile's frustum sides only (draws without depth test; all three lists when the frame
++//           has no pre-pass, i.e. neither light shadows nor ambient occlusion).
++// Directional lights are in every list. A pixel visits its list's set bits in index order with the
++// full loop's per-light code (enh_xl_one), so a light the test keeps adds exactly what it added
++// before and a light it drops could not reach the pixel: the sum is unchanged. The data lives in
++// the mask buffer (the fragment stage has no third storage buffer; WebGPU's 128 MiB binding limit
++// is that buffer's size) after the mask planes, behind a header word with the stamp of the job that
++// wrote it: a draw whose pass never got its job (a pass ended without a flush) sees another stamp
++// and runs the full loop. AURORA_ENH_TILES=0: always the full loop (A/B); AURORA_ENH_TILE_MIN=<n>:
++// tiles from n lights on (default 4); AURORA_ENH_TILE_SHOW=1: lights visited per pixel as a heat
++// tint (blue 1-8, green ~16, red 32+); AURORA_ENH_TILE_LOG=<n>: jobs / lost jobs / sizes every n
++// frames.
++constexpr uint32_t TileListWords = MaxExtraLights / 32;
++constexpr uint32_t TileLists = 3;
++constexpr uint32_t TileWords = TileListWords * TileLists;
++constexpr uint32_t TileHeaderWords = 64; // 256 bytes: word 0 = stamp
++static_assert(TileWords == 24, "the shaders read 24 words per tile, 8 per list");
++
++const bool g_tilesOff = [] {
++  const char* v = std::getenv("AURORA_ENH_TILES");
++  return v != nullptr && std::atoi(v) == 0;
++}();
++const uint32_t g_tileMin = [] {
++  const char* v = std::getenv("AURORA_ENH_TILE_MIN");
++  return v != nullptr ? uint32_t(std::max(std::atoi(v), 1)) : 4u;
++}();
++const bool g_tileShow = std::getenv("AURORA_ENH_TILE_SHOW") != nullptr;
++// AURORA_ENH_TILES_AB=<n>: tiles on and off in turns of n recorded frames (logged), to compare one
++// held frame both ways (e.g. a frozen game presenting its last tape).
++const uint32_t g_tilesAb = [] {
++  const char* v = std::getenv("AURORA_ENH_TILES_AB");
++  return v != nullptr ? uint32_t(std::max(std::atoi(v), 0)) : 0u;
++}();
++uint32_t g_tileRecFrames = 0;
++bool g_tilesAbOff = false;
++const uint32_t g_tileLog = [] {
++  const char* v = std::getenv("AURORA_ENH_TILE_LOG");
++  return v != nullptr ? uint32_t(std::max(std::atoi(v), 1)) : 0u;
++}();
++
++// The projection (and viewport) a tile job is built for: every draw that reads it must use it.
++struct TileCam {
++  float p[8]{}; // P00 P11 P02 P12 P03 P13 A B
++  Viewport vp{};
++  bool operator==(const TileCam& o) const noexcept { return std::memcmp(this, &o, sizeof(TileCam)) == 0; }
++};
++TileCam tile_cam() noexcept {
++  const auto& st = gx::g_gxState;
++  const auto& p = st.proj;
++  TileCam c;
++  const float v[8] = {p.m0.x(), p.m1.y(), p.m0.z(), p.m1.z(), p.m0.w(), p.m1.w(), p.m2.z(), p.m2.w()};
++  std::memcpy(c.p, v, sizeof v);
++  c.vp = st.renderViewport;
++  return c;
++}
++// FIFO thread: the job of the current EFB pass (made by the first draw that reads tiles).
++struct TileState {
++  bool valid = false;
++  bool fresh = false; // draws read it since the last queued job
++  uint32_t pass = UINT32_MAX;
++  uint32_t stamp = 0, gen = 0;
++  TileCam cam{};
++  Range lights{};
++  uint32_t count = 0;
++  uint32_t base = 0, shift = 4, tx = 0, ty = 0; // header word in the mask buffer, tile grid
++};
++TileState g_tile;
++uint32_t g_tileCounter = 0;
++uint32_t g_tileUniformPass = UINT32_MAX; // pass of the last enhanced uniform built with tiles
++uint32_t g_tileJobs = 0, g_tileLost = 0, g_tileDepthJobs = 0, g_tileFrames = 0; // AURORA_ENH_TILE_LOG
++
++struct TileUniform {
++  float proj[4];  // P00 P11 P02 P12
++  float projz[4]; // A B P03 P13
++  float vp[4];    // render viewport x y w h (target pixels)
++  float dr[4];    // viewport min / max depth (as stored), target pixels per depth texel, depth valid
++  uint32_t dims[4]; // tiles x, y, shift, light count
++  uint32_t info[4]; // light base (storage-buffer words), header (mask-buffer words), stamp, 0
++};
++static_assert(sizeof(TileUniform) == 96);
++struct TileJob {
++  Range uniform{};
++  uint32_t tx = 0, ty = 0;
++  bool depth = false;
++};
++
++constexpr std::string_view TileShader = R"""(
++struct TileU {
++  proj: vec4f,
++  projz: vec4f,
++  vp: vec4f,
++  dr: vec4f,
++  dims: vec4u,
++  info: vec4u,
++};
++@group(0) @binding(0) var<uniform> tu: TileU;
++@group(0) @binding(1) var<storage, read> lb: array<u32>;
++@group(0) @binding(2) var tdepth: texture_2d<f32>;
++@group(0) @binding(3) var<storage, read_write> ob: array<u32>;
++var<workgroup> wz: array<atomic<u32>, 2>;
++var<workgroup> wbits: array<atomic<u32>, 24>;
++// View z of a stored depth (depth = A + B / z, as fx view_pos); 1 (behind) when undefined.
++fn tile_view_z(d: f32) -> f32 {
++  let dn = (d - tu.dr.x) / max(tu.dr.y - tu.dr.x, 1e-6);
++  let den = dn - tu.projz.x;
++  if (abs(den) < 1e-12) { return 1.0; }
++  return tu.projz.y / den;
++}
++// The sphere (c, r) is not entirely on the outer side of the plane n.x + d = 0.
++fn tile_plane(n: vec3f, d: f32, c: vec3f, r: f32) -> bool {
++  let l = length(n);
++  return l < 1e-12 || dot(n, c) + d >= -r * l;
++}
++@compute @workgroup_size(8, 8)
++fn cs_tiles(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) lid: vec3u,
++            @builtin(local_invocation_index) li: u32) {
++  if (li == 0u) {
++    atomicStore(&wz[0], 0x7F7FFFFFu);
++    atomicStore(&wz[1], 0u);
++  }
++  if (li < 24u) { atomicStore(&wbits[li], 0u); }
++  workgroupBarrier();
++  let ts = f32(1u << tu.dims.z);
++  let p0 = vec2f(wg.xy) * ts;
++  let p1 = p0 + vec2f(ts);
++  if (tu.dr.w > 0.5) {
++    // The pre-pass depth texels under the tile and one more around it (the pre-pass is rendered at
++    // the mask's resolution: a surface the EFB pass sees between its texels lies within them).
++    let dims = vec2i(textureDimensions(tdepth));
++    let s = max(tu.dr.z, 1e-3);
++    let d0 = vec2i(floor(p0 / s)) - vec2i(1);
++    let d1 = vec2i(ceil(p1 / s)) + vec2i(1);
++    for (var y = d0.y + i32(lid.y); y < d1.y; y += 8) {
++      for (var x = d0.x + i32(lid.x); x < d1.x; x += 8) {
++        let c = clamp(vec2i(x, y), vec2i(0), dims - vec2i(1));
++        let b = bitcast<u32>(max(textureLoad(tdepth, c, 0).r, 0.0));
++        atomicMin(&wz[0], b);
++        atomicMax(&wz[1], b);
++      }
++    }
++  }
++  workgroupBarrier();
++  // The surfaces' view z range (in front: z < 0; nearest = largest z); unbounded without depth.
++  var zn = 1e30;
++  var zf = -1e30;
++  if (tu.dr.w > 0.5) {
++    let za = tile_view_z(bitcast<f32>(atomicLoad(&wz[0])));
++    let zb = tile_view_z(bitcast<f32>(atomicLoad(&wz[1])));
++    if (za < 0.0 && zb < 0.0 && za > -1e29 && zb > -1e29) {
++      zn = max(za, zb);
++      zf = min(za, zb);
++    }
++  }
++  // 64 threads, the lights in turns (li, li + 64, ...)
++  for (var i = li; i < tu.dims.w; i += 64u) {
++    let b = tu.info.x + i * 24u;
++    var k0 = true;
++    var k1 = true;
++    var k2 = true;
++    if ((lb[b + 8u] & 32u) == 0u) { // (directional lights reach every tile)
++      let c = vec3f(bitcast<f32>(lb[b]), bitcast<f32>(lb[b + 1u]), bitcast<f32>(lb[b + 2u]));
++      // the shader's reach (radius at least 1), a little wider for rounding
++      let r = max(bitcast<f32>(lb[b + 3u]), 1.0) * 1.002 + 0.5;
++      // The tile's NDC rectangle and its four side planes (clip = P x view, w = -z):
++      // ndc.x >= x0  <=>  P00 x + (P02 + x0) z + P03 >= 0, and so on.
++      let x0 = (p0.x - tu.vp.x) / tu.vp.z * 2.0 - 1.0;
++      let x1 = (p1.x - tu.vp.x) / tu.vp.z * 2.0 - 1.0;
++      let yt = 1.0 - (p0.y - tu.vp.y) / tu.vp.w * 2.0;
++      let yb = 1.0 - (p1.y - tu.vp.y) / tu.vp.w * 2.0;
++      let side = c.z - r < 0.0 &&
++                 tile_plane(vec3f(tu.proj.x, 0.0, tu.proj.z + x0), tu.projz.z, c, r) &&
++                 tile_plane(vec3f(-tu.proj.x, 0.0, -(tu.proj.z + x1)), -tu.projz.z, c, r) &&
++                 tile_plane(vec3f(0.0, tu.proj.y, tu.proj.w + yb), tu.projz.w, c, r) &&
++                 tile_plane(vec3f(0.0, -tu.proj.y, -(tu.proj.w + yt)), -tu.projz.w, c, r);
++      let front = c.z + r >= zf - (4.0 + 0.02 * abs(zf)); // not wholly behind the farthest surface
++      let back = c.z - r <= zn + (4.0 + 0.02 * abs(zn));  // not wholly in front of the nearest
++      k0 = side && front && back;
++      k1 = side && front;
++      k2 = side;
++    }
++    let bit = 1u << (i & 31u);
++    let w = i >> 5u;
++    if (k0) { atomicOr(&wbits[w], bit); }
++    if (k1) { atomicOr(&wbits[8u + w], bit); }
++    if (k2) { atomicOr(&wbits[16u + w], bit); }
++  }
++  workgroupBarrier();
++  let tile = wg.y * tu.dims.x + wg.x;
++  if (li < 24u) { ob[tu.info.y + 64u + tile * 24u + li] = atomicLoad(&wbits[li]); }
++  if (li == 0u && tile == 0u) { ob[tu.info.y] = tu.info.z; }
++}
++)""";
++
++wgpu::ComputePipeline g_tilePipe;
++wgpu::BindGroupLayout g_tileBgl;
++bool g_tileInit = false;
++
++bool init_tiles() {
++  const std::lock_guard initLock{g_initMutex}; // 0223
++  if (g_tileInit) {
++    return bool(g_tilePipe);
++  }
++  g_tileInit = true;
++  const std::string code{TileShader};
++  const wgpu::ShaderSourceWGSL wgsl{{.code = code.c_str()}};
++  const wgpu::ShaderModuleDescriptor moduleDesc{.nextInChain = &wgsl, .label = "Enhanced light tiles"};
++  const auto module = webgpu::g_device.CreateShaderModule(&moduleDesc);
++  const std::array entries{
++      wgpu::BindGroupLayoutEntry{.binding = 0,
++                                 .visibility = wgpu::ShaderStage::Compute,
++                                 .buffer = {.type = wgpu::BufferBindingType::Uniform, .minBindingSize = sizeof(TileUniform)}},
++      wgpu::BindGroupLayoutEntry{.binding = 1,
++                                 .visibility = wgpu::ShaderStage::Compute,
++                                 .buffer = {.type = wgpu::BufferBindingType::ReadOnlyStorage}},
++      wgpu::BindGroupLayoutEntry{.binding = 2,
++                                 .visibility = wgpu::ShaderStage::Compute,
++                                 .texture = {.sampleType = wgpu::TextureSampleType::UnfilterableFloat,
++                                             .viewDimension = wgpu::TextureViewDimension::e2D}},
++      wgpu::BindGroupLayoutEntry{.binding = 3,
++                                 .visibility = wgpu::ShaderStage::Compute,
++                                 .buffer = {.type = wgpu::BufferBindingType::Storage}},
++  };
++  const wgpu::BindGroupLayoutDescriptor bglDesc{.label = "Enhanced light tiles", .entryCount = entries.size(), .entries = entries.data()};
++  g_tileBgl = webgpu::g_device.CreateBindGroupLayout(&bglDesc);
++  const wgpu::PipelineLayoutDescriptor plDesc{.label = "Enhanced light tiles", .bindGroupLayoutCount = 1, .bindGroupLayouts = &g_tileBgl};
++  const wgpu::ComputePipelineDescriptor desc{
++      .label = "Enhanced light tiles",
++      .layout = webgpu::g_device.CreatePipelineLayout(&plDesc),
++      .compute = {.module = module, .entryPoint = "cs_tiles"},
++  };
++  const ::aurora::webgpu::CreateTimer createTimer{"pipeline enhanced.cpp light tiles"}; // 0223 (AURORA_CREATE_LOG)
++  g_tilePipe = webgpu::g_device.CreateComputePipeline(&desc);
++  if (!g_tilePipe) {
++    Log.error("Light tile pass failed to build; every pixel loops over all extra lights");
++  }
++  return bool(g_tilePipe);
++}
++
++// Render worker: the job queued before its EFB pass (after that pass's mask, whose pre-pass depth
++// it reads when `depth`).
++void encode_tiles(const wgpu::CommandEncoder& cmd, const TileJob& job) {
++  if (!init_gpu() || !init_tiles()) {
++    return;
++  }
++  if (job.depth && !g_gpu.maskDepthR.view) {
++    return; // (no stamp written: the pass's draws take the full loop)
++  }
++  const std::array entries{
++      wgpu::BindGroupEntry{.binding = 0, .buffer = detail::resources().uniformBuffer, .offset = job.uniform.offset, .size = sizeof(TileUniform)},
++      wgpu::BindGroupEntry{.binding = 1, .buffer = detail::resources().storageBuffer},
++      wgpu::BindGroupEntry{.binding = 2, .textureView = job.depth ? g_gpu.maskDepthR.view : g_gpu.dummyDepth.view},
++      wgpu::BindGroupEntry{.binding = 3, .buffer = detail::resources().maskBuffer},
++  };
++  const wgpu::BindGroupDescriptor bgDesc{.label = "Enhanced light tiles", .layout = g_tileBgl, .entryCount = entries.size(), .entries = entries.data()};
++  const wgpu::ComputePassDescriptor passDesc{.label = "Enhanced light tiles",
++                                             .timestampWrites = webgpu::gpu_prof::pass_writes("Enhanced light tiles")};
++  const auto pass = cmd.BeginComputePass(&passDesc);
++  pass.SetPipeline(g_tilePipe);
++  pass.SetBindGroup(0, webgpu::g_device.CreateBindGroup(&bgDesc));
++  pass.DispatchWorkgroups(job.tx, job.ty);
++  pass.End();
++}
++
++// FIFO thread (draw_uniform): the current pass's tile job for this draw, made by its first draw.
++// False: this draw runs the full loop (its camera or the light set differs from the job's, or the
++// grid does not fit into the mask buffer).
++bool tile_prepare(uint32_t pass) noexcept {
++  const TileCam cam = tile_cam();
++  if (g_tile.valid && g_tile.pass == pass) {
++    return g_tile.gen == g_lightGen && g_tile.count == g_lightCount && g_tile.cam == cam;
++  }
++  if (g_tile.valid && g_tile.fresh) {
++    ++g_tileLost; // the previous pass ended without a flush: its draws took the full loop
++  }
++  g_tile.valid = false;
++  const auto size = get_render_target_size();
++  if (size.x == 0 || size.y == 0) {
++    return false;
++  }
++  // After the mask planes (as reserved this frame, or as they would be).
++  const auto [mw, mh] = mask_size(size.x, size.y, g_cfg);
++  uint64_t used = uint64_t(AURORA_ALIGN(mw * 4, 256u)) * mh * MaskPlanes;
++  if (g_maskReserved) {
++    used = std::max(used, uint64_t(g_maskPitch) * 4 * g_maskH * MaskPlanes);
++  }
++  used = AURORA_ALIGN(used, uint64_t(256));
++  uint32_t shift = 5, tx = 0, ty = 0;
++  for (;; ++shift) {
++    if (shift > 7) {
++      return false;
++    }
++    tx = (size.x + (1u << shift) - 1) >> shift;
++    ty = (size.y + (1u << shift) - 1) >> shift;
++    if (tx <= 0xFFFFu && ty <= 0xFFFFu && used + (uint64_t(TileHeaderWords) + uint64_t(tx) * ty * TileWords) * 4 <= MaskBufferSize) {
++      break;
++    }
++  }
++  if (++g_tileCounter == 0) {
++    ++g_tileCounter;
++  }
++  g_tile = {.valid = true,
++            .fresh = false,
++            .pass = pass,
++            .stamp = g_tileCounter,
++            .gen = g_lightGen,
++            .cam = cam,
++            .lights = g_lightRange,
++            .count = g_lightCount,
++            .base = uint32_t(used / 4),
++            .shift = shift,
++            .tx = tx,
++            .ty = ty};
++  return true;
++}
++
++// FIFO thread (flush_shadows: before an EFB copy or the scene end): queues the current pass's tile
++// job if draws read it since the last one. `depth`: this flush queued a mask job (its pre-pass
++// depth holds every opaque world draw of the frame so far).
++void flush_tiles(bool depth) noexcept {
++  if (!g_tile.valid || !g_tile.fresh) {
++    return;
++  }
++  if (g_tile.pass != next_command_position().first) {
++    ++g_tileLost;
++    g_tile.valid = false;
++    return;
++  }
++  const auto size = get_render_target_size();
++  depth = depth && g_maskReserved && g_maskW > 0;
++  TileUniform u{};
++  const auto& c = g_tile.cam;
++  u.proj[0] = c.p[0];
++  u.proj[1] = c.p[1];
++  u.proj[2] = c.p[2];
++  u.proj[3] = c.p[3];
++  u.projz[0] = c.p[6];
++  u.projz[1] = c.p[7];
++  u.projz[2] = c.p[4];
++  u.projz[3] = c.p[5];
++  u.vp[0] = c.vp.left;
++  u.vp[1] = c.vp.top;
++  u.vp[2] = std::max(c.vp.width, 1.f);
++  u.vp[3] = std::max(c.vp.height, 1.f);
++  u.dr[0] = gx::UseReversedZ ? 1.f - c.vp.zfar : c.vp.znear;
++  u.dr[1] = gx::UseReversedZ ? 1.f - c.vp.znear : c.vp.zfar;
++  u.dr[2] = depth ? float(size.x) / float(g_maskW) : 1.f;
++  u.dr[3] = depth ? 1.f : 0.f;
++  u.dims[0] = g_tile.tx;
++  u.dims[1] = g_tile.ty;
++  u.dims[2] = g_tile.shift;
++  u.dims[3] = g_tile.count;
++  u.info[0] = uint32_t(g_tile.lights.offset / 4);
++  u.info[1] = g_tile.base;
++  u.info[2] = g_tile.stamp;
++  TileJob job{.uniform = push_uniform(reinterpret_cast<const uint8_t*>(&u), sizeof(u)), .tx = g_tile.tx, .ty = g_tile.ty, .depth = depth};
++  std::vector<efb_ram::PassOp> ops;
++  ops.emplace_back([job](const wgpu::CommandEncoder& cmd, detail::FramePacket&) { encode_tiles(cmd, job); });
++  if (queue_pre_pass_ops(std::move(ops))) {
++    g_tile.fresh = false;
++    ++g_tileJobs;
++    g_tileDepthJobs += depth ? 1 : 0;
++  }
++}
++
+ } // namespace
+ 
++bool tile_uniform_stale() noexcept {
++  return g_tileUniformPass != UINT32_MAX && next_command_position().first != g_tileUniformPass;
++}
++
+ bool sync_config() noexcept {
+   const uint32_t gen = g_pendingGen.load(std::memory_order_acquire);
+   if (gen == g_cfgGen) {
+@@ -2855,9 +3232,10 @@ DrawUniform draw_uniform() noexcept {
+   if (c.perPixelLighting) {
+     u.flags |= 1u;
+   }
++  g_tileUniformPass = UINT32_MAX; // 0520
+   if (c.extraLights && g_lightCount > 0) {
+     if (!g_lightRangeValid) {
+-      std::array<uint32_t, MaxExtraLights * 24> words{};
++      static std::array<uint32_t, MaxExtraLights * 24> words{}; // (FIFO thread; 24 KB)
+       for (uint32_t i = 0; i < g_lightCount; ++i) {
+         const auto& l = g_lights[i];
+         uint32_t* w = &words[i * 24];
+@@ -2879,6 +3257,30 @@ DrawUniform draw_uniform() noexcept {
+     u.flags |= 2u;
+     u.lightBase = g_lightRange.offset / 4;
+     u.lightCount = g_lightCount;
++    // 0520: light tiles for draws of the EFB pass in its main camera.
++    const auto& ts = gx::g_gxState;
++    if (!g_tilesOff && !g_tilesAbOff && g_lightCount >= g_tileMin && ts.projType == GX_PERSPECTIVE && !is_offscreen()) {
++      const uint32_t pass = next_command_position().first;
++      g_tileUniformPass = pass;
++      if (tile_prepare(pass)) {
++        // The list by what the draw's visible surface can be: in the pre-pass (the same test as
++        // note_draw's), in front of it, or anywhere.
++        const bool pointShadows = g_shadowCount > 0 && c.extraShadows;
++        uint32_t list = 2;
++        if (ts.depthCompare) {
++          list = 1;
++          if (ts.drawClass == AURORA_DRAW_CLASS_WORLD && (pointShadows || ao_forward()) && ts.depthUpdate &&
++              !(ts.blendMode == GX_BM_BLEND && ts.blendFacDst == GX_BL_ONE) && g_depthDraws.size() + 1 < MaxDepthDraws) {
++            list = 0;
++          }
++        }
++        u.tileBase = g_tile.base;
++        u.tileStamp = g_tile.stamp;
++        u.tileDims = g_tile.tx | g_tile.ty << 16;
++        u.tileCfg = g_tile.shift | list << 8 | (g_tileShow ? 1u << 30 : 0u) | 1u << 31;
++        g_tile.fresh = true;
++      }
++    }
+   }
+   if (c.softShadows) {
+     u.flags |= 4u;
+@@ -3000,7 +3402,7 @@ void assign_shadow_slots() noexcept {
+ 
+ void set_lights(const ExtraLight* in, uint32_t count) noexcept {
+   // 0196: world-anchor pseudo-lights are taken out of the set.
+-  std::array<ExtraLight, MaxExtraLights> real{};
++  static std::array<ExtraLight, MaxExtraLights> real{}; // (FIFO thread; 0520: 22 KB)
+   uint32_t n = 0;
+   uint32_t anchors = 0;
+   for (uint32_t i = 0; i < std::min(count, MaxExtraLights); ++i) {
+@@ -3887,7 +4289,8 @@ static void directional_records(const ExtraLight& l, uint32_t s, uint32_t cols,
+   xb[0] = 0.f, xb[1] = 0.f, xb[2] = fS, xb[3] = 1.f;
+ }
+ 
+-void flush_shadows() noexcept {
++// True: a mask job (with its depth pre-pass) was queued for the current pass.
++bool flush_mask() noexcept {
+   // The mask is computed before every EFB pass that added opaque world draws, from all of the
+   // frame's opaque world draws so far (the pass's own included: they are recorded, not yet run).
+   if (g_log && g_depthDraws.size() != g_depthFlushed) {
+@@ -3899,7 +4302,7 @@ void flush_shadows() noexcept {
+     }
+   }
+   if (g_depthDraws.size() == g_depthFlushed || !g_maskReserved || !g_camera.valid) {
+-    return;
++    return false;
+   }
+   for (size_t i = g_depthFlushed; i < g_depthDraws.size(); ++i) {
+     auto& g = g_depthDraws[i];
+@@ -4109,7 +4512,11 @@ void flush_shadows() noexcept {
+   ops.emplace_back([job = std::move(job)](const wgpu::CommandEncoder& cmd, detail::FramePacket&) {
+     encode_mask(cmd, job);
+   });
+-  queue_pre_pass_ops(std::move(ops));
++  return queue_pre_pass_ops(std::move(ops));
++}
++
++void flush_shadows() noexcept {
++  flush_tiles(flush_mask()); // 0520: the light tiles after the mask (they read its pre-pass depth)
+ }
+ 
+ void after_submit() noexcept {
+@@ -4180,6 +4587,24 @@ gx::DrawData* last_caster_only_draw() noexcept {
+ }
+ 
+ void begin_frame() noexcept {
++  // 0520: pass indices start again; a job never queued for the last pass is counted lost.
++  if (g_tile.valid && g_tile.fresh) {
++    ++g_tileLost;
++  }
++  g_tile.valid = false;
++  g_tileUniformPass = UINT32_MAX;
++  if (g_tilesAb != 0) {
++    const bool off = (g_tileRecFrames++ / g_tilesAb) % 2 == 1;
++    if (off != g_tilesAbOff) {
++      Log.info("light tiles A/B: {} from recorded frame {}", off ? "off (full loop)" : "on", g_tileRecFrames - 1);
++    }
++    g_tilesAbOff = off;
++  }
++  if (g_tileLog != 0 && ++g_tileFrames >= g_tileLog) {
++    Log.info("light tiles: {} jobs ({} with pre-pass depth), {} lost in {} frames; {} lights, grid {}x{} of {} px", g_tileJobs,
++             g_tileDepthJobs, g_tileLost, g_tileFrames, g_tile.count, g_tile.tx, g_tile.ty, 1u << g_tile.shift);
++    g_tileJobs = g_tileDepthJobs = g_tileLost = g_tileFrames = 0;
++  }
+   g_lastCasterOnly = SIZE_MAX;
+   g_statShadowClass.store(g_shadowClassDraws, std::memory_order_relaxed);
+   g_shadowClassDraws = 0;
+@@ -4556,6 +4981,9 @@ void run_prewarm(const PrewarmJob& j) {
+   const bool shadows = c.extraLights && c.extraShadows;
+   ensure_composite(j.format, j.msaa);
+   ensure_glow_depth_pipe();
++  if (c.extraLights && !g_tilesOff) {
++    init_tiles(); // 0520
++  }
+   if (shadows || ao) {
+     ensure_mask_pipes(ao);
+     init_dirty();
+diff --git a/lib/gfx/enhanced.hpp b/lib/gfx/enhanced.hpp
+index cbfa74f..a82e721 100644
+--- a/lib/gfx/enhanced.hpp
++++ b/lib/gfx/enhanced.hpp
+@@ -38,8 +38,13 @@ struct DrawUniform {
+   float beamDref2 = 0.f;
+   float beamFloor = 0.f;
+   float beamRings = 0.f;
++  // 0520: light tiles (enhanced.cpp "Light tiles"; 0 = the full light loop)
++  uint32_t tileBase = 0;  // u32 index of the tile header in the mask buffer
++  uint32_t tileStamp = 0; // the header must hold it (else the full loop)
++  uint32_t tileDims = 0;  // tiles x | y << 16
++  uint32_t tileCfg = 0;   // shift | list << 8 | 1 << 31
+ };
+-static_assert(sizeof(DrawUniform) == 80);
++static_assert(sizeof(DrawUniform) == 96);
+ 
+ // --- FIFO thread ---
+ // Takes a newly set configuration; true when it changed (pipelines must be re-derived).
+@@ -51,6 +56,9 @@ const AuroraEnhancedConfig& config() noexcept;
+ uint8_t shader_class(const gx::ShaderConfig& sc, uint8_t drawClass, bool blended, bool additive) noexcept;
+ // Per-draw uniform block (pushes this frame's extra lights into the storage buffer on first use).
+ DrawUniform draw_uniform() noexcept;
++// 0520: the cached uniform of an enhanced draw refers to the light tiles of another render pass
++// (a new EFB pass began since it was built): it must be built again.
++bool tile_uniform_stale() noexcept;
+ // GX_AURORA_SET_EXTRA_LIGHTS.
+ void set_lights(const ExtraLight* lights, uint32_t count) noexcept;
+ // A draw is about to be recorded while the mode is on (world class: camera projection /
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+index 8b41e8e..5cb66fa 100644
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -361,7 +361,8 @@ s64 aurora_payload_len(u16 subCmd, const u8* p, size_t avail) noexcept {
+   case GX_AURORA_SET_REPLAY_MASK:
+     return fixed(1);
+   case GX_AURORA_SET_EXTRA_LIGHTS:
+-    return avail >= 1 && p[0] <= gfx::MaxExtraLights ? fixed(1 + s64(p[0]) * GX_AURORA_EXTRA_LIGHT_WORDS * 4) : -1;
++    // 0520: u16 count
++    return avail >= 2 && be16(p) <= gfx::MaxExtraLights ? fixed(2 + s64(be16(p)) * GX_AURORA_EXTRA_LIGHT_WORDS * 4) : -1;
+   case GX2_SET_POLYGON_OFFSET:
+     return fixed(20);
+   case GX_AURORA_DRAW_SIZED: {
+@@ -1268,6 +1269,9 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
+     }
+   }
+ 
++  if (cache.shaderInfo.enh && gfx::enhanced::tile_uniform_stale()) {
++    state.dirty |= DirtyUniform; // 0520: light tiles of the current pass
++  }
+   const bool uniformValid = (state.dirty & DirtyUniform) == 0 && cache.uniformRange.size != 0;
+   if (!uniformValid) {
+     cache.uniformRange = build_uniform(cache.shaderInfo);
+@@ -1809,8 +1813,8 @@ void handle_aurora(ByteReader& reader) noexcept {
+       g_gxState.dirty |= DirtyUniform;
+     }
+   } else if (subCmd == GX_AURORA_SET_EXTRA_LIGHTS) {
+-    const u32 count = std::min<u32>(reader.read<u8>(), gfx::MaxExtraLights);
+-    std::array<gfx::ExtraLight, gfx::MaxExtraLights> lights{};
++    const u32 count = std::min<u32>(reader.read<u16>(), gfx::MaxExtraLights); // 0520: u16
++    static std::array<gfx::ExtraLight, gfx::MaxExtraLights> lights{}; // (FIFO thread only; 22 KB)
+     for (u32 i = 0; i < count; ++i) {
+       auto& l = lights[i];
+       for (float& v : l.pos) v = reader.read<f32>();
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index 7ef1093..3f15669 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1065,23 +1065,21 @@ fn enh_dir_light(b: u32, p: vec3f, n: vec3f, ghost: bool, frag: vec2f, flags: u3
+   let col = vec3f(enh_ld(b + 4u), enh_ld(b + 5u), enh_ld(b + 6u)) * enh_ld(b + 7u);
+   return col * (ndl * (1.0 - sh));
+ }
+-fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
+-  var sum = vec3f(0.0);
+-  let cnt = min(ubuf.enh_light_count, 64u);
+-  let v = normalize(-p);
+-  for (var i = 0u; i < cnt; i++) {
++// 0520: one extra light `i` added to `sum` (the former loop body; adds in the same order, so the
++// tiled and the full loop give the same sum for the same lights).
++fn enh_xl_one(i: u32, p: vec3f, n: vec3f, v: vec3f, ghost: bool, frag: vec2f, sum: ptr<function, vec3f>) {
+     let b = ubuf.enh_light_base + i * 24u;
+     if ((abuf[b + 8u] & 32u) != 0u) {
+-      if (!ghost || (abuf[b + 8u] & 2u) != 0u) { sum = sum + enh_dir_light(b, p, n, ghost, frag, abuf[b + 8u]); }
+-      continue;
++      if (!ghost || (abuf[b + 8u] & 2u) != 0u) { *sum = *sum + enh_dir_light(b, p, n, ghost, frag, abuf[b + 8u]); }
++      return;
+     }
+     // 0213: the reach test first (most lights miss a given pixel), then the flags.
+     let d = vec3f(enh_ld(b), enh_ld(b + 1u), enh_ld(b + 2u)) - p;
+     let radius = max(enh_ld(b + 3u), 1.0);
+     let dist2 = dot(d, d);
+-    if (dist2 >= radius * radius) { continue; }
++    if (dist2 >= radius * radius) { return; }
+     let flags = abuf[b + 8u];
+-    if (ghost && (flags & 2u) == 0u) { continue; }
++    if (ghost && (flags & 2u) == 0u) { return; }
+     let l = d * inverseSqrt(max(dist2, 1e-6));
+     let x2 = dist2 / (radius * radius);
+     let w = (1.0 - x2) * (1.0 - x2);
+@@ -1097,7 +1095,7 @@ fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
+         ex[k] = max(abs(dot(q, ax)) / al - al, 0.0);
+       }
+       fall = fall * (1.0 - smoothstep(0.0, 24.0, length(ex)));
+-      if (fall <= 0.0) { continue; }
++      if (fall <= 0.0) { return; }
+     }
+     var ndl = dot(n, l);
+     ndl = select(max(ndl, 0.0), ndl * 0.5 + 0.5, ghost);
+@@ -1118,10 +1116,47 @@ fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
+       let sw = (flags >> 8u) & 0xFFu;
+       col = col * (1.0 - enh_mask(frag, slot) * select(1.0, f32(sw) / 255.0, sw != 0u));
+     }
+-    sum = sum + col * (ndl * fall);
++    *sum = *sum + col * (ndl * fall);
+     if ((flags & 4u) != 0u && ubuf.enh_material < 0.5) {
+       let h = normalize(l + v);
+-      sum = sum + col * (fall * 0.35 * pow(max(dot(n, h), 0.0), 24.0));
++      *sum = *sum + col * (fall * 0.35 * pow(max(dot(n, h), 0.0), 24.0));
++    }
++}
++fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
++  var sum = vec3f(0.0);
++  let cnt = min(ubuf.enh_light_count, 256u);
++  let v = normalize(-p);
++  // 0520: light tiles. The tile pass (enhanced.cpp "Light tiles") wrote, per 2^shift px screen
++  // tile, three 256-bit masks of the lights that can reach a surface there (list 0: depth range of
++  // the pre-pass, list 1: anything in front of its farthest surface, list 2: no depth test), and
++  // its stamp into the header. Lights are visited in index order, as in the full loop. Without a
++  // matching stamp (the pass never got its tile job) the full loop runs.
++  let tc = ubuf.enh_tile_cfg;
++  if ((tc & 0x80000000u) != 0u && mbuf[ubuf.enh_tile_base] == ubuf.enh_tile_stamp) {
++    let shift = tc & 31u;
++    let td = vec2u(ubuf.enh_tile_dims & 0xFFFFu, ubuf.enh_tile_dims >> 16u);
++    let t = min(vec2u(max(frag, vec2f(0.0))) >> vec2u(shift), td - vec2u(1u));
++    let lb = ubuf.enh_tile_base + 64u + (t.y * td.x + t.x) * 24u + ((tc >> 8u) & 3u) * 8u;
++    let nw = (cnt + 31u) / 32u;
++    var vis = 0u;
++    for (var w = 0u; w < nw; w++) {
++      var bits = mbuf[lb + w];
++      vis = vis + countOneBits(bits);
++      loop {
++        if (bits == 0u) { break; }
++        let i = w * 32u + firstTrailingBit(bits);
++        bits = bits & (bits - 1u);
++        enh_xl_one(i, p, n, v, ghost, frag, &sum);
++      }
++    }
++    if ((tc & 0x40000000u) != 0u) {
++      // AURORA_ENH_TILE_SHOW: lights visited here (blue 1-8, green ~16, red 32+)
++      let h = f32(vis);
++      return vec3f(clamp((h - 16.0) / 16.0, 0.0, 1.0), clamp(1.0 - abs(h - 16.0) / 12.0, 0.0, 1.0), clamp(h / 8.0, 0.0, 1.0) * clamp((16.0 - h) / 8.0, 0.0, 1.0)) * 2.0;
++    }
++  } else {
++    for (var i = 0u; i < cnt; i++) {
++      enh_xl_one(i, p, n, v, ghost, frag, &sum);
+     }
+   }
+   return sum * ubuf.enh_extra_scale;
+@@ -2573,7 +2608,13 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+         "\n    enh_beam_gain: f32,"
+         "\n    enh_beam_dref2: f32,"
+         "\n    enh_beam_floor: f32,"
+-        "\n    enh_beam_rings: f32,";
++        "\n    enh_beam_rings: f32,"
++        // 0520: light tiles (enh_extra_lights): header word in mbuf, the stamp it must hold,
++        // tiles x | y << 16, shift | list << 8 | on << 31.
++        "\n    enh_tile_base: u32,"
++        "\n    enh_tile_stamp: u32,"
++        "\n    enh_tile_dims: u32,"
++        "\n    enh_tile_cfg: u32,";
+   }
+   if (config.intTev) {
+     // Already wrapped to 8 bits after the last stage.

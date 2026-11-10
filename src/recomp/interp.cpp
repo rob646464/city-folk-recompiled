@@ -1833,15 +1833,17 @@ u32 mark() { return capturing() ? sBase + AuroraCapturePos() : ~0u; }
 
 void noteExtraLights(u32 at, u32 count) {
     if (at == ~0u || !capturing() || count == 0) return;
-    // GX_AURORA (0x50), u16 GX_AURORA_SET_EXTRA_LIGHTS, u8 count, then the lights.
-    const u32 end = at + 4 + count * GX_AURORA_EXTRA_LIGHT_WORDS * 4;
-    if (end > sBase + AuroraCapturePos() || sScratch[at] != 0x50 || sScratch[at + 3] != count) return;
-    sLights.emplace_back(at + 4, count);
+    // GX_AURORA (0x50), u16 GX_AURORA_SET_EXTRA_LIGHTS, u16 count (Aurora 0520; was u8: 64 lights
+    // at most before), then the lights.
+    constexpr u32 kHead = 5;
+    const u32 end = at + kHead + count * GX_AURORA_EXTRA_LIGHT_WORDS * 4;
+    if (end > sBase + AuroraCapturePos() || sScratch[at] != 0x50 || (u32(sScratch[at + 3]) << 8 | sScratch[at + 4]) != count) return;
+    sLights.emplace_back(at + kHead, count);
     // Identity of each light: the providing code's id (ghost actor, emitter, fixed source) and, for
     // an id that is a guest object's address, that object's generation: a light of a new ghost or
     // emitter at a reused address is another light.
     for (u32 i = 0; i < count; i++) {
-        const u8* l = sScratch.data() + at + 4 + i * GX_AURORA_EXTRA_LIGHT_WORDS * 4;
+        const u8* l = sScratch.data() + at + kHead + i * GX_AURORA_EXTRA_LIGHT_WORDS * 4;
         const u32 id = u32(l[36]) << 24 | u32(l[37]) << 16 | u32(l[38]) << 8 | l[39];
         u32 obj = id;
         if (!(obj >= 0x80000000u && obj < 0x81800000u)) obj = id ^ 0x57000000u;  // world lights: emitter
