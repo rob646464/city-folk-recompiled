@@ -1064,6 +1064,11 @@ void enhancedLightingTab() {
     sDirty |= recomp::menu::SliderFloat("Light vibrance##furniture", &l.furnitureVibrance, 0.0f, 2.5f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
     ImGui::SetItemTooltip("How saturated the furniture lights' colour is: flames deep orange-red, screens in their\n"
                           "picture's colour. 1 = the colour as the source gives it; higher = punchier coloured pools.");
+    sDirty |= recomp::menu::SliderFloat("Rim light", &l.rimLight, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetItemTooltip("Characters (and, subtler, furniture) standing against a lamp, candle or screen pick up\n"
+                          "its colour on the edges facing away from you: a pink rim on one side and a blue one on the\n"
+                          "other between two lamps instead of a dark silhouette. Outdoors at night street lamps,\n"
+                          "windows and fireflies give a fainter rim. 0 = off.");
     sDirty |= recomp::menu::SliderFloat("Room ambient under lamps", &l.furnitureNightAmbient, 0.05f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
     ImGui::SetItemTooltip("Indoors at night while lamps or candles are lit: how much of the game's own room light\n"
                           "stays (1 = all of it). Lower makes the room around the lamps darker and their coloured\n"

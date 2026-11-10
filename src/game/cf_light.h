@@ -23,7 +23,11 @@ bool hasModel(u32 scnObj);      // a g3d object with a ResMdl (MDL0)
 bool isLightModel(u32 scnObj);  // a model of light itself (sun_*: a window's light shafts / floor patch)
 // Indoors: a g3d object that casts shadows (a model that is not light itself; ScnProcs without a
 // model are the room background).
-bool castsIndoors(u32 scnObj, u32 task);  // task: the G3dProc task (6 opa, 7 xlu: translucent parts never cast)
+bool castsIndoors(u32 scnObj, u32 task);
+// Rim-light kind of a g3d object (branch indoor-light): 1 a character (a model name without '_', up
+// to 8 characters: the player 'boy' / 'girl', villagers' species codes), 2 furniture ('int_*'),
+// 0 anything else or with enhanced lighting / the rim light off.
+int rimKind(u32 scnObj);  // task: the G3dProc task (6 opa, 7 xlu: translucent parts never cast)
 // Test aids CF_INDOOR_LEGACY=1 / CF_INDOOR_AB=<n>: indoor lighting as before branch indoor-light
 // (always / in every other block of n frames, for same-frame A/B shots).
 bool indoorLegacy();

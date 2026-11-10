@@ -743,9 +743,9 @@ Light analyse(u32 mdl, const std::string& modelName, const ItemInfo* item) {
     // to 0 at the reach): a strong pool around the source with a short cut-off.
     const float size = std::max({bbHi[0] - bbLo[0], bbHi[1] - bbLo[1], bbHi[2] - bbLo[2]});
     //                             none  lamp  screen fire  water neon  lava
-    static const float kInt[7] = {3.4f, 6.5f, 3.4f, 6.0f, 0.0f, 5.0f, 5.0f};
+    static const float kInt[7] = {3.0f, 5.6f, 3.0f, 5.4f, 0.0f, 4.4f, 4.4f};  // (pass 4: a touch less than pass 3)
     static const float kCore[7] = {0.09f, 0.12f, 0.14f, 0.09f, 0.1f, 0.10f, 0.10f};
-    static const float kReach[7] = {220.0f, 360.0f, 230.0f, 380.0f, 0.0f, 260.0f, 260.0f};
+    static const float kReach[7] = {220.0f, 320.0f, 230.0f, 380.0f, 0.0f, 250.0f, 250.0f};
     L.radius = kReach[kind] + std::min(size, 80.0f);
     L.intensity = kInt[kind];
     L.core = kCore[kind];
@@ -936,6 +936,10 @@ void submit(const float* view, bool viewValid) {
         l.flags = aurora::gfx::ExtraLightTranslucent | (L.kind == KFire ? aurora::gfx::ExtraLightFire : 0u) |
                   (L.shadow && s.furnitureLightShadows ? aurora::gfx::ExtraLightCastShadows : 0u) | aurora::gfx::ExtraLightPhysical;
         l.box[0] = L.core;
+        if (s.rimLight > 0.0f) {  // coloured rim on characters / furniture (Aurora 0520a)
+            l.flags |= aurora::gfx::ExtraLightRim;
+            l.box[11] = 1.3f * std::clamp(s.rimLight, 0.0f, 2.0f);
+        }
         if (legacy) {
             std::memcpy(l.color, L.oldColor, sizeof l.color);
             l.radius = L.oldRadius * (std::isfinite(scale) && scale > 0.1f && scale < 10.0f ? scale : 1.0f);

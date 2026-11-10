@@ -1275,6 +1275,25 @@ must add up, colours blend):
 - **True 4K shots**: `CF_RENDER_SCALE=4.7369` (docs/CONTROLS.md "Test aids"), or `--window 3840x2160`
   with `resolution_scale=0` (run.ps1 `-ExtraArgs`).
 
+**Fourth pass** (user: pass 3 "very good and what I'm looking for, but perhaps a bit too intense,
+bring it down a touch"; yes to rim light):
+- A touch less: "Light vibrance" 2.05 (was 2.4), lamps 5.6 / reach 320 + size (6.5 / 360), fires
+  5.4, screens 3.0, lava / neon 4.4 / 250; the indoor grade under lamps saturation x 1.15 (1.3),
+  contrast x 1.14 (1.18). The candle (7.0, reach 180, deep orange) unchanged.
+- **Rim light** (Aurora **0520a**, after 0520 because it lives in the light-tiles loop
+  `enh_xl_one`; the name keeps the 0520 number free and sorts right after it): point lights flagged
+  `ExtraLightRim` (bit 16, strength in `box[11]`) add, after the TEV (so the rim shows on dark hair
+  and cloth too), `0.25 x colour x the reach window (1 - x^2)^2 (not the inverse square) x Fresnel^3 (1 - N.V) x
+  back (0.4 - 0.6 L.V: from the side, strongest from behind) x side (N.L wrapped) x strength` on
+  draws with the new material hints `AURORA_MATERIAL_WORLD_RIM` (4, characters, enh_material 0.25)
+  and `_RIM_SOFT` (5, furniture, 0.125, a third). Both shade exactly like world draws otherwise
+  (every `enh_material < 0.5` test), so nothing else changes for them. cf_tags.cpp objectScope sets
+  the hint per g3d object (cflight::rimKind: a model name without '_' of up to 8 characters = a
+  character: the player 'boy' / 'girl', villagers' species codes; 'int_*' = furniture); walls,
+  floors and structures never take it. Strength: furniture lights 1.3 x, night lights (windows,
+  street lamps) and fireflies / fireworks 0.4 x F1 **"Rim light"** (`rim_light`, 1.0; 0 = off).
+  Outdoors by day there are no point lights: unchanged.
+
 **Checked (first pass, before the user's review; 2026-11-09 after merging main d8f7225)**: A/B
 runs with the user's settings, new vs `CF_INDOOR_LEGACY=1`, same route and frames: the house by
 day (the player's and the box's key-light shadows fall to the right), at night with the candle off

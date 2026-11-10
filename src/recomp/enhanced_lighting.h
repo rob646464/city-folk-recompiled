@@ -56,6 +56,10 @@ void setShadowOnly(bool on);
 // light over a wall does not put the room in that wall's shadow. Reset by the caller after the model.
 void setNoCast(bool on);
 bool noCast();
+// Branch indoor-light: the following draws are a character (1) or furniture (2): Aurora 0520a's
+// rim-light material hints (shaded as world draws otherwise). 0 = none. Reset by the caller.
+void setRimMaterial(int kind);
+int rimMaterial();
 bool casterPass();  // inside setCasterPass(true) (City Folk: the stage's second root pass)
 bool inScene();     // inside beginScene .. endScene
 // Main view bracket (fn_8000BB98 hook): sends the frame's extra lights / the scene-end marker.

@@ -430,7 +430,7 @@ void submitSky() {
     }
     if (indoor) {
         static const float kOne[3] = {1, 1, 1}, kZero[3] = {0, 0, 0};
-        enh::setGrade(kOne, kZero, 1.0f + 0.30f * sIndoorMood, 1.0f + 0.18f * sIndoorMood);
+        enh::setGrade(kOne, kZero, 1.0f + 0.15f * sIndoorMood, 1.0f + 0.14f * sIndoorMood);
         enh::setShafts(0.0f);
         if (!s.indoorShadows) return;
         // The room's key light (branch indoor-light): by day a window light from the front-left
@@ -1118,6 +1118,7 @@ void submitNightLights() {
         l.radius = src.kind->radius;
         l.intensity = src.kind->intensity * sNight * src.glow * std::clamp(s.nightLightIntensity, 0.0f, 3.0f);
         l.flags = aurora::gfx::ExtraLightTranslucent | (src.kind->shadow && s.nightLightShadows ? aurora::gfx::ExtraLightCastShadows : 0u);
+        if (s.rimLight > 0.0f) l.flags |= aurora::gfx::ExtraLightRim, l.box[11] = 0.4f * std::clamp(s.rimLight, 0.0f, 2.0f);  // a faint rim (Aurora 0520a)
         l.id = src.id;
         out[n++] = l;
     }
@@ -1323,6 +1324,7 @@ void submitEffectLights() {
         if (src.world) toView(src.pos, l.pos);
         else std::memcpy(l.pos, src.pos, sizeof l.pos);
         l.flags = aurora::gfx::ExtraLightTranslucent;
+        if (s.rimLight > 0.0f) l.flags |= aurora::gfx::ExtraLightRim, l.box[11] = 0.4f * std::clamp(s.rimLight, 0.0f, 2.0f);  // a faint rim (Aurora 0520a)
         l.id = src.id;
         out[n++] = l;
         if (n == out.size()) break;
@@ -1413,6 +1415,14 @@ bool onModel(Ctx& c, u32 obj) {
 // objectScope turns it off around each). Test aid CF_ROOM_SHELL=0: everything casts.
 bool hasModel(u32 obj) { return modelInfo(obj).mdl != 0; }
 bool isLightModel(u32 obj) { return modelInfo(obj).name.compare(0, 4, "sun_") == 0; }
+int rimKind(u32 obj) {
+    if (!enh::masterOn() || !sInStage || sPass != 1 || indoorLegacy() || !(port::settings().enhancedLighting.rimLight > 0.0f)) return 0;
+    const ModelInfo& mi = modelInfo(obj);
+    if (!mi.mdl || mi.name.empty()) return 0;
+    if (mi.name.compare(0, 4, "int_") == 0) return 2;
+    if (mi.name.size() <= 8 && mi.name.find('_') == std::string::npos) return 1;
+    return 0;
+}
 bool castsIndoors(u32 obj, u32 task) {
     const ModelInfo& mi = modelInfo(obj);
     // (idr_*: the room itself, e.g. idr_myroom4 = the house's main room: floor, walls, windows)

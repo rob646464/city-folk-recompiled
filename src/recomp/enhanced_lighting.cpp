@@ -43,6 +43,7 @@ bool sGhostPass = false;
 bool sCharPass = false;
 bool sEmissive = false;
 bool sEmissiveGlow = false;  // branch indoor-light: a flame, also a bloom source
+int sRim = 0;                // branch indoor-light: 1 a character, 2 furniture (Aurora 0520a rim light)
 bool sShadowOnly = false;  // branch shadow-casters: an off-screen object drawn into the shadow maps only
 bool sNoCast = false;      // branch indoor-light: a room's shell (receives shadows, casts none)
 const bool sNoCastAll = std::getenv("CF_NOCAST_ALL") != nullptr;  // test aid: no world draw casts a shadow
@@ -636,6 +637,8 @@ void emitMaterial() {
     }();
     const bool allowed = sMode == 1 || (sMode == 2 && (sSceneCount & 1) == 0);
     u8 m = allowed && sInScene && sCharPass && !sGhostPass && !sInCaster ? AURORA_MATERIAL_CHARACTER : AURORA_MATERIAL_WORLD;
+    if (m == AURORA_MATERIAL_WORLD && sRim && sInScene && !sGhostPass && !sInCaster)
+        m = sRim == 1 ? AURORA_MATERIAL_WORLD_RIM : AURORA_MATERIAL_WORLD_RIM_SOFT;
     if (sEmissive && sInScene && !sGhostPass && !sInCaster) m = sEmissiveGlow ? AURORA_MATERIAL_EMISSIVE_GLOW : AURORA_MATERIAL_EMISSIVE;
     if (m == sMaterial) return;
     GXSetMaterialHintAurora(m);
@@ -661,6 +664,12 @@ void setShadowOnly(bool on) {
     emitClass();
 }
 bool noCast() { return sNoCast; }
+int rimMaterial() { return sRim; }
+void setRimMaterial(int kind) {
+    if (sRim == kind) return;
+    sRim = kind;
+    emitMaterial();
+}
 void setNoCast(bool on) {
     if (sNoCast == on) return;
     sNoCast = on;
@@ -691,6 +700,7 @@ void beginScene() {
     sInScene = true;
     sShadowOnly = false;
     sNoCast = false;
+    sRim = 0;
     emitClass();
     emitMaterial();
     if (!active()) return;
@@ -720,6 +730,7 @@ void endScene() {
     sEmissive = false;
     sShadowOnly = false;
     sNoCast = false;
+    sRim = 0;
     emitClass();
     emitMaterial();
     if (active()) GXSceneEndAurora();

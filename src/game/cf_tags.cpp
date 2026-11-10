@@ -92,7 +92,12 @@ void objectScope(Ctx& c, const char* name, bool proc = false) {
     (void)proc;
     const bool shell = enh::noCast() && cflight::castsIndoors(obj, c.r[4]);
     if (shell) gx::endPendingDraw(), enh::setNoCast(false);
+    // Characters and furniture take the coloured rim of our point lights (Aurora 0520a).
+    const int rim = cflight::rimKind(obj);
+    const int rimBefore = enh::rimMaterial();
+    if (rim != rimBefore) gx::endPendingDraw(), enh::setRimMaterial(rim);
     callOriginal(c, name);
+    if (rim != rimBefore) gx::endPendingDraw(), enh::setRimMaterial(rimBefore);
     if (shell) gx::endPendingDraw(), enh::setNoCast(true);
     if (cast == 1) cfcast::shadowOnlyEnd();
 }

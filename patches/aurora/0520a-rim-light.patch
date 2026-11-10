@@ -1,0 +1,88 @@
+diff --git a/include/aurora/enhanced.h b/include/aurora/enhanced.h
+--- a/include/aurora/enhanced.h
++++ b/include/aurora/enhanced.h
+@@ -154,6 +154,10 @@ void GXSetDrawClassAurora(uint8_t drawClass);
+ // 0480: an emissive surface that is also a bloom source of its own (a candle's or a fire's flame):
+ // as AURORA_MATERIAL_EMISSIVE, and drawn into the bloom's glow buffer like additive draws.
+ #define AURORA_MATERIAL_EMISSIVE_GLOW 3
++// 0520a: a world surface (shaded exactly like AURORA_MATERIAL_WORLD) that takes the coloured rim of
++// lights flagged ExtraLightRim: characters (WORLD_RIM) and, at about a third, furniture (_SOFT).
++#define AURORA_MATERIAL_WORLD_RIM 4
++#define AURORA_MATERIAL_WORLD_RIM_SOFT 5
+ void GXSetMaterialHintAurora(uint8_t hint);
+ // End of the 3D scene of this frame (before the HUD). GX FIFO command; no effect when the
+ // enhanced mode or all of its screen-space parts are off, or inside an offscreen pass.
+diff --git a/include/aurora/lights.h b/include/aurora/lights.h
+--- a/include/aurora/lights.h
++++ b/include/aurora/lights.h
+@@ -58,6 +58,9 @@ constexpr uint32_t ExtraLightPhysical = 1u << 6;
+ // the extra (point) lights' (those have their own shadows): a room's window light in a room lit by
+ // lamps.
+ constexpr uint32_t ExtraLightSpareExtra = 1u << 7;
++// 0520a (point lights without ExtraLightRoomBox): adds a coloured rim on the silhouettes of draws
++// with the material hint AURORA_MATERIAL_WORLD_RIM / _SOFT; box[11] = its strength (0 = none).
++constexpr uint32_t ExtraLightRim = 1u << 16;
+ // 0441 (optional, directional lights): a world anchor for the cascades' texel snapping. Aurora gets
+ // only view-space data, so it snapped the cascade centres in a frame that moves and turns with the
+ // camera: the shadow map's texel grid slid over the world whenever the camera moved (shadow edges
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -3360,6 +3360,10 @@ DrawUniform draw_uniform() noexcept {
+     // 0420: light-emitting surfaces are not shadowed (shader: enh_material 2) nor occluded.
+     u.flags &= ~0x30010u;
+     u.material = 2.f;
++  } else if (gx::g_gxState.materialHint == AURORA_MATERIAL_WORLD_RIM) {
++    u.material = 0.25f; // 0520a: a world surface (every < 0.5 test) that takes the rim light
++  } else if (gx::g_gxState.materialHint == AURORA_MATERIAL_WORLD_RIM_SOFT) {
++    u.material = 0.125f;
+   }
+   return u;
+ }
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1046,6 +1046,8 @@ var<private> enh_dir_full: vec3f = vec3f(1.0);
+ var<private> enh_dir_tint_x: vec3f = vec3f(1.0);
+ // 0480: the ExtraLightPhysical lights' share of enh_extra_lights' sum (added hue-preserving).
+ var<private> enh_xl_phys: vec3f = vec3f(0.0);
++// 0520a: the rim light of ExtraLightRim lights on this pixel (added after the TEV).
++var<private> enh_rim: vec3f = vec3f(0.0);
+ fn enh_dir_light(b: u32, p: vec3f, n: vec3f, ghost: bool, frag: vec2f, flags: u32) -> vec3f {
+   let l = normalize(vec3f(enh_ld(b), enh_ld(b + 1u), enh_ld(b + 2u)) + vec3f(0.0, 0.0, 1e-7));
+   let nl = dot(n, l);
+@@ -1139,6 +1141,23 @@ fn enh_xl_one(i: u32, p: vec3f, n: vec3f, v: vec3f, ghost: bool, frag: vec2f, su
+       let h = normalize(l + v);
+       add = add + col * (fall * 0.35 * pow(max(dot(n, h), 0.0), 24.0));
+     }
++    // 0520a (ExtraLightRim, box[11] = strength): a coloured rim on the silhouette of characters
++    // (material hint WORLD_RIM, enh_material 0.25) and, subtler, furniture (WORLD_RIM_SOFT, 0.125)
++    // when the light comes from the side or from behind: a Fresnel term (edges seen at a grazing
++    // angle) x how much the light is behind the surface x the light's own colour and falloff.
++    if ((flags & 0x10000u) != 0u && !ghost) {
++      let rw = select(0.0, 1.0, ubuf.enh_material > 0.2 && ubuf.enh_material < 0.3) +
++               select(0.0, 0.35, ubuf.enh_material > 0.1 && ubuf.enh_material < 0.2);
++      if (rw > 0.0) {
++        let fres = pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 3.0);
++        let back = clamp(0.4 - 0.6 * dot(l, v), 0.0, 1.0);
++        let side = clamp(dot(n, l) * 0.5 + 0.6, 0.0, 1.0);
++        // (added after the TEV, like light reflected at the edge: a rim also shows on dark hair or
++        // dark cloth, where a multiply by the texture would remove it)
++        // (the smooth window, not the inverse square: the rim reads across the whole reach)
++        enh_rim = enh_rim + col * (0.25 * w * fres * back * side * rw * max(enh_ld(b + 23u), 0.0));
++      }
++    }
+     *sum = *sum + add;
+     if ((flags & 64u) != 0u) { enh_xl_phys = enh_xl_phys + add; }
+ }
+@@ -2661,7 +2680,9 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+                   "\n      if (enh_s_lit >= 0.0 && enh_s_lit + enh_s_xl > 1e-4) { enh_xs = clamp(enh_s_xl / (enh_s_lit + enh_s_xl), 0.0, 1.0); }"
+                   "\n      enh_dir_tint = enh_dir_tint * mix(enh_dir_tint_x, vec3f(1.0), enh_xs);"
+                   "\n    }"
+-                  "\n    prev = vec4f(prev.rgb * enh_dir_tint, prev.a);";
++                  "\n    prev = vec4f(prev.rgb * enh_dir_tint, prev.a);"
++                  // 0520a: the rim light, added after the TEV (alpha untouched)
++                  "\n    prev = vec4f(prev.rgb + enh_rim, prev.a);";
+     // 0450: AO darkens only the ambient (indirect) share of the pixel's light, as real AO does. It
+     // used to multiply the whole colour, so a contact shadow in full sun was as dark as a sun
+     // shadow and the two read alike. Not occluded: the directional lights' direct light (the part
