@@ -70,13 +70,15 @@ Drop / Carry / (Bury, Plant, Wear, Add to Wallet, ...) / Quit; "Carry" equips a 
 | Slingshot | Carry, A | ok: aiming view of the sky | |
 | Net | Carry, A | ok: swing | |
 | Planting | cedar sapling and red roses -> Plant | ok: sapling and roses in the ground | |
+| Hitting a rock | shovel, walk to the rock left of the house, A x 10 | ok: swings at the rock; no Bells (not that day's money rock) | |
+| Snow | 2027-01-10, `CF_WEATHER_FAKE=snow`, walk from the house to the plaza and around | ok: falling snow, snow-covered ground, houses and trees; no snowballs on the way (no snowman built) | |
 | Bells bags | 10,000 Bells -> Add to Wallet | ok: wallet 0 -> 10,000 | |
 | Camera / photos | 1 in the field (shutter effect), toolbar Photos icon | **bug: every photo was black** in the Photos window (fixed: the photo of the town in front of the house shows, `[efb] ... readbacks 1 writebacks 1`). The photo is an EFB copy (`fn_802B7A7C` -> GXCopyTex, 640x456 RGB565 at 0x814E02C0) that the CPU reads without a DCInvalidateRange, the port's cue for reading a copy back (`[efb] ... readbacks 0`); with `CF_EFB_READBACK_ALL=1` the photo shows the town. Without a photo: "You have no photos. Close this window and press 1 to take a photo.", SD Card button (no SD card in the port) | `fn_802B7A7C` hooked (cf_game.cpp): its buffer is marked CPU-read before the copy |
 | Villager conversation | `TP=mod22#0:0/60`, walk up (STICKUP 14-25 frames: shorter turns do not face the villager), A | ok: Pecan's talk about Halloween and candy; Bluebear's long-absence talk on her own (Harvest Festival run) | test aid `TP=mod<N>` fixed: it matched an unrelated object at 176,0,96 and put the player outside the town |
 | Test runs in a batch | several `tools/routes/run.ps1` calls in one PowerShell | **tool bug**: each run inherited the previous runs' `-Env` (CF_FIXTURE, CF_POKE, CF_GIVE_ITEM...), e.g. a run meant to start without a fixture copied one | run.ps1 restores the environment after each run |
 | Halloween | 2026-10-31 19:00, plaza | ok: event 21, Jack walking the town at night | |
 | Toy Day | 2026-12-24 20:30, `TP` to Jingle, A | ok: event 23, snow, Jingle's talk ("Happy holidays! I'm Jingle...", the gift question) | |
-| Fishing (catching) | rod at the pond by the house, 2 x 1500 frames waiting, `CF_WPAD_LOG` | no nibble at that pond in three runs (the only rumbles are the cast's); new test aid `CF_AUTO_A_MOTOR` presses A on a long rumble (the bite) | test aid only |
+| Fishing (catching) | rod at the pond by the house (2 x 1500 frames, three runs) and at the beach (`WARP=town.beach`, 4 casts x 900 frames), `CF_WPAD_LOG`, `CF_AUTO_A_MOTOR=4` | no bite: the only rumbles are the cast's (7 short pulses + 2 at the splash, at most 3 frames each); fish shadows are in the sea, but none came to a bobber cast straight ahead. New test aid `CF_AUTO_A_MOTOR` presses A on a long rumble (the bite) for a route that casts at a shadow | test aid only |
 | New Year's countdown | 2026-12-31 23:58, plaza, past midnight | ok: event 19, countdown board 00:00:04 -> midnight scene, fireworks, "Happy New Year!", plaza lights after | |
 | Fishing Tourney | 2026-11-21 (3rd Saturday; Nov 14 has none), plaza | ok: event 14, Chip and the tourney tent | |
 | Bug-Off | 2027-06-19 (3rd Saturday), plaza | ok: event 15, Nat and the tent | |
