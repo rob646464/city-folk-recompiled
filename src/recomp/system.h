@@ -41,7 +41,7 @@ void writeSettingTxtToLowMemory();
 // CF_CLOCK_OFFSET=<s> overrides). runtime.cpp initTimeBase.
 long long clockOffsetSeconds();
 
-// F1 menu (Enhancements > General > Console): language, sensor bar, clock offset...
+// F1 menu (Game > Console): language, sensor bar, clock offset...
 bool drawMenu();  // true: a setting changed (save)
 
 }  // namespace recomp::sys

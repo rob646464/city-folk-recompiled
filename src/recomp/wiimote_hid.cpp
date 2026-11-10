@@ -15,7 +15,7 @@
 //
 // Settings: [wiimote_hid] (remote<N>_source=emulated|real, remote<N>_device=auto|<serial>,
 // pointer_range, pointer_offset, invert_x, invert_y, speaker). Sensor bar position and IR
-// sensitivity are the console's (F1 > Enhancements > General > Console, SYSCONF BT.BAR / BT.SENS).
+// sensitivity are the console's (F1 > Game > Console, SYSCONF BT.BAR / BT.SENS).
 // Test aids: CF_WIIMOTE_HID=0 (never touch HID devices; ports stay emulated), CF_WIIMOTE_HID=nodevices
 // (real-Remote ports and menu without any HID access), CF_WIIMOTE_HID_LOG=1.
 #include "recomp/wiimote.h"
@@ -670,7 +670,7 @@ bool drawHidPortsSection() {
             "pair in System Settings > Bluetooth (support depends on the macOS version).");
         ImGui::TextWrapped(
             "The IR pointer needs a sensor bar (or the DolphinBar) at the TV. Its position (above / below) "
-            "and sensitivity are the console settings in Enhancements > General > Console.");
+            "and sensitivity are the console settings in F1 > Game > Console.");
         ImGui::TreePop();
     }
     if (changed) {

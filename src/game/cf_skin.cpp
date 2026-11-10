@@ -347,8 +347,8 @@ void skinMenu(bool& dirty) {
             changed = true;
         }
         if (haveSwatches) ImGui::PopStyleColor(3);
-        ImGui::SetItemTooltip("Fixed tone %d of 8 (%s); tanning is off for this resident while it is set.", i,
-                              i == 1 ? "lightest" : i == 8 ? "darkest" : "");
+        ImGui::SetItemTooltip("Fixed tone %d of 8%s; tanning is off for this resident while it is set.", i,
+                              i == 1 ? " (lightest)" : i == 8 ? " (darkest)" : "");
         ImGui::PopID();
     }
     if (changed) {

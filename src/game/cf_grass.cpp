@@ -140,6 +140,7 @@ constexpr u32 kPosInPlayer = 0x70, kSpeedInPlayer = 0x88;
 constexpr float kRunSpeed = 2.35f;  // walking 2.0, running 2.7 (3.0 at the first step)
 
 std::atomic<bool> sRegrowAll{false};
+std::atomic<bool> sTownLoaded{false};  // the grass manager holds a town's tiles (menu: Regrow button)
 
 void tileOf(u32 pos, u32& tx, u32& ty) {
     tx = u32(s32(std::floor(rdf32(pos) / kTileSize)));
@@ -247,6 +248,10 @@ void grassOnFrame(Ctx& c) {
     grassMapAid();
     static const u32 sRegrowAt = std::getenv("CF_GRASS_REGROW_AT") ? u32(std::atoi(std::getenv("CF_GRASS_REGROW_AT"))) : 0;
     if (sRegrowAt && game::guestFrames() == sRegrowAt) sRegrowAll = true;
+    {
+        u32 b;
+        sTownLoaded = texReady(b);
+    }
     if (!sRegrowAll.exchange(false)) return;
     u32 buf;
     if (!texReady(buf)) {
@@ -298,11 +303,15 @@ void grassMenu(bool& dirty) {
         "New Leaf style (our estimate, not New Leaf's real numbers): only running wears grass,\n"
         "a tile wears at most once per day and half as much, and it grows back twice as fast.\n"
         "Off: grass never wears; existing bare patches grow back as usual.");
+    ImGui::BeginDisabled(!sTownLoaded);
     if (ImGui::Button("Regrow all grass now")) sRegrowAll = true;
-    ImGui::SetItemTooltip(
-        "Gives every worn grass tile of the town full health right away. Completely bare ground\n"
-        "(under buildings and objects, the plaza, tiles worn all the way down) is left as it is.\n"
-        "Saved with the town the next time the game saves. Only while the town is loaded.");
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip(
+            "Gives every worn grass tile of the town full health right away. Completely bare ground\n"
+            "(under buildings and objects, the plaza, tiles worn all the way down) is left as it is.\n"
+            "Saved with the town the next time the game saves. Only while the town is loaded%s.",
+            sTownLoaded ? "" : " (it is not now)");
 }
 
 }  // namespace recomp::cf

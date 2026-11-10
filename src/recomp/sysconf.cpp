@@ -491,6 +491,8 @@ bool drawMenu() {
         dirty |= ImGui::RadioButton("Below the TV", &bar, 0);
         ImGui::SameLine();
         dirty |= ImGui::RadioButton("Above the TV", &bar, 1);
+        ImGui::SetItemTooltip("Where the Wii's sensor bar sits (the console setting the game reads). Only real Wii\n"
+                              "Remotes depend on it; the emulated pointer is the same either way. Applies at the next start.");
         s.sensorBar = bar;
     }
     dirty |= recomp::menu::SliderInt("Pointer sensitivity", &s.irSensitivity, 1, 5);
@@ -501,15 +503,17 @@ bool drawMenu() {
     }
     {
         int days = int(s.clockOffset / 86400), hours = int((s.clockOffset % 86400) / 3600);
+        const char* kClockTip = "Moves the console clock the game sees away from your PC's clock (time travel).\n"
+                                "The game's own \"set the clock\" keeps working as on the console.\n"
+                                "Applies at the next start.";
         bool c = recomp::menu::SliderInt("Clock offset (days)", &days, -3650, 3650);
+        ImGui::SetItemTooltip("%s", kClockTip);
         c |= recomp::menu::SliderInt("Clock offset (hours)", &hours, -23, 23);
         if (c) {
             s.clockOffset = (long long)days * 86400 + (long long)hours * 3600;
             dirty = true;
         }
-        ImGui::SetItemTooltip("Moves the console clock the game sees away from your PC's clock (time travel).\n"
-                              "The game's own \"set the clock\" keeps working as on the console.\n"
-                              "Applies at the next start.");
+        ImGui::SetItemTooltip("%s", kClockTip);
     }
     return dirty;
 }
