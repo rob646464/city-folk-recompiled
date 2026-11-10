@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 #include <iterator>
+#include <filesystem>
 #include <fstream>
 
 namespace ww {
@@ -202,7 +203,7 @@ bool load(const std::vector<uint8_t>& file, Save& out, std::string& error) {
 }
 
 bool loadFile(const std::string& path, Save& out, std::string& error) {
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(std::filesystem::path(std::u8string(path.begin(), path.end())), std::ios::binary);  // UTF-8 (file dialog)
     if (!f) {
         error = "The file could not be opened.";
         return false;

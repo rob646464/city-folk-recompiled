@@ -23,6 +23,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <cwchar>
+#include <iterator>
 #include <filesystem>
 #include <mutex>
 #include <fstream>
@@ -50,6 +52,9 @@ bool sStarted = false;
 char sFatal[600] = {};
 // Prepared at start so that the crash path only formats into fixed buffers.
 char sStatePath[1024] = {};
+#ifdef _WIN32
+wchar_t sStatePathW[1024] = {};
+#endif
 std::FILE* sLog = nullptr;
 
 fs::path statePath() { return configDir() / "last_run_state.ini"; }
@@ -102,7 +107,12 @@ void writeState(const RunState& r) {
                                 "state=%s\nphase=%s\nreason=%s\nversion=%s\nfailed_starts=%d\ncrashes_in_row=%d\n",
                                 r.state.c_str(), r.phase.c_str(), r.reason.c_str(), r.version.c_str(), r.failedStarts,
                                 r.crashesInRow);
-    if (std::FILE* f = std::fopen(sStatePath, "wb")) {
+#ifdef _WIN32
+    std::FILE* f = _wfopen(sStatePathW, L"wb");  // (a UTF-8 path in fopen fails outside the code page)
+#else
+    std::FILE* f = std::fopen(sStatePath, "wb");
+#endif
+    if (f) {
         std::fwrite(buf, 1, n > 0 ? std::min<size_t>(size_t(n), sizeof(buf) - 1) : 0, f);
         std::fclose(f);
     }
@@ -134,7 +144,7 @@ void resetSettings() {
     const fs::path ini = settingsPath();
     std::error_code ec;
     if (fs::exists(ini, ec)) {
-        const fs::path bak = ini.string() + ".bak-" + stamp();
+        const fs::path bak = fs::path(ini) += ".bak-" + stamp();
         fs::copy_file(ini, bak, fs::copy_options::overwrite_existing, ec);
         say("[recovery] settings.ini saved as " + u8(bak.filename()));
     }
@@ -182,7 +192,7 @@ void putSavesAside() {
         say("[recovery] no saves to put aside in " + u8(nandFolder()));
         return;
     }
-    const fs::path aside = nandFolder().string() + " saves (put aside " + stamp() + ")";
+    const fs::path aside = nandFolder() += " saves (put aside " + stamp() + ")";
     std::error_code ec;
     fs::create_directories(aside, ec);
     for (const fs::path& dir : folders) {
@@ -231,6 +241,9 @@ int ask(const RunState& prev, bool canRebuild) {
 void onStart(bool canRebuild) {
     const std::string sp = u8(statePath());
     std::snprintf(sStatePath, sizeof(sStatePath), "%s", sp.c_str());
+#ifdef _WIN32
+    std::swprintf(sStatePathW, std::size(sStatePathW), L"%ls", statePath().wstring().c_str());
+#endif
     const RunState prev = readState();
     const bool prevStartupCrash = prev.state == "crashed" && prev.phase == "startup";
     const bool prevFailedStart = prev.state == "starting" || prevStartupCrash;
