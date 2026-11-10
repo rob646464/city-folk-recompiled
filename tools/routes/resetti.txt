@@ -1,0 +1,9 @@
+# Mr. Resetti (branch interp-match): a town whose last session was not saved. Make the NAND once
+# with continue_any.txt from user-town-clean, quitting in the town without saving (run.ps1 -Nand
+# <dir> -Seconds 95), then run this route on a copy of that NAND (no CF_FIXTURE). The player walks
+# off the doorstep after the arrival.
+include continue_any.txt
+after link d_bgo_drawNP 2
++300:STICKDOWN*90
++150:STICKLEFT*90
++150:STICKUP*60
