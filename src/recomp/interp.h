@@ -307,6 +307,9 @@ void drawStart(u32 start);
 void drawEnd(u32 end);
 // A draw with identity `id`: values noted since the previous draw belong to it.
 void noteDraw(u64 id);
+// The next noteDraw's vertex count (immediate-mode draws) and kind (1 display list, 2 immediate with
+// indexed positions, 3 immediate with direct positions): part of its fingerprint (matchDraws).
+void noteDrawExtra(u32 n, u8 kind);
 // Values noted since noteDraw (a display list's own colour writes, found while parsing it) belong
 // to that draw too, not to the next one.
 void claimForLastDraw();

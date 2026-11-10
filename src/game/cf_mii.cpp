@@ -37,6 +37,7 @@
 #include "game/cf_mii.h"
 
 #include "game/cf_mii_data.h"
+#include "port/install.h"
 #include "port/settings.h"
 #include "recomp/efb_copy.h"
 #include "recomp/frame.h"
@@ -773,7 +774,7 @@ void importFile(const std::string& path, const char* mode /* nullptr = ask */) {
                 if (!db.slots[i].empty() && db.slots[i].problem().empty()) ed.edit.slots[i] = db.slots[i];
             ed.dirty = true;
             ed.sel = -1;
-            setStatus("Replaced the Miis with the " + std::to_string(n) + " from " + p.filename().string() +
+            setStatus("Replaced the Miis with the " + std::to_string(n) + " from " + port::displayPath(p.filename()) +
                       " (not saved yet).");
         } else {
             int added = 0, same = 0, full = 0;
@@ -792,7 +793,7 @@ void importFile(const std::string& path, const char* mode /* nullptr = ask */) {
                 added++;
             }
             ed.dirty |= added > 0;
-            setStatus("Added " + std::to_string(added) + " Miis from " + p.filename().string() +
+            setStatus("Added " + std::to_string(added) + " Miis from " + port::displayPath(p.filename()) +
                       (same ? " (" + std::to_string(same) + " already here)" : "") +
                       (full ? "; " + std::to_string(full) + " did not fit (100 at most)" : "") + " (not saved yet).",
                       full > 0);

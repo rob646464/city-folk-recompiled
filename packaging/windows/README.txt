@@ -28,3 +28,4 @@ REPORTING PROBLEMS
 Attach last_run.log (and previous_run.log) from the folder above.
 
 The bundled clang/lld-link are from the LLVM project (llvm\LLVM-LICENSE.TXT).
+Third-party software and its licences: THIRD-PARTY.txt and the licenses folder.

@@ -5,6 +5,7 @@
 #include "game/cf_calendar.h"
 #include "game/cf_features.h"
 #include "game/cf_mii.h"
+#include "game/cf_save_import.h"
 #include "recomp/system.h"
 #include "recomp/game.h"
 #include "recomp/gx_bridge.h"
@@ -28,6 +29,7 @@
 #include "recomp/pacing.h"
 #include "recomp/texture_packs.h"
 #include "recomp/ui_scale.h"
+#include "recomp/widescreen.h"
 
 #include <aurora/aurora.h>
 #include <imgui.h>
@@ -98,8 +100,8 @@ constexpr Page kPages[] = {
     {"Visuals", "General"},       {"Visuals", "Rendering"},        {"Visuals", "Enhanced lighting"}, {"Visuals", "Enhanced world"},
     {"Visuals", "Texture packs"},
     {"Sound", nullptr},           {"Controls", "Ports"},           {"Controls", "Bindings"},
-    {"Controls", "Pointer"},      {"Controls", "Analog"},       {"Controls", "DSU"},             {"Enhancements", "General"},     {"Enhancements", "Gameplay"},
-    {"Enhancements", "Silly"},          {"Enhancements", "Unused content"},
+    {"Controls", "Pointer"},      {"Controls", "Analog"},          {"Controls", "DSU"},
+    {"Enhancements", "General"},  {"Enhancements", "Gameplay"},    {"Enhancements", "Unused content"},
 #ifdef CF_DEV_TOOLS
     {"Enhancements", "Debug"},
 #endif
@@ -759,6 +761,12 @@ void gameTab() {
             else ImGui::TextDisabled("not installed");
         }
         ImGui::Text("Playing: %s version (%s)", port::regionName(inst.running), port::gameId(inst.running));
+        if (!inst.discProblem.empty()) {  // setup's disc file check (setup/disc_check.h)
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.4f, 1.0f));
+            ImGui::TextWrapped("Warning: %s. Errors or crashes may come from that; a new dump of the disc fixes them.",
+                               inst.discProblem.c_str());
+            ImGui::PopStyleColor();
+        }
         if (inst.readyCount() > 1) {
             int base = int(inst.base);
             ImGui::Text("Version to play:");
@@ -794,6 +802,7 @@ void gameTab() {
     // The Wii's own settings as the game reads them (SYSCONF; src/recomp/sysconf.cpp, docs/NAND.md).
     ImGui::SeparatorText("Console");
     sDirty |= recomp::sys::drawMenu();
+    recomp::cf::saveimport::menuSection();  // import / export / backups (src/game/cf_save_import.cpp)
     dataSection();
     updatesSection();
 }
@@ -808,14 +817,14 @@ void renderingTab() {
     ImGui::SeparatorText("Color and depth");
     sDirty |= recomp::menu::Checkbox("Integer-accurate TEV", &r.integerTev);
     ImGui::SetItemTooltip(
-        "Color combiner math as on the GameCube: 8-bit inputs, signed 11-bit registers and rounding\n"
-        "after every stage. Slightly darker multi-stage shading and exact overflow; tiny GPU cost.");
+        "Color combiner (TEV) math as on the Wii: 8-bit inputs, signed 11-bit registers and rounding\n"
+        "after every stage, so multi-stage shading and overflow come out as on the console. Tiny GPU cost.");
     // Enhanced lighting turns the 6-bit framebuffer off (hle_gx.cpp): shown greyed out and unticked.
     const bool enhOverride = recomp::gx::enhancedOverridesEfbDepth();
     constexpr const char* kEnhNote =
         "\n\nOff while Enhanced lighting is on (F1 > Visuals > Enhanced lighting): its smooth\n"
         "per-pixel, colored-light, bloom and occlusion gradients would be cut into visible 6-bit\n"
-        "steps (and 5-bit in the game's full-screen RGB565 copy). Turn Enhanced lighting off to\n"
+        "steps (and 5-bit in RGB565 screen copies). Turn Enhanced lighting off to\n"
         "use this option again; the setting itself is kept.";
     {
         ImGui::BeginDisabled(enhOverride);
@@ -826,10 +835,11 @@ void renderingTab() {
         }
         ImGui::EndDisabled();
         const std::string tip = std::string(
-            "The game renders into a 6-bit-per-channel framebuffer with an ordered dither, like the\n"
-            "console, and its screen/texture copies keep their format's precision (RGB565: 5-bit red\n"
-            "and blue in the full-screen copy the game redraws every frame; RGB5A3 for the Mario\n"
-            "painting). Off: smooth 8-bit color (less banding/dither grain in dark rooms). No real cost.") +
+            "When the game uses the console's 6-bit-per-channel framebuffer format (RGBA6, with an ordered\n"
+            "dither), it is stored that way, and screen/texture copies keep their format's precision\n"
+            "(RGB565, RGB5A3, ...). Off: smooth 8-bit color (less banding and dither grain).\n"
+            "City Folk draws in the 8-bit format (RGB8) in every scene checked (title, Rover's bus,\n"
+            "the town), so this and the two options below change nothing there. No real cost.") +
                                 (enhOverride ? kEnhNote : "");
         ImGui::SetItemTooltip("%s", tip.c_str());
     }
@@ -842,10 +852,10 @@ void renderingTab() {
             sDirty = true;
         }
         const std::string tip = std::string(
-            "Translucent things drawn over the scene (the Game Boy Horror screen, health counter and\n"
-            "room captions, glows) are stored in the 6-bit framebuffer after blending, like on the\n"
-            "console: the same banding and dither grain as the rest of the image at their edges and\n"
-            "see-through parts instead of smooth 8-bit gradients. Subtle in this game.\n"
+            "Translucent things drawn over the scene (glows, effects, see-through HUD parts) are stored\n"
+            "in the 6-bit framebuffer after blending, like on the console: the same banding and dither\n"
+            "grain as the rest of the image at their edges instead of smooth 8-bit gradients. Only while\n"
+            "the game uses the 6-bit framebuffer format.\n"
             "Costs a few full-screen passes per frame (well under 1 ms at 1440p; more with MSAA).") +
                                 (enhOverride ? kEnhNote : "");
         ImGui::SetItemTooltip("%s", tip.c_str());
@@ -862,12 +872,12 @@ void renderingTab() {
         }
         ImGui::EndDisabled();
         ImGui::SetItemTooltip(
-            "The console's 6-bit framebuffer and the 5-bit screen copy the game redraws every frame\n"
-            "turn smooth gradients (dark rooms, the flashlight beam and its pool, glows) into visible\n"
+            "The console's 6-bit framebuffer and 5-bit (RGB565) screen copies turn smooth gradients\n"
+            "(night skies, dark interiors, glows) into visible\n"
             "bands and greenish/bluish blotches, partly hidden by dither grain. On: the same colors and\n"
             "brightness as the accurate picture, but each band is drawn as the smooth average of its\n"
             "steps (plus an invisible sub-step noise against the PC's own 8-bit steps): no contour\n"
-            "lines, no blotches, no grain. Off: exactly what the GameCube outputs (default).\n"
+            "lines, no blotches, no grain. Off: exactly what the console outputs (default).\n"
             "No measurable cost.%s",
             enhOverride ? "\n\nNot used while Enhanced lighting is on: the 6-bit framebuffer is off then and\n"
                           "the picture is plain 8-bit, with nothing left to smooth." : "");
@@ -876,7 +886,7 @@ void renderingTab() {
     ImGui::EndDisabled();
     sDirty |= recomp::menu::Checkbox("Early depth for cut-out textures", &r.earlyZAlphaDepth);
     ImGui::SetItemTooltip(
-        "Room geometry and Luigi test depth before texturing. On the console that also writes the\n"
+        "Draws that test depth before texturing: on the console that also writes the\n"
         "depth of pixels the alpha test then cuts out (transparent texels of cut-out textures), so\n"
         "things drawn behind them later are hidden there. Off: cut-out pixels write no depth (PC\n"
         "behaviour). Costs one extra depth-only draw for each such draw.");
@@ -887,42 +897,23 @@ void renderingTab() {
         "image: slightly softer vertical detail, smooths the dither. One extra full-screen pass.");
     sDirty |= recomp::menu::Checkbox("Texture copy filter", &r.textureCopyFilter);
     ImGui::SetItemTooltip(
-        "The console applies the same vertical filter to the game's screen copies (the full-screen\n"
-        "copy it redraws every frame, the half-size and transition copies): the picture is a little\n"
-        "softer vertically, as on the GameCube. Off: sharper. Tiny GPU cost.");
+        "The console applies the same vertical filter to the screen copies the game reads back as\n"
+        "textures: they are a little softer vertically, as on the Wii. Off: sharper. City Folk makes\n"
+        "few such copies (none in the title or the town; the Mii pictures are some). Tiny GPU cost.");
     sDirty |= recomp::menu::Checkbox("EFB copies to RAM (accurate)", &r.efbCopyToRam);
-    ImGui::SetItemTooltip("Screen copies also exist in console memory format, like on the GameCube.\n"
-                          "Textures that read a copy in another format (the shadow depth map is\n"
-                          "read as an IA8 texture) get the console's exact bytes, and memory the game\n"
-                          "overwrites stops showing a stale copy. Aimed at the rare Luigi mouth/hose flicker.\n"
-                          "Off: copies stay GPU-only textures (saves ~0.6 ms CPU per frame).");
+    ImGui::SetItemTooltip("Screen copies also exist in console memory format, like on the Wii: textures that\n"
+                          "read a copy in another format or size, and the game's own reads of a copy, get the\n"
+                          "console's exact bytes, and memory the game overwrites stops showing a stale copy.\n"
+                          "Off: copies stay GPU-only textures (saves some CPU time per frame). The Mii\n"
+                          "previews of F1 > Miis work either way.");
     ImGui::SeparatorText("Timing");
     sDirty |= recomp::menu::Checkbox("Snapshot vertex data at draw time", &r.vtxSnapshot);
     ImGui::SetItemTooltip(
         "The vertex data each draw uses is copied when the game issues the draw, as the\n"
-        "GameCube's GPU reads it, instead of when the renderer thread gets to it. Without it,\n"
-        "a draw can pick up data the game already rewrote for a later draw: Luigi's mouth or\n"
-        "the Poltergust hose flicker now and then. Off: saves the copies (about 0.2-0.3 ms CPU per frame).\n"
+        "Wii's GPU reads it, instead of when the renderer thread gets to it. Without it, a draw can\n"
+        "pick up data the game already rewrote for a later draw (models the CPU reshapes, such as\n"
+        "faces, can flicker for a frame). Off: saves the copies (a fraction of a ms CPU per frame).\n"
         "Above the game's own frame rate (interpolation) vertex data is always snapshotted.");
-    ImGui::SeparatorText("Shadows (flashlight and lightning)");
-    sDirty |= recomp::menu::Checkbox("Shadow map at render resolution", &r.shadowRenderResolution);
-    ImGui::SetItemTooltip(
-        "The game draws its shadows from a depth map rendered from the light. On: that map uses the\n"
-        "internal render resolution, so shadow edges stay sharp at high resolutions.\n"
-        "Off: the console's 640x480 map (blockier, stair-stepped edges at high resolution).\n"
-        "Without 'EFB copies to RAM' the map always follows the render resolution. Tiny GPU cost.");
-    sDirty |= recomp::menu::Checkbox("Widescreen shadows", &r.shadowWidescreen);
-    ImGui::SetItemTooltip(
-        "The game only renders shadows for what a 4:3 screen shows. On: the light's view is widened\n"
-        "with the screen, so lightning and flashlight shadows reach the left/right edges at 16:9 and\n"
-        "wider (slightly lower horizontal shadow detail). Off: objects near the edges cast no\n"
-        "shadows, like widescreen hacks on the original. No cost. Only matters in widescreen.");
-    sDirty |= recomp::menu::Checkbox("Shadows at any distance", &r.shadowAnyDistance);
-    ImGui::SetItemTooltip(
-        "The original game only draws shadows within a limited distance band around Luigi: in big\n"
-        "rooms, shadows of things farther away (or close to the camera) drop out as he walks.\n"
-        "On: the shadow light's range covers everything in view, so all shadows always render.\n"
-        "Off: the original behaviour. No cost.");
 }
 
 // Appended to the tooltip of an option the quality preset sets (greyed out unless Custom).
@@ -1355,15 +1346,21 @@ void visualsTab() {
     frameRateControls(v);
     static const char* kAspects[] = {"Original 4:3", "Match window", "16:9", "16:10", "21:9", "32:9"};
     sDirty |= combo("Aspect ratio", v.aspect, kAspects, 6);
-    ImGui::SetItemTooltip("Shape of the 3D view. Original 4:3: as on the console, with black bars in a wider\n"
-                          "window. Match window: fills the window. The fixed ratios add black bars as needed.");
+    ImGui::SetItemTooltip("Shape of the picture. Match window: fills the window (wider than 16:9: more of the\n"
+                          "scene at the sides). The fixed ratios add black bars as needed.\n"
+                          "Original 4:3: the console set to a 4:3 TV, so the game itself draws a 4:3 picture\n"
+                          "(black bars in a wider window). Switching to or from Original 4:3 takes effect at\n"
+                          "the next start: the game reads the TV shape when it boots.");
+    if (ws::gameWidescreen() != (v.aspect != port::AspectMode::Original4x3)) pending("next launch");
     sDirty |= recomp::menu::Checkbox("Keep HUD at 16:9###hudKeep", &v.hudKeep4x3);
     ImGui::SetItemTooltip("On: in a window wider than 16:9 the HUD stays where it is on a 16:9 TV, centred.\n"
                           "Off: the clock moves to the left edge and the Save / camera buttons to the right\n"
                           "edge, where they are clicked, and the pointer reaches the whole window. The\n"
                           "toolbar, dialogue and menus stay centred.");
     sDirty |= recomp::menu::SliderFloat("Field of view", &v.fovScale, 0.75f, 1.5f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("Scales the camera's field of view (1 = original). Higher shows more of the room.");
+    ImGui::SetItemTooltip("Scales the camera's field of view (1 = original). Higher shows more of the scene.\n"
+                          "The game's sky backdrop is made for its own view: at high values (1.4) the town's\n"
+                          "sky ends before the top corners and black shows there.");
 
     ImGui::SeparatorText("Resolution and display");
     {
@@ -1901,7 +1898,7 @@ void draw() {
         if (recomp::menu::Button("Quit game")) ImGui::OpenPopup("Quit?");
         ImGui::SetItemTooltip("Closes the game (asks first). Settings are saved; unsaved game progress is lost.");
         if (ImGui::BeginPopupModal("Quit?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::Text("Quit Luigi's Mansion? Unsaved progress will be lost.");
+            ImGui::Text("Quit Animal Crossing: City Folk? Unsaved progress will be lost.");
             if (recomp::menu::Button("Quit")) {
                 if (sDirty) {
                     port::saveSettings();

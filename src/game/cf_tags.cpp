@@ -13,6 +13,7 @@
 #include "recomp/hle.h"
 #include "recomp/interp.h"
 #include "recomp/runtime.h"
+#include "recomp/version.h"
 #include "game/cf_light.h"
 
 #include <cstdio>
@@ -92,7 +93,7 @@ void objectScope(Ctx& c, const char* name) {
 // Test aid CF_EF_PEEK=<words>: each particle's first words once per game frame (birth stamp search).
 HLE(DrawQuad__Q24nw4r2efFRCQ34nw4r4math5MTX34PCQ34nw4r4math5_VEC3b) {
     static const char* const kName = "DrawQuad__Q24nw4r2efFRCQ34nw4r4math5MTX34PCQ34nw4r4math5_VEC3b";
-    if (c.lr < 0x80292388u || c.lr >= 0x802930BCu) return callOriginal(c, kName);
+    if (c.lr < VA(0x80292388) || c.lr >= VA(0x802930BC)) return callOriginal(c, kName);
     const u32 particle = c.r[27], manager = c.r[26];
     static const int sPeek = [] { const char* v = std::getenv("CF_EF_PEEK"); return v ? std::atoi(v) : 0; }();
     if (sPeek > 0 && interp::capturing()) {

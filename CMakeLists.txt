@@ -82,6 +82,10 @@ add_test(NAME distrib COMMAND cf_distrib_test)
 add_executable(cf_mii_test tools/tests/mii_test.cpp src/game/cf_mii_data.cpp)
 target_include_directories(cf_mii_test PRIVATE src)
 add_test(NAME mii COMMAND cf_mii_test)
+# Save import: the save's checksums, data.bin parsing / decryption with a made-up key (docs/NAND.md).
+add_executable(cf_save_import_test tools/tests/save_import_test.cpp src/game/cf_save_data.cpp)
+target_include_directories(cf_save_import_test PRIVATE src)
+add_test(NAME save_import COMMAND cf_save_import_test)
 
 # Online room transport (src/recomp/online_net.*, docs/ONLINE.md): host + members over loopback UDP.
 add_executable(cf_online_test tools/tests/online_net_test.cpp tools/relay/cf_relay.cpp src/recomp/online_net.cpp
@@ -218,6 +222,32 @@ set(CF_LLVM_DIR "${_cxx_dir}" CACHE PATH "LLVM bin directory whose clang and lld
 install(TARGETS CityFolkRecomp RUNTIME DESTINATION .)
 install(FILES data/pipelines.bin DESTINATION . OPTIONAL)
 install(FILES packaging/LLVM-LICENSE.TXT DESTINATION llvm)
+# Third-party licence texts (packaging/THIRD-PARTY.txt lists them): copied from the sources the
+# program was built from. The prebuilt Dawn / DXC / nod downloads carry no licence file; their
+# texts go into packaging/licenses/<name>.txt (installed when present).
+install(FILES packaging/THIRD-PARTY.txt DESTINATION .)
+set(_deps_src ${CMAKE_BINARY_DIR}/_deps)
+foreach (_lic
+        "aurora|${CMAKE_SOURCE_DIR}/extern/aurora/LICENSE"
+        "imgui|${_deps_src}/imgui-src/LICENSE.txt"
+        "sdl3|${_deps_src}/sdl3_prebuilt-src/licenses/SDL3/LICENSE.txt"
+        "libpng|${_deps_src}/png-src/LICENSE"
+        "zlib|${_deps_src}/zlib-src/LICENSE.md"
+        "freetype|${_deps_src}/freetype-src/LICENSE.TXT"
+        "freetype-FTL|${_deps_src}/freetype-src/docs/FTL.TXT"
+        "fmt|${_deps_src}/fmt-src/LICENSE"
+        "xxhash|${_deps_src}/xxhash-src/LICENSE"
+        "zstd|${_deps_src}/zstd-src/LICENSE"
+        "abseil|${_deps_src}/abseil-cpp-src/LICENSE"
+        "tracy|${_deps_src}/tracy-src/LICENSE"
+        "dawn|${CMAKE_SOURCE_DIR}/packaging/licenses/dawn.txt"
+        "dxc|${CMAKE_SOURCE_DIR}/packaging/licenses/dxc.txt"
+        "nod|${CMAKE_SOURCE_DIR}/packaging/licenses/nod.txt")
+    string(REPLACE "|" ";" _lic "${_lic}")
+    list(GET _lic 0 _name)
+    list(GET _lic 1 _file)
+    install(FILES "${_file}" DESTINATION licenses RENAME "${_name}.txt" OPTIONAL)
+endforeach ()
 if (WIN32)
     install(FILES packaging/windows/README.txt DESTINATION .)
     install(CODE "

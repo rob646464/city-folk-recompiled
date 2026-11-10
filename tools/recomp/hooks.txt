@@ -76,10 +76,10 @@ fn_801C92F0 all
 
 # Nintendo events (docs/DISTRIBUTIONS.md): the game keeps a Nintendo letter from a WiiConnect24
 # package (save letter slot, letter, item, letter id); src/recomp/distributions.cpp records which
-# distribution the town received and calls the original. USA only.
-fn_8010F194
+# distribution the town received and calls the original (all versions; live delivery too).
+fn_8010F194 all
 # Pete hands a kept Nintendo letter over (copies it into the player's mail); logged by distributions.cpp.
-fn_80104520
+fn_80104520 all
 
 # Enhanced lighting (src/game/cf_light.cpp, docs/RENDERING.md "Enhanced lighting (City Folk)"): the
 # stage draw (both ScnRoot passes + effects of the field/room scene) brackets the 3D scene.
@@ -99,6 +99,18 @@ d_a_strNP::fn_99_2B04 all
 d_a_strNP::fn_99_2548 all
 fn_80166CDC all
 fn_8018ABC8 all
+# Branch shadow-casters-2: villagers / NPCs (base draw + its flat window test), other players
+# (draw + window test), the line behind the camera (trees fn_112_17F0, d_fgobj_managerNP's object
+# draw fn_111_E4C), a main.dol actor with the frustum test, blob shadow registrations.
+fn_8001665C all
+fn_800284F8 all
+d_a_playerNP::fn_80_E20 all
+d_a_playerNP::fn_80_248C all
+fn_8018AB88 all
+d_fgobj_managerNP::fn_111_E4C all
+fn_80181978 all
+fn_801C863C all
+fn_801C874C all
 
 # Online letters research (src/recomp/online_mail.cpp CF_MAIL_PROBE): Pelly's post office checks.
 fn_80177D78

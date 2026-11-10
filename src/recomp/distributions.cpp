@@ -23,6 +23,7 @@
 #include "recomp/runtime.h"
 #include "recomp/system.h"
 #include "recomp/town_id.h"
+#include "recomp/version.h"
 #include "recomp/wc24_crypto.h"
 
 #include <imgui.h>
@@ -469,7 +470,7 @@ std::vector<LocalEnc> localFiles() {
     std::error_code ec;
     for (auto it = fs::directory_iterator(folder(), ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
         if (!it->is_regular_file(ec)) continue;
-        std::string ext = it->path().extension().string();
+        std::string ext = port::displayPath(it->path().extension());
         for (char& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
         if (ext != ".enc" && ext != ".wc24") continue;
         auto d = readFile(it->path());
@@ -868,7 +869,7 @@ bool receiveNow(int di) {
     return true;
 }
 
-// The game kept a "Receive now" letter (USA: fn_8010F194; other bases: KD stored the package).
+// The game kept a "Receive now" letter (fn_8010F194; an original file: KD stored the package).
 void noteReceivedNow(const std::string& key) {
     sNowWaiting = -1;
     TownState& t = town();
@@ -1029,18 +1030,10 @@ void onStored(const Reply& r, bool ok, const std::string& why) {
     if (r.letterId) sState.lastStored = r.letterId;
     if (!r.localFile.empty() && r.localFile == sState.pendingLocal) sState.pendingLocal.clear();
     sState.syncWanted = true;
-    // Bases without the USA hook: the stored package counts as received.
-    if (port::install().running != port::GameVersion::USA && r.dist >= 0) {
-        TownState& t = town();
-        t.received[kDefs[r.dist].key] = consoleNow();
-        t.cycle[kDefs[r.dist].key] = loopSlot(consoleDay(consoleNow())).cycle;
-        t.lastDelivery = consoleNow();
-        if (record::isReceiveNowId(r.letterId)) noteReceivedNow(kDefs[r.dist].key);
-    }
     saveState();
 }
 
-// The game keeps a Nintendo letter (USA fn_8010F194: r3 = the save's letter slot, r4 = letter
+// The game keeps a Nintendo letter (fn_8010F194, hooked on every version: r3 = the save's letter slot, r4 = letter
 // text, r5 = item, r6 = letter id): Pete will bring it. Recorded for the town.
 HLE(fn_8010F194) {
     const u32 id = c.r[6], slot = c.r[3];
@@ -1066,10 +1059,10 @@ HLE(fn_8010F194) {
     saveState();
 }
 
-// Pete (d_a_npc_sp_perioNP) hands the kept Nintendo letter to the player (USA fn_80104520:
+// Pete (d_a_npc_sp_perioNP) hands the kept Nintendo letter to the player (fn_80104520:
 // copies the save's Nintendo-letter slot into the player's mail; r3 = 1 when it did).
 HLE(fn_80104520) {
-    const u32 save = rd32(0x8074E960u);
+    const u32 save = rd32(VA(0x8074E960));
     const u32 id = save ? rd32(save + 0xFC980u) : 0;
     callOriginal(c, "fn_80104520");
     recomp::log("[distrib] Pete handed Nintendo letter %08X to the player (result %u)", id, c.r[3]);
@@ -1145,9 +1138,8 @@ void onGuestFrame(Ctx& c) {
             sTestNowList.erase(sTestNowList.begin());
         }
     }
-    // Live delivery (USA): the game's own WiiConnect24 job (the one it starts when a town is
-    // loaded, fn_801783B4 -> fn_8017B6F4) reads the stored package; Pete brings the letter.
-    if (port::install().running != port::GameVersion::USA) return;
+    // Live delivery: the game's own WiiConnect24 job (the one it starts when a town is loaded,
+    // fn_801783B4 -> fn_8017B6F4) reads the stored package; Pete brings the letter.
     // A job we started is polled to its end with the game's own poll (fn_80178498: -1 while it
     // runs or waits for a retry, then its result), as the game polls the jobs it starts: the poll
     // (fn_8017803C) frees the job thread's stack once it has ended, and until then the game's
@@ -1156,18 +1148,18 @@ void onGuestFrame(Ctx& c) {
     // good (found 2026-11-04 with Nintendo events on, branch save-crash).
     static bool sJobPending = false;
     if (sJobPending) {
-        const s32 r = s32(guestCall(c, 0x80178498u));
+        const s32 r = s32(guestCall(c, VA(0x80178498)));
         if (r == -1) return;
         sJobPending = false;
         recomp::log("[distrib] the game's WiiConnect24 check ended (result %d)", r);
     }
-    const u32 save = rd32(0x8074E960u);  // the town's save data (null before a town is loaded)
+    const u32 save = rd32(VA(0x8074E960));  // the town's save data (null before a town is loaded)
     const bool town = save >= 0x80000000u && save < 0x94000000u;
     static u32 sFrame = 0;
     if (++sFrame % 600 == 0 && std::getenv("CF_NWC24_LOG"))
         recomp::log("[distrib] frame %u: save %08X, town WiiConnect24 %d, task %d; game's check: state %d error %d/%d; "
                     "Nintendo letter slot %08X", sFrame, save, town ? rd8(save + 0x735E4u) : -1, nwc24::status().taskRegistered,
-                    s32(rd32(0x8074EBCCu)), s32(rd32(0x8074EBD0u)), s32(rd32(0x8074EBD4u)), town ? rd32(save + 0xFC980u) : 0);
+                    s32(rd32(VA(0x8074EBCC))), s32(rd32(VA(0x8074EBCC) + 4)), s32(rd32(VA(0x8074EBCC) + 8)), town ? rd32(save + 0xFC980u) : 0);
     if (const char* d = std::getenv("CF_DISTRIB_SAVE_DUMP"); d && town && sFrame == u32(std::atoi(d))) {
         std::error_code ec;
         fs::create_directories(folder(), ec);
@@ -1183,9 +1175,9 @@ void onGuestFrame(Ctx& c) {
         // turned on with the game's own setter (fn_80177DE0, what Rover's question and the attic
         // phone call; it sets the flag only while the game's WiiConnect24 check says "available").
         static bool sTried = false;
-        if (port::settings().events.townWc24 && !sTried && rd32(0x8074EBCCu) == 1) {
+        if (port::settings().events.townWc24 && !sTried && rd32(VA(0x8074EBCC)) == 1) {
             sTried = true;
-            const u32 r = guestCall(c, 0x80177DE0u);
+            const u32 r = guestCall(c, VA(0x80177DE0));
             recomp::log("[distrib] turned the town's WiiConnect24 setting on (fn_80177DE0 -> %u, flag %u)", r,
                         rd8(save + 0x735E4u));
         }
@@ -1201,7 +1193,7 @@ void onGuestFrame(Ctx& c) {
         want = sState.syncWanted || (!sRegistered && !st.taskRegistered);
     }
     if (!want) return;
-    if (guestCall(c, 0x801783B4u)) {
+    if (guestCall(c, VA(0x801783B4))) {
         std::lock_guard lk(sM);
         sRegistered = true;
         sState.syncWanted = false;
@@ -1268,16 +1260,14 @@ bool drawMenuPage() {
         dirty |= recomp::menu::Checkbox("Include other regions' distributions", &es.otherRegions);
         ImGui::SetItemTooltip("Also the ones sent only in other regions, when the item has a name in your game's language.\n"
                               "Their letters are the English ones from the archive.");
-        if (port::install().running == port::GameVersion::USA) {
-            dirty |= recomp::menu::Checkbox("Turn WiiConnect24 on for my town", &es.townWc24);
-            ImGui::SetItemTooltip("A town started while WiiConnect24 was off has its own WiiConnect24 setting off, and the game\n"
-                                  "then ignores Nintendo's letters. On: the port switches it on with the game's own setting\n"
-                                  "(what Rover's question does), kept when you save.");
-            dirty |= recomp::menu::Checkbox("Deliver while playing", &es.liveDelivery);
-            ImGui::SetItemTooltip("Runs the game's own WiiConnect24 check (the one it makes when a town is loaded) as soon as\n"
-                                  "a letter is downloaded, so the game keeps it at once. Pete hands it over when you next\n"
-                                  "load your town (save first). Off: the game picks it up at that load itself.");
-        }
+        dirty |= recomp::menu::Checkbox("Turn WiiConnect24 on for my town", &es.townWc24);
+        ImGui::SetItemTooltip("A town started while WiiConnect24 was off has its own WiiConnect24 setting off, and the game\n"
+                              "then ignores Nintendo's letters. On: the port switches it on with the game's own setting\n"
+                              "(what Rover's question does), kept when you save.");
+        dirty |= recomp::menu::Checkbox("Deliver while playing", &es.liveDelivery);
+        ImGui::SetItemTooltip("Runs the game's own WiiConnect24 check (the one it makes when a town is loaded) as soon as\n"
+                              "a letter is downloaded, so the game keeps it at once. Pete hands it over when you next\n"
+                              "load your town (save first). Off: the game picks it up at that load itself.");
     }
     std::lock_guard lk(sM);
     loadState();
@@ -1380,7 +1370,7 @@ bool drawMenuPage() {
     ImGui::SetItemTooltip("Files the Wii downloaded from Nintendo (rvforestdl_us.enc and the like). They are given to the\n"
                           "game as they are: KD checks Nintendo's signature with the game's key, so only genuine files work.");
     for (const auto& l : localFiles()) {
-        const std::string p = l.path.string();
+        const std::string p = port::displayPath(l.path);
         ImGui::PushID(p.c_str());
         const long long at = receivedNowAt(encKey(l.data));
         ImGui::BeginDisabled(!es.mode || !sTownSeen || at || sState.pendingLocal == p);

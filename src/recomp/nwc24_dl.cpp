@@ -387,7 +387,7 @@ std::vector<u8> readNand(const std::string& nandPath) {
 
 bool writeNand(const std::string& nandPath, const std::vector<u8>& data) {
     const fs::path p = ios::hostPath(nandPath);
-    const fs::path tmp = p.string() + ".kdtmp";
+    const fs::path tmp = fs::path(p) += ".kdtmp";
     {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
         if (!f) return false;

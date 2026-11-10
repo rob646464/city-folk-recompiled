@@ -40,6 +40,9 @@ public:
     const std::string& runPath() const { return runPath_; }
     // Reads a whole file by disc path ("/rels/d_a_balloonNP.rel"); false if missing.
     bool readFile(const char* path, std::vector<std::uint8_t>& out) const;
+    // Size and CRC-32 (zlib's) of a file by disc path (disc_check.h); found = the file exists.
+    // False when it is missing or could not be read to the end.
+    bool fileCrc(const char* path, std::uint32_t& size, std::uint32_t& crc, bool& found) const;
 
 private:
     NodHandle* disc_ = nullptr;

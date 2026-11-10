@@ -690,11 +690,124 @@ what only the widened test keeps as a **shadow caster only**.
   n apart compare; structures are decided a frame ahead, measured), `CF_CASTERS_LOG=<n>` (counts:
   culled / kept per kind, models drawn as casters, Aurora caster-only draws; the kept models),
   `CF_CASTERS_SHOW=1` (kept objects drawn in the picture too), `CF_CASTERS_SCALE=<f>` (sweep
-  length), `CF_CASTERS_NOSTR=1` (field objects only), `AURORA_ENH_SHADOW_CLASS_SHOW=1`. Route
+  length), `CF_CASTERS_NOSTR=1` (all but structures), `AURORA_ENH_SHADOW_CLASS_SHOW=1`. Route
   `tools/routes/shadow_casters.txt` (plaza, slow walks W/E/N/S/diagonal with pauses).
-- Open: villagers' culling not looked at (their shadows are short; unchanged);
-  d_fgobj_managerNP's objects (fn_111_E4C, the line test fn_8018AB88) and d_fg_drawNP fn_112_17F0
-  not widened; the city's structures (d_a_str_townNP) and PAL/JP/KR not run.
+  shadow-casters-2: `CF_CASTERS_KINDS=<mask>` (1 field objects, 2 structures, 4 NPCs, 8 fgobj, 16
+  other actors, 32 g3d culling; A/B of one kind), `CF_CASTERS_INSERT_LOG=1` (every model an actor
+  draw inserts, with its height; each NPC's shown flag, position, window, vtable and module),
+  `CF_CASTERS_NPC_WINDOW=<f>` (the NPC draw's own test sees its window scaled: villagers in the
+  picture culled and kept, their shadows checked on screen), `CF_CASTERS_FORCE=npc|obj` (every
+  shown villager / fgobj object kept: vanishes, shadow left). Routes `shadow_casters_npc.txt`
+  (+ `_pm`: plaza, CF_TELEPORT next to a villager), `shadow_casters_visitor.txt` (+ `_pm`: the
+  visitor of module 57).
+- Open after the first pass: villagers, d_fgobj_managerNP, fn_112_17F0, the city (done on
+  shadow-casters-2, below); PAL/JP/KR not run.
+
+#### Actors, trees behind the camera, the city (branch shadow-casters-2)
+
+- **How actors draw** (USA rev 1): actors are fBase-style objects (vtable at actor + 0x60; draw at
+  vtable + 0x2C, preDraw fn_8000BDF8 at + 0x30). A model's "draw" (game model class, vtable
+  0x8049E190, + 0x14 = fn_802AEDF8 -> fn_802AEBC4) only **inserts it into the scene group for this
+  frame** (scene root vtable + 0x34 = ScnGroup::Insert; the group is emptied after the frame). The
+  stage's scene calc (fn_802AEACC: ScnRoot CalcWorld / CalcView / Gather / ZSort; no g3d
+  UpdateFrame) then poses only what was inserted. Animation frames are set by the actors' own
+  execute, so an actor kept for its shadow is inserted, posed by CalcWorld with this frame's
+  animation and drawn as a caster: its shadow is animated correctly (the kept models go through
+  the same Insert marking as structures, cf_tags.cpp draws them as class SHADOW). Nothing the
+  game's logic reads changes (only the scene insertion; execute is untouched).
+- **Villagers and other NPCs**: the NPC base draw fn_8001665C (d_a_npc_outNP's villagers, the
+  special NPCs d_a_npc_sp_* (their own draws call it), the city's d_a_npc_town_*): if the NPC is
+  shown (+ 0x1C38), its position (+ 0x64) is tested against a window around the camera's point in
+  the town's flat coordinates (fn_800284F8 -> fn_800283B4: box at NPC + 0x19E4, x -416..416,
+  z -576..224 around the same point 0x8062426C as the structures' window; 1 = outside), then its
+  model (vtable + 0x74), the held / worn one (+ 0x7C, fn_8001DEB0) and the blob shadow. Widened like
+  the structures' window (the position swept along the shadow's footprint, height 60, exact slab
+  test against the box); kept = shadow caster.
+- **The villagers' own off-screen mode** (the game skips updating them): d_a_npc_outNP's AI tests
+  the same window for every player (fn_8002850C with 4, e.g. fn_22_8268) and a villager outside
+  it goes into a reduced mode: not shown (+ 0x1C38 = 0, the draw returns at once), no animation,
+  its position stepping in 16 / 32-unit grid hops every ~2 s (logged: 1424 -> 1392 -> 1360 ...);
+  it is shown again when it walks back into the window. **Not drawn for shadows** (decision):
+  showing it would mean changing the AI's state (game logic: where villagers go, when they enter
+  houses, meet the player), and the reduced mode has no pose or smooth position, so its shadow
+  would hop and freeze. Missing are the shadows of hidden villagers up to one shadow length
+  (60 / tan(elevation), ~280 at the 12-degree floor) past the window's edge, where the window is
+  narrower than that plus the picture (not measured how much of the window the picture covers).
+  So the NPC widening matters for NPCs the AI keeps shown outside the window: visitors (in the
+  user-town-clean fixture d_a_npc_sp_roranNP = module 57, model `cml`, wandering 1500-1800 units
+  east of the plaza: culled by the draw every frame, kept when within a shadow length of the
+  window), event NPCs, gatekeepers.
+- **The player**: the player being played is never culled (d_a_playerNP fn_80_E20 draws it
+  unless hidden, + 0x2270 bit 6). Another player (online visit) is culled by fn_80_248C, a flat
+  window with the module's constants: widened by testing the position moved along the shadow in
+  quarter steps; untested (needs a two-instance visit).
+- **Kapp'n's bus**: drawn by Kapp'n's draw (d_a_npc_sp_kappeiNP fn_54_638 -> fn_800638A8, the
+  extra model, no cull test) whenever Kapp'n is drawn; Kapp'n himself goes through the NPC draw.
+- **Trees behind the camera**: the field-object kind table (d_fg_drawNP rodata + 0x48: kind 0 =
+  fn_112_17F0 = trees, kind 1 = fn_112_1DA4) is called by fn_112_2184 after its frustum test, and
+  the tree draw first tests the line behind the camera (fn_8018AB88: z - k r beyond camera +
+  0x364): a tree south of the camera was culled again even when its sphere was kept for its
+  shadow. fn_8018AB88 is widened inside a field object's draw like the structures' line test (the
+  shadow's tip with the object's sphere diameter as height, when the shadow falls north), the
+  object then a caster. **"fn_112_17F0" is not a separate path**: it is this tree draw.
+- **Fruits** (the tree draw's loop: each fruit's sphere through fn_802B777C, then its draw,
+  nothing else after it): the first pass treated every frustum test inside a field object's draw
+  as the object's own, so a culled fruit of a visible tree switched the rest of the tree's draw to
+  shadow-only: **a visible fruit after an off-screen one vanished** (bug of the first pass). Now
+  the first test is the object's, later ones are fruits: a culled fruit of a visible tree is a
+  caster on its own until the next fruit's test; fruits of a tree drawn as a caster are casters
+  where their shadow reaches.
+- **d_fgobj_managerNP's objects** (fn_111_E4C, object + 0xC position, model at + 0x24): only the
+  line behind the camera (fn_8018AB88), never culled at the sides; widened the same way (height
+  40), the model inserted as a caster. Untested: the manager drew no object in any route run (no
+  such objects on the map those days; `CF_CASTERS_FORCE=obj` exercises the path when there are).
+- **A main.dol actor with the frustum test** (fn_80181978, data vtable 0x804F9200, near the
+  snowball effect names): bounding sphere of its model (+ 0x138) through fn_802B777C, then the
+  model and its blob shadow; widened like field objects, the model a caster. Not met in the routes.
+- **Blob shadows of kept objects**: an actor's / structure's / tree's draw registers its round
+  blob shadow after its model (fn_801C863C; structures and trees fn_801C874C). For an object kept
+  only for its shadow these are skipped (the game culled the blob with it; the blob would show in
+  the picture at the screen edge).
+- **Structure heights**: the structures' footprint sweep used one height (160) for every
+  structure; now each structure's height is the tallest box of the models it inserted (MDL0 info
+  block + 0x28 / + 0x34 min / max, model space y; City Folk leaves the "extents" byte clear but
+  fills the box), cached per actor (+ its unique id), 160 until its models were seen once. Town:
+  obj_house2 216, obj_check1 252, obj_office 188, obj_myhome0 113, obj_nc 91, obj_bbs 81; city:
+  obj_tw_grace 293, obj_tw_etc02 217, obj_tw_fountain 63, most other obj_tw_* (shops, backdrop
+  buildings, even obj_tw_lamp) exactly 500 (a box the converter seems to have given them; only a
+  longer sweep, i.e. a kept caster whose shadow may not reach the view: cheap).
+- **The city** (TOWN stage): the city's structures (d_a_str_townNP: shops, buildings, the 12 street
+  lamps) use daSTR_c's draw fn_99_2B04 / cull test fn_99_2548 (their vtables point into
+  d_a_strNP), so they were already widened by the first pass, and the city's NPCs
+  (d_a_npc_town_outNP / _graceNP / _theaterNP; module 75's `elp` on the plaza) use the NPC base
+  draw. The city has no field objects. In the plaza route (08:00 and 16:45) 0-1 structures per
+  frame were culled at all (the plaza's buildings are all inside the window), the only one kept
+  was obj_busstop1, and the A/B pairs differ only by the fountain water and idle animation.
+- **Verification** (user-town-clean, the user's settings copy (Enhanced lighting Ultra + world,
+  sun shadows), `CF_CASTERS_AB=1`, 60 fps for exact game frames; pairs in the agent scratch
+  `shadow-casters-2/`): town morning (07:30) and evening (16:45) walks: shadow bands from trees off
+  the right edge in the morning (casters off: none, same frame of two runs), from trees off the
+  left edge in the evening. Villager: `CF_CASTERS_NPC_WINDOW=0.25` makes the game cull a villager
+  in the picture; without keeping it (first build) its shadow on the bulletin board is gone (5500
+  px differ in that region per pair), kept as a caster the villager vanishes and its shadow is
+  the normal one, frame after frame while it turns (0-114 px differ). Visitor (Saharah, module
+  57): kept every frame it is within a shadow length of the window (`npcs culled 1 kept 1`).
+  120 fps (VSync off, the NPC-window aid making the villager switch between caster and visible on
+  screen): judder detector 8.94 M tagged draws judged, 0 defects, 0 jumps / switches. Sun shadows
+  off (user's settings, `sun_shadows=false`): no `[casters]` line, no actor scope opened, no
+  caster-only draw (the hooks call the game's functions unchanged).
+- **Cost** (RTX 3090 Ti shared with 3-4 other agents' game instances, the user's settings at 4K
+  (scale 3) / 120 fps / VSync off, morning walk route; `CF_CASTERS_AB=1200` in one run so on and off
+  alternate every 20 s under the same load, `AURORA_GPU_PROFILE=10 CF_PERF_LOG=10`): Aurora
+  caster-only draws 7-23 per frame. In the quiet windows (GPU busy < 5 ms) adjacent off / on:
+  GPU busy 2.86 / 2.81 ms, shadow-map atlas pass 0.076 / 0.079 ms, host thread median 1.8 / 1.9
+  ms, render worker 1.2 / 1.2 ms, 120.0 fps both; off 3.89 / on 4.37 busy (atlas 0.085 / 0.083)
+  as the load returned. The loaded windows (busy 7-12 ms, 57-110 fps) swing with the other
+  instances in both states; mean of the windows' host medians off 2.0 / on 2.0 ms.
+- **CF_SHOT and CF_CASTERS_AB**: image s<N> shows the scene drawn while the copy count was N-1
+  (models inserted at N-2): with `CF_CASTERS_AB=1` the widened images are the EVEN ones for every
+  kind (the lag of inserted models is 1 from the start now; it was 0 until the first kept model,
+  so runs with only villagers kept had the odd ones).
 
 ### Time of day (Aurora 0342 grade)
 
