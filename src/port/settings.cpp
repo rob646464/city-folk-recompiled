@@ -195,6 +195,7 @@ std::vector<Field> fields() {
         flag("enhanced_lighting", "furniture_lights", l.furnitureLights),
         num("enhanced_lighting", "furniture_light_intensity", l.furnitureLightIntensity),
         flag("enhanced_lighting", "furniture_light_shadows", l.furnitureLightShadows),
+        num("enhanced_lighting", "furniture_room_fill", l.furnitureRoomFill),
         flag("enhanced_lighting", "sun_shafts", l.sunShafts),
         num("enhanced_lighting", "sun_shaft_intensity", l.sunShaftIntensity),
         num("enhanced_lighting", "sun_shaft_quality", l.sunShaftQuality),

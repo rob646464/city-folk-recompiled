@@ -1,0 +1,15 @@
+# Indoor lighting (docs/RENDERING.md "Indoor lighting"), saved town CF_FIXTURE=user-town-clean: the
+# player's house main room (RM_HS0_F1), the player in front of the candle on the cardboard box
+# (x 208, z 336), the candle (item C45) switched by the route action FTR (its own switch,
+# daFTR_c virtual +0x1C4, what touching it calls): off at
+# arrival, on ~+700, off ~+1300, on ~+1900 after the room loads (each change fades over ten
+# frames). Pair with CF_CLOCK_START (day 10:00, night 21:00) and CF_INDOOR_AB=2 for same-frame
+# A/B shots (new | before).
+include warp.txt
++1600:WARP=house1
+after link d_bgi_drawNP 2
++300:TP=208/0/400
++40:STICKUP*6
++360:FTR=C45/1
++600:FTR=C45/0
++600:FTR=C45/1

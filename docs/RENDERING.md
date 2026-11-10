@@ -880,6 +880,9 @@ phase) and gets `ExtraLightFire`. Ids `0x46000000 ^ ScnObj` (interpolated by id 
 Budget: up to 48 per frame into enhanced_lighting.cpp's shared ranking (64 lights); fires and
 screens may cast shadows (they share the night lights' shadow slots, `shadowLightCap`), lamps
 never: the light sits inside the shade, which would hide it from the cube map.
+(**Superseded by branch indoor-light**, "Indoor lighting" below: physical falloff and new numbers,
+~2000 K fire, lamps' shadows from below their shade, flicker in position too. The numbers in this
+section, the scanner's `propose()` and `furniture_lights_check.py` are the earlier ones.)
 
 Details: a small flame (fire whose glowing part is under 20 units across: the candle) lights from
 the part's top + 2 units, not its centre (the wax around the light hid it from its own cube map);
@@ -940,6 +943,96 @@ town hall (Pelly), museum (Blathers' hall), Able Sisters (Mabel) besides the hou
 Rover's bus from enh-light: `[sky] indoors` in each (d_bgi_drawNP linked, d_bgo_drawNP not), the
 room key light's soft shadows and AO, no sun / grade / night lights, nothing broken. Not reached:
 the city (bus), the museum's other rooms, the café.
+
+### Indoor lighting (branch indoor-light, Aurora 0480)
+
+User report 2026-11-04 (Ultra, indoor / furniture / extra-light shadows on): "indoors I'm not
+wowed", "no shadows indoors at all", "lights too strong, not realistic", "the candle simply lights
+the whole room, no colour or fire". Outdoors is unchanged by everything below (no flag, class or
+hook acts outdoors; the shader paths are exact identities without the new flags).
+
+**What was wrong** (user-town-clean house, `GLOWDBG=8/9` shadow-mask views, `CF_ROOMLIGHT_LOG`):
+- *The room key light was a shadow caster, but its shadows could not be seen.* It took the game's
+  GX key light's direction, which in the house is nearly horizontal from the left and toward the
+  camera (view (-0.85, 0.11, 0.51)): the left wall shadowed the whole room evenly and the furniture's
+  shadows fell behind it, and it darkened by a tenth (tint 0.90 = strength 0.6 x 0.6 x 0.28).
+- *Every caster cast, the room shell included*: floor, walls and the front wall the camera looks
+  through (culled in the picture, not in a shadow map: the shadow pass draws with culling off), so
+  any light from the side or the front left the room in a wall's shadow.
+- *Furniture point lights* had shadow slots (fires, screens; lamps never), and the mask applies to
+  indoor materials, but a point light's shadow only removes that light's own contribution, which
+  was small (wide smooth falloff `(1-x^2)^2 / (1 + 8x^2)` over 120-320 units, intensity ~1.6): the
+  shadows had nothing to remove. Nothing else was disabled indoors (sun, grade, shafts and night
+  lights are outdoor-only by design).
+- *The candle lights the whole room*: that is the game itself. **dEnvAmbLight_c** (fn_80197E1C, its
+  per-frame update; vtable 0x804FAA68 after its type name; next to dFixAmbLight_c,
+  dFixAmbSwitchLight_c, dSubLightRoom_c) moves the room-light helper at 0x806244A0 (+0 amount)
+  toward the "a light-kind 2 lamp is on" byte at r13 - 0x2C90 (set by d_a_ftrNP) and writes
+  `this + 4 = lerp((0,0,0,255), colour at r13 - 0x56AC, amount)`, a colour added to the room's
+  ambient: at night it goes 000000 -> EFEFBD over ten frames when the candle is lit (log), i.e. the
+  whole room at almost full brightness.
+- *No colour*: the candle's light colour was (1.00, 0.85, 0.72) (60 % of the wax+flame texture mean,
+  40 % toward warm), and the game's white whole-room brightening swamped it; the flicker (±20 %
+  intensity of a small contribution) could not show.
+
+**What it does now**
+- **Room key light** (cf_light.cpp submitSky, indoors): our own direction in the room's frame
+  (camera right / forward snapped to the world axes, world Y up: rooms are level and axis-aligned,
+  so the light does not swing as the camera follows the player). By day a window light from the
+  left and a little from the front, ~53 degrees up (the room camera looks down at ~35 degrees:
+  shadows falling back would hide behind their casters, these fall to the right, in sight); at night
+  the room's ceiling light, ~75 degrees up. Neutral soft tint 1 - k (1 - (0.58, 0.58, 0.64)),
+  k = strength x (0.95 night .. 1.2 day) (0.70-0.76 at the user's 0.6), no terminator darkening
+  (`away` 0.1), softer at night. Aurora 0480 **ExtraLightSpareExtra**: its tint only darkens the
+  share of the pixel's light that is not the furniture lights' (a lit candle is not dimmed by the
+  window light's shadow).
+- **The room shell casts no shadow** (Aurora 0480 **AURORA_DRAW_CLASS_WORLD_NOCAST**: same
+  pipelines as WORLD, in the depth pre-pass, not a caster). Indoors every world draw of the scene is
+  NOCAST by default (cflight::roomShellMode at the scene begin); a g3d object turns it off around its
+  draw (cf_tags.cpp objectScope) when `castsIndoors`: a model (not a ScnProc without one), not the
+  room itself (`idr_*`, e.g. `idr_myroom4` = the house's main room: floor, walls, windows; also any
+  model over 240 units across), not `sun_*` (the game's window light shafts and floor patches), not
+  a translucent pass (G3dProc task 7). Found on the way:
+  - cf_light.cpp's model-name cache (per ScnObj address) was never invalidated: indoors the room
+    model reused the title screen's object address and was still called `idr_player_select`, so the
+    room cast a shadow over half of itself. Indoors an entry is now checked against the object (the
+    MDL0 pointer still at its offset); outdoors unchanged (open: the same staleness may exist there).
+  - Aurora (generic): a class change that does not change the pipeline let the next draw be merged
+    into the last recorded caster command, so NOCAST geometry was drawn into the shadow maps with
+    it; the NOCAST switch now dirties the pipeline.
+- **Furniture lights** (cf_furniture_light.cpp): Aurora 0480 **ExtraLightPhysical** falloff
+  `win^2 / (1 + x^2 / c^2)`, x = d / reach, c = core share in `box[0]`, win = 1 - x^4: inverse square
+  from a small source, a bright pool and a faint tail to the reach. Numbers: lamp 3.2 (core 0.10),
+  screen 1.8 (0.14), fire 3.4 (0.09), candle (a small flame) 4.4 (0.07, reach 340), neon / lava 2.0,
+  reach 260 + 2 x model size (280-460); exceptions' old numbers x 1.5 reach, x 2 intensity.
+  Colours: fire ~2000 K, 75 % toward (1.0, 0.55, 0.20) (the candle is (1.00, 0.66, 0.40) before
+  Aurora's saturation), screens keep 70 % of their picture's colour. Flames flicker in intensity
+  (slow sway + flutter + rare dips) and move ±1.6 units with the flame, so their shadows waver too
+  (host time, interpolated by id; `CF_FURN_FLICKER=0` steady). Shadows for fires, screens and real
+  lamps (item light kind 1 / 2): a lamp's light (and shadow origin) goes 2 units below its shade's
+  lower rim; small lit parts on furniture bodies (robo series) neither move nor cast. A flame's lit
+  material gets Aurora 0480 **AURORA_MATERIAL_EMISSIVE_GLOW** (emissive + a bloom source of its
+  own: re-drawn into the bloom's glow buffer like additive draws).
+- **The game's whole-room brightening** (hook `fn_80197E1C all`): with furniture lights on, indoors,
+  while a lit light-kind 2 lamp / candle of ours is in view, `this + 4` is scaled to F1 "Room fill
+  from lamps" (`[enhanced_lighting] furniture_room_fill`, default 0.25; eased over ~10 frames):
+  the rest of the light comes from the lamp. Rooms with no lamp lit keep the game's ambient
+  exactly; a room brightened by a lamp we do not light (out of view, not analysed) keeps it too.
+- AO stays off by default (ambient-only option).
+
+**Test aids**: `CF_INDOOR_LEGACY=1` (everything above as before, for A/B runs: the old key light,
+furniture numbers and falloff, the full room brightening, the shell casting), `CF_INDOOR_AB=<n>`
+(legacy in alternate blocks of n frames: fine for point lights, but the directional cascades do
+not follow a per-frame alternation: compare separate runs), `CF_INDOOR_DIR=<right>,<up>,<toward
+camera>` (key light direction), `CF_INDOOR_SHADOW=<distance>,<caster reach>`, `CF_ROOM_SHELL=0`
+(the shell casts), `CF_ROOM_SHELL_LOG=1` (each object: casts / room background), `CF_CAST_ONLY=<name
+prefix>` (only those objects cast indoors), `CF_NOCAST_ALL=1` (no world draw casts),
+`CF_ROOMLIGHT_LOG=1` (`[roomlight]` the game's room-light colour before -> after), `CF_ROOMLIGHT_FILL=<f>`.
+Route actions (any route): `FTR=<item hex>/<0|1>` switches that furniture through its own switch
+(daFTR_c virtual +0x1C4 (this, on, 0), what touching it calls; the on byte +0x409 is not reliable
+for the candle: it read 0x32 later in the visit), `POKE=<hex addr>/<hex byte>`. Routes
+`tools/routes/indoor_light_house.txt` (candle off / on / off / on), `indoor_light_tv.txt` (the
+tape deck turned into a retro TV, switched through its glow helper's target, then the candle).
 
 ### Other versions (branch enh-light-2)
 

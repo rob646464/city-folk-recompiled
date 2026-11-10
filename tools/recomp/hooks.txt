@@ -220,3 +220,8 @@ d_a_ftrNP::fn_15_3100 all
 # wipe of doors, stage changes and the arrival in the town; drawn in a ws::WipeScope so it covers
 # windows wider than 16:9.
 fn_802B6B48 all
+
+# Indoor lighting (src/game/cf_furniture_light.cpp, docs/RENDERING.md "Indoor lighting"):
+# dEnvAmbLight_c's per-frame update, the room's ambient brightening when a lamp or candle is on
+# (scaled to "Room fill from lamps" with furniture lights).
+fn_80197E1C all

@@ -44,13 +44,18 @@ bool characterPass();
 // A light-emitting material is being drawn (City Folk: a structure material the game's light
 // controller has lit, cf_light.cpp): Aurora's emissive hint (0420), no sun / moon shadow and no
 // AO on it. Reset by the provider before other draws.
-void setEmissive(bool on);
+void setEmissive(bool on, bool glow = false);  // glow: also a bloom source (a flame; Aurora 0480)
 // Shadow-map caster pass (shadows.cpp: fn_8005D984 .. fn_8005D8CC): draws in it are class OTHER.
 void setCasterPass(bool on);
 // Branch shadow-casters (docs/RENDERING.md "Shadows of objects outside the view"): the following
 // draws are shadow casters only (Aurora 0470 AURORA_DRAW_CLASS_SHADOW: shadow maps, nothing else).
 // Only inside the scene bracket, outside the caster pass; reset by the caller after the object.
 void setShadowOnly(bool on);
+// Branch indoor-light: the following draws are a room's shell (floor, walls): world draws that
+// receive light and shadows but cast none (Aurora 0480 AURORA_DRAW_CLASS_WORLD_NOCAST), so a window
+// light over a wall does not put the room in that wall's shadow. Reset by the caller after the model.
+void setNoCast(bool on);
+bool noCast();
 bool casterPass();  // inside setCasterPass(true) (City Folk: the stage's second root pass)
 bool inScene();     // inside beginScene .. endScene
 // Main view bracket (fn_8000BB98 hook): sends the frame's extra lights / the scene-end marker.

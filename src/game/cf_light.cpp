@@ -29,6 +29,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <array>
 #include <vector>
 
@@ -187,6 +188,26 @@ struct LogFit {
     std::unordered_map<int, u32> radii;  // object radius (whole units) -> samples
 };
 LogFit sFit;
+// Indoors (branch indoor-light): daylight share of the room key light (0 night .. 1 day).
+float sIndoorDay = 1.0f;
+}  // namespace
+// Test aids: CF_INDOOR_LEGACY=1 = everything indoors as before branch indoor-light (key light from
+// the game's GX key light, faint; furniture lights' old numbers and falloff; the game's full room
+// brightening; room shell casting); CF_INDOOR_AB=<n>: legacy in every other block of n frames
+// (dump numbers: with n = 2, shots 4k+1 / 4k+2 new, 4k+3 / 4k+4 legacy... same frame, A/B).
+bool indoorLegacy() {
+    static const bool sLegacy = [] {
+        const char* v = std::getenv("CF_INDOOR_LEGACY");
+        return v && *v == '1';
+    }();
+    static const u32 sAb = [] {
+        const char* v = std::getenv("CF_INDOOR_AB");
+        return v ? u32(std::max(std::atoi(v), 1)) : 0u;
+    }();
+    if (sLegacy) return true;
+    return sAb && ((copyDispCount() + 1) / sAb) % 2 == 1;
+}
+namespace {
 const u32 sSunLog = [] { const char* v = std::getenv("CF_SUN_LOG"); return v ? u32(std::max(1, std::atoi(v))) : 0u; }();  // every n frames (1 = every frame; samples every 60)
 const bool sUpMean = [] {
     const char* v = std::getenv("CF_SUN_UP");
@@ -390,11 +411,28 @@ void submitSky() {
         enh::setGrade(kOne, kZero, 1.0f, 1.0f);
         enh::setShafts(0.0f);
         if (!s.indoorShadows) return;
-        const float k = std::clamp(s.sunShadowStrength, 0.0f, 1.0f) * 0.6f;
-        for (int c = 0; c < 3; c++) sky.tint[c] = 1.0f - k * (1.0f - (c == 2 ? 0.8f : 0.72f));
+        // The room's key light (branch indoor-light): by day a window light from the front-left
+        // and above, at night (the room's own ceiling light) almost straight down; a soft,
+        // neutral shadow that leaves the lamps' and candles' own light alone (Aurora 0480
+        // ExtraLightSpareExtra). It used to be the game's GX key light, which shines from behind
+        // the camera: every shadow fell straight behind its caster, out of sight, and it was faint
+        // (a tenth of the light), so rooms showed no shadows at all.
+        const float day = sstep(-6.0f, 6.0f, sky.sunEl);
+        const float k = std::clamp(std::clamp(s.sunShadowStrength, 0.0f, 1.0f) * (0.95f + 0.25f * day), 0.0f, 1.0f);
+        static const float kBase[3] = {0.58f, 0.58f, 0.64f};
+        for (int c = 0; c < 3; c++) sky.tint[c] = 1.0f - k * (1.0f - kBase[c]);
         sky.intensity = 0.0f;
-        sky.tanSize = 0.03f * std::clamp(s.sunShadowSoftness, 0.0f, 3.0f);
+        sky.tanSize = (0.035f + 0.025f * (1.0f - day)) * std::clamp(s.sunShadowSoftness, 0.0f, 3.0f);
+        sky.away = 0.1f;
         sky.on = true;
+        sIndoorDay = day;
+        if (indoorLegacy()) {  // (test aid: as before)
+            const float k0 = std::clamp(s.sunShadowStrength, 0.0f, 1.0f) * 0.6f;
+            for (int c = 0; c < 3; c++) sky.tint[c] = 1.0f - k0 * (1.0f - (c == 2 ? 0.8f : 0.72f));
+            sky.tanSize = 0.03f * std::clamp(s.sunShadowSoftness, 0.0f, 3.0f);
+            static const float sAway = std::getenv("CF_SUN_AWAY") ? float(std::atof(std::getenv("CF_SUN_AWAY"))) : 0.75f;
+            sky.away = sAway;
+        }
     } else {
         enh::setGrade(sky.gain, sky.lift, sky.saturation, sky.contrast);
         // The cool night look leaves the light sources (lit windows, street lamps, signs) their
@@ -404,7 +442,40 @@ void submitSky() {
     }
     if (!sViewValid || !(s.sunShadows || s.sunLight) || !sky.on) return;
     aurora::gfx::ExtraLight l{};
-    if (indoor || s.sunDirection == 1) {
+    if (indoor && !indoorLegacy()) {
+        // Rooms are level and axis-aligned (world Y up): the camera's right / forward on the floor,
+        // snapped to the nearest world axis, so the light stays put while the camera follows the
+        // player. The room has walls on its back and sides but none toward the camera and no
+        // ceiling, so the light comes from the camera's side and from above (a light from behind a
+        // wall would put the whole room in that wall's shadow).
+        float R[3] = {0.0f, 0.0f, 0.0f}, F[3] = {0.0f, 0.0f, 0.0f};
+        if (std::fabs(sView[0]) >= std::fabs(sView[2])) R[0] = sView[0] >= 0.0f ? 1.0f : -1.0f;
+        else R[2] = sView[2] >= 0.0f ? 1.0f : -1.0f;
+        // forward = -(view row 2) on the floor, perpendicular to R
+        if (R[0] != 0.0f) F[2] = -sView[10] >= 0.0f ? 1.0f : -1.0f;
+        else F[0] = -sView[8] >= 0.0f ? 1.0f : -1.0f;
+        // By day a window light from the left (a little from the front), ~53 deg up: the camera looks
+        // down at ~35 deg, so shadows falling back would hide behind their casters; these fall to the
+        // right, in sight; at night the room's
+        // ceiling light, ~75 deg up. (A side taken from the game's window-sunlight model, sun_*,
+        // was tried: its bounds span the room, so the side was not reliable.)
+        const float d = sIndoorDay;
+        const float a = 0.55f * d + 0.12f * (1.0f - d), b = 0.22f * d + 0.20f * (1.0f - d), up = 0.80f * d + 0.97f * (1.0f - d);
+        float w[3];
+        for (int k = 0; k < 3; k++) w[k] = -R[k] * a - F[k] * b + (k == 1 ? up : 0.0f);
+        // Test aid CF_INDOOR_DIR=<right>,<up>,<toward camera>: the direction toward the light in the
+        // camera-aligned room frame instead.
+        static const std::array<float, 3> sDir = [] {
+            std::array<float, 3> v{0, 0, 0};
+            if (const char* e = std::getenv("CF_INDOOR_DIR")) std::sscanf(e, "%f,%f,%f", &v[0], &v[1], &v[2]);
+            return v;
+        }();
+        if (sDir[0] != 0 || sDir[1] != 0 || sDir[2] != 0)
+            for (int k = 0; k < 3; k++) w[k] = R[k] * sDir[0] - F[k] * sDir[2] + (k == 1 ? sDir[1] : 0.0f);
+        const float wl = std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+        for (float& v : w) v /= wl;
+        for (int r = 0; r < 3; r++) l.pos[r] = sView[r * 4] * w[0] + sView[r * 4 + 1] * w[1] + sView[r * 4 + 2] * w[2];
+    } else if (indoor || s.sunDirection == 1) {
         // The game's own key light (GX_LIGHT0 of the first light set loaded, view space as
         // loaded: a GX directional light is a point ~10^6 units away).
         uint32_t n = 0;
@@ -472,6 +543,18 @@ void submitSky() {
     l.box[4] = 0.25f;
     l.box[5] = sky.tanSize;
     l.box[6] = 4000.0f;
+    if (indoor && !indoorLegacy()) {
+        // The key light's shadow spares the furniture lights' share (Aurora 0480). Test aid
+        // CF_INDOOR_SHADOW=<shadow distance>,<caster reach> (defaults: the setting's, 4000).
+        static const std::array<float, 2> sDist = [] {
+            std::array<float, 2> v{0, 0};
+            if (const char* e = std::getenv("CF_INDOOR_SHADOW")) std::sscanf(e, "%f,%f", &v[0], &v[1]);
+            return v;
+        }();
+        if (sDist[0] > 0) l.radius = sDist[0];
+        if (sDist[1] > 0) l.box[6] = sDist[1];
+        l.flags |= aurora::gfx::ExtraLightSpareExtra;
+    }
     {
         // Aurora 0441: the shadow cascades' texel grid fixed in the world (world X axis as the
         // reference, the world origin as the anchor), not moving with the camera (branch
@@ -515,9 +598,9 @@ void submitSky() {
         }
     }
     if (logNow())
-        log("[sky] f%u %02d:%02d yday %d weather %d dir %.2f %.2f %.2f view %.2f %.2f %.2f tint %.2f %.2f %.2f I %.2f soft %.3f",
+        log("[sky] f%u %02d:%02d yday %d weather %d dir %.2f %.2f %.2f view %.2f %.2f %.2f tint %.2f %.2f %.2f I %.2f soft %.3f%s day %.2f",
             copyDispCount(), sClock.hour, sClock.min, sClock.yday, sWeather, sky.dir[0], sky.dir[1], sky.dir[2], l.pos[0], l.pos[1],
-            l.pos[2], sky.tint[0], sky.tint[1], sky.tint[2], sky.intensity, sky.tanSize);
+            l.pos[2], sky.tint[0], sky.tint[1], sky.tint[2], sky.intensity, sky.tanSize, indoor ? (indoorLegacy() ? " indoor(legacy)" : " indoor") : "", sIndoorDay);
 }
 
 void submitNightLights();
@@ -551,6 +634,7 @@ void onCamera(Ctx& c, u32 data) {
             submitEffectLights();
             cffurn::submit(sView, sViewValid);  // furniture lights (cf_furniture_light.cpp)
             enh::beginScene();
+            if (roomShellMode()) enh::setNoCast(true);  // indoors: the room background casts no shadow
         } else if (sSceneOpen) {
             // (ScnRoot::DrawOpa loads all 32 cameras up front: the last one set is not the current one)
         }
@@ -582,18 +666,29 @@ bool onRootDraw(Ctx& c, bool xlu, bool begin) {
 namespace {
 struct ModelInfo {
     u32 mdl = 0;
+    u32 off = 0;  // where in the object the MDL0 pointer was found
     std::string name;
 };
 std::unordered_map<u32, ModelInfo> sModels;
 bool guestPtr(u32 p) { return (p >= 0x80000000u && p < 0x81800000u) || (p >= 0x90000000u && p < 0x94000000u); }
 const ModelInfo& modelInfo(u32 obj) {
     auto [it, fresh] = sModels.try_emplace(obj);
-    if (!fresh) return it->second;
+    if (!fresh) {
+        // Indoors (branch indoor-light) the entry is checked against the object: a room reuses the
+        // addresses of the place before it (the house's room model was still named after the title's
+        // 'idr_player_select' and cast a shadow over half the room). Outdoors unchanged (open: the
+        // same staleness may exist there).
+        const ModelInfo& m = it->second;
+        const bool indoor = relBase(107, 1) != 0 && relBase(108, 1) == 0;
+        if (!indoor || (m.mdl && rd32(obj + m.off) == m.mdl && rd32(m.mdl) == 0x4D444C30u))
+            return m;
+        it->second = ModelInfo{};
+    }
     if (sModels.size() > 8192) sModels.clear(), it = sModels.try_emplace(obj).first;
     ModelInfo& mi = it->second;
     for (u32 off = 0xC; off < 0x180 && !mi.mdl; off += 4) {
         const u32 p = rd32(obj + off);
-        if (guestPtr(p) && (p & 3) == 0 && rd32(p) == 0x4D444C30u) mi.mdl = p;  // 'MDL0'
+        if (guestPtr(p) && (p & 3) == 0 && rd32(p) == 0x4D444C30u) mi.mdl = p, mi.off = off;  // 'MDL0'
     }
     if (mi.mdl) {
         const u32 rev = rd32(mi.mdl + 8);
@@ -897,6 +992,7 @@ const LitModel& litModel(u32 resMdl, const std::array<s8, 17>& mats) {
 // material data of that ScnMdl) is recorded with the light amount, and when g3d loads that
 // material for drawing (G3DState::LoadResMatTevColor) the draw gets Aurora's emissive hint.
 std::unordered_map<u32, float> sLitTev;  // ResMatTevColorData -> light amount
+std::unordered_set<u32> sGlowTev;  // lit materials that are flames: also bloom sources (branch indoor-light)
 bool sInStrLight = false;
 float sStrAmount = 0.0f;
 void noteLitTev(u32 data) {
@@ -907,17 +1003,19 @@ void noteLitTev(u32 data) {
 }  // namespace
 // Furniture glow parts (cf_furniture_light.cpp: lp_m / tv_m / ... at their game amount) are lit
 // materials too.
-void markLitMaterial(u32 tevColorData, float amount) {
+void markLitMaterial(u32 tevColorData, float amount, bool glow) {
     if (!tevColorData) return;
     sLitTev[tevColorData] = amount;
-    if (sLitTev.size() > 8192) sLitTev.clear();
+    if (sLitTev.size() > 8192) sLitTev.clear(), sGlowTev.clear();
+    if (glow) sGlowTev.insert(tevColorData);
+    else sGlowTev.erase(tevColorData);
 }
 namespace {
 void onLoadTevColor(u32 data) {
     if (!sInStage || sPass != 1 || sInPass2) return;
     const auto it = sLitTev.find(data);
     const bool lit = it != sLitTev.end() && it->second > 0.05f;
-    enh::setEmissive(lit);
+    enh::setEmissive(lit, lit && !indoorLegacy() && sGlowTev.count(data) != 0);
     if (sCityLog) {
         static u32 sFrame = 0, sLit = 0, sAll = 0;
         if (copyDispCount() != sFrame) {
@@ -1280,6 +1378,59 @@ bool onModel(Ctx& c, u32 obj) {
     if (proc == 6 && sNight > 0.01f) noteNightSource(obj, mi.name);
     if (proc == 6 || proc == 7) cffurn::noteModel(obj, mi.mdl, mi.name);  // furniture lights
     return true;
+}
+
+// A room's shell (branch indoor-light): indoors the floor, walls (also the front wall the camera
+// looks through, culled in the picture but not in a shadow map) and window frames are not g3d
+// scene objects: the room background module d_bgi_drawNP draws them outside every G3dProc (no
+// display list of them in a CF_DL_TRACE of the house). So indoors every world draw of the scene
+// outside a g3d object scope is drawn as Aurora 0480 WORLD_NOCAST: it receives light and shadows
+// but casts none (the key light from above and the camera side would otherwise put the whole room
+// in the front wall's shadow); g3d objects (furniture, characters, displays) cast (cf_tags.cpp
+// objectScope turns it off around each). Test aid CF_ROOM_SHELL=0: everything casts.
+bool hasModel(u32 obj) { return modelInfo(obj).mdl != 0; }
+bool isLightModel(u32 obj) { return modelInfo(obj).name.compare(0, 4, "sun_") == 0; }
+bool castsIndoors(u32 obj, u32 task) {
+    const ModelInfo& mi = modelInfo(obj);
+    // (idr_*: the room itself, e.g. idr_myroom4 = the house's main room: floor, walls, windows)
+    bool cast = mi.mdl != 0 && mi.name.compare(0, 4, "sun_") != 0 && mi.name.compare(0, 4, "idr_") != 0 && (task & 0xFFFF) != 7;
+    // Room-sized models are part of the room, not things in it (the house's 'xct', 256 / 0 / 432,
+    // put half the room in its shadow): ResMdl bounds over 240 units across (furniture is < 100).
+    if (cast && guestPtr(mi.mdl) && rd32(mi.mdl) == 0x4D444C30u) {
+        const u32 ver = rd32(mi.mdl + 8);
+        const u32 info = mi.mdl + 0x10 + 4 * (ver >= 10 ? 14 : 11) + 4;
+        const float sx = rdf32(info + 0x34) - rdf32(info + 0x28), sz = rdf32(info + 0x3C) - rdf32(info + 0x30);
+        if (std::isfinite(sx + sz) && std::max(sx, sz) > 240.0f) cast = false;
+    }
+    // Test aid CF_CAST_ONLY=<name prefix>[|<prefix>...]: only those objects cast indoors.
+    static const std::vector<std::string> sOnly = [] {
+        std::vector<std::string> v;
+        if (const char* e = std::getenv("CF_CAST_ONLY"))
+            for (std::string s = e; !s.empty();) {
+                const size_t bar = s.find('|');
+                v.push_back(s.substr(0, bar));
+                s = bar == std::string::npos ? "" : s.substr(bar + 1);
+            }
+        return v;
+    }();
+    if (!sOnly.empty() && std::none_of(sOnly.begin(), sOnly.end(), [&](const std::string& o) { return mi.name.compare(0, o.size(), o) == 0; }))
+        cast = false;
+    static const bool sLog = std::getenv("CF_ROOM_SHELL_LOG") != nullptr;
+    if (sLog) {
+        static std::unordered_map<u32, u32> sSeen;
+        static const u32 sAt = std::atoi(std::getenv("CF_ROOM_SHELL_LOG"));  // >1: every object of that frame
+        if (sSeen[obj]++ == 0 || copyDispCount() == sAt) log("[indoor] f%u object %08X '%s' task %X %s", copyDispCount(), obj, mi.name.c_str(), task, cast ? "casts" : "room background: no shadow");
+    }
+    return cast;
+}
+bool roomShellMode() {
+    if (!enh::masterOn() || !sInStage || sPass != 1 || indoorLegacy()) return false;
+    if (!relBase(107, 1) || relBase(108, 1) != 0) return false;
+    static const bool sOff = [] {
+        const char* v = std::getenv("CF_ROOM_SHELL");
+        return v && *v == '0';
+    }();
+    return !sOff && port::settings().enhancedLighting.indoorShadows;
 }
 
 void onLayoutDraw(Ctx& c) {

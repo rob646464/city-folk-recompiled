@@ -1049,13 +1049,20 @@ void enhancedLightingTab() {
     ImGui::SetItemTooltip("Lamps, TVs, computers, stereos, fireplaces, candles, lava lamps, festive trees and other\n"
                           "glowing furniture light the room around them in their own colour, in your house, villagers'\n"
                           "houses and shops. Switchable furniture follows the game: a lamp you turn off stops lighting.\n"
-                          "Fires flicker, screens are cool. Cost grows with the lights in view.");
+                          "Light falls off from the source like a real lamp: a bright pool, a faint tail. Flames are\n"
+                          "warm orange and flicker, screens take their picture's colour. Cost grows with the lights in view.");
     ImGui::BeginDisabled(!l.furnitureLights);
     ImGui::Indent();
     sDirty |= recomp::menu::SliderFloat("Furniture light intensity", &l.furnitureLightIntensity, 0.0f, 3.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
     sDirty |= recomp::menu::Checkbox("Furniture light shadows", &l.furnitureLightShadows);
-    ImGui::SetItemTooltip("Fires and screens cast shadows (shares the night lights' shadow slots; the preset sets how\n"
-                          "many). Lamps light without shadows: their own shade would block them.");
+    ImGui::SetItemTooltip("Fires, screens and lamps cast shadows (lamps from just below their shade; the nearest and\n"
+                          "strongest get the night lights' shadow slots, the preset sets how many). Flames' shadows\n"
+                          "waver with the flame.");
+    sDirty |= recomp::menu::SliderFloat("Room fill from lamps", &l.furnitureRoomFill, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetItemTooltip("In the original game a lamp or candle switched on brightens the whole room evenly. With\n"
+                          "furniture lights the light comes from the lamp itself (a pool of light, shadows); this\n"
+                          "keeps that share of the game's whole-room brightening as soft bounce light.\n"
+                          "1 = the game's full brightening, 0 = only the lamp's own light.");
     ImGui::Unindent();
     ImGui::EndDisabled();
 

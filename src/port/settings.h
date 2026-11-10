@@ -329,7 +329,10 @@ struct EnhancedLightingSettings {
     // room, following the game's own on/off state.
     bool furnitureLights = true;
     float furnitureLightIntensity = 1.0f;  // 0..3
-    bool furnitureLightShadows = true;     // fires and screens cast shadows (lamps never: their shade encloses the light)
+    bool furnitureLightShadows = true;     // fires, screens and lamps (from below their shade) cast shadows
+    // 0..1: how much of the game's own whole-room brightening a lamp or candle switched on keeps
+    // (dEnvAmbLight_c's room light; the rest of the light comes from the lamp itself). 1 = the game's.
+    float furnitureRoomFill = 0.25f;
     // Sun shafts: light scattered in the air, cut by the shadows of trees and houses.
     bool sunShafts = true;
     float sunShaftIntensity = 1.0f;    // 0..3

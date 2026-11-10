@@ -401,7 +401,10 @@ run).
   `WARP=<target>` (route action, same timing as `TP=`) loads another place through the game's
   own stage change: `WARP=museum.cafe`, `WARP=city`, `WARP=town@1880/28/2000`, `WARP=stage:0x25`
   (docs/WARPS.md: every destination, `CF_WARP`, the F1 page; it waits until the game can change
-  stage). Time in retraces, or in guest frames with `CF_INPUT_CLOCK=frames` (matches `CF_SHOT` frame
+  stage). `FTR=<item hex>/<0|1>` (same timing) switches the furniture with that item number off / on
+  through its own switch (daFTR_c virtual +0x1C4, what touching it calls; cf_furniture_light.cpp);
+  `POKE=<hex addr>/<hex byte>` writes one guest byte (e.g. a glow helper's target, an item grid
+  entry; docs/RENDERING.md "Indoor lighting"). Time in retraces, or in guest frames with `CF_INPUT_CLOCK=frames` (matches `CF_SHOT` frame
   numbers). A time `+N` = N after the previous item's start; `~N` after an item repeats it N times
   (`+60:A ~10` = ten presses 60 apart). `after link <REL module> [n]` in a route file: the items
   after it are timed (`+N`) from the n-th time the game links that module (scene changes, e.g.
