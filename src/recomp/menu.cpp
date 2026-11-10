@@ -28,6 +28,7 @@
 #include "recomp/pacing.h"
 #include "recomp/texture_packs.h"
 #include "recomp/ui_scale.h"
+#include "recomp/widescreen.h"
 
 #include <aurora/aurora.h>
 #include <imgui.h>
@@ -1342,15 +1343,21 @@ void visualsTab() {
     frameRateControls(v);
     static const char* kAspects[] = {"Original 4:3", "Match window", "16:9", "16:10", "21:9", "32:9"};
     sDirty |= combo("Aspect ratio", v.aspect, kAspects, 6);
-    ImGui::SetItemTooltip("Shape of the 3D view. Original 4:3: as on the console, with black bars in a wider\n"
-                          "window. Match window: fills the window. The fixed ratios add black bars as needed.");
+    ImGui::SetItemTooltip("Shape of the picture. Match window: fills the window (wider than 16:9: more of the\n"
+                          "scene at the sides). The fixed ratios add black bars as needed.\n"
+                          "Original 4:3: the console set to a 4:3 TV, so the game itself draws a 4:3 picture\n"
+                          "(black bars in a wider window). Switching to or from Original 4:3 takes effect at\n"
+                          "the next start: the game reads the TV shape when it boots.");
+    if (ws::gameWidescreen() != (v.aspect != port::AspectMode::Original4x3)) pending("next launch");
     sDirty |= recomp::menu::Checkbox("Keep HUD at 16:9###hudKeep", &v.hudKeep4x3);
     ImGui::SetItemTooltip("On: in a window wider than 16:9 the HUD stays where it is on a 16:9 TV, centred.\n"
                           "Off: the clock moves to the left edge and the Save / camera buttons to the right\n"
                           "edge, where they are clicked, and the pointer reaches the whole window. The\n"
                           "toolbar, dialogue and menus stay centred.");
     sDirty |= recomp::menu::SliderFloat("Field of view", &v.fovScale, 0.75f, 1.5f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
-    ImGui::SetItemTooltip("Scales the camera's field of view (1 = original). Higher shows more of the scene.");
+    ImGui::SetItemTooltip("Scales the camera's field of view (1 = original). Higher shows more of the scene.\n"
+                          "The game's sky backdrop is made for its own view: at high values (1.4) the town's\n"
+                          "sky ends before the top corners and black shows there.");
 
     ImGui::SeparatorText("Resolution and display");
     {
