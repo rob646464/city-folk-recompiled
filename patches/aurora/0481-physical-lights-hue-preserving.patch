@@ -1,0 +1,45 @@
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1044,6 +1044,8 @@ var<private> enh_dir_full: vec3f = vec3f(1.0);
+ // darkens only the share of the pixel's light that is not the extra (point) lights', which have
+ // their own shadows (a candle's light is not dimmed by the window light's shadow).
+ var<private> enh_dir_tint_x: vec3f = vec3f(1.0);
++// 0480: the ExtraLightPhysical lights' share of enh_extra_lights' sum (added hue-preserving).
++var<private> enh_xl_phys: vec3f = vec3f(0.0);
+ fn enh_dir_light(b: u32, p: vec3f, n: vec3f, ghost: bool, frag: vec2f, flags: u32) -> vec3f {
+   let l = normalize(vec3f(enh_ld(b), enh_ld(b + 1u), enh_ld(b + 2u)) + vec3f(0.0, 0.0, 1e-7));
+   let nl = dot(n, l);
+@@ -1134,12 +1136,15 @@ fn enh_extra_lights(p: vec3f, n: vec3f, ghost: bool, frag: vec2f) -> vec3f {
+       let sw = (flags >> 8u) & 0xFFu;
+       col = col * (1.0 - enh_mask(frag, slot) * select(1.0, f32(sw) / 255.0, sw != 0u));
+     }
+-    sum = sum + col * (ndl * fall);
++    var add = col * (ndl * fall);
+     if ((flags & 4u) != 0u && ubuf.enh_material < 0.5) {
+       let h = normalize(l + v);
+-      sum = sum + col * (fall * 0.35 * pow(max(dot(n, h), 0.0), 24.0));
++      add = add + col * (fall * 0.35 * pow(max(dot(n, h), 0.0), 24.0));
+     }
++    sum = sum + add;
++    if ((flags & 64u) != 0u) { enh_xl_phys = enh_xl_phys + add; }
+   }
++  enh_xl_phys = enh_xl_phys * ubuf.enh_extra_scale;
+   return sum * ubuf.enh_extra_scale;
+ }
+ // How much of the game's shadow darkening applies. The game lerps a shadowed pixel toward its
+@@ -2095,7 +2100,13 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
+         // the clamp), so the game's material and TEV decide how the surface responds.
+         fragmentFnPre += fmt::format(
+             "\n    if ((ubuf.enh_flags & 2u) != 0u) {{"
+-            "\n      rast{0} = vec4f(clamp(rast{0}.rgb + {1} * enh_xl, vec3f(0.0), vec3f(1.0)), rast{0}.a);"
++            "\n      rast{0} = vec4f(clamp(rast{0}.rgb + {1} * (enh_xl - enh_xl_phys), vec3f(0.0), vec3f(1.0)), rast{0}.a);"
++            // 0480: physical lights (a candle, a lamp) are added hue-preserving: scaled so that no
++            // channel passes 1, instead of each channel clipping on its own (an orange flame's pool
++            // went yellow-white where red clipped and green kept rising).
++            "\n      let enh_xp{0} = {1} * enh_xl_phys;"
++            "\n      let enh_q{0} = select(vec3f(1e9), max(vec3f(1.0) - rast{0}.rgb, vec3f(0.0)) / max(enh_xp{0}, vec3f(1e-6)), enh_xp{0} > vec3f(1e-6));"
++            "\n      rast{0} = vec4f(rast{0}.rgb + enh_xp{0} * clamp(min(enh_q{0}.x, min(enh_q{0}.y, enh_q{0}.z)), 0.0, 1.0), rast{0}.a);"
+             "\n    }}",
+             i, enh_mat_src(cc, i));
+       }

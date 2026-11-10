@@ -332,7 +332,10 @@ struct EnhancedLightingSettings {
     bool furnitureLightShadows = true;     // fires, screens and lamps (from below their shade) cast shadows
     // 0..1: how much of the game's own whole-room brightening a lamp or candle switched on keeps
     // (dEnvAmbLight_c's room light; the rest of the light comes from the lamp itself). 1 = the game's.
-    float furnitureRoomFill = 0.25f;
+    float furnitureRoomFill = 0.0f;
+    // 0..2.5: colour vibrance of furniture lights (HSV saturation x this, up to full; 1 = the
+    // source's colour). Default punchy, like LM's "Light color vibrance".
+    float furnitureVibrance = 1.6f;
     // Sun shafts: light scattered in the air, cut by the shadows of trees and houses.
     bool sunShafts = true;
     float sunShaftIntensity = 1.0f;    // 0..3

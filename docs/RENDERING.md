@@ -1020,6 +1020,41 @@ hook acts outdoors; the shader paths are exact identities without the new flags)
   exactly; a room brightened by a lamp we do not light (out of view, not analysed) keeps it too.
 - AO stays off by default (ambient-only option).
 
+**Second pass** (user review of the first: "better, take it further": the candle should light only
+its corner in flickering red / orange, the room still mostly lit; LM's punchy, contrasty look; lights
+must add up, colours blend):
+- "Room fill from lamps" default **0**: while one of our light-kind 2 lamps / candles is lit, the
+  game's whole-room brightening is gone and our lights light the room; rooms with no lamp on keep
+  the game's look exactly (the night room stays at the game's dark night ambient).
+- **Lights add up**: every light's contribution is summed (Aurora's light loop, no per-light
+  normalisation, no cap besides the 64-light set: furniture submits up to 48; branch light-tiles
+  raises the set). One candle lights its corner; more lamps progressively light the room.
+  Aurora **0481**: the physical lights' sum is added to the lit channel **hue-preserving** (scaled
+  so that no channel passes 1, the GX channel's range, instead of each channel clipping on its own):
+  an orange pool stays orange where red saturates (it went yellow-white), and a red and a blue pool
+  overlapping add to purple (the sum is taken first, so colours blend; nothing picks the strongest
+  light's colour). This happens in the game's own colour space (GX lighting has no linear stage);
+  the other extra lights (night lights, outdoors) are unchanged (`enh_xl_phys` 0 there = identity).
+- Numbers: candle reach 170 (core 0.09, intensity 5.0, colour (1.0, 0.36, 0.08) ~1700-1900 K),
+  other fires 380 + size (1.0, 0.45, 0.12), the tall lantern 260; lamps warm but softer
+  (40 % texture + 60 % (1.0, 0.86, 0.66), a third of the vibrance), reach 340 + size, 3.4; screens 85 % picture colour,
+  reach 230 + size, core 0.16; neon / lava 220 + size. F1 **"Light vibrance"** (`furniture_vibrance`,
+  1.6): HSV saturation x vibrance, up to full, hue and brightest channel kept (LM's "Light color
+  vibrance" idea; Aurora's global `extra_light_saturation` still applies on top).
+- **Lamps cast no shadow again and light from their glowing part's centre**: the first pass's
+  origin 2 units below the shade's lower rim sat inside the lamp (the regal lamp's table top hid
+  most of its light; the lovely lamp's glowing material spans its base, so its light went to the
+  floor). Lamps 5.0 (core 0.14, reach 360 + size); a coloured shade (saturation > 0.2) gets the full
+  vibrance, plain warm lamps a third of it; lava / neon lamps at least 60 % saturated (3.6, reach
+  260 + size). Lamp shadows: open (needs a shadow origin outside the lamp's own geometry, or the
+  lamp excluded from its own shadow map).
+- **Flicker**: smoothed value noise at ~1.3 / 4 / 9 Hz, +-19 % with occasional gutters to -35 %
+  (not sines: those read as a pulse), position jitter +-1.4 units from noise too.
+- Test scenes (routes): `indoor_light_lamps1.txt` / `indoor_light_lamps3.txt` (the candle plus one
+  / three regal lamps placed in the back row of the house's item grid before the warp, switched with `FTR`, which
+  now switches every furniture of that item within 30 frames), `indoor_light_redblue.txt` (the
+  lovely lamp and the blue lava lamp side by side).
+
 **Checked (first pass, before the user's review; 2026-11-09 after merging main d8f7225)**: A/B
 runs with the user's settings, new vs `CF_INDOOR_LEGACY=1`, same route and frames: the house by
 day (the player's and the box's key-light shadows fall to the right), at night with the candle off

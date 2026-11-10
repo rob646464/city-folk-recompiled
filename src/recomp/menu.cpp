@@ -1064,7 +1064,11 @@ void enhancedLightingTab() {
     ImGui::SetItemTooltip("In the original game a lamp or candle switched on brightens the whole room evenly. With\n"
                           "furniture lights the light comes from the lamp itself (a pool of light, shadows); this\n"
                           "keeps that share of the game's whole-room brightening as soft bounce light.\n"
-                          "1 = the game's full brightening, 0 = only the lamp's own light.");
+                          "1 = the game's full brightening, 0 = only the lamp's own light (default: a candle\n"
+                          "is the only light in its corner).");
+    sDirty |= recomp::menu::SliderFloat("Light vibrance##furniture", &l.furnitureVibrance, 0.0f, 2.5f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetItemTooltip("How saturated the furniture lights' colour is: flames deep orange-red, screens in their\n"
+                          "picture's colour. 1 = the colour as the source gives it; higher = punchier coloured pools.");
     ImGui::Unindent();
     ImGui::EndDisabled();
 

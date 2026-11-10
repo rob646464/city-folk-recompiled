@@ -1,0 +1,19 @@
+# Indoor lighting (docs/RENDERING.md "Indoor lighting"), CF_FIXTURE=user-town-clean, night.
+# Items are put into the house's item grid before the warp: the main room's back row (the box's
+# row) starts at 0x90E94B80, u16 per tile (code 0x9000 + 4 x item number, 0xFFF1 empty), index 12 =
+# the box at x 208, index 15 = the tape deck at x 304, 32 units per tile. FTR switches every
+# furniture of an item.
+# A red and a blue light side by side, their pools blending (purple between): the lovely lamp (A31,
+# pink-red shade, code B8C4) at index 13 (x 240) and the blue lava lamp (B48, code BD20) in place of
+# the tape deck (index 15, x 304); the candle stays off.
+include warp.txt
++1000:POKE=90E94B9A/B8
++1:POKE=90E94B9B/C4
++1:POKE=90E94B9E/BD
++1:POKE=90E94B9F/20
++597:WARP=house1
+after link d_bgi_drawNP 2
++300:TP=256/0/440
++40:STICKUP*2
++360:FTR=A31/1
++100:FTR=B48/1

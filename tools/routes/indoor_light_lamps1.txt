@@ -1,0 +1,16 @@
+# Indoor lighting (docs/RENDERING.md "Indoor lighting"), CF_FIXTURE=user-town-clean, night.
+# Items are put into the house's item grid before the warp: the main room's back row (the box's
+# row) starts at 0x90E94B80, u16 per tile (code 0x9000 + 4 x item number, 0xFFF1 empty), index 12 =
+# the box at x 208, index 15 = the tape deck at x 304, 32 units per tile. FTR switches every
+# furniture of an item.
+# The candle plus one standard lamp (regal lamp, item 9E8, code B7A0) at index 13 (x 240; index 10
+# did not take: no actor there).
+include warp.txt
++1000:POKE=90E94B9A/B7
++1:POKE=90E94B9B/A0
++599:WARP=house1
+after link d_bgi_drawNP 2
++300:TP=256/0/440
++40:STICKUP*2
++360:FTR=C45/1
++500:FTR=9E8/1
