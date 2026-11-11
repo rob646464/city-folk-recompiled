@@ -906,6 +906,11 @@ per request):
 | A join | about 4 (two signals, each 1 Worker + 1 Durable Object request), +2 when it needs the relay, +2 for the relay address |
 | Keep-alive pings | answered by the edge without waking the object (if billed at all: 1/20 request each, ~108 per room per day) |
 
+Counted from the client side with `CF_LOBBY_LOG=1` (every request the game makes to the lobby, with
+status, time and totals per kind: list / connect / msg / ping / signal / turn). Not measured against
+the deployed Worker yet (branch lobby-live: hosting a test room lists it publicly, which waits for the
+user's go-ahead).
+
 So the list is what counts: 100,000 / 6 = about 16,000 player-minutes of an open room list per day
 (e.g. 500 players looking for 30 minutes each), which is why the client refreshes only while the list is
 visible. Over the limit Cloudflare answers HTTP 429 (error 1027) and the game shows "The lobby is busy

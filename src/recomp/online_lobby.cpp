@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -29,6 +30,28 @@ double secs() {
     using namespace std::chrono;
     static const auto t0 = steady_clock::now();
     return duration<double>(steady_clock::now() - t0).count();
+}
+
+// CF_LOBBY_LOG=1: every request to the lobby with its status and time, and running totals per kind
+// (docs/ONLINE.md "Free plan budget": what this game costs the lobby, counted on the client side).
+// Kinds: list (GET /v1/rooms), connect (the host's WebSocket upgrade), msg (a host message: reg / sig
+// answer; the Durable Object bills incoming WebSocket messages 20:1), ping (keep-alive, answered by
+// the edge), signal (POST /v1/signal), turn (POST /v1/turn).
+enum Kind { K_LIST, K_CONNECT, K_MSG, K_PING, K_SIGNAL, K_TURN, K_COUNT };
+std::atomic<unsigned> sTally[K_COUNT];
+const char* const kKindName[K_COUNT] = {"list", "connect", "msg", "ping", "signal", "turn"};
+
+void tally(Kind k, int status, double ms) {
+    sTally[k]++;
+    static const bool on = [] {
+        const char* v = std::getenv("CF_LOBBY_LOG");
+        return v && *v && *v != '0';
+    }();
+    if (!on) return;
+    std::printf("[lobby-req] %.1f s %s status %d %.0f ms | totals list %u connect %u msg %u ping %u signal %u turn %u\n", secs(),
+                kKindName[k], status, ms, sTally[K_LIST].load(), sTally[K_CONNECT].load(), sTally[K_MSG].load(), sTally[K_PING].load(),
+                sTally[K_SIGNAL].load(), sTally[K_TURN].load());
+    std::fflush(stdout);
 }
 
 const char* kB64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -153,7 +176,9 @@ void refresh(const std::string& url, const std::string& game) {
         sList.url = url;
     }
     std::thread([url, game] {
+        const double t0 = secs();
         const http::Result r = http::request("GET", url + "/v1/rooms?v=1" + (game.empty() ? "" : "&game=" + http::urlEncode(game)), {}, {}, 8000, 256 * 1024);
+        tally(K_LIST, r.status, (secs() - t0) * 1000);
         std::vector<Room> rooms;
         std::string err;
         bool relay = false;
@@ -223,7 +248,10 @@ void hostThread(std::shared_ptr<HostState> st) {
         http::WebSocket ws;
         std::string err;
         int status = 0;
-        if (!ws.connect(st->url + "/v1/host?v=1", 10000, &err, &status)) {
+        const double tc = secs();
+        const bool connected = ws.connect(st->url + "/v1/host?v=1", 10000, &err, &status);
+        tally(K_CONNECT, connected ? 101 : status, (secs() - tc) * 1000);
+        if (!connected) {
             {
                 std::lock_guard<std::mutex> g(st->m);
                 st->listed = false;
@@ -283,11 +311,18 @@ void hostThread(std::shared_ptr<HostState> st) {
                 }
             }
             bool ok = true;
-            if (!reg.empty()) ok &= ws.sendText(reg);
-            for (auto& s : sends) ok &= ws.sendText(s);
+            if (!reg.empty()) {
+                ok &= ws.sendText(reg);
+                tally(K_MSG, 0, 0);
+            }
+            for (auto& s : sends) {
+                ok &= ws.sendText(s);
+                tally(K_MSG, 0, 0);
+            }
             if (secs() - lastPing > 40) {
                 lastPing = secs();
                 ok &= ws.sendText("ping");
+                tally(K_PING, 0, 0);
             }
             if (!ok) break;
         }
@@ -375,7 +410,9 @@ void joinThread(std::shared_ptr<JoinState> st) {
         }
         if (job.empty()) {  // relay credentials
             if (st->stop) continue;  // nobody is left to use them
+            const double t0 = secs();
             const http::Result r = http::request("POST", st->url + "/v1/turn", "{\"v\":1,\"room\":\"" + st->room + "\"}", "application/json", 10000);
+            tally(K_TURN, r.status, (secs() - t0) * 1000);
             http::Json j;
             std::string server, user, pass;
             if (r.ok() && http::parseJson(r.body, j) && j["servers"].type == http::Json::Array) {
@@ -404,7 +441,9 @@ void joinThread(std::shared_ptr<JoinState> st) {
             continue;
         }
         const std::string body = "{\"v\":1,\"room\":\"" + st->room + "\",\"peer\":\"" + st->peer + "\",\"data\":\"" + b64(job) + "\"}";
+        const double t0 = secs();
         const http::Result r = http::request("POST", st->url + "/v1/signal", body, "application/json", 13000);
+        tally(K_SIGNAL, r.status, (secs() - t0) * 1000);
         http::Json j;
         std::vector<u8> d;
         std::lock_guard<std::mutex> g(st->m);
