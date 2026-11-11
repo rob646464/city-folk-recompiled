@@ -1263,7 +1263,10 @@ struct Session::Impl {
             if (!oc::equal(want, proof, 32)) {
                 auto& f = fails[ip];
                 if (now() - f.second > 60) f = {0, now()};
-                if (++f.first >= (viaSig ? 8 : 5)) {
+                // Joins through the lobby all share one sender here, so wrong passwords there never
+                // lock the room (anyone could lock others out; user decision). Only an address that
+                // connects directly is held off after 5 wrong tries.
+                if (!viaSig && ++f.first >= 5) {
                     blocked[ip] = now() + 60;
                     std::printf("[online] %s blocked for 60 s after %d failed joins\n", ip.c_str(), f.first);
                 }

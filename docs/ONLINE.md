@@ -995,8 +995,9 @@ g++ -O2 -std=c++17 -pthread tools/lobby/cf_lobby.cpp -o cf_lobby
 - Known limits found there: a symmetric *host's* port prediction is based on two fixed mappings and goes
   stale after a few joins or on a busy line (then the relay takes over); symmetric on both sides always
   needs the relay; relay -> direct takes up to 15 s (probe interval) and the TURN allocation is kept;
-  wrong passwords through the lobby are counted for all lobby joiners together (8 per minute block lobby
-  joins of that room for 60 s: someone can lock a password room that way); a kicked lobby member is
+  wrong passwords through the lobby never lock a room (user decision 2026-11-11: the old shared counter let
+  anyone lock a password room; only a directly connecting address is held off for 60 s after 5 wrong
+  tries); a kicked lobby member is
   banned by profile id only; a lost T_CAND is not resent (the join fails and is tried again by hand);
   two players behind one router rely on the LAN candidate (not simulated); IPv6 not simulated.
 - **Two game instances on this PC** (dev build, copies of the test_builds/online-letter-test-2
