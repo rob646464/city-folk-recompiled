@@ -46,6 +46,7 @@ std::vector<u8> sMyInfo;
 std::string sMyEndpoints;
 std::string sMyEmail;  // own address while "Always online mail" is on (sent to friends in rooms)  // "ip:port;ip:port" of this game's letters link (online_mail.cpp)
 std::vector<u32> sRemoved;  // profile ids to take out of the game's roster (removed / blocked in F1)
+std::vector<u32> sSession;  // room members put into the game's roster for the session (not F1 friends)
 
 struct MemberState {
     u8 pub[32] = {};
@@ -90,6 +91,7 @@ void save() {
     for (auto& f : sFriends)
         if (f.gameInfo.size() == kGameInfoSize) out << "info " << oc::hex(f.pub, 32) << " " << oc::hex(f.gameInfo.data(), f.gameInfo.size()) << "\n";
     for (u32 pid : sRemoved) out << "removed " << pid << "\n";
+    for (u32 pid : sSession) out << "session " << pid << "\n";
     for (auto& f : sFriends)
         if (!f.email.empty()) out << "email " << oc::hex(f.pub, 32) << " " << f.email << "\n";
     for (auto& f : sFriends)
@@ -123,9 +125,9 @@ void load() {
         std::string name;
         std::getline(ls, name);
         while (!name.empty() && name[0] == ' ') name.erase(name.begin());
-        if (st == "removed") {
+        if (st == "removed" || st == "session") {
             const u32 pid = u32(std::strtoul(hx.c_str(), nullptr, 10));
-            if (pid) sRemoved.push_back(pid);
+            if (pid) (st == "removed" ? sRemoved : sSession).push_back(pid);
             continue;
         }
         if (hx.size() != 64) continue;
@@ -371,6 +373,26 @@ void onMessage(const net::AppMsg& m) {
     }
 }
 
+// Session roster entries of players who are no longer in a room with us go to the removal list
+// (also after a crash: the list is in friends.txt).
+void sweepSession() {
+    if (sSession.empty()) return;
+    bool changed = false;
+    for (auto it = sSession.begin(); it != sSession.end();) {
+        bool here = false, isFriend = false;
+        for (auto& [id, ms] : sMembers) here |= ms.verified && pidOf(ms.pub) == *it;
+        for (auto& f : sFriends) isFriend |= f.pid == *it && f.state == State::Friend;
+        if (here && !isFriend) {
+            ++it;
+            continue;
+        }
+        if (!isFriend) sRemoved.push_back(*it);
+        it = sSession.erase(it);
+        changed = true;
+    }
+    if (changed) save();
+}
+
 u8 memberOfPub(const u8 pub[32]) {
     for (auto& [id, ms] : sMembers)
         if (ms.verified && std::memcmp(ms.pub, pub, 32) == 0) return id;
@@ -427,6 +449,7 @@ void tick() {
     if (!s.active()) {
         mail::tick();  // starts the relay worker (letters while not in a room)
         sMembers.clear();
+        sweepSession();
         return;
     }
     const u8 self = s.selfId();
@@ -460,6 +483,7 @@ void tick() {
     net::AppMsg msg;
     int budget = 64;
     while (budget-- > 0 && s.pollApp(msg, 0x40, 0x5F)) onMessage(msg);
+    sweepSession();
     mail::tick();
 }
 
@@ -518,6 +542,34 @@ std::vector<Friend> list() {
     std::lock_guard<std::recursive_mutex> g(sMutex);
     load();
     return sFriends;
+}
+
+std::vector<Friend> sessionMembers() {
+    std::lock_guard<std::recursive_mutex> g(sMutex);
+    std::vector<Friend> v;
+    for (auto& [id, ms] : sMembers) {
+        if (!ms.verified || ms.info.size() != kGameInfoSize) continue;
+        if (byPub(ms.pub) && (byPub(ms.pub)->state == State::Friend || byPub(ms.pub)->state == State::Blocked)) continue;
+        Friend f;
+        std::memcpy(f.pub, ms.pub, 32);
+        f.name = ms.name;
+        f.code = codeOf(ms.pub);
+        f.pid = pidOf(ms.pub);
+        f.state = State::Friend;
+        f.gameInfo = ms.info;
+        v.push_back(std::move(f));
+    }
+    return v;
+}
+
+void noteSessionRoster(uint32_t pid) {
+    std::lock_guard<std::recursive_mutex> g(sMutex);
+    for (u32 p : sSession)
+        if (p == pid) return;
+    sSession.push_back(pid);
+    // Queued for removal earlier (it left, then came back before the game dropped it): it stays.
+    for (auto it = sRemoved.begin(); it != sRemoved.end();) it = *it == pid ? sRemoved.erase(it) : std::next(it);
+    save();
 }
 
 uint8_t memberOf(const uint8_t pub[32]) {

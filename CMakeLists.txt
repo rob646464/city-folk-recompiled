@@ -89,7 +89,7 @@ add_test(NAME save_import COMMAND cf_save_import_test)
 
 # Online room transport (src/recomp/online_net.*, docs/ONLINE.md): host + members over loopback UDP.
 add_executable(cf_online_test tools/tests/online_net_test.cpp tools/relay/cf_relay.cpp src/recomp/online_net.cpp
-    src/recomp/online_nat.cpp src/recomp/online_crypto.cpp src/recomp/online_ed25519.cpp)
+    src/recomp/online_turn.cpp src/recomp/online_nat.cpp src/recomp/online_crypto.cpp src/recomp/online_ed25519.cpp)
 target_include_directories(cf_online_test PRIVATE src)
 target_compile_definitions(cf_online_test PRIVATE CF_RELAY_AS_LIB)
 if (WIN32)
@@ -97,19 +97,24 @@ if (WIN32)
 endif ()
 add_test(NAME online_net COMMAND cf_online_test)
 # Test aid: plain local SMTP/IMAP for the email letters (docs/ONLINE.md "Always online mail").
-add_executable(cf_mail_test_server tools/tests/cf_mail_test_server.cpp src/recomp/online_tls.cpp src/recomp/online_net.cpp src/recomp/online_nat.cpp
+add_executable(cf_mail_test_server tools/tests/cf_mail_test_server.cpp src/recomp/online_tls.cpp src/recomp/online_net.cpp src/recomp/online_turn.cpp src/recomp/online_nat.cpp
     src/recomp/online_crypto.cpp src/recomp/online_ed25519.cpp)
 target_include_directories(cf_mail_test_server PRIVATE src)
 if (WIN32)
     target_link_libraries(cf_mail_test_server PRIVATE ws2_32 iphlpapi bcrypt secur32 crypt32)
 endif ()
 # The optional self-hosted relay (docs/ONLINE.md "Relay"): rooms behind unreachable routers.
-add_executable(cf_relay tools/relay/cf_relay.cpp src/recomp/online_net.cpp src/recomp/online_nat.cpp
+add_executable(cf_relay tools/relay/cf_relay.cpp src/recomp/online_net.cpp src/recomp/online_turn.cpp src/recomp/online_nat.cpp
     src/recomp/online_crypto.cpp src/recomp/online_ed25519.cpp)
 target_include_directories(cf_relay PRIVATE src)
 if (WIN32)
     target_link_libraries(cf_relay PRIVATE ws2_32 iphlpapi bcrypt)
 endif ()
+
+# Online lobby (docs/ONLINE.md "The lobby"): TURN client + stand-in (tools/tests/turn_tests.cmake), the
+# self-hosted lobby / test stand-in and its API test (tools/lobby/lobby.cmake).
+include(tools/tests/turn_tests.cmake OPTIONAL)
+include(tools/lobby/lobby.cmake OPTIONAL)
 
 # Wild World save reader / converter for the move-in (src/game/ww_save.*, docs/MOVE_IN.md "Testing").
 # Synthetic saves; with CF_WW_SAVE=<file> also a real one (never committed).

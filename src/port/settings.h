@@ -302,6 +302,13 @@ struct OnlineSettings {
     std::string emailImapHost, emailSmtpHost;
     int emailImapPort = 993, emailSmtpPort = 465;
     std::string relay;          // optional self-hosted relay "host[:port]" (tools/relay/cf_relay.cpp)
+    // The lobby (room list + connection help; docs/ONLINE.md "The lobby"): its address, e.g.
+    // "https://cf-lobby.example.workers.dev". Empty = the built-in default list (online.cpp), which
+    // may be empty too ("No lobby server set").
+    std::string lobbyServer;
+    bool lobbyList = true;      // hosted rooms are listed on the lobby
+    int maxPlayers = 4;         // room size when hosting, 2..4
+    int visibility = 0;         // hosting: 0 public, 1 password, 2 friends only
     // Wii Speak from the PC microphone (src/recomp/online_voice.cpp). Nothing is recorded or sent while off.
     bool micOn = false;
     std::string micDevice;      // SDL recording device name; empty = the system default

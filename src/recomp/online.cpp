@@ -16,6 +16,7 @@
 #include "recomp/town_id.h"
 #include "recomp/online_ed25519.h"
 #include "recomp/online_friends.h"
+#include "recomp/online_lobby.h"
 #include "recomp/online_mail.h"
 #include "recomp/online_email.h"
 #include "recomp/online_net.h"
@@ -33,14 +34,23 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
 
 namespace recomp::online {
+
+// Hosting / joining through the lobby (with the F1 tab at the end of this file).
+std::string lobbyUrl();
+bool hostRoom(const std::string& password, int visibility, int portOverride, bool noMapping, std::string* err);
+bool joinListedRoom(const std::string& name, const std::string& password);
+void lobbyUpkeep();
+
 namespace {
 
 namespace net = ::online::net;
+namespace lobby = ::online::lobby;
 namespace oc = ::onlinecrypto;
 
 std::atomic<u32> sPid{0};
@@ -97,6 +107,9 @@ void pushIdentity() {
     id.portVersion = port::update::buildVersion();
     id.pid = sPid;
     id.friendKey = sFriendKey;
+    id.haveKey = true;
+    std::memcpy(id.edSeed, sSeed, 32);
+    std::memcpy(id.edPub, friends::myPublicKey(), 32);
     net::session().setIdentity(id);
 }
 
@@ -181,12 +194,21 @@ void envStart() {
         std::ofstream(f) << sPid.load() << "\n";
     }
     sCodeFile = envOr("CF_ONLINE_CODE_FILE", "");
+    // CF_ONLINE_STUN=<ip:port>,<ip:port>: the two STUN servers (local stand-ins in test runs);
+    // CF_ONLINE_FORCE_RELAY=1: lobby joins never use a direct path (the relay test).
+    if (const char* st = envOr("CF_ONLINE_STUN")) {
+        const std::string v = st;
+        const size_t c = v.find(',');
+        net::setStunServers(v.substr(0, c), c == std::string::npos ? std::string() : v.substr(c + 1));
+    }
+    if (envOr("CF_ONLINE_FORCE_RELAY")) net::setForceRelay(true);
     if (const char* h = envOr("CF_ONLINE_HOST")) {
-        auto o = hostOptions(envOr("CF_ONLINE_PASSWORD", ""));
-        o.port = u16(std::atoi(h) > 1023 ? std::atoi(h) : net::kDefaultPort);
-        o.portMapping = envOr("CF_ONLINE_UPNP") != nullptr;
+        // CF_ONLINE_VISIBILITY=public|password|friends (default: password when CF_ONLINE_PASSWORD is set).
+        const std::string pw = envOr("CF_ONLINE_PASSWORD", ""), vis = envOr("CF_ONLINE_VISIBILITY", "");
+        const int v = vis == "friends" ? 2 : vis == "public" ? 0 : (vis == "password" || !pw.empty()) ? 1 : 0;
         std::string err;
-        if (!net::session().host(o, &err)) std::printf("[online] CF_ONLINE_HOST failed: %s\n", err.c_str());
+        if (!hostRoom(pw, v, std::atoi(h) > 1023 ? std::atoi(h) : net::kDefaultPort, envOr("CF_ONLINE_UPNP") == nullptr, &err))
+            std::printf("[online] CF_ONLINE_HOST failed: %s\n", err.c_str());
     }
     if (envOr("CF_ONLINE_JOIN")) sJoinPending = true;
     if (const char* t = envOr("CF_ONLINE_TEST")) {
@@ -205,6 +227,14 @@ void envStart() {
 
 void tryJoinFromEnv() {
     std::string target = envOr("CF_ONLINE_JOIN", "");
+    if (target.rfind("lobby", 0) == 0) {  // lobby[:<room name>]: from the room list, once it shows the room
+        static u32 next = 0;
+        const u32 f = recomp::game::guestFrames();
+        if (f < next) return;
+        next = f + 30;
+        if (joinListedRoom(target.size() > 6 ? target.substr(6) : std::string(), envOr("CF_ONLINE_PASSWORD", ""))) sJoinPending = false;
+        return;
+    }
     if (target == "file") {
         std::ifstream in(sCodeFile);
         std::string code;
@@ -322,6 +352,8 @@ u64 wiiNumber() {
 }
 
 static std::vector<u8> cleanGameInfo(std::vector<u8> v, const u8 pub[32]);
+static std::string sMyTown;                 // the loaded town's name (the lobby lists it with the room)
+static std::map<u32, std::string> sTownOf;  // towns of roster entries we wrote (by profile id)
 
 // nwc24fl.bin (layout from the NWC24 library's reads: GetCachedFLHeader / iReadFriendInfoRaw /
 // fn_8040E23C): 0x00 "WcFl", 0x04 version 2, 0x08 entries (100), 0x40 Wii numbers u64[100],
@@ -444,6 +476,7 @@ static void rosterSync(Ctx& c) {
     const u32 save = gu::call(c, fnSave);
     if (!save || !gu::call(c, fnCheck, {save + 4})) return;
     friends::setMyGameInfo(myGameInfo(save));
+    sMyTown = utf16Name(myGameInfo(save), 0x0A);
     {
         std::string sig;
         for (auto& fr : friends::list())
@@ -483,7 +516,10 @@ static void rosterSync(Ctx& c) {
         return;
     }
     auto fl = friends::list();
-    bool any = false;
+    // Players of the room we are in count as friends for the game while the room lasts: the gate
+    // lists only towns of roster friends, so joining a room is all two players need for a visit.
+    const auto sessionList = friends::sessionMembers();
+    bool any = !sessionList.empty();
     for (auto& fr : fl) any |= fr.state == friends::State::Friend;
     if (!any) return;
     // Pelly offers "Other town." only when town flag 0x1F is set (d_a_npc_sp_perikoNP fn_34_3794
@@ -505,6 +541,12 @@ static void rosterSync(Ctx& c) {
             std::printf("[online] town flag 0x1F set (Pelly: \"Other town.\"): a friend is in the roster\n");
         }
     }
+    for (auto& sm : sessionList) fl.push_back(sm);
+    auto isSession = [&](u32 pid) {
+        for (auto& sm : sessionList)
+            if (sm.pid == pid) return true;
+        return false;
+    };
     static u32 buf = 0, info = 0;
     if (!buf) buf = hleAlloc(16);
     if (!info) info = hleAlloc(u32(friends::kGameInfoSize));
@@ -546,7 +588,13 @@ static void rosterSync(Ctx& c) {
         const std::string as = haveInfo ? ", as " + utf16Name(gi, 0x20) + " of " + utf16Name(gi, 0x0A) : std::string();
         std::printf("[online] friend %s (profile id %u) -> game roster slot %d%s: %s\n", fr.name.c_str(), fr.pid, at, as.c_str(),
                     ok ? (slot >= 0 ? "updated" : "registered") : "refused");
-        if (ok && slot < 0) notice(fr.name + " is now in the game's friend roster");
+        if (ok && slot < 0 && isSession(fr.pid)) {
+            friends::noteSessionRoster(fr.pid);
+            notice(fr.name + " is in this room: you can visit each other at the town gate");
+        } else if (ok && slot < 0) {
+            notice(fr.name + " is now in the game's friend roster");
+        }
+        if (haveInfo) sTownOf[fr.pid] = utf16Name(gi, 0x0A);
         return;  // one per pass
     }
 }
@@ -766,6 +814,7 @@ void onGuestFrame(Ctx& c) {
 
 void drawOverlay() {
     watchRoom();
+    lobbyUpkeep();
     email::tick();
     friends::tick();
     voice::tick();
@@ -811,10 +860,11 @@ void drawOverlay() {
 }
 
 static void memberTable(const net::Snapshot& snap, bool canKick) {
-    if (!ImGui::BeginTable("members", canKick ? 5 : 4, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) return;
+    if (!ImGui::BeginTable("members", canKick ? 6 : 5, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) return;
     ImGui::TableSetupColumn("Player");
     ImGui::TableSetupColumn("Friend code (in game)");
     ImGui::TableSetupColumn("Ping");
+    ImGui::TableSetupColumn("Connection");
     ImGui::TableSetupColumn("Friend");
     if (canKick) ImGui::TableSetupColumn("");
     ImGui::TableHeadersRow();
@@ -828,6 +878,17 @@ static void memberTable(const net::Snapshot& snap, bool canKick) {
         ImGui::TableNextColumn();
         if (m.self || m.rttMs < 0) ImGui::TextDisabled("-");
         else ImGui::Text("%d ms", m.rttMs);
+        ImGui::TableNextColumn();
+        {
+            // The host reaches every member itself; a member reaches the host, and the others through it.
+            const bool mine = canKick ? !m.self : m.host;
+            const bool relayed = canKick ? m.relayed : (m.host && snap.relayed);
+            if (m.self) ImGui::TextDisabled("-");
+            else if (mine && canKick && m.address == "(connecting)") ImGui::TextDisabled("connecting...");
+            else if (mine && relayed) ImGui::TextColored(ImVec4(1, 0.75f, 0.3f, 1), "relayed");
+            else if (mine) ImGui::TextUnformatted("direct");
+            else ImGui::TextDisabled("through the host");
+        }
         ImGui::TableNextColumn();
         if (!m.self) {
             switch (friends::relation(m.id)) {
@@ -883,6 +944,430 @@ static void friendsSection() {
     ImGui::TextDisabled("Letters between friends and visits without a room: not yet (docs/ONLINE.md section 10).");
 }
 
+// ---- the lobby: hosting a listed room, the room list, joining (docs/ONLINE.md "The lobby") ----
+
+// The built-in lobby list. None yet: who hosts the public lobby is not decided, so until then the
+// address comes from F1 > Online > Advanced ([online] lobby_server) and the list says so.
+static const char* const kDefaultLobbies[] = {""};
+
+std::string lobbyUrl() {
+    if (const char* e = envOr("CF_ONLINE_LOBBY")) return lobby::normalizeUrl(e);
+    const std::string own = lobby::normalizeUrl(port::settings().online.lobbyServer);
+    return own.empty() ? lobby::normalizeUrl(kDefaultLobbies[0]) : own;
+}
+
+static std::shared_ptr<lobby::HostChannel> sHostChan;
+static std::string sHostTag;
+static int sHostVisibility = 0;
+
+static std::string gameIdText() { return port::dol::versionId(port::dol::version()); }
+
+static lobby::RoomInfo roomInfo(const net::Snapshot& snap) {
+    lobby::RoomInfo r;
+    r.name = snap.roomName;
+    r.host = playerName();
+    r.town = sMyTown;
+    r.players = int(std::max<size_t>(snap.members.size(), 1));
+    r.max = std::clamp(port::settings().online.maxPlayers, 2, 4);
+    r.lock = snap.hasPassword;
+    r.friends = sHostVisibility == 2;
+    r.game = gameIdText();
+    r.ver = port::update::buildVersion();
+    r.tag = sHostTag;
+    return r;
+}
+
+// A friends-only room lets in the keys of the F1 friends list (kept current while hosting).
+static void pushFriendKeys() {
+    std::vector<std::array<u8, 32>> keys;
+    for (auto& f : friends::list())
+        if (f.state == friends::State::Friend) {
+            std::array<u8, 32> k;
+            std::memcpy(k.data(), f.pub, 32);
+            keys.push_back(k);
+        }
+    net::session().setAllowedKeys(keys);
+}
+
+bool hostRoom(const std::string& passwordIn, int visibility, int portOverride, bool noMapping, std::string* err) {
+    pushIdentity();
+    const auto& o = port::settings().online;
+    if (visibility == 1 && passwordIn.empty()) {
+        if (err) *err = "Enter a password for the room, or pick another visibility";
+        return false;
+    }
+    auto h = hostOptions(visibility == 1 ? passwordIn : std::string());
+    h.maxMembers = std::clamp(o.maxPlayers, 2, 4);
+    h.friendsOnly = visibility == 2;
+    if (portOverride) h.port = u16(portOverride);
+    if (noMapping) h.portMapping = false;
+    if (sHostChan) {
+        sHostChan->stop();
+        sHostChan.reset();
+    }
+    if (!net::session().host(h, err)) return false;
+    sHostVisibility = visibility;
+    pushFriendKeys();
+    const std::string url = lobbyUrl();
+    if (!url.empty() && o.lobbyList) {
+        sHostTag = lobby::makeTag(friends::myPublicKey());
+        sHostChan = lobby::HostChannel::start(url, roomInfo(net::session().snapshot()));
+        net::session().attachSignaling(sHostChan);
+    }
+    return true;
+}
+
+void lobbyUpkeep() {
+    if (!sHostChan) return;
+    const auto snap = net::session().snapshot();
+    if (snap.state != net::State::Hosting) {  // the room closed: off the list at once
+        sHostChan->stop();
+        sHostChan.reset();
+        return;
+    }
+    sHostChan->update(roomInfo(snap));
+    static int n = 0;
+    if (++n % 120 == 0) pushFriendKeys();
+}
+
+// The F1 friend whose key made this friends-only room's tag, or null.
+static const friends::Friend* friendOfTag(const std::string& tag, const std::vector<friends::Friend>& fl) {
+    for (auto& f : fl)
+        if (f.state == friends::State::Friend && lobby::tagMatches(tag, f.pub)) return &f;
+    return nullptr;
+}
+
+static bool joinRoom(const lobby::Room& r, const std::string& password, std::string* err) {
+    pushIdentity();
+    const std::string url = lobbyUrl();
+    u8 key[32];
+    bool expect = false;
+    if (r.friends) {
+        const auto fl = friends::list();
+        if (const auto* f = friendOfTag(r.tag, fl)) {
+            std::memcpy(key, f->pub, 32);
+            expect = true;
+        } else {
+            if (err) *err = "That room is for the host's friends only";
+            return false;
+        }
+    }
+    return net::session().joinSignaled(lobby::joinChannel(url, r.id), expect ? key : nullptr, password, err);
+}
+
+// Test aid CF_ONLINE_JOIN=lobby[:<room name>|:friends]: joins that room once the list shows it.
+// True when an attempt was made (or nothing can be done), false while the room is not listed yet.
+bool joinListedRoom(const std::string& name, const std::string& password) {
+    const std::string url = lobbyUrl();
+    if (url.empty()) {
+        std::printf("[online] CF_ONLINE_JOIN=lobby: no lobby server set\n");
+        return true;
+    }
+    const auto st = lobby::state();
+    if (!st.loading && (st.age < 0 || st.age > 2 || st.url != url)) lobby::refresh(url, {});
+    if (st.url != url) return false;
+    const auto fl = friends::list();
+    for (auto& r : st.rooms) {
+        if (r.game != gameIdText() || r.ver != port::update::buildVersion()) continue;
+        const bool match = r.friends ? (friendOfTag(r.tag, fl) && (name.empty() || name == "friends")) : (name.empty() || r.name == name);
+        if (!match) continue;
+        std::string err;
+        std::printf("[online] room list: joining \"%s\" (%s)\n", r.friends ? "(a friend's room)" : r.name.c_str(), r.id.c_str());
+        if (!joinRoom(r, password, &err)) std::printf("[online] CF_ONLINE_JOIN failed: %s\n", err.c_str());
+        return true;
+    }
+    return false;
+}
+
+// A small padlock (the menu font has no such glyph).
+static void lockIcon(bool locked) {
+    const float h = ImGui::GetTextLineHeight(), w = h * 0.8f;
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(ImVec2(w, h));
+    if (!locked) return;
+    ImGui::SetItemTooltip("This room has a password");
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImU32 col = ImGui::GetColorU32(ImVec4(0.95f, 0.78f, 0.25f, 1));
+    const float x0 = p.x + w * 0.12f, x1 = p.x + w * 0.88f, y0 = p.y + h * 0.48f, y1 = p.y + h * 0.94f;
+    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), col, h * 0.08f);
+    dl->PathArcTo(ImVec2((x0 + x1) * 0.5f, y0), w * 0.24f, 3.14159265f, 6.2831853f, 12);
+    dl->PathStroke(col, 0, std::max(1.5f, h * 0.11f));
+}
+
+struct RoomRow {
+    bool lan = false;
+    lobby::Room room;
+    net::LanRoom lanRoom;
+    std::string title, hostLine, version, why;  // why: the reason it cannot be joined ("" = it can)
+    bool versionOk = true, lock = false, friendRoom = false;
+    int players = 0, max = 4, ping = -1;
+};
+
+static std::vector<RoomRow> buildRows(const lobby::ListState& ls) {
+    std::vector<RoomRow> rows;
+    const std::string game = gameIdText(), ver = port::update::buildVersion();
+    const auto fl = friends::list();
+    auto versionOf = [&](RoomRow& x, const std::string& g, const std::string& v) {
+        if (g != game) {
+            x.versionOk = false;
+            x.version = "Other region";
+            x.why = "Towns visit only within one region: this room plays " + g + ", you play " + game + ".";
+        } else if (!v.empty() && v != ver) {
+            x.versionOk = false;
+            x.version = "Version " + v;
+            x.why = "The host runs City Folk Recompiled " + v + ", you run " + ver + ": both need the same version.";
+        } else {
+            x.version = "Same";
+        }
+    };
+    for (auto& l : net::session().lanRooms()) {
+        RoomRow x;
+        x.lan = true;
+        x.lanRoom = l;
+        x.title = l.roomName;
+        x.hostLine = l.hostName;
+        x.players = l.members;
+        x.max = l.maxMembers;
+        x.lock = l.hasPassword;
+        versionOf(x, l.gameId, l.portVersion);
+        rows.push_back(std::move(x));
+    }
+    for (auto& r : ls.rooms) {
+        RoomRow x;
+        x.room = r;
+        x.players = r.players;
+        x.max = r.max;
+        x.lock = r.lock;
+        x.ping = r.pingMs;
+        if (r.friends) {  // listed without names: only the host's friends can tell whose it is
+            const auto* f = friendOfTag(r.tag, fl);
+            if (!f) continue;
+            x.friendRoom = true;
+            x.title = f->name + "'s room";
+            x.hostLine = f->name + " (friends only)";
+        } else {
+            x.title = r.name;
+            x.hostLine = r.town.empty() ? r.host : r.host + " of " + r.town;
+            // The same room heard on the local network: that row stays (it connects directly).
+            bool onLan = false;
+            for (auto& o : rows) onLan |= o.lan && o.title == r.name && o.lanRoom.hostName == r.host;
+            if (onLan) continue;
+        }
+        versionOf(x, r.game, r.ver);
+        if (x.why.empty() && r.players >= r.max) x.why = "This room is full.";
+        rows.push_back(std::move(x));
+    }
+    return rows;
+}
+
+static RoomRow sPwRow;        // the locked room whose password is being asked
+static bool sPwAsk = false;
+
+static void startJoin(const RoomRow& x, const std::string& password) {
+    std::string err;
+    pushIdentity();
+    const bool ok = x.lan ? net::session().joinLan(x.lanRoom, password, &err) : joinRoom(x.room, password, &err);
+    sError = ok ? "" : err;
+}
+
+// The list of rooms: the lobby's and the local network's. Click Join; a locked room asks for
+// its password first.
+static void roomList() {
+    const std::string url = lobbyUrl();
+    auto ls = lobby::state();
+    net::session().lanScan(true);
+    if (!url.empty() && !ls.loading && (ls.url != url || ls.age < 0 || ls.age > 10) && !(ls.age < 0 && !ls.error.empty() && ls.url == url))
+        lobby::refresh(url, {});
+    // After a failed fetch the next automatic try comes 10 s later.
+    static double sRetryAt = 0;
+    if (!url.empty() && !ls.loading && ls.age < 0 && !ls.error.empty() && ls.url == url && secs() > sRetryAt) {
+        sRetryAt = secs() + 10;
+        lobby::refresh(url, {});
+    }
+    if (menu::SmallButton("Refresh") && !url.empty()) lobby::refresh(url, {});
+    ImGui::SameLine();
+    if (url.empty()) {
+        ImGui::TextColored(ImVec4(1, 0.75f, 0.3f, 1), "No lobby server set");
+        ImGui::SetItemTooltip("Rooms on the internet are listed by a lobby server. None is built in yet:\n"
+                              "enter one under Advanced > Lobby server. Rooms on your own network still show here.");
+    } else if (!ls.error.empty() && ls.url == url) {
+        ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", ls.error.c_str());
+    } else if (ls.url != url || ls.age < 0) {
+        ImGui::TextDisabled("Asking the lobby...");
+    } else {
+        ImGui::TextDisabled("%s, updated %d s ago (every 10 s)%s", url.substr(url.find("://") + 3).c_str(), int(ls.age),
+                            ls.relay ? "" : ", no relay");
+        if (!ls.relay)
+            ImGui::SetItemTooltip("This lobby has no relay: two players whose routers both refuse direct\n"
+                                  "connections cannot be connected (most home routers are fine).");
+    }
+    if (ls.url != url) ls.rooms.clear();
+    const auto rows = buildRows(ls);
+    if (rows.empty()) {
+        ImGui::TextDisabled("%s", url.empty() ? "No rooms on your network right now." : "No rooms right now. Host one below, or wait for the next update.");
+    } else if (ImGui::BeginTable("rooms", 7, ImGuiTableFlags_BordersInner | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("##lock", ImGuiTableColumnFlags_WidthFixed, ImGui::GetTextLineHeight());
+        ImGui::TableSetupColumn("Room", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("Host / town", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("Players", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("Players ").x);
+        ImGui::TableSetupColumn("Version", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("Version 00.00.00 ").x);
+        ImGui::TableSetupColumn("Ping", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("~000 ms ").x);
+        ImGui::TableSetupColumn("##join", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("  Join  ").x + 12.0f * ui::scale());
+        ImGui::TableHeadersRow();
+        int i = 0;
+        for (auto& x : rows) {
+            ImGui::PushID(i);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            lockIcon(x.lock);
+            ImGui::TableNextColumn();
+            // Long names are cut by the column: the whole text on hover.
+            if (x.friendRoom) ImGui::TextColored(ImVec4(0.55f, 0.85f, 1, 1), "%s", x.title.c_str());
+            else ImGui::TextUnformatted(x.title.c_str());
+            ImGui::SetItemTooltip("%s%s", x.title.c_str(), x.friendRoom ? "\nFriends only: listed without a name, you see it because the host is your friend." : "");
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(x.hostLine.c_str());
+            ImGui::SetItemTooltip("%s", x.hostLine.c_str());
+            ImGui::TableNextColumn();
+            ImGui::Text("%d/%d", x.players, x.max);
+            ImGui::TableNextColumn();
+            if (x.versionOk) ImGui::TextUnformatted(x.version.c_str());
+            else ImGui::TextColored(ImVec4(1, 0.6f, 0.4f, 1), "%s", x.version.c_str());
+            if (!x.versionOk) ImGui::SetItemTooltip("%s", x.why.c_str());
+            ImGui::TableNextColumn();
+            if (x.lan) ImGui::TextUnformatted("LAN");
+            else if (x.ping >= 0) ImGui::Text("~%d ms", x.ping);
+            else ImGui::TextDisabled("-");
+            if (!x.lan && x.ping >= 0) ImGui::SetItemTooltip("An estimate from the distance to the host. The measured ping shows once you are in the room.");
+            ImGui::TableNextColumn();
+            ImGui::BeginDisabled(!x.why.empty());
+            // "Join##r<i>": the click test aid presses a row by this label.
+            if (menu::SmallButton(("Join##r" + std::to_string(i)).c_str())) {
+                if (x.lock) {
+                    sPwRow = x;
+                    sPwAsk = true;
+                    if (!envOr("CF_ONLINE_PASSWORD")) sJoinPw[0] = 0;
+                } else {
+                    startJoin(x, {});
+                }
+            }
+            ImGui::EndDisabled();
+            if (!x.why.empty()) ImGui::SetItemTooltip("%s", x.why.c_str());
+            ImGui::PopID();
+            i++;
+        }
+        ImGui::EndTable();
+    }
+    if (sPwAsk) {
+        ImGui::OpenPopup("Room password");
+        sPwAsk = false;
+    }
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("Room password", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("\"%s\" has a password.", sPwRow.title.c_str());
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        ImGui::SetNextItemWidth(260.0f * ui::scale());
+        const bool enter = ImGui::InputText("##roompw", sJoinPw, sizeof sJoinPw, ImGuiInputTextFlags_Password | ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::TextDisabled("It is checked by the host; the lobby never sees it.");
+        if ((menu::Button("Join room") || enter) && sJoinPw[0]) {
+            startJoin(sPwRow, sJoinPw);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (menu::Button("Cancel##roompw")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+}
+
+// Everything the room list replaced, for setups it does not cover: the lobby's address, the
+// host's network options, a manual address, the old room / reply codes.
+static bool advancedSection(const net::Snapshot& snap, bool hosting) {
+    auto& o = port::settings().online;
+    bool dirty = false;
+    menu::openTreesForCheck();
+    if (!ImGui::CollapsingHeader("Advanced")) return false;
+    if (hosting) {
+        ImGui::TextWrapped("Room code (for a player who cannot use the room list)%s:", snap.hasPassword ? ", password not included" : "");
+        ImGui::TextUnformatted(snap.code.c_str());
+        ImGui::SameLine();
+        if (menu::SmallButton("Copy##code")) ImGui::SetClipboardText(snap.code.c_str());
+        if (!snap.lanEndpoint.empty()) ImGui::Text("On your network: %s", snap.lanEndpoint.c_str());
+        if (!snap.publicEndpoint.empty()) ImGui::Text("On the internet: %s", snap.publicEndpoint.c_str());
+        if (!snap.reachability.empty()) ImGui::TextWrapped("Port mapping: %s", snap.reachability.c_str());
+        static char reply[64] = {};
+        ImGui::SetNextItemWidth(260.0f * ui::scale());
+        ImGui::InputTextWithHint("##reply", "a code joiner's reply code", reply, sizeof reply);
+        ImGui::SameLine();
+        if (menu::SmallButton("Let them in")) {
+            std::string e;
+            if (net::session().punch(reply, &e)) reply[0] = 0;
+            else sError = e;
+        }
+        ImGui::SetItemTooltip("Only for joins with a room code: a joiner whose packets do not arrive gets a reply code.\n"
+                              "Rooms joined from the list do this by themselves.");
+        return false;
+    }
+    {
+        char lb[160];
+        std::snprintf(lb, sizeof lb, "%s", o.lobbyServer.c_str());
+        ImGui::SetNextItemWidth(360.0f * ui::scale());
+        if (ImGui::InputTextWithHint("Lobby server", "https://cf-lobby.example.workers.dev", lb, sizeof lb)) {
+            o.lobbyServer = lb;
+            dirty = true;
+        }
+        ImGui::SetItemTooltip("The server that lists rooms and helps two routers connect. It sees room names and\n"
+                              "internet addresses, never the password or anything of the game (docs/ONLINE.md).\n"
+                              "Empty = the built-in one (none yet).");
+        if (envOr("CF_ONLINE_LOBBY")) ImGui::TextDisabled("Overridden by CF_ONLINE_LOBBY: %s", lobbyUrl().c_str());
+    }
+    dirty |= menu::Checkbox("List my room on the lobby", &o.lobbyList);
+    ImGui::SetItemTooltip("Off: the room is only on your network and reachable by room code or address.");
+    if (ImGui::InputInt("UDP port", &o.port)) {
+        o.port = std::clamp(o.port, 1024, 65535);
+        dirty = true;
+    }
+    dirty |= menu::Checkbox("Ask me before someone joins", &o.askBeforeJoin);
+    dirty |= menu::Checkbox("Map the port on my router (UPnP / NAT-PMP)", &o.portMapping);
+    ImGui::SetItemTooltip("Asks your router to forward the UDP port to this PC while you host. Not needed for\n"
+                          "rooms joined from the list; it helps code and address joins.");
+    dirty |= menu::Checkbox("Show on the local network", &o.lanVisible);
+    dirty |= menu::Checkbox("Allow direct connections (IP:port, no code)", &o.allowDirect);
+    ImGui::SetItemTooltip("For port forwarding / VPN setups: joiners that know only your address may join.\n"
+                          "Set a password if you leave this on with a public address.");
+    {
+        char rb[128];
+        std::snprintf(rb, sizeof rb, "%s", o.relay.c_str());
+        ImGui::SetNextItemWidth(220.0f * ui::scale());
+        if (ImGui::InputTextWithHint("Own relay for room codes", "host:29912", rb, sizeof rb)) {
+            o.relay = rb;
+            dirty = true;
+        }
+        ImGui::SetItemTooltip("A cf_relay your group runs (docs/ONLINE.md): code joiners that cannot reach you come\n"
+                              "in through it. Rooms joined from the list use the lobby's relay instead.");
+    }
+    ImGui::SeparatorText("Connect to an address");
+    if (ImGui::InputText("Address (IP:port)", sDirect, sizeof sDirect)) {
+        o.lastDirect = sDirect;
+        dirty = true;
+    }
+    ImGui::InputText("Password##direct", sDirectPw, sizeof sDirectPw, ImGuiInputTextFlags_Password);
+    if (menu::Button("Connect")) {
+        pushIdentity();
+        std::string err;
+        sError = net::session().joinAddress(sDirect, sDirectPw, &err) ? "" : err;
+    }
+    ImGui::SetItemTooltip("A host with a forwarded port (UDP 29910 by default) or a VPN address (Tailscale, ZeroTier, Hamachi).");
+    ImGui::SeparatorText("Join with a room code");
+    ImGui::InputText("Room code", sJoinCode, sizeof sJoinCode);
+    ImGui::InputText("Password##code", sJoinPw, sizeof sJoinPw, ImGuiInputTextFlags_Password);
+    if (menu::Button("Join with the code")) {
+        pushIdentity();
+        std::string err;
+        sError = net::session().joinCode(sJoinCode, sJoinPw, &err) ? "" : err;
+    }
+    return dirty;
+}
+
 bool drawTab() {
     auto& o = port::settings().online;
     bool dirty = false;
@@ -892,34 +1377,39 @@ bool drawTab() {
         copyStr(sName, sizeof sName, o.playerName);
         copyStr(sRoom, sizeof sRoom, o.roomName);
         copyStr(sDirect, sizeof sDirect, o.lastDirect);
+        if (const char* pw = envOr("CF_ONLINE_PASSWORD")) {  // test runs: the password fields start filled
+            copyStr(sJoinPw, sizeof sJoinPw, pw);
+            copyStr(sPassword, sizeof sPassword, pw);
+        }
     }
     const auto snap = net::session().snapshot();
     const bool inRoom = snap.state == net::State::Hosting || snap.state == net::State::Joined;
     const bool busy = snap.state == net::State::Connecting || snap.state == net::State::WaitingForHost;
 
-    ImGui::TextWrapped("Play with other players of City Folk Recompiled: one player hosts a room, the others join it; "
-                       "then visit towns through the game's own gate (Copper) as on the Wii. No account and no server: "
-                       "the host's game is the room. Players register each other's friend code in the game, as on Nintendo WFC.");
+    ImGui::TextWrapped("Play with other players of City Folk Recompiled: host a room or join one from the list, then visit "
+                       "each other's towns through the game's own gate (Copper), as on the Wii. Players in one room can "
+                       "visit each other at once; no friend codes to type.");
     ImGui::Separator();
     const char* stateText = snap.state == net::State::Hosting ? "Hosting a room"
                           : snap.state == net::State::Joined ? "In a room"
                           : snap.state == net::State::Connecting ? "Connecting..."
                           : snap.state == net::State::WaitingForHost ? "Waiting for the host..."
-                          : snap.state == net::State::Failed ? "Not in a room"
-                                                             : "Not in a room";
+                                                                     : "Not in a room";
     ImGui::Text("Room: %s", stateText);
-    if (!snap.message.empty() && snap.state != net::State::Hosting) ImGui::TextWrapped("%s", snap.message.c_str());
+    if (!snap.message.empty() && snap.state == net::State::Failed) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0.5f, 0.4f, 1));
+        ImGui::TextWrapped("%s", snap.message.c_str());
+        ImGui::PopStyleColor();
+    } else if (!snap.message.empty() && snap.state != net::State::Hosting) {
+        ImGui::TextWrapped("%s", snap.message.c_str());
+    }
     if (!snap.replyCode.empty()) {
-        ImGui::TextWrapped("No answer from the host yet. Send the host this reply code (they enter it under "
-                           "\"Let them in\"):");
+        ImGui::TextWrapped("No answer from the host yet. Send the host this reply code (Advanced > \"Let them in\"):");
         ImGui::TextUnformatted(snap.replyCode.c_str());
         ImGui::SameLine();
         if (menu::SmallButton("Copy##reply")) ImGui::SetClipboardText(snap.replyCode.c_str());
     }
     ImGui::Text("Game: %s", dwcStatusText().c_str());
-    ImGui::Text("Your friend code: %s", fcText(sFriendKey).c_str());
-    ImGui::SetItemTooltip("The game's 12-digit friend code. Others enter it in their game's friend roster,\n"
-                          "and you enter theirs, so the gate lets you visit each other.");
     if (!sError.empty()) ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", sError.c_str());
 
     ImGui::BeginDisabled(inRoom || busy);
@@ -928,36 +1418,35 @@ bool drawTab() {
         dirty = true;
     }
     ImGui::EndDisabled();
-    ImGui::SetItemTooltip("Shown to the others in a room (not your character's name in the game).");
+    ImGui::SetItemTooltip("Shown to the others in the room list and in a room (not your character's name in the game).");
 
     if (inRoom || busy) {
         ImGui::Separator();
-        if (snap.state == net::State::Hosting) {
-            ImGui::Text("Room code%s:", snap.hasPassword ? " (password protected)" : "");
-            ImGui::SameLine();
-            ImGui::TextUnformatted(snap.code.c_str());
-            ImGui::SameLine();
-            if (menu::SmallButton("Copy")) ImGui::SetClipboardText(snap.code.c_str());
-            ImGui::SetItemTooltip("Give this code to the players you want in your room (chat, message, ...).\n"
-                                  "It holds your address and a random key; it changes every time you host.\n"
-                                  "The password (if any) is not in it: tell it separately.");
-            if (!snap.lanEndpoint.empty()) ImGui::Text("On your network: %s", snap.lanEndpoint.c_str());
-            if (!snap.publicEndpoint.empty()) ImGui::Text("On the internet: %s", snap.publicEndpoint.c_str());
-            ImGui::TextWrapped("Internet: %s", snap.reachability.c_str());
-            // Hole punching: a joiner whose packets do not get through sends its reply code.
-            static char reply[64] = {};
-            ImGui::SetNextItemWidth(260.0f * ui::scale());
-            ImGui::InputTextWithHint("##reply", "a joiner's reply code", reply, sizeof reply);
-            ImGui::SameLine();
-            if (menu::SmallButton("Let them in")) {
-                std::string e;
-                if (net::session().punch(reply, &e)) reply[0] = 0;
-                else sError = e;
+        const bool hosting = snap.state == net::State::Hosting;
+        if (!snap.roomName.empty())
+            ImGui::Text("\"%s\"%s%s", snap.roomName.c_str(), snap.hasPassword ? " (password)" : "",
+                        hosting && sHostVisibility == 2 ? " (friends only)" : "");
+        if (hosting) {
+            if (sHostChan) {
+                const bool listed = sHostChan->listed();
+                ImGui::TextColored(listed ? ImVec4(0.5f, 0.9f, 0.5f, 1) : ImVec4(1, 0.75f, 0.3f, 1), "%s", sHostChan->status().c_str());
+            } else {
+                ImGui::TextDisabled("%s", lobbyUrl().empty() ? "Not on a room list (no lobby server set): local network, room code or address only."
+                                                             : "Not on the room list (turned off under Advanced).");
             }
-            ImGui::SetItemTooltip("For a player who cannot reach you (no UPnP, no port forward): they get a reply code\n"
-                                  "while joining. Enter it here and both routers open the way (works with most home\n"
-                                  "routers; not through every mobile or corporate network).");
-            memberTable(snap, true);
+            if (!snap.nat.empty()) ImGui::TextDisabled("Your router: %s", snap.nat.c_str());
+        } else if (snap.state == net::State::Joined) {
+            if (snap.relayed) {
+                ImGui::TextColored(ImVec4(1, 0.75f, 0.3f, 1), "Connection to the host: relayed");
+                ImGui::SetItemTooltip("Your router and the host's did not let a direct connection through, so the\n"
+                                      "(encrypted) traffic goes through the lobby's relay. It works the same; the ping is higher.");
+            } else {
+                ImGui::TextDisabled("Connection to the host: direct");
+            }
+            if (snap.hostKeyKnown && friends::isFriend(snap.hostKey)) ImGui::TextDisabled("The host is your friend (key checked).");
+        }
+        memberTable(snap, hosting);
+        if (hosting) {
             for (auto& r : snap.pending) {
                 ImGui::PushID(int(r.ticket));
                 ImGui::Text("%s (%s) asks to join", r.name.c_str(), r.address.c_str());
@@ -969,101 +1458,47 @@ bool drawTab() {
             }
             if (menu::Button("Close room")) net::session().leave();
         } else {
-            if (!snap.roomName.empty()) ImGui::Text("\"%s\"", snap.roomName.c_str());
-            memberTable(snap, false);
             if (menu::Button(busy ? "Cancel###leave" : "Leave room###leave")) net::session().leave();
         }
-        ImGui::TextDisabled("Leaving or closing the room while visiting ends the visit (the game reports a lost connection).");
+        ImGui::TextDisabled("Go to the town gate and talk to Copper to open your gate or to go out. Leaving or closing the\n"
+                            "room while visiting ends the visit (the game reports a lost connection).");
         net::session().lanScan(false);
+        if (hosting) advancedSection(snap, true);
         return dirty;
     }
 
-    if (ImGui::CollapsingHeader("Host a room", ImGuiTreeNodeFlags_DefaultOpen)) {
-        if (ImGui::InputText("Room name", sRoom, sizeof sRoom)) {
-            o.roomName = sRoom;
-            dirty = true;
-        }
-        ImGui::InputText("Password (optional)##host", sPassword, sizeof sPassword, ImGuiInputTextFlags_Password);
-        ImGui::SetItemTooltip("Joiners must enter it. It is never sent or saved: joiners prove they know it\n"
-                              "(challenge-response, PBKDF2) and it keys the room's encryption.");
-        if (ImGui::InputInt("UDP port", &o.port)) {
-            o.port = std::clamp(o.port, 1024, 65535);
-            dirty = true;
-        }
-        dirty |= menu::Checkbox("Ask me before someone joins", &o.askBeforeJoin);
-        dirty |= menu::Checkbox("Map the port on my router (UPnP / NAT-PMP)", &o.portMapping);
-        ImGui::SetItemTooltip("Asks your router to forward the UDP port to this PC while you host, and finds\n"
-                              "your internet address (STUN, a public service). Without it only players on your\n"
-                              "network (or a VPN such as Tailscale, ZeroTier, Hamachi) can join.");
-        {
-            char rb[128];
-            std::snprintf(rb, sizeof rb, "%s", o.relay.c_str());
-            ImGui::SetNextItemWidth(220.0f * ui::scale());
-            if (ImGui::InputTextWithHint("Relay (optional)", "host:29912", rb, sizeof rb)) {
-                o.relay = rb;
-                dirty = true;
-            }
-            ImGui::SetItemTooltip("A relay that your group runs (tools: cf_relay). Joiners whose packets cannot reach\n"
-                                  "you directly come in through it, and friends' letters wait there while you are\n"
-                                  "offline. Room traffic stays end-to-end encrypted; the relay only forwards it.");
-        }
-        dirty |= menu::Checkbox("Show on the local network", &o.lanVisible);
-        dirty |= menu::Checkbox("Allow direct connections (IP:port, no code)", &o.allowDirect);
-        ImGui::SetItemTooltip("For port forwarding / VPN setups: joiners that know only your address may join.\n"
-                              "Set a password if you leave this on with a public address.");
-        if (menu::Button("Host")) {
-            pushIdentity();
-            std::string err;
-            sError = net::session().host(hostOptions(sPassword), &err) ? "" : err;
-        }
+    ImGui::SeparatorText("Rooms");
+    roomList();
+
+    ImGui::SeparatorText("Host a room");
+    if (ImGui::InputText("Room name", sRoom, sizeof sRoom)) {
+        o.roomName = sRoom;
+        dirty = true;
     }
-    if (ImGui::CollapsingHeader("Join with a code", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::InputText("Room code", sJoinCode, sizeof sJoinCode);
-        ImGui::InputText("Password##join", sJoinPw, sizeof sJoinPw, ImGuiInputTextFlags_Password);
-        if (menu::Button("Join")) {
-            pushIdentity();
-            std::string err;
-            sError = net::session().joinCode(sJoinCode, sJoinPw, &err) ? "" : err;
+    {
+        static const char* const kVis[] = {"Public (anyone on the list)", "Password", "Friends only"};
+        ImGui::SetNextItemWidth(260.0f * ui::scale());
+        if (ImGui::Combo("Who can join", &o.visibility, kVis, 3)) dirty = true;
+        ImGui::SetItemTooltip("Public: anyone who sees the room can join.\n"
+                              "Password: joiners must know it (the host checks it; it is never sent or saved).\n"
+                              "Friends only: only players on your F1 friends list see whose room it is and get in.");
+        if (o.visibility == 1) {
+            ImGui::SetNextItemWidth(260.0f * ui::scale());
+            ImGui::InputText("Password##host", sPassword, sizeof sPassword, ImGuiInputTextFlags_Password);
         }
+        ImGui::SetNextItemWidth(260.0f * ui::scale());
+        if (ImGui::SliderInt("Players", &o.maxPlayers, 2, 4, "%d (you included)")) dirty = true;
     }
-    if (ImGui::CollapsingHeader("Rooms on this network")) {
-        net::session().lanScan(true);
-        const auto rooms = net::session().lanRooms();
-        if (rooms.empty()) ImGui::TextDisabled("No rooms heard yet (hosts announce every 2 seconds).");
-        int i = 0;
-        for (auto& r : rooms) {
-            ImGui::PushID(i++);
-            ImGui::Text("%s%s - %s, %d/%d, %s", r.hasPassword ? "[locked] " : "", r.roomName.c_str(), r.hostName.c_str(), r.members,
-                        r.maxMembers, r.address.c_str());
-            ImGui::SameLine();
-            ImGui::BeginDisabled(!r.compatible);
-            if (menu::SmallButton("Join")) {
-                pushIdentity();
-                std::string err;
-                sError = net::session().joinLan(r, r.hasPassword ? sJoinPw : "", &err) ? "" : err;
-            }
-            ImGui::EndDisabled();
-            if (!r.compatible) ImGui::SetItemTooltip("Another region (%s): towns visit only within one region.", r.gameId.c_str());
-            ImGui::PopID();
-        }
-        ImGui::TextDisabled("A locked room uses the password typed under \"Join with a code\".");
-    } else {
-        net::session().lanScan(false);
+    if (menu::Button("Host room")) {
+        std::string err;
+        sError = hostRoom(sPassword, o.visibility, 0, false, &err) ? "" : err;
     }
-    if (ImGui::CollapsingHeader("Direct connect")) {
-        if (ImGui::InputText("Address (IP:port)", sDirect, sizeof sDirect)) {
-            o.lastDirect = sDirect;
-            dirty = true;
-        }
-        ImGui::InputText("Password##direct", sDirectPw, sizeof sDirectPw, ImGuiInputTextFlags_Password);
-        if (menu::Button("Connect")) {
-            pushIdentity();
-            std::string err;
-            sError = net::session().joinAddress(sDirect, sDirectPw, &err) ? "" : err;
-        }
-        ImGui::TextWrapped("For hosts whose router has no UPnP: forward the UDP port (default 29910) on the host's router, or "
-                           "use a VPN (Tailscale, ZeroTier, Hamachi) and enter the host's VPN address.");
+    if (lobbyUrl().empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(no lobby server set: the room shows on your network only)");
     }
+
+    dirty |= advancedSection(snap, false);
     friendsSection();
     dirty |= email::drawSection();
     dirty |= voice::drawSection();

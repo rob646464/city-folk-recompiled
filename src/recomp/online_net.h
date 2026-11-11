@@ -11,7 +11,9 @@
 // Game-agnostic: the DWC layer (online_dwc.cpp) sends its own application messages over it.
 // Thread-safe; the I/O runs on its own host thread.
 #include <cstddef>
+#include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -36,6 +38,11 @@ struct Identity {
     std::string portVersion;  // shown in mismatch messages
     u32 pid = 0;              // DWC profile id of this install (online_dwc.cpp), 0 = not yet known
     u64 friendKey = 0;        // the game's 12-digit friend code for pid
+    // This install's Ed25519 key (online_friends.cpp): the host signs the handshake with it and a
+    // joiner proves it for "friends only" rooms. Without one (tests) nothing is signed.
+    bool haveKey = false;
+    u8 edSeed[32] = {};
+    u8 edPub[32] = {};
 };
 struct HostOptions {
     u16 port = kDefaultPort;
@@ -46,6 +53,24 @@ struct HostOptions {
     bool lanVisible = true;    // LAN beacons
     bool portMapping = true;   // UPnP-IGD / NAT-PMP mapping + STUN public address
     std::string relay;         // optional self-hosted relay "host[:port]" (tools/relay/cf_relay.cpp)
+    int maxMembers = kMaxMembers;  // 2..4 players, the host included
+    bool friendsOnly = false;  // only joiners whose key is in setAllowedKeys() (the host's F1 friends)
+};
+
+// Signaling for rooms found through a lobby (online_lobby.cpp; docs/ONLINE.md "The lobby"): carries
+// the handshake datagrams between a joiner and the room's host while neither can reach the other
+// over UDP yet. Never game data. Calls come from the session's network thread.
+struct Signaling {
+    virtual ~Signaling() = default;
+    // Host: the answer for joiner `peer`. Joiner: a request to the host (peer ignored).
+    virtual void send(u32 peer, const std::vector<u8>& datagram) = 0;
+    virtual bool recv(u32* peer, std::vector<u8>* datagram) = 0;  // non-blocking
+    virtual bool busy() = 0;            // joiner: a request still waits for its answer
+    virtual std::string error() = 0;    // joiner: why a request failed for good ("" = none)
+    // Joiner: relay (TURN) credentials, asked once when no direct path opens.
+    virtual void requestTurn() = 0;
+    // 0 pending, 1 ok (server = "ip:port", already resolved), -1 this lobby has no relay.
+    virtual int turnResult(std::string* server, std::string* user, std::string* pass) = 0;
 };
 
 enum class State { Off, Hosting, Connecting, WaitingForHost, Joined, Failed };
@@ -59,6 +84,7 @@ struct Member {
     bool self = false;
     int rttMs = -1;
     std::string address;   // host's view only
+    bool relayed = false;  // reached through a relay (TURN / cf_relay), not directly
 };
 
 struct JoinRequest {
@@ -80,6 +106,11 @@ struct Snapshot {
     std::string lanEndpoint, publicEndpoint, reachability;
     // Joiner without an answer yet: its public address for the host (hole punching), or empty.
     std::string replyCode;
+    bool relayed = false;      // member: the connection to the host goes through a relay
+    bool viaLobby = false;     // joined / hosting with a lobby's signaling
+    std::string nat;           // what the two STUN answers say about this router ("" = unknown)
+    bool hostKeyKnown = false; // member: the host proved this key in the handshake
+    u8 hostKey[32] = {};
 };
 
 // LAN room list entry (beacons heard in the last 6 s) while scanning.
@@ -117,6 +148,17 @@ public:
     bool joinCode(const std::string& code, const std::string& password, std::string* err);
     bool joinAddress(const std::string& hostPort, const std::string& password, std::string* err);
     bool joinLan(const LanRoom& room, const std::string& password, std::string* err);
+    // Lobby rooms. Host: after host(), joiners' handshakes arrive through `sig`. Joiner: the whole
+    // handshake goes through `sig`, then both sides open a UDP path (hole punching with the
+    // addresses STUN reported, port prediction, a TURN relay as the last resort).
+    // expectHostKey (32 bytes or null): the join fails unless the host proves this key.
+    void attachSignaling(std::shared_ptr<Signaling> sig);
+    bool joinSignaled(std::shared_ptr<Signaling> sig, const u8* expectHostKey, const std::string& password, std::string* err);
+    // Host of a "friends only" room: the keys that may join.
+    void setAllowedKeys(const std::vector<std::array<u8, 32>>& keys);
+    // Tests: every datagram of this session goes through a NAT simulator at `gateway` ("ip:port"),
+    // with a 6-byte destination / source header (tools/tests/online_lobby_test.cpp).
+    void setTestGateway(const std::string& gateway);
     // Host: a joiner's reply code: send packets to it for 30 s (hole punching).
     bool punch(const std::string& replyCode, std::string* err);
     void leave();
@@ -156,5 +198,9 @@ std::string endpointText(const Endpoint& e);
 
 // Tests (tools/tests/online_net_test.cpp): loopback endpoints only in codes, faster timers.
 void setTestMode(bool on);
+// Tests / CF_ONLINE_STUN: the two STUN servers ("ip:port") instead of the public ones.
+void setStunServers(const std::string& a, const std::string& b);
+// Test switch (CF_ONLINE_FORCE_RELAY): lobby joins never use a direct path.
+void setForceRelay(bool on);
 
 }  // namespace online::net

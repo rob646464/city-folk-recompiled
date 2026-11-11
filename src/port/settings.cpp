@@ -252,6 +252,10 @@ std::vector<Field> fields() {
         num("online", "mic_gain", sSettings.online.micGain),
         flag("online", "mic_echo_suppression", sSettings.online.micEchoSuppression),
         str("online", "relay", sSettings.online.relay),
+        str("online", "lobby_server", sSettings.online.lobbyServer),
+        flag("online", "lobby_list", sSettings.online.lobbyList),
+        num("online", "max_players", sSettings.online.maxPlayers),
+        num("online", "visibility", sSettings.online.visibility),
         flag("online", "email_on", sSettings.online.emailOn),
         str("online", "email_address", sSettings.online.emailAddress),
         str("online", "email_preset", sSettings.online.emailPreset),
@@ -293,6 +297,8 @@ void sanitize() {
     // Menu size: 0 (Auto) or a percentage (the UI snaps it to its nearest step).
     if (sSettings.ui.menuScale != 0) clampTo(sSettings.ui.menuScale, 75, 300);
     clampTo(sSettings.online.port, 1024, 65535);
+    clampTo(sSettings.online.maxPlayers, 2, 4);
+    clampTo(sSettings.online.visibility, 0, 2);
     if (sSettings.online.playerName.size() > 24) sSettings.online.playerName.resize(24);
     clampTo(v.targetFps, kMinFps, kMaxFps);
     clampTo(sSettings.events.mode, 0, 3);
