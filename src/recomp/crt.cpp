@@ -23,6 +23,7 @@
 
 #include "port/settings.h"
 
+#include <aurora/aurora.h>
 #include <aurora/postfx.h>
 #include <imgui.h>
 
@@ -987,9 +988,15 @@ void update() {
     const float here = float(dc.vfilter[2] + dc.vfilter[3] + dc.vfilter[4]) / 64.0f;
     const float below = float(dc.vfilter[5] + dc.vfilter[6]) / 64.0f;
     const float gamma = dc.gamma == 1 ? 1.7f : dc.gamma == 2 ? 2.2f : 1.0f;
-    const bool filter = port::settings().rendering.displayCopyFilter &&
-                        (above != 0.0f || below != 0.0f || here != 1.0f || gamma != 1.0f);
-    const float dcopy[4] = {above, here, below, 0.0f};
+    // The blur: Auto = only while rendering at the game's own resolution (above it the console's
+    // deflicker just softens a sharp image), On / Off as chosen, and always with the CRT filter (a
+    // TV look). The game's gamma is applied in every mode.
+    const int mode = port::settings().rendering.displayCopyFilterMode;
+    const bool atNative = float(aurora_get_window_size().fb_height) <= float(std::max<unsigned>(dc.efbHeight, 1u)) * 1.1f;
+    const bool blur = (mode == 1 || (mode == 0 && atNative) || s.enabled) &&
+                      (above != 0.0f || below != 0.0f || here != 1.0f);
+    const bool filter = blur || gamma != 1.0f;
+    const float dcopy[4] = {blur ? above : 0.0f, blur ? here : 1.0f, blur ? below : 0.0f, 0.0f};
     const float dcopy2[4] = {gamma, float(dc.efbHeight), 0.0f, 0.0f};
     if (!s.enabled) {
         if (filter) {

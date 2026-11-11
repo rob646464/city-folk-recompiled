@@ -131,8 +131,13 @@ struct RenderingSettings {
     // (GXSetZCompLoc(GX_TRUE)) update Z even where the alpha test then rejects the pixel, as the
     // hardware does (GX_AURORA_ACCURACY_EARLY_Z, Aurora 0170/0179: depth-only pass + colour pass).
     bool earlyZAlphaDepth = true;
-    // Display copy filter: the vertical filter (and gamma) GXCopyDisp applies on the way to the TV.
-    bool displayCopyFilter = true;
+    // Display copy filter: the vertical filter GXCopyDisp applies on the way to the TV (a deflicker
+    // blur meant for interlaced CRTs, as soft at 4K as at 480p). 0 = Auto (default, user decision
+    // 2026-11-11): on only while the game renders at its own resolution (render height within 10%
+    // of the EFB's), off above it; 1 = always on; 2 = off. The game's display gamma is applied in
+    // every mode, and the CRT filter turns the blur on while it is on. Replaces the 1.x bool
+    // display_copy_filter (ignored: every file gets Auto).
+    int displayCopyFilterMode = 0;
     // Texture copy filter: the same vertical filter applied to the game's GXCopyTex copies (the
     // full-screen RGB565 copy it redraws every frame, the box-filtered half-size copies...), as on
     // the console (GX_AURORA_ACCURACY_COPY_FILTER).

@@ -101,7 +101,7 @@ std::vector<Field> fields() {
         flag("rendering", "efb_blend_6bit", r.efbBlend6),
         flag("rendering", "smooth_banding", r.smoothBanding),
         flag("rendering", "early_z_alpha_depth", r.earlyZAlphaDepth),
-        flag("rendering", "display_copy_filter", r.displayCopyFilter),
+        num("rendering", "display_copy_filter_mode", r.displayCopyFilterMode),
         flag("rendering", "texture_copy_filter", r.textureCopyFilter),
         flag("rendering", "efb_copy_to_ram", sSettings.rendering.efbCopyToRam),
         flag("rendering", "vertex_snapshot", r.vtxSnapshot),
@@ -305,6 +305,7 @@ void sanitize() {
     clampTo(sSettings.events.loopPeriod, 0, 2);
     clampEnum(v.aspect, AspectMode::Ultra32x9, AspectMode::Auto);
     clampTo(v.resolutionScale, 0, 8);
+    clampTo(sSettings.rendering.displayCopyFilterMode, 0, 2);
     clampTo(v.fovScale, 0.75f, 1.5f);
     v.msaa = v.msaa >= 8 ? 8 : v.msaa >= 4 ? 4 : v.msaa >= 2 ? 2 : 1;
     auto& c = sSettings.crt;

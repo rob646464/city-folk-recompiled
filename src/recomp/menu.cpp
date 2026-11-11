@@ -898,10 +898,18 @@ void renderingTab() {
         "things drawn behind them later are hidden there. Off: cut-out pixels write no depth (PC\n"
         "behaviour). Costs one extra depth-only draw for each such draw.");
     ImGui::SeparatorText("Screen copies");
-    sDirty |= recomp::menu::Checkbox("Display copy filter", &r.displayCopyFilter);
-    ImGui::SetItemTooltip(
-        "The vertical filter (and gamma) the console applies when copying the frame to the TV\n"
-        "image: slightly softer vertical detail, smooths the dither. One extra full-screen pass.");
+    {
+        static const char* const kModes[] = {"Auto (only at the game's resolution)", "On", "Off"};
+        ImGui::SetNextItemWidth(260 * recomp::ui::scale());
+        sDirty |= ImGui::Combo("Display copy filter", &r.displayCopyFilterMode, kModes, 3);
+        ImGui::SetItemTooltip(
+            "The vertical filter the console applies when copying the frame to the TV image: a\n"
+            "deflicker blur meant for interlaced CRTs, as soft at 4K as at 480p.\n"
+            "Auto (default): on only while the game renders at its own resolution, off above it\n"
+            "(sharp). On: the Wii's soft look at any resolution. Off: always sharp.\n"
+            "The game's display gamma is applied in every mode, and the CRT filter turns the blur on\n"
+            "while it is on. One extra full-screen pass.");
+    }
     sDirty |= recomp::menu::Checkbox("Texture copy filter", &r.textureCopyFilter);
     ImGui::SetItemTooltip(
         "The console applies the same vertical filter to the screen copies the game reads back as\n"

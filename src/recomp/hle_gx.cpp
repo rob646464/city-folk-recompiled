@@ -715,9 +715,9 @@ void gx::applyAccuracySettings() {
             sFrames = 0;
         }
         sFrames++;
-        static const bool sFilter = port::settings().rendering.displayCopyFilter;
+        static const int sFilter = port::settings().rendering.displayCopyFilterMode;
         if (off) flags = 0;
-        port::settings().rendering.displayCopyFilter = off ? false : sFilter;
+        port::settings().rendering.displayCopyFilterMode = off ? 2 : sFilter;
     }
     if (flags != GXGetAuroraAccuracy()) GXSetAuroraAccuracy(flags);
     // CF_TEXGEN_BEYOND=0|1|2 (test aid): what a stage reads from a texcoord beyond GXSetNumTexGens
