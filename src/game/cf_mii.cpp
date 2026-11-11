@@ -260,20 +260,27 @@ void renderPreview(Ctx& c) {
     u32 seq;
     float yaw;
     int expr;
+    const u32 now = game::guestFrames();
     {
         std::lock_guard lk(sh.m);
-        sh.lastStageFrame = game::guestFrames();
-        if (!sh.wanted || game::guestFrames() > sh.wantedUntil || sh.reqSeq == sRenderedSeq) return;
+        sh.lastStageFrame = now;
+        // Two buffers: a copy is read back a few frames later (interpolated frames replay later),
+        // and one that never lands (a dropped frame: with frame interpolation on a loaded GPU fewer
+        // game frames are shown than made, and the copies of one never shown are never made) frees
+        // its buffer after a second and the newest request is drawn again, so the preview never
+        // stays missing.
+        for (TexSlot& t : sTex)
+            if (t.busy && now > t.frame + 60) {
+                t.busy = false;
+                if (t.seq == sRenderedSeq && sh.outSeq != t.seq) sRenderedSeq = 0;
+                if (sLog) log("[mii] preview %u did not land: drawn again", t.seq);
+            }
+        if (!sh.wanted || now > sh.wantedUntil || sh.reqSeq == sRenderedSeq) return;
         std::memcpy(raw, sh.reqRaw, sizeof raw);
         seq = sh.reqSeq;
         yaw = sh.reqYaw;
         expr = sh.reqExpr;
     }
-    // Two buffers: a copy is read back a few frames later (interpolated frames replay later), and
-    // one that never lands (a dropped frame) frees its buffer after a second.
-    const u32 now = game::guestFrames();
-    for (TexSlot& t : sTex)
-        if (t.busy && now > t.frame + 60) t.busy = false;
     int slot = sNextTex;
     if (sTex[slot].busy) slot ^= 1;
     if (sTex[slot].busy) return;
