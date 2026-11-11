@@ -648,6 +648,84 @@ catch close-up); 120 fps, VSync off, 1280x720, and the user's own settings (Enha
   at once and the shown time skips a tape (60-70 px leaps in a town walk run beside other
   instances; none alone, main or branch).
 
+### Splashes and ripples while the camera moves (branch fish-fx)
+
+What branch cam-jumps left open: at 120 fps the fishing route (tools/routes/gameplay_fish_beach.txt)
+still read 9-25 visible defects per run on main, all water effects (`af_fsh_hamon`,
+`af_fsh_hamon_child` and the splash emitters; ef draw sites 80291718 = fn_80291120 and 802905A0 /
+8029077C = fn_8028FF0C), in the frames after a bite, when the fish is pulled out and while the
+catch close-up camera moves. Part of the user's "big jumps when catching a bug or fish".
+
+- **Cause**: the nw4r::ef *directional* draw strategies (fn_8028FF0C, fn_802908D4, fn_80291120;
+  their common setup fn_802918C0) build every particle's quad on the CPU **in view space** and
+  draw it with an **identity position matrix** (`GXLoadPosMtxImm(identity)` at 80291974, once per
+  particle manager). The particles are their own identities (round 3) and their vertices blend in
+  view space, which is right. The identity matrix, though, is one value per manager under the
+  effect's ScnProc, in a bucket with the other managers' ones, so it is matched by its draw: the
+  manager's first drawn particle. Whenever that particle was new (born in this game frame, or the
+  first one of the frame before had died) the matrix had no partner, and an unpaired position
+  matrix is "placed under the in-between camera" (V(t) V(b)^-1 x its value). That moved **every
+  particle of that manager** by the camera's remaining step for the interval, on top of their own
+  blend, and back at the next game frame: 30-130 px (of a 2160-line picture) there and back, only
+  while the camera moves. With a standing camera the product is the identity and nothing shows,
+  which is why ripples under a still fishing camera were fine and the catch was not. Judge `D`
+  lines (`CF_JUDGE_DIAG=1`): `site 80291974 ... partner -1 ... b 0.0 0.0 0.0 drawn -0.1 1.8 -1.0`
+  (the slot's matrix is the identity in the tape and was drawn moved); the pops one interval later
+  at 802905A0 with the matrix paired (`a 0.0 b 0.0 drawn 0.0`) are the way back.
+- **Fix** (interp.cpp `identityMtx`, `placeVerts`): a position matrix that is exactly the identity
+  places nothing, so it is never placed under the camera and never blended (as captured). The
+  CPU-built vertex blocks drawn with it that have no partner (a particle's first game frame) or
+  were placed anew (a jump over 200 units, a reversal) are the ones moved by V(t) V(b)^-1: they
+  stand still in the world for that interval, like every other unpaired thing, instead of riding
+  the camera. Stats: `view-space blocks without partner placed under the camera` in the
+  `[interp] colour registers` line. A/B `CF_VIEW_SPACE_VERTS=0`.
+- **`cameraAttached` (round 2's rule for the fireworks backdrop)**: (1) it took these identity
+  matrices for things with a camera of their own (the same in view space while "their place", the
+  eye, moved), so the judge followed their particles on screen without the camera; they are
+  excluded. (2) Its mark came and went with every other game frame: a partner marked the frame
+  before was skipped (`q.ownCamera`), so every second interval was blended camera-factored again
+  and the judge saw the space flip (the 7 "pops" at 802905A0 left after the fix above, all with
+  `own 1` / `own 0` alternating in the `D` lines). A mark now stays while the thing stands still in
+  view space (`Patch::attached`). A/B `CF_CAM_ATTACHED_STAYS=0`.
+- **Judge**: the game's own there-and-back is now also told by the tracked vertex itself, through
+  the matrices its slot held at capture in the three game frames, seen on screen through the
+  present's camera (the slot table is kept whenever the judge runs; `DG` line per visible defect).
+  The old test used the world step of the draw's centre, which says little about a part that
+  turns about an origin far from it: the float at the end of its flight (17 game frames after the
+  cast: it falls 6 units a game frame and its sideways step turns round; 1 "pop" per fishing run)
+  and a part of the player's model 6 game frames after the bite is answered (there and back at
+  100-160 px per game frame between three game frames; 2 of 4 bites in the first main run) read
+  as visible defects. Both are the game's own motion, shown as the game frames have it.
+- **Checked and not defects**: the cast (rod wind-up and return, the float swinging on the line:
+  in-between strips of `CF_INTERP_TEST=4` dumps over 16 game frames move evenly), the float on the
+  water, the fish model pulled out, the caught-item pose and the text box: no visible event in any
+  run. A particle's first game frame (`born` / `game-frame`, 1200-1600 per run, mostly the ripples'
+  billboards at 80291FD8) is by design: it stands at its first place for one interval, since its
+  velocity is not known (open: the ef particle's own velocity could feed `tagBackStep`).
+- **Catching a bug** (new route tools/routes/gameplay_bug_net.txt, docs/TEST_COVERAGE.md): the net
+  swing, the catch close-up and "I caught a robust cicada!" read 0 visible defects with the old
+  behaviour too (0 / 711 / 312 old, 0 / 702 / 311 new): no view-space effect is alive while that
+  camera moves.
+- **Results** at 120 fps, VSync off, 1280x720, visible defects / by design / detector mismatches,
+  game frames from 4500 on (after the fast-forwarded title and bus; two instances at a time on
+  this PC). Old = the same build and judge with `CF_VIEW_SPACE_VERTS=0 CF_CAM_ATTACHED_STAYS=0`.
+  Fishing (2-4 bites per run, which varies): main exe with its own judge 25; old 27 / 2807 / 1693
+  and 23 / 3480 / 2019; new **0** / 2504 / 1688, **0** / 2404 / 1639, **0** / 1678 / 1114. Town
+  walk (town_trees.txt) 0 / 449 / 75, city plaza (city_plaza_warp.txt) 0 / 226 / 14, house
+  (house_furniture_warp.txt) 0 / 57 / 22, door route (cam_door.txt) 0 / 388 / 117. Fireworks
+  (town_trees.txt on 2026-08-02 20:00): old 2 / 13271 / 9831, new 2 / 5874 / 8455: the bursts'
+  "motion" events at 80292124 fall from 8709 to 2508 with the mark that stays; the 2 visible ones
+  are the same in both (one g3d sky object 1300 units away at the top edge of the picture that
+  steps 404 units sideways in one game frame, f11513, and is blended across: a wrap; on main too,
+  open).
+- Original 60: nothing here runs without a capture (replay, pairing and judge code; the test aids
+  are behind their variables). Frame dumps of the fishing route every 100 game frames 4500-9000
+  (the arrival, the pockets, two casts): this build against a main run 35 of 46 identical, the
+  two main runs against each other 23 of 46 (the route is not deterministic run to run: load
+  timing shifts the arrival), a second run of this build 0 of 46 against all three.
+- Not done: a particle's first interval (above), PAL/JP/KR, the river and pond fish, a real 120 Hz
+  display.
+
 ## IOS (Starlet)
 
 The game reaches every device through IPC to IOS (`IOS_Open/Ioctl(v)/Read/Write`). Decision

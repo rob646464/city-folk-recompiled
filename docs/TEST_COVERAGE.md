@@ -242,7 +242,7 @@ found in these systems; what failed in early runs was the route (details under "
 | System | Tested how | Result |
 | --- | --- | --- |
 | Catching a fish | fish shadows are not actors: two `CF_MEM_DUMP`s 30 frames apart at the beach, `memsearch` for moving float x/y/z near the player (the shadow records at 0x90537384 / 0x90538424 in this route, model name `af_fsh_shadow` beside them); then rod Carry, `WARP=town.beach`, `TP=addr90537384:0/-110` (new test aid: 110 units north of that shadow), face the sea, cast, `CF_AUTO_A_MOTOR=4` | ok: the shadow swims to the bobber, nibble = one 3-frame rumble, bite = 4+ frames, auto A: **"I caught a boot!"** (run fishbeach1) and **"I caught a sea horse!"** (fishbeach2); casting straight out from the shore (round 1) only missed the shadows. River/pond not retried |
-| Catching a bug | net Carry, `TP=addr` next to moving objects of a 0x902Dxxxx pool from the same dumps, swing | not reached: those objects were not insects (the swings hit nothing; no `ins_*` instance was found in the dump, only the static name table at 0x804E8700). Open |
+| Catching a bug | net Carry, `TP=addr` next to moving objects of a 0x902Dxxxx pool from the same dumps, swing | not reached in this round: those objects were the insects' scene objects, in rolled g3d world coordinates (the swings hit nothing). Reached on branch fish-fx with `TP=mdlins_` (see "Open" below): a robust cicada caught |
 | Fossil assessment | Blathers: "Check a fossil!" was not picked (route timing), "Donation!" with the unidentified fossil (item 9018) instead | ok: "Hoo now? An unidentified... If you wish to donate this, shall I first identify it?" Please do! -> "In a large, ancient nutshell, this is a stego skull." -> donated ("away it goes to our fine collection!") |
 | Donating a fish | sea bass in the "Donate what?" picker by pointer | the picker takes pointer clicks when they are timed from its link (`after link d_menu_item02NP 1`): probe run, sea bass hovered and ticked; earlier clicks made before the picker was ready did nothing. The donation itself is covered by branch snap-donate (D-pad route `museum_donate.txt`) |
 | Able Sisters | grid of `TP` spots, A at each | the mannequin row reached (x 290 behind the row, facing down): Mabel "Oh, yes, that design was made by Ann from Treehut. I believe it's called checked cloth, yeah. Are you into it?" Display mine! / I want it! / Switch it out. / Just looking...; "Display mine!" -> "Your design will replace the one we're currently displaying" -> I don't mind. -> the "Display which?" design picker (the player's designs). "I want it!" (the purchase) was not hit by the scripted pointer in three runs (the choice box came up between pointer moves). Open |
@@ -299,7 +299,19 @@ after a session with a sent letter).
 
 ### Open (gameplay, round 2)
 
-- Catching a bug: insect objects not located (the 0x902Dxxxx pool tried was something else).
+- Catching a bug: done on branch fish-fx (2026-11-10): insects are g3d scene models `ins_*`
+  (`ins_minmin` robust cicada, `ins_abura` brown cicada, `ins_miyakwa`, `ins_ginyan` darner
+  dragonfly on 2026-07-20 10:00; `CF_MODEL_LOG=1` names them). The 0x902Dxxxx pool holds their
+  scene objects, whose world matrix is the rolled g3d world (a fixed cylinder about X, radius =
+  586.7 + field height), not field coordinates: hence the misses. New route action
+  `TP=mdlins_:dx/dz` + `CF_MODEL_TRACK=ins_` (docs/CONTROLS.md "Test aids"),
+  tools/routes/gameplay_bug_net.txt: net Carry, a walk until a cicada on a tree is in view, then 26
+  units west of it facing east, A: the catch close-up, **"I caught a robust cicada! Gimme a hearty
+  YAAAY!"** (runs ff-bug6b at 60 fps, ff-bugj-* at 120). A swing from the south or with the player
+  facing away misses and the cicada stays; which insects are about varies with the load timing (in
+  five runs at 120 fps: a cicada in reach in three, caught in the two that took screenshots; only a
+  darner dragonfly in one, which flies on and was not caught; none seen in one), so the route
+  tries twice.
 - Next-day results: the villager's reply to the letter, the catalog order (Confirm) and its
   delivery, the HRA score letter (see "Multi-day chain").
 - Able Sisters purchase ("I want it!" at a mannequin), sitting down at Club LOL (show, K.K.'s

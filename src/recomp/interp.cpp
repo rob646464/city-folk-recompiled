@@ -113,6 +113,7 @@ struct Patch {
     TagCat cat = TagCat::None;  // category of the innermost object scope (policy)
     bool inScope = false;       // noted inside any tag scope (a view at least): untagged values outside are left as captured
     bool ownCamera = false;     // noted in a SubView (its own camera: blended as drawn)
+    bool attached = false;      // ownCamera set by cameraAttached (stands still in view space), not by a SubView
     u32 site = 0;       // guest call site (logs)
     u64 group = 0;      // TagFrame::group: values of one model instance switch together
     u16 clrOffset = 0xFFFF;  // Verts: a direct colour in each vertex (blended unless it jumps)
@@ -336,6 +337,9 @@ FILE* const sProbeOut = [] {
 // D line: the patch its slot held, its pairing and policy, and whether the drawn matrix is what the
 // replay wrote for it.
 const bool sJudgeDiag = std::getenv("CF_JUDGE_DIAG") != nullptr;
+// The slot table is kept for the judder detector and for the judge (its game-pop test follows the
+// tracked vertex through the captured matrices of both game frames).
+const bool sSlotTable = sProbeOut || sJudgeDiag || std::getenv("CF_MATCH_JUDGE") != nullptr;
 const float sProbeThresh = [] {
     const char* v = std::getenv("CF_JUDDER_PX");
     return v ? float(std::atof(v)) : 1.5f;
@@ -1688,6 +1692,30 @@ void matchDraws(const Tape& a, Tape& b) {
             int(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - phase[2]).count()));
 }
 
+// A position matrix that is exactly the identity: what is drawn with it is given in view space (the
+// game built the vertices on the CPU with this game frame's camera: the nw4r::ef directional
+// strategies' quads, fn_802918C0). It places nothing, so the camera never moves it: the vertices are
+// blended (or placed under the in-between camera) by themselves, replayPair's Verts paths.
+// A/B: CF_VIEW_SPACE_VERTS=0 (the matrix is placed under the in-between camera when it has no
+// partner, the vertices never: every particle of a manager whose first particle was new went there
+// and back by the camera's step; the fishing route's splashes and ripples).
+const bool sViewSpaceVerts = [] {
+    const char* v = std::getenv("CF_VIEW_SPACE_VERTS");
+    return !(v && *v == '0');
+}();
+bool identityMtx(const Tape& t, const Patch& p) {
+    if (p.kind != Kind::PosMtx || p.count != 12) return false;
+    for (int e = 0; e < 12; e++)
+        if (val(t, p, e) != (e % 5 == 0 ? 1.0f : 0.0f)) return false;
+    return true;
+}
+
+// CF_CAM_ATTACHED_STAYS=0 (A/B): a matrix marked by cameraAttached is not marked again in the next
+// game frame (the old rule: every other interval was blended camera-factored).
+const bool sAttachedStays = [] {
+    const char* v = std::getenv("CF_CAM_ATTACHED_STAYS");
+    return !(v && *v == '0');
+}();
 // Things drawn with a camera of their own that the port does not know as such (the fireworks show
 // is a sky backdrop: its effects' matrices are its own fixed camera times the emitter, not the town
 // camera): their matrices stand still in view space while the town camera moves. Camera factoring
@@ -1710,7 +1738,13 @@ void cameraAttached(const Tape& a, Tape& b) {
         const s32 j = b.partner[i];
         if (j < 0 || p.kind != Kind::PosMtx || p.count != 12 || p.role != 0 || p.ownCamera || p.cat == TagCat::World) continue;
         const Patch& q = a.patches[j];
-        if (q.ownCamera || q.count != 12) continue;
+        // (A partner marked here one game frame ago is the same thing still standing in view space: `q.ownCamera`
+        // alone skipped it, so the mark came and went with every other game frame. A partner noted in a
+        // SubView is another matter.)
+        if ((q.ownCamera && !(sAttachedStays && q.attached)) || q.count != 12) continue;
+        // View-space geometry's identity matrix (identityMtx) is no camera of its own: the vertices drawn
+        // with it move in view space as the town camera does, and the detector follows them in the world.
+        if (sViewSpaceVerts && identityMtx(b, p)) continue;
         float dv = 0, drot = 0;
         for (int e = 0; e < 12; e++) {
             const float d = std::fabs(val(b, p, e) - val(a, q, e));
@@ -1723,7 +1757,7 @@ void cameraAttached(const Tape& a, Tape& b) {
         // (Exactly the same in view space: an animated character the camera follows is never that still.)
         const float tl = std::hypot(val(b, p, 3), val(b, p, 7), val(b, p, 11));
         if (dw > 2.0f && dv < 0.02f + 1e-4f * tl && drot < 1e-3f) {
-            p.ownCamera = true;
+            p.ownCamera = p.attached = true;
             marked++;
         }
     }
@@ -2252,6 +2286,7 @@ std::vector<s32> sBundleToA;  // replayPair: per draw of b, the draw of a it pai
 u32 sReversals = 0;   // CPU-built blocks shown as captured because they turned back (another particle)
 u32 sSprayPresent = 0;  // CF_SPRAY_LOG: the present being replayed
 u32 sBornMoving = 0;  // values without partner shown moving along their step into place (tagBackStep; stats)
+u32 sVertsPlaced = 0;  // view-space CPU-built blocks without partner placed under the in-between camera (stats)
 u32 sGroupForced = 0; // model instances blended linearly as a whole (stats)
 u64 sOwnSkinned = 0, sOwnPivoted = 0;  // own-camera scenes: skinned instances blended entrywise / rigid matrices blended about their draw (stats)
 // CF_GROUP_LOG: members of a model instance without a say this replay (1 outlier, 2 erratic now, 3 held
@@ -3037,7 +3072,7 @@ void note(u32 at, Kind kind, u32 source, u32 slot, int nFloats, int first) {
     p.untagged = !p.key && p.bucket && p.inScope;
     if (kind == Kind::TexMtx && sShadowRecv > 0) p.role = 1;
     else if (sOrtho && !sViewOverride && kind != Kind::Projection) p.role = 2;
-    if ((sProbeOut || sJudgeDiag) && kind == Kind::PosMtx && nFloats == 12 && slot % 3 == 0 && slot / 3 < 10)
+    if (sSlotTable && kind == Kind::PosMtx && nFloats == 12 && slot % 3 == 0 && slot / 3 < 10)
         sSlotPatch[slot / 3] = s32(sPatches.size());
     p.tgroup = sTextCur;
     if (kind == Kind::PosMtx && slot % 3 == 0 && slot / 3 < 10) sLastPosMtx[slot / 3] = s32(sPatches.size());
@@ -4008,7 +4043,7 @@ void pushBundle(u64 id) {
     sBundleRange.push_back({~0u, ~0u});
     sBundlePass.push_back(u8(sPass));
     sBundleCentre.push_back({std::nanf(""), 0.0f, 0.0f});
-    if (sProbeOut || sJudgeDiag) sBundleSlots.push_back(sSlotPatch);
+    if (sSlotTable) sBundleSlots.push_back(sSlotPatch);
     // Fingerprint (matchDraws): what is drawn (list / layout), its vertex count and the textures it shows.
     sBundleFp.push_back(mix(id ^ u64(sDrawExtra) << 32 ^ u64(boundTexture(0)) * 0x9E3779B97F4A7C15ull ^
                             mix(u64(boundTexture(1)) ^ u64(boundTexture(2)) << 32)));
@@ -4203,7 +4238,7 @@ void vtxEnd() { detail::drawEnd(mark()); }
 // A display list or the stream loaded XF matrix memory directly (indexed or raw loads): the
 // detector's slot table no longer knows those slots.
 void detail::xfMatrixWritten(u32 addr, u32 words) {
-    if ((!sProbeOut && !sJudgeDiag) || !capturing()) return;
+    if (!sSlotTable || !capturing()) return;
     for (u32 s = 0; s < 10; s++)
         if (addr < 12 * s + 12 && addr + words > 12 * s) sSlotPatch[s] = -1;
 }
@@ -5050,6 +5085,12 @@ void matchJudge(const ProbeReplay& pr, const std::vector<ProbeRec>& recs) {
         bool stepIn = false;  // that velocity was taken within one game frame's in-betweens
         bool own = false;     // drawn with its own camera: w is its view-space place
         f32 m[12];            // the matrix it was drawn with (CF_JUDGE_DIAG)
+        // The tracked vertex through the matrices its slot held at capture in a and in b, each seen from
+        // its own game frame's camera (world; view space for `own`): its step in this pair of game frames
+        // (gHas) and in the pair before (gpHas). The game's own there-and-back (a rod yanked up, a
+        // bobber hitting the water) is told from a blend that pops by these, whatever the part's origin.
+        f32 gstep[3] = {}, gprev[3] = {}, gw[3] = {};  // (gw: its place in b)
+        bool gHas = false, gpHas = false;
     };
     static std::vector<Pt> prev, cur;
     static u64 prevSeq = 0;
@@ -5100,6 +5141,33 @@ void matchJudge(const ProbeReplay& pr, const std::vector<ProbeRec>& recs) {
             p.k = k;
             p.slot = r.mtxIdx;
             std::memcpy(p.m, r.mtx, sizeof(p.m));
+            if (const s32 pi = k < b.bundleSlots.size() ? b.bundleSlots[k][r.mtxIdx] : -1;
+                a && b.pairedWith == a && !b.cut && pi >= 0 && u32(pi) < b.patches.size() && u32(pi) < b.partner.size() && b.partner[pi] >= 0) {
+                const Patch& P = b.patches[pi];
+                const Patch& Q = a->patches[b.partner[pi]];
+                if (P.kind == Kind::PosMtx && P.count == 12 && Q.count == 12 && P.role == 0) {
+                    f32 mb[12], ma[12], vb[3], va[3];
+                    for (int e = 0; e < 12; e++) mb[e] = val(b, P, e), ma[e] = val(*a, Q, e);
+                    xform34(mb, r.pos, vb);
+                    xform34(ma, r.pos, va);
+                    bool ok = true;
+                    if (!p.own) {
+                        M34 ib, ia;
+                        ok = P.view < b.views.size() && Q.view < a->views.size() && invertAffine(b.views[P.view].data(), ib.data()) &&
+                             invertAffine(a->views[Q.view].data(), ia.data());
+                        if (ok) {
+                            f32 wb[3], wa[3];
+                            xform34(ib.data(), vb, wb);
+                            xform34(ia.data(), va, wa);
+                            std::copy(wb, wb + 3, vb), std::copy(wa, wa + 3, va);
+                        }
+                    }
+                    if (ok && std::isfinite(vb[0] + vb[1] + vb[2] + va[0] + va[1] + va[2])) {
+                        for (int e = 0; e < 3; e++) p.gstep[e] = vb[e] - va[e], p.gw[e] = vb[e];
+                        p.gHas = true;
+                    }
+                }
+            }
             cur.push_back(p);
         }
     }
@@ -5158,6 +5226,11 @@ void matchJudge(const ProbeReplay& pr, const std::vector<ProbeRec>& recs) {
             const s32 ex = exactPrev(p);
             float exJerk = -1;
             bool exPop = false;
+            if (ex >= 0) {  // (the game-frame step of the pair before this one)
+                const Pt& q = prev[ex];
+                if (same) std::copy(q.gprev, q.gprev + 3, p.gprev), p.gpHas = q.gpHas;
+                else std::copy(q.gstep, q.gstep + 3, p.gprev), p.gpHas = q.gHas;
+            }
             if (ex >= 0 && rs[ex][0] < 1e29f) {
                 const Pt& q = prev[ex];
                 p.ev[0] = float((p.s[0] - rs[ex][0]) / dg), p.ev[1] = float((p.s[1] - rs[ex][1]) / dg);
@@ -5241,6 +5314,27 @@ void matchJudge(const ProbeReplay& pr, const std::vector<ProbeRec>& recs) {
                         const float d = v1[0] * v2[0] + v1[1] * v2[1] + v1[2] * v2[2];
                         gamePop = d < -0.25f * std::hypot(v1[0], v1[1], v1[2]) * std::hypot(v2[0], v2[1], v2[2]);
                     }
+                    // (The tracked vertex itself, through the captured matrices: a part that turns about an origin
+                    // far from it reverses where its draw's centre does not.)
+                    // On screen, as the detector sees it (the three game-frame places through this present's
+                    // camera): in the town everything but the player also rolls with the log, so the steps in
+                    // the world mostly agree where the screen path of a far walker turns back.
+                    if (!gamePop && p.gHas && p.gpHas) {
+                        f32 w[3][3], sc[3][2];
+                        bool ok = true;
+                        for (int e = 0; e < 3; e++) w[2][e] = p.gw[e], w[1][e] = w[2][e] - p.gstep[e], w[0][e] = w[1][e] - p.gprev[e];
+                        for (int n = 0; n < 3 && ok; n++) {
+                            f32 v[3];
+                            if (p.own) std::copy(w[n], w[n] + 3, v);
+                            else xform34(cam.data(), w[n], v);
+                            ok = project(p.proj, v, sc[n]);
+                        }
+                        if (ok) {
+                            const float v1[2] = {sc[1][0] - sc[0][0], sc[1][1] - sc[0][1]}, v2[2] = {sc[2][0] - sc[1][0], sc[2][1] - sc[1][1]};
+                            const float l1 = std::hypot(v1[0], v1[1]), l2 = std::hypot(v2[0], v2[1]);
+                            gamePop = l1 > 0.25f * T && l2 > 0.25f * T && v1[0] * v2[0] + v1[1] * v2[1] < -0.25f * l1 * l2;
+                        }
+                    }
                     if (gamePop) cls = 2, why = "game-pop";
                     else cls = 1, why = "pop";
                 }
@@ -5299,6 +5393,8 @@ void matchJudge(const ProbeReplay& pr, const std::vector<ProbeRec>& recs) {
                              "abc"[cls - 1], why, pr.present, (unsigned long long)b.seq, b.gameFrame, pr.alpha, same ? "in" : "at", exJerk, rawJerk,
                              p.site, u32(p.match), p.k, p.k < b.bundlePartner.size() ? b.bundlePartner[p.k] : -9, p.s[0], p.s[1]);
                 if (sJudgeDiag && cls == 1) {
+                    std::fprintf(sMatchJudgeOut, "DG vertex step in the game frames: before %d %.2f %.2f %.2f, now %d %.2f %.2f %.2f (%s)\n", int(p.gpHas),
+                                 p.gprev[0], p.gprev[1], p.gprev[2], int(p.gHas), p.gstep[0], p.gstep[1], p.gstep[2], p.own ? "view" : "world");
                     const s32 pi = p.k < b.bundleSlots.size() ? b.bundleSlots[p.k][p.slot] : -1;
                     if (pi < 0 || u32(pi) >= b.patches.size()) {
                         std::fprintf(sMatchJudgeOut, "D slot %u patch none drawn %.1f %.1f %.1f\n", p.slot, p.m[3], p.m[7], p.m[11]);
@@ -5581,6 +5677,7 @@ void auroraCmd(std::vector<u8>& out, u16 sub, u8 arg) {
 // counterpart are left as captured.
 bool placeUnderCamera(const Tape& a, const Tape& b, const Patch& p, float alpha) {
     if (p.role != 0 || p.count > 16 || p.view >= sViewToA.size() || sViewToA[p.view] < 0) return false;
+    if (sViewSpaceVerts && identityMtx(b, p)) return false;
     // Untagged values outside every scope (frame setup, J3D's default matrices) are not things in the
     // 3D view: as captured.
     if (!p.key && !p.inScope) return false;
@@ -5724,6 +5821,29 @@ void replayPair(const Tape* a, const Tape& b, float alpha, void* dump) {
             compose(vp->vt.data(), wb.data(), out);
             for (int c = 0; c < 12; c++) storeBE(sReplay.data() + p.offset + 4 * c, out[c]);
             sBornMoving++;
+            return true;
+        };
+        // CPU-built vertices given in view space (drawn with an identity position matrix, identityMtx)
+        // that have no partner or were placed anew: b's vertices as the in-between camera sees them (they
+        // stand still in the world for the interval, like every other unpaired thing), instead of at b's
+        // view-space place while the camera is still on its way there.
+        const auto placeVerts = [&](const Patch& p) -> bool {
+            if (!sViewSpaceVerts || p.kind != Kind::Verts || p.role != 0 || p.mtxPatch < 0 || u32(p.mtxPatch) >= b.patches.size())
+                return false;
+            const Patch& m = b.patches[p.mtxPatch];
+            if (m.role != 0 || m.ownCamera || m.view >= sViewToA.size() || sViewToA[m.view] < 0 || !identityMtx(b, m)) return false;
+            const ViewPair* vp = viewPair(*a, u16(sViewToA[m.view]), b, m.view, alpha);
+            if (!vp || !vp->ok || vp->cut) return false;
+            M34 rel;
+            compose(vp->vt.data(), vp->ib.data(), rel.data());
+            for (u32 v = 0; v < p.count; v++) {
+                const f32 in[3] = {vtx(b, p, v, 0), vtx(b, p, v, 1), vtx(b, p, v, 2)};
+                f32 out[3];
+                mxv(rel.data(), in, out);
+                if (!std::isfinite(out[0] + out[1] + out[2])) continue;
+                for (int c = 0; c < 3; c++) storeBE(sReplay.data() + p.offset + v * p.stride + p.posOffset + 4 * c, out[c]);
+            }
+            sVertsPlaced++;
             return true;
         };
         // A model instance (an S3D model: fn_80059C54 & co., or a J3D model: its packets' matrix buffer;
@@ -6118,10 +6238,13 @@ void replayPair(const Tape* a, const Tape& b, float alpha, void* dump) {
             }
             if (j < 0 || cameraOnly) {
                 if (j < 0 && backStep(p)) continue;
+                if (j < 0 && placeVerts(p)) continue;
                 if (placeUnderCamera(*a, b, p, alpha)) sCamOnly++;
                 continue;
             }
             const Patch& q = a->patches[j];
+            // View-space geometry's identity matrix (identityMtx) in both game frames: as captured.
+            if (sViewSpaceVerts && p.role == 0 && identityMtx(b, p) && identityMtx(*a, q)) continue;
             if (sNoBlendKinds & (1u << u32(p.kind))) {
                 placeUnderCamera(*a, b, p, alpha);
                 continue;
@@ -6160,7 +6283,7 @@ void replayPair(const Tape* a, const Tape& b, float alpha, void* dump) {
                     for (int c = 0; c < 3; c++) jump = std::max(jump, std::fabs(vtx(*a, q, v, c) - vtx(b, p, v, c)));
                 if (!(jump <= 200.0f)) {
                     snap(p, nullptr, nullptr);
-                    backStep(p);
+                    if (!backStep(p)) placeVerts(p);
                     continue;
                 }
                 // A slot reused by another particle (the water spray's points: a stream's slots are
@@ -6186,7 +6309,7 @@ void replayPair(const Tape* a, const Tape& b, float alpha, void* dump) {
                     if (!p.tracked && std::isfinite(pp) && dd > 16.0f && pp > 1.0f && dp < -0.25f * std::sqrt(dd * pp)) {
                         sReversals++;
                         snap(p, nullptr, nullptr);
-                        backStep(p);
+                        if (!backStep(p)) placeVerts(p);
                         continue;
                     }
                 }
@@ -7468,11 +7591,12 @@ bool replay(bool final) {
         sProjShared = 0;
         if (sColorsBlended + sColorsSwitched)
             log("[interp] colour registers per present: %.1f blended, %.1f switched (jumped); model instances blended linearly %.1f, "
-                "switched %.1f; particles shown at the game frame (turned back) %.1f; born moving along their step %.1f",
+                "switched %.1f; particles shown at the game frame (turned back) %.1f; born moving along their step %.1f; view-space blocks "
+                "without partner placed under the camera %.2f",
                 double(sColorsBlended) / presentedWindow, double(sColorsSwitched) / presentedWindow,
                 double(sGroupForced) / presentedWindow, double(sGroupSnaps) / presentedWindow, double(sReversals) / presentedWindow,
-                double(sBornMoving) / presentedWindow);
-        sColorsBlended = sColorsSwitched = sGroupForced = sGroupSnaps = sReversals = sBornMoving = 0;
+                double(sBornMoving) / presentedWindow, double(sVertsPlaced) / presentedWindow);
+        sColorsBlended = sColorsSwitched = sGroupForced = sGroupSnaps = sReversals = sBornMoving = sVertsPlaced = 0;
         if (sOwnSkinned + sOwnPivoted)
             log("[interp] own-camera scenes per present: %.1f skinned model instances blended entrywise, %.1f rigid model matrices blended about their draw",
                 double(sOwnSkinned) / presentedWindow, double(sOwnPivoted) / presentedWindow);

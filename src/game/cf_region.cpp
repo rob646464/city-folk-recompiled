@@ -28,6 +28,7 @@
 // language in that nibble for the duration of the call.
 #include "game/cf_furniture_light.h"
 #include "game/cf_region.h"
+#include "game/cf_light.h"
 #include "game/cf_warp.h"
 
 #include "recomp/hle.h"
@@ -42,6 +43,7 @@
 
 #include <imgui.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -650,6 +652,40 @@ std::vector<ActorHit> findActors(std::initializer_list<u32> modules) {
     return out;
 }
 
+// CF_MODEL_TRACK=<name prefix> (e.g. ins_): the last sighting of such a scene model in field
+// coordinates (its x, the player's z + its distance along the log when it was drawn), kept for
+// TP=mdl<prefix> after it left the view (a cicada stays on its tree).
+struct Sighting {
+    float x = 0, z = 0;
+    u32 frame = 0;
+    std::string name;
+    bool ok = false;
+} sSighting;
+u32 playerActor(u32 frame) {
+    static u32 addr = 0, tried = ~0u;
+    const auto valid = [&] { return addr && relBase(80, 5) && rd32(addr + 0x60) == relBase(80, 5) + 0x1280; };
+    if (!valid() && (tried == ~0u || frame - tried >= 120)) {  // (a scan of all guest memory: seldom)
+        tried = frame, addr = 0;
+        for (const ActorHit& h : findActors({80}))
+            if (rd32(h.addr + 0x60) == relBase(80, 5) + 0x1280) addr = h.addr;
+    }
+    return valid() ? addr : 0;
+}
+void trackSightings(u32 frame) {
+    static const char* prefix = std::getenv("CF_MODEL_TRACK");
+    if (!prefix || !*prefix || !std::strcmp(prefix, "1")) return;
+    float mx = 0, angle = 0, pr = 0;
+    std::string name;
+    if (!cflight::trackedModel(prefix, mx, angle, pr, name)) return;
+    if (const u32 pa = playerActor(frame)) {
+        const float along = angle * (pr - rdf32(pa + 0x68));
+        if (!sSighting.ok || sSighting.name != name || std::fabs(sSighting.x - mx) > 1.0f)
+            log("[actor] f%u model '%s' in view at x %.1f z %.1f (player %.1f %.1f)", frame, name.c_str(), mx, rdf32(pa + 0x6C) + along,
+                rdf32(pa + 0x64), rdf32(pa + 0x6C));
+        sSighting = {mx, rdf32(pa + 0x6C) + along, frame, name, true};
+    }
+}
+
 // Moves the player (CF_TELEPORT target syntax, below; route token TP=<target> with '/' for ',').
 void teleport(u32 frame, const char* arg) {
     float x = 0, y = 0, z = 0;
@@ -669,7 +705,35 @@ void teleport(u32 frame, const char* arg) {
         }
         if (*e2 == ':') std::sscanf(e2 + 1, "%f,%f", &dx, &dz);
     }
-    if (!std::strncmp(arg, "addr", 4)) {  // addr<hex>[:dx,dz]: next to the float x/y/z at that guest address
+    if (!std::strncmp(arg, "mdl", 3)) {  // mdl<name prefix>[:dx,dz]: next to the nearest drawn model of that name (CF_MODEL_TRACK=1)
+        std::string prefix(arg + 3);
+        if (const size_t c = prefix.find(':'); c != std::string::npos) {
+            std::sscanf(prefix.c_str() + c + 1, "%f,%f", &dx, &dz);
+            prefix.resize(c);
+        }
+        float mx = 0, angle = 0, pr = 0;
+        std::string name;
+        for (const ActorHit& h : hits)
+            if (h.module == 80 && rd32(h.addr + 0x60) == relBase(80, 5) + 0x1280) {
+                if (cflight::trackedModel(prefix.c_str(), mx, angle, pr, name, true)) {
+                    const float along = angle * (pr - rdf32(h.addr + 0x68));
+                    x = mx + dx;
+                    z = rdf32(h.addr + 0x6C) + along + dz;
+                    log("[actor] f%u target model '%s': x %.1f, %.1f along the log from the player at %.1f %.1f %.1f", frame, name.c_str(), mx,
+                        along, rdf32(h.addr + 0x64), rdf32(h.addr + 0x68), rdf32(h.addr + 0x6C));
+                } else if (sSighting.ok && sSighting.name.compare(0, prefix.size(), prefix) == 0) {
+                    x = sSighting.x + dx;
+                    z = sSighting.z + dz;
+                    log("[actor] f%u target model '%s' as seen at frame %u: x %.1f z %.1f", frame, sSighting.name.c_str(), sSighting.frame,
+                        sSighting.x, sSighting.z);
+                } else {
+                    break;
+                }
+                y = rdf32(h.addr + 0x68);
+                ok = x > 1 && x < 20000 && z > 1 && z < 20000;
+                break;
+            }
+    } else if (!std::strncmp(arg, "addr", 4)) {  // addr<hex>[:dx,dz]: next to the float x/y/z at that guest address
         char* e2 = nullptr;
         const u32 a = u32(std::strtoul(arg + 4, &e2, 16));
         if (*e2 == ':') std::sscanf(e2 + 1, "%f,%f", &dx, &dz);
@@ -712,7 +776,9 @@ void teleport(u32 frame, const char* arg) {
 // CF_TELEPORT=<frame>:<x>,<y>,<z>|tortimer|mod<N>[:dx,dz][;...]: the player moved there
 // (tortimer = 48 units in front of the holiday Tortimer; mod<N>[#k][t<type>][:dx,dz] = next to the k-th / last actor of
 // module N, e.g. mod13 = the bulletin board's bird; addr<hex>[:dx,dz] = next to the float x/y/z
-// stored at that guest address, e.g. a fish shadow found in a CF_MEM_DUMP).
+// stored at that guest address, e.g. a fish shadow found in a CF_MEM_DUMP; mdl<prefix>[:dx,dz] = next
+// to the nearest drawn scene model whose name starts with the prefix, e.g. mdlins_ = an insect, with
+// CF_MODEL_TRACK=1: cf_light.cpp trackedModel).
 void actorAids(u32 frame) {
     static const u32 every = [] {
         const char* v = std::getenv("CF_ACTOR_LOG");
@@ -786,6 +852,7 @@ void actorAids(u32 frame) {
 
 void onGuestFrame(u32 frame) {
     memDump(frame);
+    trackSightings(frame);
     actorAids(frame);
 }
 

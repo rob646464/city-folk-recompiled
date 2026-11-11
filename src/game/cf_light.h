@@ -46,6 +46,13 @@ bool logAxis(float& cy, float& cz, float& radius);
 bool mainView(float view[12]);
 // A g3d scene object's model name ("" if none / not a model).
 std::string modelName(u32 scnObj);
+// Test aid CF_MODEL_TRACK=<prefix> (route action TP=mdl<prefix>, cf_region.cpp): the drawn scene
+// object whose model name starts with `prefix` nearest the player's model ('boy' / 'girl'): its
+// world x, its angle about the log's axis from the player (south positive) and the player's radius
+// there. The town's g3d world is a fixed cylinder about X that the player walks around: the field's
+// z is the angle times (the player's radius - the player's field height). False: none drawn in the
+// last frames, no player model, or no log fit yet.
+bool trackedModel(const char* prefix, float& x, float& angle, float& playerRadius, std::string& name, bool logCandidates = false);
 // Shadows of objects outside the view (src/game/cf_shadow_casters.cpp, docs/RENDERING.md "Shadows
 // of objects outside the view"): the sun / moon shadow light of this scene in the g3d world
 // (direction toward the light, unit), the same in the ground's frame (east, up, south), the sine

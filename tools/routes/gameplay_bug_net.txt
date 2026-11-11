@@ -1,0 +1,39 @@
+# Catching a bug with the net on a summer morning: net (first free slot 0.56/-0.26) -> Carry, a walk
+# around the house (a cicada on a tree comes into view and is remembered), then in three steps to
+# 26 units west of it (TP=mdlins_: the nearest drawn scene model named ins_*, or where it was last
+# seen; the player still faces east from the walk, and a short stick press does not turn him), swing:
+# the catch close-up and "I caught a robust cicada!" (which cicada varies with the load timing).
+# Env: CF_FF=1-4400;CF_CLOCK_START=2026-07-20 10:00;CF_GIVE_ITEM=5600:CEA0;CF_MODEL_TRACK=ins_ (branch fish-fx)
+include continue_any.txt
+5240:A
++60:A ~6
+after link d_bgo_drawNP 2
++1400:@-0.82/0.82
++30:A
++200:@0.56/-0.26
++60:A
++150:@0.77/-0.38
++60:A
++150:@off
++100:B
++100:STICKDOWN*200
++230:STICKLEFT*200
++230:STICKUP*200
++230:STICKRIGHT*300
++400:TP=mdlins_:-120/4
++40:TP=mdlins_:-60/4
++40:TP=mdlins_:-26/4
++20:A
++500:A
++150:B ~3
+# Second try (insects come and go with the load timing): another walk, facing east again at its end.
++200:STICKDOWN*200
++230:STICKLEFT*300
++330:STICKUP*200
++230:STICKRIGHT*200
++400:TP=mdlins_:-120/4
++40:TP=mdlins_:-60/4
++40:TP=mdlins_:-26/4
++20:A
++500:A
++150:B ~3
