@@ -1032,3 +1032,26 @@ g++ -O2 -std=c++17 -pthread tools/lobby/cf_lobby.cpp -o cf_lobby
   until a town is loaded; a pending CF_MENU_CLICK opens every collapsing header (test aid only).
 - **Not tested**: two real routers / two PCs, `wss://` to a deployed Worker, the real Cloudflare TURN
   service, Linux / macOS clients (http.cpp's libcurl WebSocket ran on Linux loopback only), PAL / JP / KR.
+
+### 13.9 Live lobby run (2026-11-11, user-approved)
+
+The deployed Worker `https://cf-lobby.cf-lobby.workers.dev` (TURN configured), two `cfrecomp` instances on
+one PC (copies of the test_builds/online-letter-test-2 profiles), rooms "CF test (ignore)" / "CF test locked
+(ignore)", players CFTest1 / CFTest2, port mapping off, host `lan_visible=false` so the join goes through the
+lobby, `CF_LOBBY_LOG=1`. Script: the session scratchpad `live-lobby/run.ps1`.
+
+| Case | Result | Evidence |
+|---|---|---|
+| Public room listed, joined from the list | pass | `room listed on cf-lobby.cf-lobby.workers.dev`, joiner `room list: joining "CF test (ignore)"`, `connected ... (direct)` (same router: the LAN candidate wins) |
+| Password room, wrong password | pass | host `join refused (wrong password)`, joiner `Wrong password` |
+| Password room, right password | pass | `Joined "CF test locked (ignore)"`, direct |
+| Forced relay (`CF_ONLINE_FORCE_RELAY=1`) through Cloudflare TURN | pass | `turn status 200 96 ms`, `relay: allocating on 141.101.90.1:3478`, `relay: ready at 104.30.148.139:...`, both sides `(relayed)` |
+| Host quits: room leaves the list | pass | `/v1/rooms?v=1` -> `"rooms":[]` after every run |
+
+Requests seen by the client in a 150 s join run: host 1 WebSocket connect + 4 messages + 1 ping per 40 s;
+joiner 1 list + 2 signals (+ 1 turn when relayed). How Cloudflare bills the WebSocket messages / pings to the
+Durable Object is read from the dashboard, not from the client.
+
+Deploy note: store the TURN secrets without a trailing newline. Piping a string in PowerShell
+(`"value" | npx wrangler secret put ...`) appends CR LF, so the credentials call fails and `/v1/turn` answers
+"busy". Use `printf '%s' value | npx wrangler secret put ...` (bash) or type the value at wrangler's prompt.
