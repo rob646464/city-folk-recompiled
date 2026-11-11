@@ -17,6 +17,7 @@
 #include "recomp/menu.h"
 #include "recomp/controls.h"
 #include "recomp/dsu.h"
+#include "recomp/pc_keyboard.h"
 #include "recomp/ui_scale.h"
 #include "recomp/wiimote.h"
 
@@ -490,6 +491,7 @@ struct PortState {
     u64 pushedGen = 0;
     SDL_JoystickID pushedPad = -1;
     bool pushedKeyboard = false;
+    bool pushedTyping = false;  // pushed with the keyboard's keys left out (pc_keyboard.cpp)
     PADStatus last{};      // last read, after shaping (for the input test)
     bool haveLast = false;
 };
@@ -627,10 +629,11 @@ ControlId stickControl(Target t, float& scale) {
     }
 }
 
-void addBindings(std::vector<Binding>& out, const Profile& prof) {
+// noKeys: the keyboard's key bindings left out (typing with the PC keyboard), mouse buttons kept.
+void addBindings(std::vector<Binding>& out, const Profile& prof, bool noKeys = false) {
     for (int t = 0; t < kTargets; t++) {
         for (const Input& in : prof.bind[t]) {
-            if (!in) continue;
+            if (!in || (noKeys && in.kind == Input::Key)) continue;
             Binding b;
             switch (in.kind) {
             case Input::Key: b.input.control = PhysicalInput::Key{SDL_Scancode(in.code)}; break;
@@ -665,13 +668,18 @@ void addBindings(std::vector<Binding>& out, const Profile& prof) {
 
 // Hands a port's bindings to Aurora: its own controller mappings and keyboard bindings
 // are emptied (in memory only; Aurora's mapping files are never written) and ours are
-// added as action bindings.
+// added as action bindings. While typing with the PC keyboard (pc_keyboard.cpp) the keyboard's
+// keys are left out (the mouse stays): the keys type text on the Wii keyboard instead.
 void push(u32 port) {
     auto& st = sPorts[port];
+    const bool typing = pckbd::typing();
     PADClearKeyBindings(port);
-    PADSetKeyboardActive(port, st.keyboard ? TRUE : FALSE);
+    PADSetKeyboardActive(port, st.keyboard ? TRUE : FALSE);  // (also the mouse's bindings)
     std::vector<Binding> list;
-    if (st.keyboard) addBindings(list, sCfg.keyboard);
+    if (st.keyboard) addBindings(list, sCfg.keyboard, typing);
+    if (st.keyboard && typing != st.pushedTyping)
+        log("[controls] port %u: keyboard keys %s", port + 1, typing ? "type text (bindings off, mouse on)" : "bound again");
+    st.pushedTyping = typing;
     if (st.pad.id) {
         u32 n = 0;
         if (PADButtonMapping* m = PADGetButtonMappings(port, &n))
@@ -1077,6 +1085,20 @@ bool portsTab() {
         ImGui::EndTable();
     }
 
+    ImGui::SeparatorText("PC keyboard");
+    changed |= menu::Checkbox("Type with the PC keyboard (disables keyboard game controls)", &port::settings().keyboard.typing);
+    ImGui::SetItemTooltip(
+        "The game sees your PC keyboard as a Wii USB keyboard: type chat messages (also during visits), letters,\n"
+        "names, design names and every other text box of the game; Enter, Backspace, Shift and Caps Lock work\n"
+        "as on the Wii's keyboard.\n"
+        "While this is on, keyboard keys no longer act as Wii Remote buttons or the Nunchuk stick (no walking or\n"
+        "button presses while you type): use a controller or the mouse to play. The mouse and controllers keep\n"
+        "working; F1 still opens this menu (Esc closes it). A keyboard push-to-talk key that types text is\n"
+        "off meanwhile (F1 > Online > Voice chat; a controller button still works).\n"
+        "Takes effect at once.");
+    if (port::settings().keyboard.typing)
+        ImGui::TextDisabled("Keyboard keys type in the game; keyboard bindings are off (mouse buttons still work).");
+
     changed |= wiimote::drawRemotesSection();
     ImGui::SeparatorText("Input test");
     for (int port = 0; port < PAD_MAX_CONTROLLERS; port++) {
@@ -1157,6 +1179,9 @@ bool bindingsTab() {
     if (!prof) return false;
     ImGui::TextDisabled("Click a slot, then press a %s. Esc cancels, right-click clears.",
                         prof->keyboard ? "key or mouse button" : "button or move a stick/trigger");
+    if (prof->keyboard && pckbd::typing())
+        ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.3f, 1),
+                           "Typing with the PC keyboard is on (Ports): key bindings are off, mouse buttons work.");
     const float secondsLeft =
         kCaptureSeconds - std::chrono::duration<float>(Clock::now() - sCap.start).count();
     if (ImGui::BeginChild("bindings", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 4))) {
@@ -1488,7 +1513,9 @@ void beforeRead() {
     assign();
     for (u32 port = 0; port < PAD_MAX_CONTROLLERS; port++) {
         const auto& st = sPorts[port];
-        if (st.pushedGen != sGeneration || st.pushedPad != st.pad.id || st.pushedKeyboard != st.keyboard) push(port);
+        if (st.pushedGen != sGeneration || st.pushedPad != st.pad.id || st.pushedKeyboard != st.keyboard ||
+            st.pushedTyping != pckbd::typing())
+            push(port);
     }
     refreshMotors();
 }

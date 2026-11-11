@@ -142,7 +142,7 @@ French.
 | `/dev/stm/immediate`, `/dev/stm/eventhook` | hot reset / power off / standby end the program; LED and dimming accepted. The OS's own event hook is HLE'd (os/OSStateTM.c): `ios::stmEvent(0x800 power / 0x20000 reset)` calls the game's OSSetPowerCallback / OSSetResetCallback callback as the OS handler does (City Folk registers a reset callback, 0x80107870, which checks the disc with DVDCheckDiskAsync). |
 | `/dev/di` | accepted (disc reads are HLE'd at the DVD library). |
 | `/dev/sdio/slot0`, `slot1` | **SD slot with no card**: GetStatus (0x0B) = 0, card commands fail. Photos to SD: later (see "Not done"). |
-| `/dev/usb/kbd` | **absent** (open fails, `-6`): no USB keyboard. A device version (open succeeds, the event request waits forever = no keyboard attached) exists behind `CF_USB_KBD_DEVICE=1`. |
+| `/dev/usb/kbd` | the USB keyboard module, always there (the game opens it once at boot): no keyboard attached (the event request waits), or the PC keyboard while F1 > Controls "Type with the PC keyboard" is on (docs/CONTROLS.md "Typing with the PC keyboard", docs/ONLINE.md 10b). Writes (LEDs) answer `-4`. |
 | `/dev/usb/oh0` | USB host with no devices (Wii Speak absent); not opened by the game so far. |
 | `/dev/net/*` (KD = WiiConnect24, NCD, IP, SSL, WD = DS wireless) | **not running** (open fails, `-6`): the game is offline. NWC24 retries `/dev/net/kd/request` every ~2 s at the title (logged once). Online play: docs/ONLINE.md. WD is never opened: the MP/MPDL libraries above it are HLE'd (docs/MOVE_IN.md). |
 

@@ -5,7 +5,8 @@
 //   /dev/stm/eventhook  held until a console button event (stmEvent): POWER 0x800, RESET 0x20000
 //   /dev/di             accepted (disc reads go through the DVD HLE)
 //   /dev/sdio/slot0     an SD slot with no card in it
-//   /dev/usb/kbd        the USB keyboard module with no keyboard attached (its event request waits)
+//   /dev/usb/kbd        the USB keyboard module: the PC keyboard attached while F1 > Controls "Type
+//                       with the PC keyboard" is on, otherwise no keyboard (its event request waits)
 //   /dev/usb/oh0        the USB host with no device (Wii Speak absent)
 //   /dev/net/*          not running (offline: NCD/SO/KD/SSL opens fail, as when the network
 //                       modules are not up), except KD and NCD while a WiiConnect24 feature is on
@@ -258,16 +259,18 @@ public:
     }
 };
 
-// The USB keyboard module: its event request returns when a keyboard is attached, which never
-// happens here; held requests stay pending as on a console without a keyboard.
 // The USB keyboard module (/dev/usb/kbd, public IOS interface): async ioctl 0 returns the next
 // 16-byte message {u32 type (0 attached, 1 detached, 2 keys), u32 keyboard id, u8 modifiers,
-// u8 0, u8 keys[6] (HID usages)}. With F1 > Online "USB keyboard" (online.usb_keyboard) the PC
-// keyboard is that keyboard (City Folk's chat; usbKeyboardPoll() from the host thread); without
-// it the module has no keyboard (requests wait).
+// u8 0, u8 keys[6] (HID usages)}. The module is always there, as on a console (the game's KBD
+// library opens it once, at boot, and never again: an open that failed while the option was off
+// left the keyboard dead for the session). With F1 > Controls "Type with the PC keyboard"
+// (pc_keyboard.cpp) a keyboard is attached and the PC keyboard's reports go to the game; without
+// it no keyboard is attached (requests wait, as on a console without one).
 struct KbdState {
     std::mutex m;
     bool open = false;
+    bool want = false;      // a keyboard should be attached (the option)
+    bool attached = false;  // attach message queued since the open
     std::optional<Reply> pending;
     u32 out = 0, outLen = 0;
     std::vector<std::array<u8, 16>> queue;
@@ -290,11 +293,15 @@ public:
     UsbKeyboard() {
         std::lock_guard lk(sKbd.m);
         sKbd.open = true;
+        sKbd.attached = false;
+        sKbd.queue.clear();
     }
     ~UsbKeyboard() override {
         std::lock_guard lk(sKbd.m);
         sKbd.open = false;
+        sKbd.attached = false;
         sKbd.pending.reset();
+        sKbd.queue.clear();
     }
     s32 ioctl(u32 cmd, u32, u32, u32 out, u32 outLen, const Reply& r) override {
         if (!r.cb) {
@@ -333,50 +340,53 @@ public:
 }  // namespace
 
 namespace {
-std::optional<Reply> kbdPollLocked(bool enabled, const u8* scancodes, int count) {
-    static bool attached = false;
-    static std::array<u8, 8> last{};
-    if (!sKbd.open) {
-        attached = false;
-        return std::nullopt;
-    }
-    auto push = [](u32 type, const std::array<u8, 8>& rep) {
-        std::array<u8, 16> m{};
-        m[3] = u8(type);
-        m[7] = 1;  // keyboard id 1
-        std::memcpy(m.data() + 8, rep.data(), 8);
-        if (sKbd.queue.size() < 64) sKbd.queue.push_back(m);
-    };
-    if (enabled != attached) {
-        attached = enabled;
-        last = {};
-        push(enabled ? 0 : 1, last);
-        recomp::log("[ios] USB keyboard %s", enabled ? "attached (PC keyboard)" : "detached");
-    }
-    if (attached && scancodes) {
-        std::array<u8, 8> rep{};  // modifiers, 0, keys[6]
-        int n = 0;
-        for (int sc = 4; sc < count && sc < 0xE8; sc++) {
-            if (!scancodes[sc]) continue;
-            if (sc >= 0xE0) rep[0] |= u8(1 << (sc - 0xE0));  // HID modifier bits
-            else if (n < 6) rep[size_t(2 + n++)] = u8(sc);    // SDL scancodes are HID usages
-        }
-        if (rep != last) {
-            last = rep;
-            push(2, rep);
-        }
-    }
-    return kbdDeliverLocked();
+void kbdPushLocked(u32 type, const u8* rep) {
+    std::array<u8, 16> m{};
+    m[3] = u8(type);
+    m[7] = 1;  // keyboard id 1
+    if (rep) std::memcpy(m.data() + 8, rep, 8);
+    if (sKbd.queue.size() < 256) sKbd.queue.push_back(m);
 }
-}  // namespace
 
-void usbKeyboardPoll(bool enabled, const u8* scancodes, int count) {
+// Attach / detach messages for the option's state (device open only).
+void kbdSyncLocked() {
+    if (!sKbd.open || sKbd.want == sKbd.attached) return;
+    sKbd.attached = sKbd.want;
+    kbdPushLocked(sKbd.attached ? 0 : 1, nullptr);
+    recomp::log("[ios] USB keyboard %s", sKbd.attached ? "attached (PC keyboard)" : "detached");
+}
+
+void kbdDeliver() {
     std::optional<Reply> done;
     {
         std::lock_guard lk(sKbd.m);
-        done = kbdPollLocked(enabled, scancodes, count);
+        done = kbdDeliverLocked();
     }
     if (done) answer(*done, IPC_OK);  // outside the lock: the game's callback re-arms the request
+}
+}  // namespace
+
+void usbKeyboardSetAttached(bool attached) {
+    {
+        std::lock_guard lk(sKbd.m);
+        sKbd.want = attached;
+        kbdSyncLocked();
+    }
+    kbdDeliver();
+}
+
+bool usbKeyboardReport(const u8 report[8]) {
+    bool sent = false;
+    {
+        std::lock_guard lk(sKbd.m);
+        kbdSyncLocked();
+        if (sKbd.open && sKbd.attached) {
+            kbdPushLocked(2, report);
+            sent = true;
+        }
+    }
+    kbdDeliver();
+    return sent;
 }
 
 void stmEvent(u32 event) {
@@ -403,8 +413,7 @@ std::unique_ptr<Handle> openDevice(const std::string& path, u32, s32& err, doubl
     if (path == "/dev/net/kd/request" || path == "/dev/net/kd/time") return std::make_unique<KdDevice>();
     if (path == "/dev/di") return std::make_unique<AcceptAll>();
     if (path == "/dev/sdio/slot0" || path == "/dev/sdio/slot1") return std::make_unique<SdSlot>();
-    if (path == "/dev/usb/kbd" && (std::getenv("CF_USB_KBD_DEVICE") || port::settings().online.usbKeyboard))
-        return std::make_unique<UsbKeyboard>();
+    if (path == "/dev/usb/kbd") return std::make_unique<UsbKeyboard>();
     if (path == "/dev/usb/oh0") return std::make_unique<UsbHost>();
     logOnce("open " + path + ": no such device");
     err = IPC_ENOENT;

@@ -1,0 +1,18 @@
+# New game: the player's name and the town name typed on the PC keyboard (typing on).
+1300:A
++80:A ~41
+4620:@0.41/0.42
++20:A
++60:A ~47
+# Name keyboard (open from about frame 7480): type "Rob", Enter.
+7600:@0/0.9
+7620:KEYS=Rob
+7760:KEYS={ENTER}
++60:@0.41/0.42
++20:A
++60:A ~14
+# Town-name keyboard (open from about frame 8800): Shift+letters, Backspace, Enter.
+8950:KEYS=Kbx{BACK}d
+9150:KEYS={ENTER}
++100:@0.625/0.508
++100:A

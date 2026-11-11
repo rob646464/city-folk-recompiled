@@ -84,6 +84,7 @@ std::vector<Field> fields() {
     return {
         num("interface", "menu_scale", sSettings.ui.menuScale),
         flag("interface", "start_hint", sSettings.ui.startHint),
+        flag("keyboard", "type_with_pc_keyboard", sSettings.keyboard.typing),
         num("video", "target_fps", v.targetFps),
         flag("video", "unlimited_fps", v.unlimitedFps),
         flag("video", "match_display_refresh", v.matchDisplay),
@@ -243,7 +244,6 @@ std::vector<Field> fields() {
         flag("online", "port_mapping", sSettings.online.portMapping),
         str("online", "last_direct", sSettings.online.lastDirect),
         flag("online", "notices", sSettings.online.notices),
-        flag("online", "usb_keyboard", sSettings.online.usbKeyboard),
         flag("online", "mic_on", sSettings.online.micOn),
         str("online", "mic_device", sSettings.online.micDevice),
         flag("online", "mic_push_to_talk", sSettings.online.micPushToTalk),
@@ -438,6 +438,8 @@ void loadSettings() {
     auto table = fields();
     std::string line, section;
     bool fileAo = false;  // the file has the AO keys (migrateAo)
+    int oldUsbKeyboard = -1;  // [online] usb_keyboard of an older file (-1: not there)
+    bool newTyping = false;   // the file has [keyboard] type_with_pc_keyboard
     sSettings.enhancedLighting.aoVersion = 0;  // stays 0 unless the file has ao_version
     while (std::getline(in, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -457,6 +459,13 @@ void loadSettings() {
             continue;
         }
         if (section == "enhanced_lighting" && key.rfind("ssao", 0) == 0) fileAo = true;
+        // F1 > Online "USB keyboard" of 1.x files is now F1 > Controls "Type with the PC keyboard"
+        // ([keyboard] type_with_pc_keyboard, written from now on; that key wins if both are there).
+        if (section == "online" && key == "usb_keyboard") {
+            oldUsbKeyboard = value == "true" || value == "1" ? 1 : 0;
+            continue;
+        }
+        if (section == "keyboard" && key == "type_with_pc_keyboard") newTyping = true;
         bool known = false;
         for (auto& f : table)
             if (section == f.section && key == f.key) {
@@ -469,8 +478,14 @@ void loadSettings() {
     const bool migrate = fileAo && sSettings.enhancedLighting.aoVersion < 2;
     if (migrate) migrateAo();
     sSettings.enhancedLighting.aoVersion = 2;
+    const bool migrateKbd = oldUsbKeyboard >= 0 && !newTyping;
+    if (migrateKbd) {
+        sSettings.keyboard.typing = oldUsbKeyboard == 1;
+        std::fprintf(stderr, "[settings] [online] usb_keyboard=%s -> [keyboard] type_with_pc_keyboard (F1 > Controls)\n",
+                     oldUsbKeyboard == 1 ? "true" : "false");
+    }
     sanitize();
-    if (migrate) saveSettings();  // once: the file now has ao_version=2
+    if (migrate || migrateKbd) saveSettings();  // once: the file now has the new keys
 }
 
 void resetSettingsToDefaults() {

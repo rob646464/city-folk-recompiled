@@ -27,6 +27,7 @@
 #include "recomp/online.h"
 #include "recomp/online_sync.h"
 #include "recomp/pacing.h"
+#include "recomp/pc_keyboard.h"
 #include "recomp/texture_packs.h"
 #include "recomp/ui_scale.h"
 #include "recomp/widescreen.h"
@@ -1653,6 +1654,7 @@ void shutdown() {
 
 void handleEvent(const SDL_Event& ev) {
     if (recomp::controls::handleEvent(ev)) return;  // binding capture owns the key
+    recomp::pckbd::handleEvent(ev, sOpen);  // PC keyboard typing (before F1 / Esc change sOpen)
     if (ev.type != SDL_EVENT_KEY_DOWN || ev.key.repeat) return;
     if (ev.key.key == SDLK_F1) sOpen = !sOpen;
     else if (ev.key.key == SDLK_ESCAPE && sOpen) sOpen = false;
@@ -1786,6 +1788,7 @@ bool SliderInt(const char* label, int* v, int min, int max, const char* format, 
 void draw() {
     click::frame();
     recomp::wiimote::hostFrame();  // mouse cursor over the game (pointer from the mouse)
+    recomp::pckbd::hostFrame();    // PC keyboard as the Wii's USB keyboard (attach / detach, CF_KBD_TYPE)
     scriptedSettings();
     recomp::texpacks::hostFrame();
     recomp::gx::applyAccuracySettings();

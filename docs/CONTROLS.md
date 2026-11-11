@@ -172,11 +172,62 @@ Defaults: Wii Remote 1 = Remote + Nunchuk from keyboard + mouse and the first ga
 | Shake Remote / Nunchuk | F, middle click / G | right shoulder / left stick press |
 | Recenter pointer | R | right stick press |
 
+Ports also has **"Type with the PC keyboard (disables keyboard game controls)"** (next section).
+
 Settings: `[controls]`, `[controls.keyboard]`, `[controls.pad.<guid>]` (bindings) and `[wiimote]`
 (`remote<N>_connect=auto|on|off`, `remote<N>_extension=nunchuk|none`,
 `remote<N>_pointer=mouse+stick|...|none`, `remote<N>_snap=auto|on|off`, `pointer_stick_speed`,
 `pointer_stick_absolute`, `gyro_sensitivity`, `gyro_invert_x/y`, `hide_cursor`, `pointer_timeout`,
 `distance`).
+
+## Typing with the PC keyboard
+
+F1 > Controls > Ports "Type with the PC keyboard (disables keyboard game controls)" (`[keyboard]
+type_with_pc_keyboard`, off by default; src/recomp/pc_keyboard.cpp): the PC keyboard is the Wii's
+USB keyboard, which City Folk takes text from in every software keyboard (its KBD library,
+fn_801F9CAC; the keyboards' shared update fn_802F070C feeds USB keys through KPRPutChar). While on:
+
+- every key press and release is a HID report to `/dev/usb/kbd` (ios_devices.cpp, docs/ONLINE.md
+  10b), from the SDL key events of the host loop in their order (not the keyboard state once a frame:
+  a key pressed and released within one frame is not lost). The game does shift, caps lock and key
+  repeat itself, as with a real keyboard. Layout: SDL scancodes are key positions, read as the US
+  keyboard the USA game expects (other PC layouts type the US key at that position).
+- **keyboard bindings are off**: controls.cpp pushes the keyboard profile without its key bindings
+  (mouse buttons kept: left click = A still works), so typing never walks (WASD), opens HOME (H),
+  pockets (Enter = +) or presses A (Space). Controllers are unchanged.
+- F1 never reaches the game (nor anything while the menu is open; keys held when it opens are
+  released, keys held from before are ignored until pressed again). Esc reaches the game except
+  when it closes the menu.
+- a keyboard push-to-talk key that types text (letters, digits, Space, Enter, punctuation) is off
+  (F1 > Online > Voice chat shows a note; the controller button and keys such as Right Ctrl work).
+- Live: the device is always there (the KBD library opens it once at boot and never retries, which
+  is why 1.x's "USB keyboard" option did nothing unless it was on before the start); the option
+  attaches / detaches the keyboard and switches the bindings at once.
+
+Where the game takes it (checked 2026-11-10, USA, scripted real SDL key events): chat in one's own
+town and indoors (typing a letter in the field opens the chat line with it; Enter sends, the bubble
+shows), visits (the same chat; docs/ONLINE.md 10b), the player's name and the town name of a new
+game (Enter = Confirm, Backspace, Shift for capitals), letters (Enter = new line, held Backspace
+repeats, Caps Lock), the design name ("What's this design called?" after Edit Design > Done). Every
+software keyboard is the same class (set up by fn_802EFD60, updated by fn_802F070C), so the others
+(HUD chat button, bulletin board, ...) take it too. Routes: tools/routes/typing_chat.txt,
+typing_toggle.txt (option switched at run time by `CF_SETTINGS_AT`: W walks, then types, the left
+click still presses A, then S walks again), typing_names.txt, typing_letter.txt, typing_design.txt
+(environment in each file's header).
+
+1.x's F1 > Online "USB keyboard" (`[online] usb_keyboard`) is read once and becomes this option
+(log line `[settings] [online] usb_keyboard=... -> [keyboard] type_with_pc_keyboard`); the old key
+is no longer written.
+
+Test aids: `CF_KBD_TYPE="<guest frame>:<text>|..."` and the route token `KEYS=<text>` (`_` = space)
+type through SDL's event queue (SDL_PushEvent: Aurora's input router and the bindings see them like
+a real key, then pc_keyboard.cpp): letters, digits, `.,!?'-;:/`, `{ENTER} {BACK} {ESC} {TAB} {CAPS}
+{UP} {DOWN} {LEFT} {RIGHT} {F1}`, `{HOLD:<key>:<frames>}`, `{WAIT:<frames>}`, `{MOUSE1}` (left click);
+each key 3 host frames down, 3 up. They work with the option off too (then the keys act as
+bindings). `CF_KBD_LOG=1` logs every report, attach / detach and Wii Remote 1's bound buttons and
+stick on each change. `CF_USB_KBD_DEVICE=1` turns the option on. `CF_OFFSCREEN` runs no longer
+take the keyboard focus (SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN=0): typing on the PC no longer lands
+in an off-screen test run.
 
 ## Pointer timeout
 
