@@ -315,6 +315,14 @@ void traceNote(const char* fmt, ...) {
 }
 
 void prepareDraw(ProjMode mode, const char* what = "draw") {
+    // A display list being recorded (GXBeginDisplayList) holds only what the game writes: the
+    // widescreen projection / scissor for its draws are chosen where the list is called. Emitted
+    // here they were recorded into the list, and every later call of it reset the projection to
+    // the one current while it was recorded (RFL's head shapes, recorded under the HUD's centered
+    // 2D projection: Mii heads without a face in windows wider than 16:9, docs/MIIS.md).
+    // Test aid CF_DL_WS_OLD=1: the old behaviour (A/B).
+    static const bool sDlOld = std::getenv("CF_DL_WS_OLD") != nullptr;
+    if (sInDisplayList && !sDlOld) return;
     traceNote("%s %s vp(%.0f,+%.0f) -> %s", what, sProj.type == GX_PERSPECTIVE ? "persp" : "ortho", sVp.left,
               sVp.wd, mode == ProjMode::Scaled ? "scaled" : mode == ProjMode::Zoom ? "zoom" : "plain");
     const bool hud = mode == ProjMode::Scaled && sProj.type == GX_ORTHOGRAPHIC;
@@ -1519,7 +1527,9 @@ GXHLE(GXBegin) {
     sBeginGuest = sched::currentGuest();
     if (interp::drawLogActive()) interp::drawLogCaller(guestChain(c));
     if (interp::capturing()) interp::vtxBegin(c.r[3], c.r[4], c.r[5], sProj.type == GX_PERSPECTIVE);
-    if (ws::active() && sProj.type == GX_ORTHOGRAPHIC && viewportFull()) {
+    // (Not while a display list is recorded: its draws go into the list as they are, prepareDraw.)
+    static const bool sDlOld = std::getenv("CF_DL_WS_OLD") != nullptr;  // test aid (prepareDraw)
+    if (ws::active() && sProj.type == GX_ORTHOGRAPHIC && viewportFull() && (!sInDisplayList || sDlOld)) {
         sHeld.active = true;
         sHeldAnchor = ws::hudAnchor();
         sHeldShift = ws::hudShift();
@@ -1738,6 +1748,7 @@ GXHLE(GXBeginDisplayList) {
 }
 GXHLE(GXEndDisplayList) {
     sInDisplayList = false;
+    sRawCheck = true;  // (prepareDraw did nothing while recording: the next raw draw checks again)
     const u32 n = GXEndDisplayList();
     interp::resumeAfterDisplayList();
     while (!sRetiredDls.empty() && sDiagFrame - sRetiredDls.front().first > 16) sRetiredDls.pop_front();

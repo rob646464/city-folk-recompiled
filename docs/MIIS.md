@@ -90,9 +90,42 @@ Drawn by the game's RFL with the disc's Mii parts (`Face/RFLRes01.arc`, which th
   `aurora_imgui_update_texture`).
 - Size: 256 px when RFL's heap has room for the model RFLiMakeIcon allocates there (checked first with
   MEMGetAllocatableSizeForExpHeapEx; ~149 KB free in town), else 128 or 64.
+- A copy that never lands (with frame interpolation on a loaded GPU fewer game frames are shown
+  than made, and the EFB copies of a frame never shown are never made; seen at 15-19 fps shown
+  with other game instances on the GPU) frees its buffer after 60 frames and the newest request is
+  drawn again (`[mii] preview N did not land: drawn again` with CF_MII_LOG), so the preview never
+  stays empty.
 
 The preview needs a scene with the stage draw (the title town, the town, buildings, the city); on
 other screens the page says so.
+
+### Windows wider than 16:9 (the black-face bug)
+
+User report (main 0c37043, 4K, Enhanced lighting Ultra): "Mii maker is not working": the preview
+head had no face, a black hole with only the nose and a strip of forehead (from behind: black
+polygons with a few skin fragments). Not a lighting regression: it needs a window wider than 16:9
+with F1 > Visuals > Aspect "Match window" (the user's maximized window was 3840x2131, aspect 1.802,
+widescreen factor 0.987). Reproduced in town at 3840x2131 with the user's settings; Enhanced
+lighting, Enhanced world, EFB copies to RAM, 60/120 fps and texture packs switched live
+(CF_SETTINGS_AT) changed nothing, a fixed 16:9 aspect or a 3840x2160 window gave the right face.
+
+Cause (GX HLE, `hle_gx.cpp`): RFL records each head shape as a display list
+(RFLiInitCharModel -> RFLiInitCharModelRes -> RFLiInitShapeRes: GXBeginDisplayList, GXBegin and
+the vertices, GXEndDisplayList) whenever it builds a model, with whatever projection and viewport
+are current (the HUD's orthographic one in town). With a widescreen factor below 1 the HLE treated
+those GXBegin calls like 2D HUD draws: held and given the centered projection, and `prepareDraw`
+emitted that projection (and scissor) into the list being recorded. Every later call of the list
+then switched to the HUD's projection in the middle of the head, so the face mask (and parts of
+the hair) landed somewhere else: the hole. Whether a list got the projection depended on the state
+left by the draws before it: the title town and the game's own "Choose a Mii" icons happened to
+be clean on main, and an interim fix that changed that state (RFL's renders drawn unadjusted)
+broke the list's first icon the same way.
+
+Fix: nothing widescreen-related is emitted or held while a display list is recorded
+(`prepareDraw` returns at once, GXBegin does not hold); the projection for a list's draws is chosen
+where the game calls it, as before. A list holds only what the game writes, as on the console.
+That covers every Mii head (F1 preview, the game's icons, the worn mask) and any other game list
+recorded under a 2D projection. Test aid `CF_DL_WS_OLD=1` restores the old behaviour (A/B).
 
 ## Import and export
 
@@ -153,5 +186,8 @@ outes\mii_mask.txt -Seconds 560 -Shots 9500,14500,40
   `shot=<path.ppm>` (the current preview over dark grey), `open` (opens F1 > Miis). The preview keeps
   rendering while a script runs with the menu closed.
 - `CF_MII_SEED=<n>`: deterministic Random button.
+- `CF_DL_WS_OLD=1` (GX HLE): widescreen projections emitted into display lists being recorded
+  again (the black-face bug, "Windows wider than 16:9"), for A/B runs. Reproduce with
+  `--window 3840x2131`, `[video] resolution_scale=0`, aspect "Match window", in town.
 - Example (town, two Miis, saved, preview shots turned and smiling):
   `CF_MII_AT=5400:random|5410:name=Robo|5600:shot=p0.ppm|5610:yaw=45|5700:shot=p1.ppm|5710:expr=1|5800:shot=p2.ppm|5900:save`
