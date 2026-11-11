@@ -1,0 +1,10 @@
+# The default gamepad layout, played on a virtual pad (docs/CONTROLS.md "Default gamepad layout").
+# This file only continues the saved town (scripted Wii Remote, pointing away); every action after
+# the arrival comes from the virtual pad's buttons through the default bindings:
+#   CF_VIRTUAL_PAD=@tools\routes\pad_layout_pad.txt
+# Env: CF_FIXTURE=user-town-clean;CF_FF=1-4400;CF_GIVE_ITEM=5600:CEA0,5600:CEA4;CF_POINTER_TIMEOUT=3;CF_WPAD_LOG=1;CF_PAD_LOG=1
+# (a net and a fishing rod in the pockets for the tool buttons; the pointer timeout of normal play).
+# Shots: 5980,11600,20. About 190 s.
+include continue_any.txt
+5240:A
++60:A ~6

@@ -17,6 +17,7 @@
 #include "recomp/menu.h"
 #include "recomp/controls.h"
 #include "recomp/dsu.h"
+#include "recomp/game.h"
 #include "recomp/pc_keyboard.h"
 #include "recomp/ui_scale.h"
 #include "recomp/wiimote.h"
@@ -69,7 +70,7 @@ enum Target : int {
     tC, tZ,
     tStickUp, tStickDown, tStickLeft, tStickRight,
     tPtrUp, tPtrDown, tPtrLeft, tPtrRight,
-    tShake, tShakeNunchuk, tRecenter,
+    tShake, tShakeNunchuk, tRecenter, tTogglePointer,
     kTargets
 };
 
@@ -78,33 +79,37 @@ struct TargetInfo {
     const char* label;  // menu
     const char* group;  // menu section, printed when it changes
     u32 button;         // RemoteInputs::buttons bit (wiimote.h kBtn*) for digital inputs, else 0
+    const char* action; // what the input does in City Folk (tooltip, default layout list)
 };
 
 constexpr TargetInfo kTargetInfo[kTargets] = {
-    {"a", "A", "Wii Remote", wiimote::kBtnA},
-    {"b", "B", "Wii Remote", wiimote::kBtnB},
-    {"one", "1", "Wii Remote", wiimote::kBtn1},
-    {"two", "2", "Wii Remote", wiimote::kBtn2},
-    {"plus", "+ (Plus)", "Wii Remote", wiimote::kBtnPlus},
-    {"minus", "- (Minus)", "Wii Remote", wiimote::kBtnMinus},
-    {"home", "HOME", "Wii Remote", wiimote::kBtnHome},
-    {"dpad_up", "Up", "D-pad", wiimote::kBtnUp},
-    {"dpad_down", "Down", "D-pad", wiimote::kBtnDown},
-    {"dpad_left", "Left", "D-pad", wiimote::kBtnLeft},
-    {"dpad_right", "Right", "D-pad", wiimote::kBtnRight},
-    {"c", "C", "Nunchuk", wiimote::kBtnC},
-    {"z", "Z", "Nunchuk", wiimote::kBtnZ},
-    {"stick_up", "Up", "Nunchuk stick", 0},
-    {"stick_down", "Down", "Nunchuk stick", 0},
-    {"stick_left", "Left", "Nunchuk stick", 0},
-    {"stick_right", "Right", "Nunchuk stick", 0},
-    {"pointer_up", "Up", "Pointer (stick or keys)", 0},
-    {"pointer_down", "Down", "Pointer (stick or keys)", 0},
-    {"pointer_left", "Left", "Pointer (stick or keys)", 0},
-    {"pointer_right", "Right", "Pointer (stick or keys)", 0},
-    {"shake", "Shake Wii Remote", "Motion and pointer", wiimote::kBtnShake},
-    {"shake_nunchuk", "Shake Nunchuk", "Motion and pointer", wiimote::kBtnShakeNunchuk},
-    {"recenter", "Recenter pointer", "Motion and pointer", wiimote::kBtnRecenter},
+    {"a", "A", "Wii Remote", wiimote::kBtnA, "Confirm / action: talk, use the tool, open doors, read signs"},
+    {"b", "B", "Wii Remote", wiimote::kBtnB, "Cancel, pick up items; hold while walking to run"},
+    {"one", "1", "Wii Remote", wiimote::kBtn1, "Take a photo"},
+    {"two", "2", "Wii Remote", wiimote::kBtn2, "Open / close the photos"},
+    {"plus", "+ (Plus)", "Wii Remote", wiimote::kBtnPlus, "Town map; on a menu: the next tab"},
+    {"minus", "- (Minus)", "Wii Remote", wiimote::kBtnMinus, "Pockets (inventory); on a menu: the last tab"},
+    {"home", "HOME", "Wii Remote", wiimote::kBtnHome, "HOME Menu"},
+    {"dpad_up", "Up", "D-pad", wiimote::kBtnUp, "Change view (look at the sky)"},
+    {"dpad_down", "Down", "D-pad", wiimote::kBtnDown, "Put the tool away"},
+    {"dpad_left", "Left", "D-pad", wiimote::kBtnLeft, "Change tool"},
+    {"dpad_right", "Right", "D-pad", wiimote::kBtnRight, "Change tool"},
+    {"c", "C", "Nunchuk", wiimote::kBtnC, "Same as A: talk, use the tool, open doors"},
+    {"z", "Z", "Nunchuk", wiimote::kBtnZ, "Same as B: cancel, pick up items; hold while walking to run"},
+    {"stick_up", "Up", "Nunchuk stick", 0, "Walk"},
+    {"stick_down", "Down", "Nunchuk stick", 0, "Walk"},
+    {"stick_left", "Left", "Nunchuk stick", 0, "Walk"},
+    {"stick_right", "Right", "Nunchuk stick", 0, "Walk"},
+    {"pointer_up", "Up", "Pointer (stick or keys)", 0, "Move the pointer (cursor)"},
+    {"pointer_down", "Down", "Pointer (stick or keys)", 0, "Move the pointer (cursor)"},
+    {"pointer_left", "Left", "Pointer (stick or keys)", 0, "Move the pointer (cursor)"},
+    {"pointer_right", "Right", "Pointer (stick or keys)", 0, "Move the pointer (cursor)"},
+    {"shake", "Shake Wii Remote", "Motion and pointer", wiimote::kBtnShake, "Shakes the Wii Remote while held"},
+    {"shake_nunchuk", "Shake Nunchuk", "Motion and pointer", wiimote::kBtnShakeNunchuk, "Shakes the Nunchuk while held"},
+    {"recenter", "Recenter pointer", "Motion and pointer", wiimote::kBtnRecenter,
+     "Pointer back to the middle of the screen; on a menu: onto the nearest item; in the field: onto the toolbar"},
+    {"toggle_pointer", "Toggle pointer", "Motion and pointer", wiimote::kBtnTogglePointer,
+     "Hides the pointer at once, as if the Wii Remote pointed away; again: brings it back where it was"},
 };
 
 // The Aurora controls behind the targets: one button control per digital target, and the
@@ -312,6 +317,8 @@ std::string inputName(const Input& in, SDL_GamepadType type) {
 
 // ---- Profiles ------------------------------------------------------------------------
 
+constexpr int kPadLayout = 2;  // the current default gamepad layout (padDefaults)
+
 struct Profile {
     bool keyboard = false;
     SDL_GamepadType type = SDL_GAMEPAD_TYPE_STANDARD;
@@ -325,6 +332,9 @@ struct Profile {
     float threshold[2] = {0.5f, 0.5f};     // analog trigger pull that presses a button bound to it
     bool rumble = true;
     float rumbleStrength = 0.5f;           // 0..1 (controllers that support intensity)
+    // Gamepads: the default layout the bindings were made from (kPadLayout; 1 = the first
+    // layout, a settings.ini section without a "layout" key). migratePads() below.
+    int layout = kPadLayout;
     bool operator==(const Profile&) const = default;
 };
 
@@ -365,15 +375,80 @@ Profile keyboardDefaults() {
     return p;
 }
 
-// Gamepads as a Wii Remote held with a Nunchuk: A = bottom face button, B = right face button
-// (and the right trigger: the Remote's B is a trigger), 1 = left, 2 = top (printed A/B/X/Y on
-// Nintendo pads: A, B, Y, X), + = Start, - = Back, HOME = Guide, D-pad as is; Nunchuk: left
-// stick, C = left shoulder, Z = left trigger; pointer = right stick (wiimote.cpp), right stick
-// press = recenter, right shoulder = shake, left stick press = shake the Nunchuk.
+// Gamepads, laid out like a Wii Classic Controller (docs/CONTROLS.md "Default gamepad layout";
+// the game's own controls are the Remote + Nunchuk's, so every button below is one of theirs):
+//   face buttons by position (Classic a right, b bottom, x top, y left):
+//     right = A (confirm / action), bottom = B (cancel, pick up, run),
+//     top = + (map, next tab), left = - (pockets, last tab)
+//   right shoulder = A too, left shoulder = Toggle pointer (port action, wiimote.cpp)
+//   both triggers = run: left = Nunchuk Z, right = B (the game's run button on each half)
+//   Back / Select = 1 (take a photo), Start = 2 (photos), Guide = HOME, D-pad as is
+//   left stick = Nunchuk stick (walk), right stick = pointer, its press = Recenter pointer
+// Nunchuk C (the same as A in the game) and the shakes are left unbound.
+// GameCube controller (no Back, Guide, left shoulder or stick presses): A = A, B = B, Y (top) = +,
+// X = -, Start = 1, Z = Toggle pointer, L / R = run.
 Profile padDefaults(SDL_GamepadType type, const std::string& name) {
     Profile p;
     p.type = type;
     p.name = name;
+    auto& b = p.bind;
+    const Family f = familyOf(type);
+    SDL_GamepadButton a = SDL_GAMEPAD_BUTTON_EAST, cancel = SDL_GAMEPAD_BUTTON_SOUTH, top = SDL_GAMEPAD_BUTTON_NORTH,
+                      left = SDL_GAMEPAD_BUTTON_WEST;
+    if (f == Family::GameCube) {  // its A is the big middle button: by printed label
+        for (int i = 0; i <= SDL_GAMEPAD_BUTTON_NORTH; i++) {
+            const auto btn = SDL_GamepadButton(i);
+            switch (SDL_GetGamepadButtonLabelForType(type, btn)) {
+            case SDL_GAMEPAD_BUTTON_LABEL_A: a = btn; break;
+            case SDL_GAMEPAD_BUTTON_LABEL_B: cancel = btn; break;
+            case SDL_GAMEPAD_BUTTON_LABEL_Y: top = btn; break;
+            case SDL_GAMEPAD_BUTTON_LABEL_X: left = btn; break;
+            default: break;
+            }
+        }
+    }
+    b[tA][0] = button(a);
+    b[tB][0] = button(cancel);
+    b[tPlus][0] = button(top);
+    b[tMinus][0] = button(left);
+    b[tDUp][0] = button(SDL_GAMEPAD_BUTTON_DPAD_UP);
+    b[tDDown][0] = button(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+    b[tDLeft][0] = button(SDL_GAMEPAD_BUTTON_DPAD_LEFT);
+    b[tDRight][0] = button(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+    b[tZ][0] = axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER, 1);
+    b[tB][1] = axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, 1);
+    if (f == Family::GameCube) {
+        b[t1][0] = button(SDL_GAMEPAD_BUTTON_START);
+        b[tTogglePointer][0] = button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);  // its Z button
+        p.deadzone[0] = 0.15f;  // the GameCube stick rests less centred than modern ones
+    } else {
+        b[tA][1] = button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+        b[t1][0] = button(SDL_GAMEPAD_BUTTON_BACK);
+        b[t2][0] = button(SDL_GAMEPAD_BUTTON_START);
+        b[tHome][0] = button(SDL_GAMEPAD_BUTTON_GUIDE);
+        b[tTogglePointer][0] = button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
+        b[tRecenter][0] = button(SDL_GAMEPAD_BUTTON_RIGHT_STICK);
+    }
+    b[tStickUp][0] = axis(SDL_GAMEPAD_AXIS_LEFTY, -1);
+    b[tStickDown][0] = axis(SDL_GAMEPAD_AXIS_LEFTY, 1);
+    b[tStickLeft][0] = axis(SDL_GAMEPAD_AXIS_LEFTX, -1);
+    b[tStickRight][0] = axis(SDL_GAMEPAD_AXIS_LEFTX, 1);
+    b[tPtrUp][0] = axis(SDL_GAMEPAD_AXIS_RIGHTY, -1);
+    b[tPtrDown][0] = axis(SDL_GAMEPAD_AXIS_RIGHTY, 1);
+    b[tPtrLeft][0] = axis(SDL_GAMEPAD_AXIS_RIGHTX, -1);
+    b[tPtrRight][0] = axis(SDL_GAMEPAD_AXIS_RIGHTX, 1);
+    return p;
+}
+
+// The first default layout (up to 1.x: a Remote + Nunchuk by label; A = bottom face button, B =
+// right + right trigger, 1 / 2 = left / top, + / - = Start / Back, C = left shoulder, Z = left
+// trigger, right shoulder = shake). Only to recognize a saved profile that still has it
+// (migratePads).
+Profile legacyPadDefaults(SDL_GamepadType type, const std::string& name) {
+    Profile p;
+    p.type = type;
+    p.name = name;
+    p.layout = 1;
     auto& b = p.bind;
     const Family f = familyOf(type);
     // Face buttons by printed label on Nintendo/GameCube pads, by position elsewhere.
@@ -450,6 +525,26 @@ Config sCfg;
 u64 sGeneration = 1;   // bumped on every change; ports re-push when theirs is older
 bool sUnsaved = false; // changed outside drawTab (capture callback)
 
+// Gamepad profiles saved with the first default layout (settings.ini sections without
+// "layout=2"; a profile is only saved once something in it was changed, e.g. a dead zone or one
+// binding). Bindings that are still exactly that layout's defaults become the current defaults;
+// a profile whose bindings were changed keeps them as they are (its new "Toggle pointer" input
+// stays unbound). Profiles that were never saved are built from the current defaults anyway.
+bool sMigratePads = false;  // set by loadKey; done before the profiles are used or saved
+
+void migratePads() {
+    if (!std::exchange(sMigratePads, false)) return;
+    for (auto& [guid, p] : sCfg.pads) {
+        if (p.layout >= kPadLayout) continue;
+        const bool untouched = p.bind == legacyPadDefaults(p.type, p.name).bind;
+        if (untouched) p.bind = padDefaults(p.type, p.name).bind;
+        p.layout = kPadLayout;
+        log("[controls] %s (%s): bindings %s", p.name.empty() ? "controller" : p.name.c_str(), guid.c_str(),
+            untouched ? "were the old defaults, now the new default layout" : "customized, kept");
+        sGeneration++;
+    }
+}
+
 // ---- Connected gamepads and port assignment ------------------------------------------
 
 struct Pad {
@@ -525,6 +620,7 @@ const char* connectionName(SDL_JoystickConnectionState s) {
 // Gives every port its device: chosen pads first, then "Auto" ports take the remaining
 // pads in connection order. Sets SDL player indices, which is how Aurora's PAD maps ports.
 void assign() {
+    migratePads();
     sPads = listPads();
     std::vector<SDL_JoystickID> ids;
     for (const auto& p : sPads) ids.push_back(p.id);
@@ -838,6 +934,7 @@ void loadProfileKey(Profile& p, const std::string& key, const std::string& value
     }
     if (p.keyboard) return;
     if (key == "name") p.name = value;
+    else if (key == "layout") p.layout = std::clamp(std::atoi(value.c_str()), 1, kPadLayout);
     else if (key == "type") p.type = SDL_GamepadType(std::clamp(std::atoi(value.c_str()), 0, int(SDL_GAMEPAD_TYPE_COUNT) - 1));
     else if (key == "stick_deadzone") p.deadzone[0] = parseFloat(value, 0, 0.9f, p.deadzone[0]);
     else if (key == "c_deadzone") p.deadzone[1] = parseFloat(value, 0, 0.9f, p.deadzone[1]);
@@ -870,18 +967,24 @@ void loadKey(const std::string& section, const std::string& key, const std::stri
         const std::string guid = section.substr(13);
         auto it = sCfg.pads.find(guid);
         // Keys left out keep the defaults of the pad's type (an empty value unbinds), so a
-        // "type" key that comes before any other setting rebuilds those defaults.
+        // "type" key that comes before any other setting rebuilds those defaults. A section
+        // starts as the first layout's (files written before the "layout" key existed: their
+        // bindings are that layout's defaults plus the user's changes, which migratePads looks
+        // at); the "layout" key, written right after "type", makes it the current one.
         static std::vector<std::string> sTouched;  // sections with settings loaded
         if (it == sCfg.pads.end()) {
-            it = sCfg.pads.emplace(guid, padDefaults(SDL_GAMEPAD_TYPE_STANDARD, "")).first;
+            it = sCfg.pads.emplace(guid, legacyPadDefaults(SDL_GAMEPAD_TYPE_STANDARD, "")).first;
             sTouched.erase(std::remove(sTouched.begin(), sTouched.end(), guid), sTouched.end());
+            sMigratePads = true;
         }
         Profile& prof = it->second;
         const bool touched = std::find(sTouched.begin(), sTouched.end(), guid) != sTouched.end();
         if (key == "type" && !touched) {
             const std::string name = prof.name;
-            prof = padDefaults(SDL_GamepadType(std::clamp(std::atoi(value.c_str()), 0, int(SDL_GAMEPAD_TYPE_COUNT) - 1)),
-                               name);
+            prof = legacyPadDefaults(
+                SDL_GamepadType(std::clamp(std::atoi(value.c_str()), 0, int(SDL_GAMEPAD_TYPE_COUNT) - 1)), name);
+        } else if (key == "layout" && !touched) {
+            if (std::atoi(value.c_str()) >= kPadLayout) prof = padDefaults(prof.type, prof.name);
         } else {
             loadProfileKey(prof, key, value);
             if (key != "name" && !touched) sTouched.push_back(guid);
@@ -892,7 +995,7 @@ void loadKey(const std::string& section, const std::string& key, const std::stri
 
 void saveProfile(std::ostream& out, const Profile& p) {
     if (!p.keyboard) {
-        out << "name=" << p.name << '\n' << "type=" << int(p.type) << '\n';
+        out << "name=" << p.name << '\n' << "type=" << int(p.type) << '\n' << "layout=" << p.layout << '\n';
     }
     for (int t = 0; t < kTargets; t++) {
         out << kTargetInfo[t].key << '=' << toString(p.bind[t][0]) << '\n';
@@ -911,6 +1014,7 @@ void saveProfile(std::ostream& out, const Profile& p) {
 
 void saveConfig(std::ostream& out) {
     std::lock_guard lk(sMutex);
+    migratePads();
     out << "[controls]\n";
     for (int i = 0; i < PAD_MAX_CONTROLLERS; i++) {
         const auto& pc = sCfg.ports[i];
@@ -1177,7 +1281,8 @@ bool bindingsTab() {
     profilePicker(false);
     Profile* prof = findProfile(sSelProfile);
     if (!prof) return false;
-    ImGui::TextDisabled("Click a slot, then press a %s. Esc cancels, right-click clears.",
+    ImGui::TextDisabled("Click a slot, then press a %s. Esc cancels, right-click clears.\n"
+                        "Hover an input's name for what it does in the game.",
                         prof->keyboard ? "key or mouse button" : "button or move a stick/trigger");
     if (prof->keyboard && pckbd::typing())
         ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.3f, 1),
@@ -1202,6 +1307,7 @@ bool bindingsTab() {
                 ImGui::TableNextColumn();
                 ImGui::AlignTextToFramePadding();
                 ImGui::Text("  %s", kTargetInfo[t].label);
+                ImGui::SetItemTooltip("In the game: %s", kTargetInfo[t].action);
                 for (int slot = 0; slot < 2; slot++) {
                     ImGui::TableNextColumn();
                     ImGui::PushID(t * 2 + slot);
@@ -1241,7 +1347,38 @@ bool bindingsTab() {
         prof->bind = defaultsFor(*prof).bind;
         changed = true;
     }
-    ImGui::SetItemTooltip("Every binding of this profile back to its default.");
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
+        // The default layout with this device's own button names.
+        const Profile d = defaultsFor(*prof);
+        std::string tip = prof->keyboard ? "Every binding of this profile back to its default:"
+                                         : "Every binding of this profile back to the default layout (a Wii Classic\n"
+                                           "Controller's: face buttons by position, confirm on the right one):";
+        const auto line = [&](const char* what, std::initializer_list<int> targets) {
+            std::string names;
+            for (const int t : targets)
+                for (const Input& in : d.bind[t])
+                    if (in) names += (names.empty() ? "" : ", ") + inputName(in, d.type);
+            if (!names.empty()) tip += std::string("\n  ") + what + ": " + names;
+        };
+        line("Walk", {tStickUp, tStickDown, tStickLeft, tStickRight});
+        line("Move the pointer", {tPtrUp, tPtrDown, tPtrLeft, tPtrRight});
+        line("Confirm / action (A)", {tA});
+        line("Cancel, pick up, run (B)", {tB});
+        line("Run (Nunchuk Z)", {tZ});
+        line("Map / next tab (+)", {tPlus});
+        line("Pockets / last tab (-)", {tMinus});
+        line("Take a photo (1)", {t1});
+        line("Open / close the photos (2)", {t2});
+        line("Change view", {tDUp});
+        line("Change tool", {tDLeft, tDRight});
+        line("Put the tool away", {tDDown});
+        line("HOME Menu", {tHome});
+        line("Toggle pointer", {tTogglePointer});
+        line("Recenter pointer", {tRecenter});
+        line("Nunchuk C (same as A)", {tC});
+        line("Shake Wii Remote / Nunchuk", {tShake, tShakeNunchuk});
+        ImGui::SetTooltip("%s", tip.c_str());
+    }
     ImGui::SameLine();
     if (ImGui::Button("Clear all")) {
         prof->bind = {};
@@ -1335,13 +1472,19 @@ bool analogTab() {
 }
 
 // ---- Test aid: scripted virtual gamepad ----------------------------------------------
-// CF_VIRTUAL_PAD="<read>:<action>,..." drives an SDL virtual Xbox 360 pad, timed in
-// PADRead calls: attach, detach, motor=1|0 (game rumble on port 1), <button id>=0|1 (kButtonIds), <axis id>=-1..1 (kAxisIds;
-// raw joystick values: +y is down, triggers go from -1 released to 1 pulled). Its rumble
-// requests are logged. Exercises device
-// assignment, hot-plug, gamepad bindings and rumble without touching a real controller.
+// CF_VIRTUAL_PAD="<time>:<action>,..." (or "@<file>": one item per line or comma-separated, #
+// comments) drives an SDL virtual gamepad. <time> = a count of PADRead calls, or f<n> = guest
+// frame n (the clock of CF_SHOT and of --input with CF_INPUT_CLOCK=frames). Actions: attach
+// (an Xbox 360 pad; attach=ps4|ps5|switch|gamecube|xboxone for another model's ids), detach,
+// motor=1|0 (game rumble on port 1), <button id>=0|1 (kButtonIds), <axis id>=-1..1 (kAxisIds; raw
+// joystick values: +y is down, triggers go from -1 released to 1 pulled). "<id>*<n>" presses a
+// button (or pushes an axis fully, "<id>=<v>*<n>" to v) for n time units and lets go. Its rumble
+// requests are logged. Exercises device assignment, hot-plug, gamepad bindings (the default
+// layout: docs/CONTROLS.md) and rumble without touching a real controller.
 struct VirtualStep {
-    u32 at;
+    u32 at = 0;
+    bool frames = false;  // at = guest frame (fires once it is reached), else the PADRead count
+    bool done = false;
     std::string action;
 };
 std::vector<VirtualStep> sVirtualScript = [] {
@@ -1349,12 +1492,48 @@ std::vector<VirtualStep> sVirtualScript = [] {
     const char* env = std::getenv("CF_VIRTUAL_PAD");
     if (!env) return steps;
     std::string s = env, item;
+    if (!s.empty() && s[0] == '@') {  // a script file
+        std::string text;
+        if (std::FILE* f = std::fopen(s.c_str() + 1, "rb")) {
+            char line[1024];
+            while (std::fgets(line, sizeof(line), f)) {
+                std::string l = line;
+                if (const auto hash = l.find('#'); hash != std::string::npos) l.resize(hash);
+                l.erase(std::remove_if(l.begin(), l.end(), [](char ch) { return ch == '\r' || ch == '\n' || ch == ' ' || ch == '\t'; }),
+                        l.end());
+                if (!l.empty()) text += l + ",";
+            }
+            std::fclose(f);
+        } else {
+            log("[controls] CF_VIRTUAL_PAD: cannot read %s", s.c_str() + 1);
+        }
+        s = text;
+    }
     for (size_t pos = 0; pos <= s.size();) {
         const size_t comma = std::min(s.find(',', pos), s.size());
         item = s.substr(pos, comma - pos);
         pos = comma + 1;
-        if (const auto colon = item.find(':'); colon != std::string::npos)
-            steps.push_back({u32(std::strtoul(item.c_str(), nullptr, 10)), item.substr(colon + 1)});
+        const auto colon = item.find(':');
+        if (colon == std::string::npos) continue;
+        VirtualStep st;
+        st.frames = item[0] == 'f' || item[0] == 'F';
+        st.at = u32(std::strtoul(item.c_str() + (st.frames ? 1 : 0), nullptr, 10));
+        st.action = item.substr(colon + 1);
+        if (const auto star = st.action.find('*'); star != std::string::npos) {
+            // "<id>[=<v>]*<n>": on now, off n later (triggers rest at -1, sticks and buttons at 0).
+            const u32 hold = u32(std::strtoul(st.action.c_str() + star + 1, nullptr, 10));
+            st.action.resize(star);
+            const auto eq = st.action.find('=');
+            const std::string id = st.action.substr(0, eq);
+            if (eq == std::string::npos) st.action += "=1";
+            VirtualStep off = st;
+            off.at = st.at + hold;
+            off.action = id + (id == "lefttrigger" || id == "righttrigger" ? "=-1" : "=0");
+            steps.push_back(st);
+            steps.push_back(off);
+            continue;
+        }
+        steps.push_back(st);
     }
     return steps;
 }();
@@ -1381,20 +1560,40 @@ bool SDLCALL virtualRumble(void*, Uint16 low, Uint16 high) {
 void runVirtualScript() {
     if (sVirtualScript.empty()) return;
     sReads++;
-    for (const auto& step : sVirtualScript) {
-        if (step.at != sReads) continue;
+    const u32 frame = game::guestFrames();
+    for (auto& step : sVirtualScript) {
+        if (step.frames ? (step.done || frame < step.at) : step.at != sReads) continue;
+        step.done = true;
         const std::string& a = step.action;
-        if (a == "attach" && !sVirtualId) {
+        if ((a == "attach" || a.rfind("attach=", 0) == 0) && !sVirtualId) {
+            // USB ids SDL knows the model (type, button names, default layout family) by.
+            static const struct {
+                const char* key;
+                u16 vid, pid;
+                const char* name;
+            } kModels[] = {{"xbox360", 0x045E, 0x028E, "Virtual test pad"},
+                           {"xboxone", 0x045E, 0x02EA, "Virtual Xbox One pad"},
+                           {"ps4", 0x054C, 0x09CC, "Virtual PS4 pad"},
+                           {"ps5", 0x054C, 0x0CE6, "Virtual PS5 pad"},
+                           {"switch", 0x057E, 0x2009, "Virtual Switch Pro pad"},
+                           {"gamecube", 0x057E, 0x0337, "Virtual GameCube pad"}};
+            const auto* model = &kModels[0];
+            for (const auto& m : kModels)
+                if (a.size() > 7 && a.substr(7) == m.key) model = &m;
+            // Test runs are off screen without the focus and set SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS=0
+            // with the other variables that hide the physical controllers (CLAUDE.md "Test runs"):
+            // SDL would drop this pad's events too. The physical ones stay hidden by their backends.
+            SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1", SDL_HINT_OVERRIDE);
             SDL_VirtualJoystickDesc desc;
             SDL_INIT_INTERFACE(&desc);
             desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
-            desc.vendor_id = 0x045E;
-            desc.product_id = 0x028E;  // Xbox 360 controller
+            desc.vendor_id = model->vid;
+            desc.product_id = model->pid;
             desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
             desc.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
             desc.button_mask = (1u << SDL_GAMEPAD_BUTTON_COUNT) - 1;
             desc.axis_mask = (1u << SDL_GAMEPAD_AXIS_COUNT) - 1;
-            desc.name = "Virtual test pad";
+            desc.name = model->name;
             desc.Rumble = &virtualRumble;
             sVirtualId = SDL_AttachVirtualJoystick(&desc);
             sVirtualJoy = sVirtualId ? SDL_OpenJoystick(sVirtualId) : nullptr;
@@ -1418,6 +1617,7 @@ void runVirtualScript() {
             for (int i = 0; i < SDL_GAMEPAD_AXIS_COUNT; i++)
                 if (id == kAxisIds[i])
                     SDL_SetJoystickVirtualAxis(sVirtualJoy, i, Sint16(std::clamp(v, -1.0f, 1.0f) * 32767.0f));
+            if (sPadLog) log("[controls] virtual pad %s at guest frame %u (read %u)", a.c_str(), frame, sReads);
         }
     }
 }

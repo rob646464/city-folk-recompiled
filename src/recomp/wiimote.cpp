@@ -263,7 +263,8 @@ std::vector<ScriptItem> parseScript(const std::string& script) {
                 {"A", kBtnA}, {"B", kBtnB}, {"1", kBtn1}, {"2", kBtn2}, {"X", kBtn1}, {"Y", kBtn2},
                 {"PLUS", kBtnPlus}, {"START", kBtnPlus}, {"MINUS", kBtnMinus}, {"HOME", kBtnHome},
                 {"UP", kBtnUp}, {"DOWN", kBtnDown}, {"LEFT", kBtnLeft}, {"RIGHT", kBtnRight},
-                {"C", kBtnC}, {"Z", kBtnZ}, {"SHAKE", kBtnShake}, {"NSHAKE", kBtnShakeNunchuk}, {"RECENTER", kBtnRecenter}};
+                {"C", kBtnC}, {"Z", kBtnZ}, {"SHAKE", kBtnShake}, {"NSHAKE", kBtnShakeNunchuk}, {"RECENTER", kBtnRecenter},
+                {"PTRTOGGLE", kBtnTogglePointer}};
             for (const auto& [name, bit] : kNames)
                 if (b == name) p.buttons |= bit;
             // TP=<target>: player teleport (cf_region.cpp, CF_TELEPORT syntax, '/' for ',');
@@ -344,6 +345,11 @@ struct PortState {
     bool snapped = false;       // the menu snap placed the pointer this sample
     double lastMove = 0;        // when the pointer last moved (or a pointer screen was up): timeout
     bool timedOut = false;
+    bool toggledOff = false;    // hidden by the "Toggle pointer" input (until toggled back or used)
+    bool snapHeld = false;      // the menu snap holds the pointer on an item (since the last free move)
+    float preSnapX = 0, preSnapY = 0;  // where the pointer was before the snap took it
+    bool preSnapOff = false;    // ... a scripted pointer that pointed away (@off)
+    bool toggleHeld = false;    // that input's last state (it acts on the press)
     State lastState;            // for the input test (menu)
 };
 std::array<PortState, kRemotes> sPort;
@@ -414,6 +420,7 @@ public:
         // Script (test runs): buttons and stick add to the bound inputs; a scripted pointer
         // position stays until the next one.
         bool pointerMoved = false;  // a free pointer device (or a scripted position) moved it
+        bool pointerUsed = false;   // ... deliberately: everything but the gyro (it never rests)
         if (!script().empty()) {
             const u32 clk = scriptClock();
             const ScriptItem* latest = nullptr;
@@ -436,7 +443,7 @@ public:
                 ps.scriptOff = latest->pointerOff;
                 ps.scriptX = latest->px;
                 ps.scriptY = latest->py;
-                pointerMoved = true;
+                pointerMoved = pointerUsed = true;
             }
         }
 
@@ -451,7 +458,7 @@ public:
                 if (m.seq != ps.mouseSeq) {
                     ps.mouseSeq = m.seq;
                     ps.last = PortState::MouseDev;
-                    pointerMoved = true;
+                    pointerMoved = pointerUsed = true;
                 }
                 if (ps.last == PortState::MouseDev) {
                     mouseToPointer(m, ps.px, ps.py);
@@ -460,8 +467,16 @@ public:
             }
             if (rc.pointer & kPtrStick) {
                 const float m = std::sqrt(ptrX * ptrX + ptrY * ptrY);
+                if (m > 0.02f && ps.scriptPointer) {
+                    // A bound pointer stick takes the pointer over from a scripted position (test
+                    // runs that drive a virtual pad after a scripted route), until the next one.
+                    ps.scriptPointer = false;
+                    ps.px = ps.scriptX;
+                    ps.py = ps.scriptY;
+                    ps.valid = !ps.scriptOff;
+                }
                 if (cfg.stickAbsolute) {
-                    if (m > 0.02f) pointerMoved = true;
+                    if (m > 0.02f) pointerMoved = pointerUsed = true;
                     // While the snap holds the pointer on an item, a centred stick does not take it back.
                     if (m > 0.02f || (ps.last == PortState::StickDev && !ps.snapped)) {
                         ps.last = PortState::StickDev;
@@ -470,7 +485,7 @@ public:
                         ps.valid = true;
                     }
                 } else if (m > 0.02f) {
-                    pointerMoved = true;
+                    pointerMoved = pointerUsed = true;
                     ps.last = PortState::StickDev;
                     // Speed grows with the square of the tilt: fine aim near the centre.
                     ps.px += float(ptrX * m * cfg.stickSpeed * dt);
@@ -518,6 +533,43 @@ public:
                 sx = no.stickX;
                 sy = no.stickY;
                 ps.snapped = no.setPointer;
+                // The D-pad / left stick picked a menu item, or Recenter went onto the toolbar.
+                constexpr u32 kNavButtons = kBtnUp | kBtnDown | kBtnLeft | kBtnRight | kBtnRecenter;
+                if (no.setPointer && ((ni.buttons & kNavButtons) || std::sqrt(ni.stickX * ni.stickX + ni.stickY * ni.stickY) > 0.55f))
+                    pointerUsed = true;
+                // A screen that closes while the snap still holds the pointer on one of its items
+                // (B, or A on a choice): the pointer would stay where the item slid away to, at the
+                // bottom of the screen on the field toolbar, and the next A would click a toolbar
+                // slot instead of using the tool. It goes back where it was before the snap took
+                // it and leaves the screen, like a toggled-off pointer, until it is used again.
+                // (A scripted pointer goes back to what the script last said, on or off.)
+                if (pointerMoved) ps.snapHeld = false;
+                if (no.setPointer && no.active) {
+                    if (!ps.snapHeld) {
+                        ps.snapHeld = true;
+                        ps.preSnapX = ni.px;
+                        ps.preSnapY = ni.py;
+                        ps.preSnapOff = ps.scriptPointer && ps.scriptOff;
+                    }
+                } else if (no.setPointer) {  // the toolbar left with B / Recenter: put back, stays
+                    ps.snapHeld = false;
+                } else if (ps.snapHeld && !no.active) {
+                    ps.snapHeld = false;
+                    static const bool sKeep = std::getenv("CF_SNAP_KEEP_POINTER") != nullptr;  // A/B: as before
+                    if (!sKeep) {
+                        ps.px = ps.preSnapX;
+                        ps.py = ps.preSnapY;
+                        if (ps.scriptPointer) {
+                            ps.scriptX = ps.preSnapX;
+                            ps.scriptY = ps.preSnapY;
+                            ps.scriptOff = ps.preSnapOff;
+                            if (sTimeoutLog) log("[wiimote] remote %d: scripted pointer back (menu closed)", chan + 1);
+                        } else {
+                            if (!ps.toggledOff && sTimeoutLog) log("[wiimote] remote %d: pointer hidden (menu closed)", chan + 1);
+                            ps.toggledOff = true;
+                        }
+                    }
+                }
                 if (no.setPointer) {
                     ps.px = no.px;
                     ps.py = no.py;
@@ -533,7 +585,7 @@ public:
             if (buttons & kBtnRecenter) {
                 ps.px = ps.py = 0;
                 ps.valid = true;
-                pointerMoved = true;
+                pointerMoved = pointerUsed = true;
             }
             if (ps.last != PortState::MouseDev) {
                 // The whole window while the HUD is anchored to its edges (ultrawide), else the
@@ -559,12 +611,52 @@ public:
             // a pointer screen is up (it needs the pointer); moving it brings it back where it was.
             const float timeout = pointerTimeout(cfg);
             if (pointerMoved || ps.snapped || menuOpen || menunav::menuUp()) ps.lastMove = now;
-            const bool out = timeout > 0 && st.pointerValid && now - ps.lastMove > timeout;
+            bool out = timeout > 0 && st.pointerValid && !ps.toggledOff && now - ps.lastMove > timeout;
+
+            // "Toggle pointer" (port action, F1 > Controls > Bindings): pressed while the pointer
+            // is on the screen it hides it at once, also on a pointer screen and with the timeout
+            // off; pressed while it is hidden (by this, by the timeout, or because nothing points
+            // at the screen) it brings it back where it was. A hidden pointer also comes back
+            // when it is used: the right stick or the mouse moves it, Recenter, or the D-pad /
+            // left stick picks a menu item. The gyro alone does not bring it back.
+            const bool toggle = (buttons & kBtnTogglePointer) != 0;
+            const bool togglePressed = toggle && !ps.toggleHeld;
+            ps.toggleHeld = toggle;
+            const bool wasOff = ps.toggledOff;
+            if (pointerUsed) ps.toggledOff = false;
+            if (togglePressed) {
+                if (st.pointerValid && !out && !ps.toggledOff) {
+                    ps.toggledOff = true;
+                } else if (rc.pointer || ps.scriptPointer) {
+                    ps.toggledOff = false;
+                    ps.lastMove = now;
+                    out = false;
+                    if (!st.pointerValid) {  // the mouse is outside the window, a script pointed away
+                        if (ps.scriptPointer) {
+                            ps.scriptOff = false;
+                        } else {
+                            const float rx = ws::pointerRangeX();
+                            ps.px = std::clamp(ps.px, -rx, rx);
+                            ps.py = std::clamp(ps.py, -1.0f, 1.0f);
+                            ps.last = PortState::StickDev;
+                            ps.valid = true;
+                            st.px = ps.px;
+                            st.py = ps.py;
+                        }
+                        st.pointerValid = true;
+                    }
+                }
+            }
+            if (ps.toggledOff != wasOff && sTimeoutLog)
+                log("[wiimote] remote %d: pointer %s", chan + 1,
+                    ps.toggledOff ? "hidden (toggle)" : togglePressed ? "shown (toggle)" : "shown (used)");
+            else if (togglePressed && !ps.toggledOff && sTimeoutLog)
+                log("[wiimote] remote %d: pointer brought back (toggle)", chan + 1);
             if (out != ps.timedOut) {
                 ps.timedOut = out;
                 if (sTimeoutLog) log("[wiimote] remote %d: pointer %s", chan + 1, out ? "timed out (hidden)" : "back");
             }
-            if (out) st.pointerValid = false;
+            if (out || ps.toggledOff) st.pointerValid = false;
         }
 
         // Motion: at rest, or swung back and forth (about 7 Hz, +-2.5 g) while a shake input is held.
@@ -838,7 +930,8 @@ bool drawPointerTab() {
     ImGui::SeparatorText("Snap pointer to menu items");
     ImGui::TextWrapped("Play menus with a normal controller: while a pointer screen is up (pockets, map, shops, "
                        "dialogue choices, keyboards, ...), the D-pad or the left stick moves the pointer from item to "
-                       "item and A clicks. The right stick still moves the pointer freely.");
+                       "item and A clicks. The right stick still moves the pointer freely. When the screen closes, "
+                       "a pointer that was on one of its items leaves the screen until it is used again.");
     for (int i = 0; i < kRemotes; i++) {
         static const char* kSnap[] = {"Auto", "On", "Off"};
         auto& rc = sCfg.remotes[i];
@@ -873,6 +966,9 @@ bool drawPointerTab() {
                               "controls without the pointer. Moving the pointer brings it back where it was.\n"
                               "Pointer screens (pockets, map, shops, dialogue choices) keep it. 0 = never (the\n"
                               "pointer stays until the mouse leaves the window). Real Wii Remotes are not affected.");
+        ImGui::TextDisabled("The \"Toggle pointer\" binding (a controller's left shoulder button by default) hides the\n"
+                            "pointer at once and brings it back where it was. Using the pointer (right stick, mouse,\n"
+                            "a menu item picked with the D-pad) brings it back too.");
     }
     ImGui::SeparatorText("Right stick");
     changed |= recomp::menu::SliderFloat("Pointer speed", &sCfg.stickSpeed, 0.2f, 5.0f, "%.1f", ImGuiSliderFlags_AlwaysClamp);

@@ -76,6 +76,7 @@ struct ChanState {
     u32 prevButtons = 0;
     bool stickHeld = false;
     bool wasActive = false;
+    bool swallowB = false;      // the B that left the toolbar is kept from the game until released
 };
 std::array<ChanState, wiimote::kRemotes> sChan;
 
@@ -622,6 +623,12 @@ Output apply(int chan, const Input& in) {
     ChanState& st = sChan[chan];
     const u32 pressed = in.buttons & ~st.prevButtons;
     st.prevButtons = in.buttons;
+    // The B press that left the toolbar: held over several samples, only its first one was taken,
+    // so the game still saw B go down (a cancel / pick up in the field).
+    if (st.swallowB) {
+        if (in.buttons & wiimote::kBtnB) out.buttons &= ~wiimote::kBtnB;
+        else st.swallowB = false;
+    }
     auto reset = [&] {
         st.selected = 0;
         st.toolbar = false;
@@ -674,6 +681,7 @@ Output apply(int chan, const Input& in) {
         st.toolbar = false;
         st.selected = 0;
         out.buttons &= ~wiimote::kBtnB;
+        st.swallowB = true;
         if (st.haveSaved) {
             out.setPointer = true;
             out.px = st.savedX;

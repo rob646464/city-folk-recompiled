@@ -40,6 +40,7 @@ enum : u32 {
     kBtnShake = 0x10000,         // shake the Wii Remote
     kBtnShakeNunchuk = 0x20000,  // shake the Nunchuk
     kBtnRecenter = 0x40000,      // pointer back to the centre (stick / gyro pointers)
+    kBtnTogglePointer = 0x80000, // hide the pointer (as if the Remote pointed away) / bring it back
 };
 
 // WPAD device types (WPADProbe, KPADStatus.dev_type).

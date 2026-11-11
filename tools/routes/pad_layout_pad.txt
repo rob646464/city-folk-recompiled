@@ -1,0 +1,67 @@
+# Virtual pad script for pad_layout.txt (CF_VIRTUAL_PAD=@<this file>; f<n> = guest frame).
+# Button ids are SDL's positions: east = right face button (Xbox B, PlayStation Circle, Switch A),
+# south = bottom (Xbox A, Cross, Switch B), north = top (Y, Triangle, X), west = left (X, Square, Y).
+1:attach
+
+# A nudge of the right stick: the pad's pointer takes over from the route's scripted "@off" (it shows
+# in the middle and times out 3 s later, CF_POINTER_TIMEOUT=3, as in normal play).
+f5700:rightx=0.6*5
+
+# Left stick = walk; with a trigger held = run (right trigger = B, left trigger = Nunchuk Z).
+f6000:leftx=1*90
+f6150:leftx=-1*90, f6150:righttrigger*90
+f6300:leftx=1*90, f6300:lefttrigger*90
+
+# Back / Select = 1: take a photo. Start = 2: the photos open, again: closed.
+f6460:back*6
+f6600:start*6
+f6800:start*6
+
+# North = +: the town map; south = B: closed.
+f6980:north*6
+f7140:south*6
+
+# West = -: pockets. North = + / west = -: next / last tab (designs, encyclopedia, and back).
+f7300:west*6
+f7450:north*6
+f7600:north*6
+f7750:west*6
+f7900:west*6
+
+# Pockets with the D-pad (snap): onto the fishing rod, east = A: Drop / Carry / Quit, up to Drop, A.
+f8050:dpright*6
+f8120:dpleft*6
+f8190:dpleft*6
+f8260:dpleft*6
+f8350:east*6
+f8480:dpup*6
+f8550:dpup*6
+f8650:east*6
+# South = B: pick the rod up again (twice: the first one closes the pockets if they are still up).
+f8850:south*6
+f9050:south*6
+
+# D-pad right / left = change tool, east = A and right shoulder = A: use it, D-pad down = put away.
+f9250:dpright*6
+f9400:east*6
+f9550:rightshoulder*6
+f9700:dpright*6
+f9850:dpleft*6
+f10000:dpdown*6
+
+# D-pad up = change view (look at the sky); walking on.
+f10150:dpup*6
+f10400:lefty=1*40
+
+# Right stick = pointer; left shoulder = Toggle pointer (hidden, back); right stick press = Recenter
+# (onto the toolbar), south = B leaves it.
+f10600:rightx=1*30
+f10700:righty=-1*20
+f10800:leftshoulder*6
+f10900:leftshoulder*6
+f11000:rightstick*6
+f11100:south*6
+
+# Guide = HOME Menu, again: closed.
+f11250:guide*6
+f11450:guide*6

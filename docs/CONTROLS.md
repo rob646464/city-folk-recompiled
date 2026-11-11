@@ -149,7 +149,9 @@ ultrawide" below.
   acc); Real Wii Remotes (source per port: Emulated / Real Wii Remote, which Remote, status with
   battery and extension, the Remotes found, pairing help).
 - **Bindings**: Wii Remote (A, B, 1, 2, +, -, HOME), D-pad, Nunchuk (C, Z, stick), pointer stick/keys,
-  motion (shake Remote, shake Nunchuk, recenter pointer), two slots each, per device profile.
+  motion and pointer (shake Remote, shake Nunchuk, recenter pointer, toggle pointer), two slots each,
+  per device profile. Hovering an input's name shows what it does in the game; hovering "Reset
+  bindings to defaults" lists the default layout with the selected device's own button names.
 - **Pointer & motion**: hide the OS cursor over the game while the mouse points, stick pointer speed
   and absolute mode, gyro sensitivity and inversion, sensor bar distance; real Wii Remotes: pointer
   range, height, IR inversion, Remote speaker on/off.
@@ -159,22 +161,123 @@ ultrawide" below.
 Defaults: Wii Remote 1 = Remote + Nunchuk from keyboard + mouse and the first gamepad (pointer: mouse
 + right stick); Remotes 2-4 connect when a gamepad is assigned (pointer: right stick).
 
-| Input | Keyboard + mouse | Gamepad |
+| Input | Keyboard + mouse | Gamepad (next section) |
 |---|---|---|
-| A | left click / Space | bottom face button (Nintendo: A) |
-| B | right click / Left Shift | right face button (B), right trigger |
-| 1 / 2 | 1 / 2 | left / top face button |
-| + / - / HOME | Enter / Backspace / H | Start / Back / Guide |
+| A | left click / Space | right face button, right shoulder |
+| B | right click / Left Shift | bottom face button, right trigger |
+| 1 / 2 | 1 / 2 | Back (Select) / Start |
+| + / - / HOME | Enter / Backspace / H | top / left face button / Guide |
 | D-pad | arrow keys | D-pad |
 | Nunchuk stick | WASD | left stick |
-| C / Z | C, Q / Z, E | left shoulder / left trigger |
+| C / Z | C, Q / Z, E | - / left trigger |
 | Pointer | mouse | right stick (gyro if chosen) |
-| Shake Remote / Nunchuk | F, middle click / G | right shoulder / left stick press |
+| Shake Remote / Nunchuk | F, middle click / G | - |
 | Recenter pointer | R | right stick press |
+| Toggle pointer | - | left shoulder |
+
+## Default gamepad layout
+
+Every gamepad model starts with one layout, the Wii Classic Controller's as the user's reference
+picture labels it (the City Folk Deluxe mod's Classic layout; the retail game has no Classic
+Controller support, so each control is bound to the Wii Remote / Nunchuk input that does that
+action in the game). Face buttons go **by position**: the Classic Controller's a is the right
+button, b the bottom one, x the top one, y the left one. That is the printed layout of Nintendo
+pads; on Xbox and PlayStation pads confirm is therefore B / Circle and cancel A / Cross.
+`padDefaults` in controls.cpp; F1 > Controls > Bindings shows it per controller.
+
+| Action in the game | Wii input | Pad control | Xbox | PlayStation | Switch Pro |
+|---|---|---|---|---|---|
+| Walk | Nunchuk stick | left stick | left stick | left stick | left stick |
+| Move cursor (pointer) | pointer | right stick | right stick | right stick | right stick |
+| Confirm / action (talk, use tool, doors) | A | right face button, right shoulder | B, RB | Circle, R1 | A, R |
+| Cancel / run / pick up items | B | bottom face button | A | Cross | B |
+| Run (hold while walking) | Nunchuk Z, B | left trigger, right trigger | LT, RT | L2, R2 | ZL, ZR |
+| Map / next tab | + | top face button | Y | Triangle | X |
+| Inventory (pockets) / last tab | - | left face button | X | Square | Y |
+| Take photo | 1 | Back / Select | View (Back) | Share / Create | - (minus) |
+| Open / close photos | 2 | Start | Menu (Start) | Options | + (plus) |
+| Change view (look at the sky) | D-pad Up | D-pad Up | D-pad Up | D-pad Up | D-pad Up |
+| Change tool | D-pad Left / Right | D-pad Left / Right | same | same | same |
+| Put tool away | D-pad Down | D-pad Down | same | same | same |
+| HOME Menu | HOME | Guide | Xbox button | PS button | Home |
+| Toggle cursor (hide / show the pointer) | port action | left shoulder | LB | L1 | L |
+| Recenter pointer | port action | right stick press | RS | R3 | RS |
+
+Not bound by default: Nunchuk C (the game treats it like A), Shake Wii Remote / Nunchuk, the left
+stick press. The game has no button that only runs: Nunchuk Z and B both cancel, pick up and run,
+so each trigger is one of them (left = Z, right = B; with the extension set to None the left one
+does nothing, the right one still runs).
+
+**GameCube controller** (no Back, Guide, left shoulder or stick presses; its A is the big middle
+button, so the face buttons go by what they are): A = A, B = B, Y (top) = + (map), X = -
+(pockets), Start = 1 (take photo; the photos open from the toolbar), Z = Toggle pointer, L / R
+(analog) = run (Nunchuk Z / B), D-pad, Control Stick = walk, C-Stick = pointer.
+
+**Menus**: with "Snap pointer to menu items" (Auto by default, section below) the D-pad and the
+left stick move the pointer between a menu's items while a pointer screen is up (the game does not
+use them there); in the field they are the game's own tool / view buttons and walking. That is
+unchanged by this layout.
+
+**Who gets it** (settings format): a gamepad profile is written to settings.ini only once
+something in it differs from the defaults, so every install that never changed a pad binding or
+its stick / trigger / rumble settings gets the new layout at once, and so does every new install
+and "Restore defaults". A saved profile from 1.x (a `[controls.pad.<guid>]` section without
+`layout=2`) is compared with the old default layout of its controller type at the first start:
+bindings that are still exactly the old defaults (e.g. only a dead zone or the rumble strength was
+changed) become the new layout, the tuning is kept; a profile with any binding changed keeps all
+its bindings as they are (its Toggle pointer stays unbound until the user binds it). Log line
+`[controls] <name> (<guid>): bindings were the old defaults, now the new default layout` /
+`customized, kept`. "Reset bindings to defaults" in F1 > Controls > Bindings gives any profile the
+new layout. Keyboard and mouse defaults are unchanged.
+
+**Verified in game** (2026-11-10, USA, fixture `user-town-clean`; a virtual Xbox 360 pad through
+the default profile: `tools/routes/pad_layout.txt` + `CF_VIRTUAL_PAD=@tools\routes\pad_layout_pad.txt`,
+the `[wpad]` state lines and `CF_SHOT` frames every 20):
+
+| Pad control | Remote state | Seen in the game |
+|---|---|---|
+| left stick | stick 1.00 | the player walks |
+| left stick + RT / + LT | B 0400 / Z 2000 | runs (dust puffs), both triggers |
+| Back | 1 (0200) | camera shutter; the photo is in the Photos window afterwards |
+| Start | 2 (0100) | Photos window (the photo, "SD Card"); Start again closes it |
+| Y (top) | + (0010) | town map ("Frunch Town Map"); B closes it (+ again too: the map is the last tab) |
+| X (left) | - (1000) | pockets |
+| Y / X on a menu | + / - | pockets -> designs -> encyclopedia -> photos with +, back with - |
+| D-pad on a menu | (taken by the snap) | pointer from slot to slot; onto the fishing rod |
+| B (right) | A (0800) | on the rod: "Drop / Carry / Quit"; D-pad up to Drop, A: dropped |
+| A (bottom) | B (0400) | pockets closed; then, at the dropped rod ("fishing rod" label): picked up |
+| D-pad Right / Left | 0002 / 0001 | net out, fishing rod, net |
+| B (right), RB | A (0800) | the net swings, both buttons |
+| D-pad Down | 0004 | tool put away |
+| D-pad Up | 0008 | the camera tilts up to the sky (it comes back when the player walks) |
+| right stick | pointer on, moving | the hand appears and moves, the toolbar comes up |
+| LB | (port action) | hand and toolbar gone; LB again: back at the same place |
+| RS (press) | (port action) | pointer onto the toolbar; A (bottom) = B leaves it |
+| Xbox button | HOME (8000) | HOME Menu; again: closed |
+
+Settings (boot to the title, pad presses, one option changed in the menu so settings.ini is
+saved): fresh install = new layout, no pad section written; a 1.x section with the old defaults
+and a changed dead zone / rumble strength = `bindings were the old defaults, now the new default
+layout`, right face button gives A, saved with `layout=2` and the tuning kept; a 1.x section with
+one binding changed = `customized, kept`, bottom face button still A, LB still C, saved with
+`layout=2` and `toggle_pointer=` empty; a restart with the migrated file = unchanged, no message.
+Button names per model: F1 > Controls > Bindings with virtual pads carrying PS5, Switch Pro and
+GameCube ids (Circle / Cross / Triangle / Square / Share / Options / R1 / R2; A / B / X / Y / - /
++ / R / ZR; A / B / Y / X / START / R (analog)). The F1 menu ID sweep with a pad attached: 0
+conflicts. Not tried: real controllers (their names and types come from SDL's tables), the
+GameCube layout in play (its bindings were only looked at in the menu), single Joy-Cons; PAL /
+Japan / Korea (no game code is involved).
+
+The old layout (1.x), for reference: A bottom face button, B right face button + right trigger,
+1 / 2 left / top (by printed label on Nintendo pads), + / - Start / Back, C left shoulder, Z left
+trigger, shake right shoulder / left stick press.
 
 Ports also has **"Type with the PC keyboard (disables keyboard game controls)"** (next section).
 
-Settings: `[controls]`, `[controls.keyboard]`, `[controls.pad.<guid>]` (bindings) and `[wiimote]`
+Settings: `[controls]`, `[controls.keyboard]`, `[controls.pad.<guid>]` (bindings: one key per
+input, `<key>.2` for the alternate slot, e.g. `a=button:east`, `a.2=button:rightshoulder`,
+`toggle_pointer=button:leftshoulder`; `layout=2` = made from the current default layout, a section
+without it is a 1.x profile, "Default gamepad layout" above) and `[wiimote]`
 (`remote<N>_connect=auto|on|off`, `remote<N>_extension=nunchuk|none`,
 `remote<N>_pointer=mouse+stick|...|none`, `remote<N>_snap=auto|on|off`, `pointer_stick_speed`,
 `pointer_stick_absolute`, `gyro_sensitivity`, `gyro_invert_x/y`, `hide_cursor`, `pointer_timeout`,
@@ -246,6 +349,41 @@ Test runs with `--input` keep the pointer (timeout off, so existing routes are u
 Checked in the user-town fixture: Rover's choice boxes keep the pointer, in town the hand and the
 toolbar go 3 s after the last scripted move and come back with the next one.
 
+## Toggle pointer
+
+Port action "Toggle pointer" (F1 > Controls > Bindings > Motion and pointer; left shoulder button
+in the default gamepad layout, GameCube Z; not bound on the keyboard; `kBtnTogglePointer`, never
+sent to the game). It acts on the press, in `EmulatedSource::read` next to the timeout:
+
+- pressed while the pointer is on the screen: the pointer goes off the screen at once, as when the
+  Remote is pointed away (the hand and the pointer toolbar go, the game uses its pointer-less
+  controls). Unlike the timeout this also works on a pointer screen and with the timeout set to
+  Never;
+- pressed while the pointer is hidden (by the toggle, by the timeout, or because nothing points at
+  the screen, e.g. the mouse is outside the window): it comes back where it was (the centre if it
+  was never placed) and the timeout starts again;
+- a pointer hidden by the toggle also comes back when it is used: the right stick or the mouse
+  moves it, Recenter, or the D-pad / left stick picks an item on a menu (snap). The gyro alone
+  does not bring it back (it never rests; that is what the toggle is for with a gyro pointer).
+
+**A menu closed with the pointer snapped to it** (same hidden state, branch default-binds): when a
+pointer screen goes away while the snap still holds the pointer on one of its items (B closes the
+pockets, A takes a dialogue choice), the pointer used to stay where the item slid off to, at the
+bottom of the screen on the field toolbar: the hand and the toolbar stayed up and the next A
+clicked a toolbar slot (the Friends list opened instead of the net swinging; seen in the first run
+of the layout test). Now the pointer goes back where it was before the snap took it and leaves the
+screen until it is used or toggled, so after a menu played with the D-pad the field controls are
+the pointer-less ones at once. A pointer moved freely on the menu (right stick, mouse) stays; the
+toolbar left with B / Recenter puts the pointer back visibly, as before (and that B no longer
+reaches the game while it is held: only its first sample was taken). In a scripted run the pointer
+goes back to what the script last said instead (`@x/y` visible there again, `@off` away), so a
+route's later clicks are where the route put the pointer. A/B: `CF_SNAP_KEEP_POINTER=1` (old
+behaviour). Log lines `pointer hidden (menu closed)` / `scripted pointer back (menu closed)`.
+
+Real Wii Remotes are not affected. Log lines with `CF_WPAD_LOG=1` or `CF_POINTER_TIMEOUT`:
+`[wiimote] remote N: pointer hidden (toggle)` / `shown (toggle)` / `shown (used)` / `brought back
+(toggle)` (pressed after a timeout). Script token `PTRTOGGLE`.
+
 ## Snap pointer to menu items
 
 Every City Folk menu is pointer-only (FEATURE_RESEARCH.md section 1). With "Snap pointer to menu
@@ -295,7 +433,7 @@ player walks. Alone they do not take the D-pad / stick (tools, view, walking sta
 D-pad left / right moves along it, A opens (pockets, map, ...), B or Recenter leaves it (the pointer
 goes back where it was; that B does not reach the game), moving the pointer freely leaves it too.
 The game's own shortcuts need nothing new: - opens the pockets, + the town map (both tried in the
-field, Nunchuk style; gamepad Back / Start), B closes them.
+field, Nunchuk style; the left / top face buttons in the default gamepad layout), B closes them.
 
 **Screens drawn but not hit-tested** (1b): the pockets record their slot panes' centres once when
 they open (d_menu_itemNP calls the same pane walk with a REL test function at setup) and test
@@ -465,7 +603,8 @@ run).
 
 - `--input` drives the Remotes: items `<time>:<tokens>[*<frames>]`, `P2:`..`P4:` for other Remotes.
   Tokens: `A B 1 2 PLUS MINUS HOME UP DOWN LEFT RIGHT C Z SHAKE NSHAKE STICKUP STICKDOWN STICKLEFT
-  STICKRIGHT RECENTER` (`START`/`X`/`Y` = `PLUS`/`1`/`2`), `STICK=x/y` = Nunchuk stick at any position
+  STICKRIGHT RECENTER PTRTOGGLE` (`START`/`X`/`Y` = `PLUS`/`1`/`2`: Wii names, not the gamepad
+  layout's), `STICK=x/y` = Nunchuk stick at any position
   (-1..1, up = +y), `@x/y` = pointer at KPAD position (stays until the next one), `@off` = pointing
   away. `TP=<target>` (route action, fires once when the item starts, so it can follow an
   `after link` anchor) moves the player like `CF_TELEPORT` (src/game/cf_region.cpp) with `/` in
@@ -514,6 +653,20 @@ run).
   (the game's clock and the Wii Remote report timing follow guest frames) make it repeatable; run.ps1 sets all three
   (12345678, 2026-10-27 10:00). Diagnostics: `CF_RNG_LOG=1` (every setSeed), `CF_RNG_DRAWS=a,b`
   (every main-generator draw in frames a..b), `CF_TIME_LOG=1` (who reads the clock).
+- **Virtual gamepad** (`CF_VIRTUAL_PAD`, controls.cpp): an SDL virtual pad whose buttons and axes
+  go through device assignment and the binding profiles like a real controller's (the `--input`
+  tokens above are Wii buttons and bypass the bindings). `CF_VIRTUAL_PAD="<time>:<action>,..."` or
+  `@<file>` (one item per line or comma-separated, `#` comments). `<time>` = a count of pad reads
+  (`1:attach`), or `f<n>` = guest frame n (the clock of `CF_SHOT` and of `--input` with
+  `CF_INPUT_CLOCK=frames`). Actions: `attach` (Xbox 360 ids; `attach=xboxone|ps4|ps5|switch|gamecube`
+  for another model's default layout and button names), `detach`, `<button>=0|1` (SDL positions:
+  `south east west north back guide start leftstick rightstick leftshoulder rightshoulder dpup
+  dpdown dpleft dpright`), `<axis>=<-1..1>` (`leftx lefty rightx righty lefttrigger righttrigger`;
+  raw values: +y is down, triggers rest at -1), `<button>*<n>` / `<axis>[=<v>]*<n>` = pressed /
+  pushed for n time units, `motor=1|0`. `CF_PAD_LOG=1` logs each step with its guest frame. A bound
+  pointer stick takes the pointer over from a scripted `@x/y` / `@off` until the next scripted
+  position, so a pad script can follow a scripted route: `tools/routes/pad_layout.txt` +
+  `pad_layout_pad.txt` play the whole default gamepad layout in the saved town.
 - `CF_WPAD_LOG=1`: Remote state changes, callbacks, motor/DPD/speaker commands (motor lines carry
   the guest frame).
 - `CF_AUTO_A_MOTOR=<frames>[,<hold>]` (scripted fishing, docs/TEST_COVERAGE.md): once the game has
