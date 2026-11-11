@@ -1,0 +1,15 @@
+# Typing toggled at run time (starts off): W walks (bound), typing on -> W types, the mouse still
+# presses A, typing off -> S walks again. CF_SETTINGS_AT turns the option on at 4700, off at 5500.
+1300:A
++80:A ~12
+2400:@0.27/0.14
++40:A
+2700:@0.44/0.33
++40:A
++60:A ~25
++30:@0/0
+4500:KEYS={HOLD:W:60}
+4800:KEYS={HOLD:W:60}
+5000:KEYS=i_hi{ENTER}
+5250:KEYS={MOUSE1}
+5600:KEYS={HOLD:S:60}

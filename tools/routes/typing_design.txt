@@ -1,0 +1,22 @@
+# Design name with the PC keyboard (typing on): HUD toolbar Designs -> first design -> Edit
+# Design -> Done -> "What's this design called?": held Backspace, then a name (not confirmed).
+# Env: CF_FIXTURE=user-town-clean;CF_FF=1-4400, settings [keyboard] type_with_pc_keyboard=true,
+# [wiimote] remote1_snap=off.
+include continue_any.txt
+5240:A
++60:A ~6
+after link d_bgo_drawNP 2
++1400:@-0.575/0.806
++30:A
++400:@-0.44/-0.06
++10:@-0.43/-0.05
++30:A
++150:@-0.07/-0.21
++10:@-0.06/-0.20
++10:@-0.07/-0.21
++20:A
++200:@0.65/0.77
++10:@0.66/0.78
++20:A
++300:KEYS={HOLD:BACK:90}
++150:KEYS=Rob's_Tee!

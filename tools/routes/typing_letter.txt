@@ -1,0 +1,21 @@
+# Letter writing with the PC keyboard (typing on): tools/routes/gameplay_letter_villager.txt up to
+# the letter keyboard, then text typed (Enter = new line), held Backspace (key repeat), Caps Lock.
+# Env: CF_FIXTURE=user-town-clean;CF_FF=1-4400;CF_GIVE_ITEM=5600:9643, settings [keyboard]
+# type_with_pc_keyboard=true, [wiimote] remote1_snap=off
+include continue_any.txt
+5240:A
++60:A ~6
+after link d_bgo_drawNP 2
++1400:@-0.82/0.82
++30:A
++200:@0.56/-0.26
++40:A
++100:@0.58/-0.40
++40:A
++300:@0.0/-0.08
++40:A
++150:@0.66/0.78
++40:A
++400:KEYS=Hi_Bluebear!{ENTER}How_are_you?xxxxxxxx
++500:KEYS={HOLD:BACK:100}
++300:KEYS={CAPS}ok{CAPS}_ok_:)

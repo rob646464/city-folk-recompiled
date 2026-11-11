@@ -32,6 +32,7 @@
 
 #include "recomp/hle.h"
 #include "recomp/menu.h"
+#include "recomp/pc_keyboard.h"
 #include "recomp/runtime.h"
 #include "recomp/version.h"
 #include "recomp/wiimote.h"
@@ -759,6 +760,9 @@ void actorAids(u32 frame) {
                 log("[input] f%u poke %08X = %02X (was %02X)", frame, a, b, rd8(a));
                 wr8(a, u8(b));
             }
+        } else if (act.rfind("KEYS=", 0) == 0) {
+            std::replace(act.begin(), act.end(), '_', ' ');
+            pckbd::scriptType(act.substr(5));  // real SDL key events (pc_keyboard.cpp)
         } else if (act.rfind("WARP=", 0) == 0) {
 #ifdef CF_DEV_TOOLS
             warp::requestFromScript(act.substr(5));  // cf_warp.cpp (docs/WARPS.md)

@@ -531,14 +531,19 @@ CF_ONLINE_RELAY for tests).
 
 ## 10b. USB keyboard chat (src/recomp/ios_devices.cpp)
 
-City Folk takes chat text from a USB keyboard (its KBD library over IOS `/dev/usb/kbd`). With
-F1 > Online "USB keyboard" (`[online] usb_keyboard`, off by default) the device opens and the PC
-keyboard is that keyboard: the module's async ioctl 0 gets 16-byte messages (public IOS
-interface): `{u32 type: 0 attached, 1 detached, 2 keys; u32 keyboard id; u8 modifiers (HID bits);
-u8 0; u8 keys[6] (HID usages)}`. The host thread polls the SDL keyboard state each frame
-(`ios::usbKeyboardPoll`, SDL scancodes are HID usages) and queues a message on every change.
-Off: as before (the open fails: no keyboard). Keys bound to the Wii Remote act on both, so play
-with a controller while typing.
+City Folk takes chat text (and letters, names, ...) from a USB keyboard (its KBD library over IOS
+`/dev/usb/kbd`). The option is F1 > Controls > Ports "Type with the PC keyboard (disables keyboard
+game controls)" (`[keyboard] type_with_pc_keyboard`, off by default; docs/CONTROLS.md "Typing with
+the PC keyboard"; until branch pc-keyboard it was F1 > Online "USB keyboard", `[online]
+usb_keyboard`, read once for migration). The device is always there (the game's KBD library opens it
+once at boot and never retries: 1.x's option, which made the open fail while off, did nothing when
+turned on later, the user's "Don't think it's working"); while the option is on a keyboard is
+attached. The module's async ioctl 0 gets 16-byte messages (public IOS interface): `{u32 type: 0
+attached, 1 detached, 2 keys; u32 keyboard id; u8 modifiers (HID bits); u8 0; u8 keys[6] (HID
+usages)}`, one per key press / release from the SDL key events (pc_keyboard.cpp ->
+`ios::usbKeyboardReport`; SDL scancodes are HID usages). The KBD library's writes to the device
+(LEDs) are answered -4 as before. Keyboard bindings are off while typing (mouse and controllers
+work).
 
 Fix (branch online-voice): the first key report crashed the game (`std::_Throw_Cpp_error` in
 `UsbKeyboard::ioctl`): answering the pending request runs the KBD library's callback at once on
@@ -549,9 +554,10 @@ Verified 2026-11-03 in a real visit (host `Frunch-rob64`, visitor `test-tester`,
 test_builds profiles): with the keyboard on, typing starts the game's chat input; Enter sends.
 The visitor's "Hello rob" shows as a bubble over the visitor in its game and as "tester Hello
 rob" in the host's chat strip (top right) while the host stood in the gatehouse. It also works offline (the bubble shows
-in one's own town). Test aid `CF_KBD_TYPE="<guest frame>:<text>|..."` (src/recomp/usb_kbd_script.cpp:
-letters, digits, space, `.,!?'-;`, `{ENTER}` `{BACK}` `{ESC}` `{UP}`...; each key 3 host frames
-down, 3 up; needs the USB keyboard setting on).
+in one's own town). Test aids `CF_KBD_TYPE="<guest frame>:<text>|..."` and the route token
+`KEYS=<text>` (src/recomp/pc_keyboard.cpp; since branch pc-keyboard real SDL key events through
+SDL's queue, so the bindings see them too; syntax in docs/CONTROLS.md "Typing with the PC
+keyboard"), `CF_KBD_LOG=1`.
 
 ## 10e. Wii Speak voice chat (src/recomp/online_voice.cpp)
 

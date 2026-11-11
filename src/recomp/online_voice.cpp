@@ -39,6 +39,7 @@
 #include "recomp/hle.h"
 #include "recomp/menu.h"
 #include "recomp/online.h"
+#include "recomp/pc_keyboard.h"
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
@@ -267,7 +268,10 @@ bool pttHeld() {
     }
     int n = 0;
     const bool* keys = SDL_GetKeyboardState(&n);
-    if (keys && o.micPttKey > 0 && o.micPttKey < n && keys[o.micPttKey]) return true;
+    // (a key that types text is the Wii keyboard's while typing with the PC keyboard: pc_keyboard.cpp)
+    if (keys && o.micPttKey > 0 && o.micPttKey < n && keys[o.micPttKey] &&
+        !(pckbd::typing() && pckbd::typesText(o.micPttKey)))
+        return true;
     if (o.micPttPadButton >= 0)
         if (SDL_Gamepad* g = controls::portGamepad(0))
             if (SDL_GetGamepadButton(g, SDL_GamepadButton(o.micPttPadButton))) return true;
@@ -566,6 +570,10 @@ bool drawSection() {
             }
         }
         ImGui::TextDisabled("Keyboard keys work while the game window has focus; the controller button is port 1's.");
+        if (o.micPttKey > 0 && pckbd::typing() && pckbd::typesText(o.micPttKey))
+            ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.3f, 1),
+                               "This key types text while \"Type with the PC keyboard\" is on (F1 > Controls): push-to-talk "
+                               "uses the controller button only. Pick a key such as Right Ctrl or F5.");
     }
     dirty |= menu::SliderFloat("Input gain##mic", &o.micGain, 0.0f, 4.0f, "%.2f");
     dirty |= menu::Checkbox("Echo suppression", &o.micEchoSuppression);

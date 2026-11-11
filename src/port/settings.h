@@ -302,7 +302,6 @@ struct OnlineSettings {
     std::string emailImapHost, emailSmtpHost;
     int emailImapPort = 993, emailSmtpPort = 465;
     std::string relay;          // optional self-hosted relay "host[:port]" (tools/relay/cf_relay.cpp)
-    bool usbKeyboard = false;   // the PC keyboard is the Wii USB keyboard (chat); applies when the game opens it
     // Wii Speak from the PC microphone (src/recomp/online_voice.cpp). Nothing is recorded or sent while off.
     bool micOn = false;
     std::string micDevice;      // SDL recording device name; empty = the system default
@@ -328,8 +327,16 @@ struct UnusedContentSettings {
     int nookItem = 0;
 };
 
+// F1 > Controls "Type with the PC keyboard" (src/recomp/pc_keyboard.cpp, docs/CONTROLS.md "Typing
+// with the PC keyboard"): the PC keyboard is the Wii's USB keyboard (chat, letters, names, ...)
+// and its keys no longer act as Wii Remote buttons. Live. Was [online] usb_keyboard (read once).
+struct KeyboardSettings {
+    bool typing = false;
+};
+
 struct Settings {
     InterfaceSettings ui;  // (not "interface": a macro in the Windows headers)
+    KeyboardSettings keyboard;
     MoveInSettings moveIn;
     UnusedContentSettings unusedContent;
     VideoSettings video;

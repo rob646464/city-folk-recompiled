@@ -325,6 +325,9 @@ int main(int argc, char* argv[]) {
     // stays on top and a fullscreen window is not minimized when another window takes the focus.
     const bool topmost = std::getenv("CF_TOPMOST") != nullptr;
     if (topmost) SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "0");
+    // CF_OFFSCREEN test runs never take the keyboard focus from the person using the PC (their
+    // typing went into the off-screen game: PC keyboard typing, key bindings).
+    if (std::getenv("CF_OFFSCREEN")) SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
     cpu::init();  // thread policy + Aurora thread hooks (issue #18), before Aurora starts its threads
     aurora_initialize(argc, argv, &config);
     mem::trackInit();  // CF_MEM_TRACK (test aid, docs/RENDERING.md "Memory use over time")

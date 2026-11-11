@@ -1,0 +1,13 @@
+# Chat in one's own town with the PC keyboard (typing on): continue the clean fixture, then type.
+1300:A
++80:A ~12
+2400:@0.27/0.14
++40:A
+2700:@0.44/0.33
++40:A
++60:A ~25
++30:@0/0
+4600:KEYS=Hello_rob!
+4900:KEYS={ENTER}
+5300:KEYS=wasd_h_ok{WAIT:30}{BACK}{BACK}
+5700:KEYS={ENTER}
