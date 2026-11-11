@@ -2,8 +2,11 @@
 
 City Folk's Nintendo Wi-Fi Connection features (town visits, chat, Wii Speak) and WiiConnect24
 (letters) restored **between players of this port**: no Nintendo, Wiimmfi or WiiLink servers, no
-console identities, no server of ours. User decision (2026-10-27): online does not need to work
-with real consoles or revival services. Branch online-1.
+console identities. User decision (2026-10-27): online does not need to work with real consoles or
+revival services. Branch online-1. Since branch online-lobby (2026-11-10, section 13) rooms are found
+in a **room list** served by a small free lobby (a Cloudflare Worker, or self-hosted), which also helps
+two routers connect and hands out a relay as the last resort; rooms themselves stay peer to peer, and
+the room / reply codes of sections 5-10 are the "Advanced" fallback.
 
 Confidence tags: **[disc]** read from our discs / disassembly; **[run]** seen in a test run;
 **[web]** from service pages and wikis (untrusted, unverified).
@@ -11,7 +14,8 @@ Confidence tags: **[disc]** read from our discs / disassembly; **[run]** seen in
 Contents: 1 what the game has; 2 the game's online flow (disassembly); 3 why DWC-level HLE;
 4 DWC on rooms (online_dwc.cpp); 5 rooms and transport (online_net.cpp); 6 security;
 7 reachability; 8 F1 > Online; 9 test aids and the two-instance test; 10 friends and mail
-(design); 11 what is left; 12 decisions for the user.
+(design); 11 what is left; 12 decisions for the user; 13 the lobby (room list, connecting two
+routers, the relay, deploy guide, privacy, tests).
 
 ## 1. What the game has
 
@@ -201,6 +205,9 @@ must allow the port: Windows asks the first time). Not done: NAT hole punching w
 (both players exchanging codes; section 11).
 
 ## 8. F1 > Online
+
+(As built on branch online-1. The page is now built around the room list: section 13.5; what is
+described here lives under "Advanced".)
 
 Status (room, game: logged in / hosting / visiting, your friend code), player name, then:
 - **Host a room**: room name, password (optional), UDP port, ask before join, map the port on
@@ -695,12 +702,9 @@ Left:
   roster: the roster menu `d_menu_friendNP` fn_139_10EC builds the entry with
   DWC_CreateFriendKeyToken, checks duplicates with `fn_8017BD64` and stores it at menu+0x5A0; the
   game's friend manager is `fn_8017BAC8`-`fn_8017C480` (names/towns of the 32 entries).
-- **NAT hole punching** without a server: both players exchange codes (each code carries the
-  STUN endpoint), then both send to each other at once; works for most home routers
-  (endpoint-independent mapping), not for symmetric NAT. Not done; port mapping, LAN and VPN
-  cover the rest.
-- **Optional lobby/relay server** (self-hostable, lowest priority): room codes without
-  reachable hosts, relaying for symmetric NAT. Not written.
+- **NAT hole punching** and the **lobby / relay**: done, section 13 (room list, coordinated hole
+  punching with port prediction, TURN relay). Open there: deploying the Worker (user), a default lobby
+  address in the build, `wss://` and real routers untested, Linux / macOS only compiled in parts.
 - Region: PAL/Japan/Korea use the same HLE by name (tables carried); the CF_ONLINE_TEST actions
   are USA-only.
 
@@ -714,4 +718,279 @@ Left:
   (section 10)?
 - Mail without a common online time: decided 2026-11-03: the player's own email account (optional) and
   delivery whenever both games run; no DHT, no letters on the relay (section 10).
-- Who hosts an optional public relay/lobby, if ever (none needed for rooms).
+- The public lobby (section 13.7): deploy `tools/lobby_worker` to the Cloudflare account, decide
+  whether to create the TURN key (check whether it asks for billing details), then give the URL so
+  it can go into `kDefaultLobbies` (until then: F1 > Online > Advanced > Lobby server).
+- Session friends (13.4): room members are written into the game's roster while the room lasts and
+  removed afterwards. Keep it that way, or leave visitors in the roster after a visit as the Wii did?
+
+## 13. The lobby: room list, connecting two routers, the relay (branch online-lobby)
+
+User report (2026-11-10): two players in different US states could not connect. Host log: `port mapping
+failed: no UPnP router answered ...; no NAT-PMP / PCP answer`, `STUN: public address <host address>:29910`,
+second attempt `:57747` (the router's mapping is not stable), `opening the way for <guest address>:59581
+(hole punching, 30 s)` repeated, never connected. Neither side had a forwarded port; the pasted-code hole
+punch (10d) had no timing coordination and cannot follow a router that picks another port. User
+requirement: no room / reply codes in the normal flow: "a list of all online rooms available (refreshes
+every 10 seconds or manually refresh) and then you can simply click and join the room. if the room is
+password protected then you enter the password." And: the lobby must be free to run and must not need
+the user's PC on.
+
+### 13.1 Parts
+
+| Part | Where | What it does |
+|---|---|---|
+| Lobby (primary) | `tools/lobby_worker/` (Cloudflare Worker, free plan, one SQLite-backed Durable Object) | room directory, signaling pipe joiner <-> host, hands out relay (TURN) credentials |
+| Lobby (self-hosted, tests) | `tools/lobby/cf_lobby.cpp` (one C++17 file, plain HTTP + WebSocket) | the same API; also the local stand-in |
+| Public STUN servers | Google / Cloudflare (as before, 10d) | each game's public UDP address; two servers tell a symmetric router |
+| Relay | Cloudflare Realtime TURN (optional), or any TURN server (coturn) with cf_lobby | carries the encrypted packets when no direct path opens |
+| Client | `src/recomp/online_lobby.cpp` (HTTP/WebSocket via `src/port/http.cpp`), `online_net.cpp` (handshake, candidates, paths), `online_turn.cpp` (TURN client) | |
+
+The room itself is unchanged (section 5): the host's game is the room, members talk to the host over UDP,
+sealed end to end. The lobby only lists rooms and passes the handshake along; game data never goes
+through it, and through the relay only as sealed packets.
+
+### 13.2 Lobby API v1 (both servers)
+
+JSON over HTTPS; `v=1` in every request (other values: HTTP 426 `version`). Errors are
+`{"error":"<code>","message":"..."}`: `bad_request` 400, `no_room` 404, `timeout` 504, `too_many` 429,
+`full` 503, `busy` 503, `no_turn` 404, `not_found` 404.
+- `GET /v1/info?v=1` -> `{"v":1,"name":"cf-lobby","rooms":N,"turn":bool}`.
+- `GET /v1/rooms?v=1[&game=RUUE01]` -> `{"v":1,"turn":bool,"rooms":[{"id","name","host","town","players",
+  "max","lock","friends","game","ver","tag","age","ping"?}]}` (at most 200, newest first). Friends-only
+  rooms are listed with blank `name`/`host`/`town`. `ping` (Worker only) is an estimate from the distance
+  between the caller's and the host's Cloudflare locations, rounded to 10 ms; the coordinates stay in the
+  Durable Object. The Worker caches the list 5 s (a new room can take 5 s to show, a closed one 5 s to go).
+- `WebSocket /v1/host?v=1` (one per hosted room). Host -> lobby `{"t":"reg","room":{name, host, town,
+  players, max, lock, friends, game, ver, tag}}` (again to update) -> `{"t":"reg_ok","id":"<16 hex>"}` or
+  `{"t":"error","code","message"}`; `{"t":"sig","peer":"<8 hex>","data":"<base64>"}` both ways (a joiner's
+  signal and its answer). Text `ping` -> `pong`. The room is listed while the socket is open; closing it
+  removes the room at once; a socket silent for 120 s is closed. The client pings every 40 s.
+- `POST /v1/signal {"v":1,"room","peer","data"}` (a joiner): forwarded to the host's socket; the response
+  `{"data"}` is the host's answer (waits up to 8 s, else 504).
+- `POST /v1/turn {"v":1,"room"}` -> `{"servers":["host:port"],"username","credential","ttl"}` or `no_turn`.
+- Limits: 4 rooms and 8 host sockets per client address, 500 rooms, 30 host messages per 10 s, 20 signals
+  per minute and 10 relay credentials per hour per address, 8 signals waiting per room, bodies <= 8 KB,
+  WebSocket messages <= 4096 bytes, names cleaned (control characters out, 32 / 24 / 16 characters), game
+  id `[A-Z0-9]{6}`. No amplification: every answer goes to the TCP/TLS connection that asked.
+The full text with every edge case is the header of `tools/lobby/cf_lobby.cpp` and the test
+`tools/tests/lobby_api_test.cpp` (ctest `lobby_api`, 200+ checks; `CF_LOBBY_TEST_URL=<url>` runs it
+against a running Worker).
+
+### 13.3 Joining a listed room (online_net.cpp)
+
+1. **Handshake through the lobby.** The joiner's HELLO / AUTH and the host's CHALLENGE / ACCEPT (WAIT,
+   REJECT) are the same datagrams as in section 5, carried as signal blobs (two HTTPS requests on the
+   joiner's side, the host's WebSocket on the other). Handshake v2 (all join kinds, wire protocol 2):
+   both sides add an ephemeral X25519 key; `k = HMAC(master, "cf-k2" | X25519 shared)`, proof and session
+   key = `HMAC(k, label | nonces | both ephemeral keys)`. So the lobby (or anyone on the path) cannot
+   derive the session key, and cannot test password guesses offline against what it relayed. The host
+   signs the transcript with its Ed25519 identity key (section 10); a joiner signs it for friends-only
+   rooms. The password is checked by the host exactly as before (PBKDF2 proof); a wrong one is refused in
+   ~0.3 s. Limit of this design: it is a challenge-response, not a full PAKE. A lobby that actively
+   replaces the ephemeral keys (man in the middle) could collect one proof per attempt and guess a weak
+   password offline from it, and could sit between two strangers in a public room. It cannot do either
+   against friends: a friends-only join requires the host's key to be the friend's key
+   (`expectHostKey`), and F1 shows "The host is your friend (key checked)" in any room.
+2. **Candidates.** AUTH carries the joiner's UDP addresses, ACCEPT the host's, sealed under the session
+   key (the lobby never sees UDP addresses or ports): LAN address, the public address two STUN servers
+   reported (the host asks again every 20 s, which also keeps its router's mapping alive), the UPnP
+   mapping if any, global IPv6, and for a router that showed the two STUN servers different ports
+   ("symmetric") six predicted next ports (last port + k x the difference).
+3. **Opening a path.** Both sides send sealed pings to every candidate of the other (every 250 ms for
+   10 s, then every second); a ping is answered on the path it came in on, and a path counts once a pong
+   came back over it (round trip proved, nothing forgeable: only sealed packets count). A valid packet
+   from an address nobody listed (the router picked another port) becomes a candidate too. Direct paths
+   win over relayed ones; a relayed link keeps probing for a direct one every 15 s; a path silent for 4 s
+   is dropped and the search starts again.
+4. **Relay.** After 3 s without a path (1 s when the joiner's own router is symmetric) the joiner asks the
+   lobby for TURN credentials, allocates a relay address on the TURN server from its game socket
+   (`online_turn.cpp`: RFC 5766/8656 over UDP, long-term credentials, Send / Data indications,
+   permissions for the host's addresses), and sends that address to the host through the lobby (T_CAND,
+   sealed with the link key). The host just sees one more candidate; the joiner reaches the host's
+   addresses through the relay. Only the joiner needs credentials. Without a relay (lobby without TURN
+   keys) the join fails after 12 s with: "Could not open a connection to the host: both routers refuse
+   direct connections and this lobby has no relay. A port forward on the host's router (UDP 29910) or a
+   VPN (Tailscale, ZeroTier) works".
+5. F1 shows "Connection to the host: direct / relayed", and per member for the host.
+
+Test switch `CF_ONLINE_FORCE_RELAY=1` (`net::setForceRelay`): only relay paths are used.
+
+### 13.4 Friends for the session (no friend requests needed)
+
+The game's gate lists only towns of roster friends who registered each other (sections 2, 4). The old
+flow needed an F1 friend request + accept in the room before the roster entries were written. Now every
+room member whose key is proved (IDENT / PROVE) and whose roster entry (INFO) arrived is written into the
+game's roster by rosterSync as soon as the game is offline with a town loaded ("<name> is in this room:
+you can visit each other at the town gate"), on both sides, so the DWC layer sees them as buddies. These
+session entries are remembered (`session <pid>` in friends.txt) and taken out of the roster again once
+that player is no longer in a room with us (also after a crash), unless the two became F1 friends
+meanwhile. F1 friends stay as before (letters, friends-only rooms). Blocked players are never added.
+
+### 13.5 F1 > Online
+
+- **Rooms**: the list (lock icon, room, host / town, players, version match, ping estimate, Join). It is
+  fetched when the tab is shown and every 10 s while it stays visible (never while the menu is closed),
+  plus a Refresh button. Rooms heard on the local network are in the same list ("LAN"). Rooms of another
+  region or port version are shown but cannot be joined (tooltip says why). Join on a locked room opens
+  a password prompt. "No lobby server set" when there is none.
+- **Host a room**: name, who can join (Public / Password / Friends only), players (2-4), Host room.
+  Friends only: the lobby lists the room without names; friends recognise it by its tag (4 random bytes +
+  HMAC(host key, them)[0..4]) and see "<friend>'s room"; the host admits only keys of its F1 friends
+  (signature over the handshake).
+- **In a room**: listed-on-lobby status, router type from the two STUN answers, members with ping and
+  connection (direct / relayed / through the host), Kick, join requests, Close / Leave.
+- **Advanced**: the lobby server address (`[online] lobby_server`; the built-in default list in
+  online.cpp `kDefaultLobbies` is empty until the project has a public lobby), "List my room on the
+  lobby", UDP port, ask before join, port mapping, LAN visibility, direct connections, own cf_relay,
+  "Connect to an address", "Join with a room code"; while hosting: the room code and the reply code box.
+  The old code flow (sections 5, 7, 10c, 10d) is unchanged there.
+New settings: `[online] lobby_server`, `lobby_list`, `max_players`, `visibility`.
+
+### 13.6 What the lobby and the relay see (privacy)
+
+- The lobby: each room's name, host player name, town name, player count, lock / friends flags, game id,
+  port version, tag; the IP address of every HTTPS connection (hosts, players looking at the list,
+  joiners), as any web server does. Friends-only rooms: no names. The Worker also gets Cloudflare's
+  approximate location of a host (for the ping estimate), kept only with the open socket.
+- It does not see: passwords or anything derived from them that could be tested offline (13.3), UDP
+  addresses and ports, friend lists, keys other than the handshake's public keys, chat, towns, voice.
+- Nothing is stored: a room exists only as the attachment of its host's open WebSocket (Worker) / in
+  memory (cf_lobby) and is gone when the host disconnects. No logs of rooms or addresses (Worker:
+  observability off; cf_lobby: a statistics line every 10 minutes, room names only with `--verbose`).
+- The relay (TURN) sees the two IP addresses and sealed packets, and their sizes and timing.
+- The other player: your public IP address once a direct path is used (as in any peer-to-peer game).
+  With a password or friends-only room the host's addresses are only sent to joiners that passed the check.
+
+### 13.7 Deploying the lobby on Cloudflare (free plan)
+
+Needs Node.js 18+ on any PC (only for deploying) and a free Cloudflare account. From the repository:
+```
+cd tools/lobby_worker
+npm install
+npx wrangler login          # opens the browser: log in to the Cloudflare account, allow wrangler
+npx wrangler deploy
+```
+- The first deploy asks once for a workers.dev subdomain if the account has none, and applies the
+  Durable Object migration `v1` (`new_sqlite_classes = ["Lobby"]` in wrangler.toml: the SQLite-backed
+  kind is the only one on the free plan; no further migration steps).
+- The address is printed at the end: `https://cf-lobby.<your-subdomain>.workers.dev`. Check it:
+  `https://cf-lobby.<your-subdomain>.workers.dev/v1/info?v=1` -> `{"v":1,"name":"cf-lobby","rooms":0,"turn":false}`.
+- **Relay (optional)**: Cloudflare dashboard > Realtime > TURN Server > Create: it shows a "Turn Token ID"
+  and an "API Token" once. Then
+  ```
+  npx wrangler secret put TURN_KEY_ID          # paste the Turn Token ID
+  npx wrangler secret put TURN_KEY_API_TOKEN   # paste the API Token
+  ```
+  (no redeploy needed; `/v1/info` then says `"turn":true`). Cloudflare's TURN has a free allowance
+  (1,000 GB per month, shared with their SFU, at the time of writing): **check at sign-up whether
+  creating the TURN key asks for billing details**, and what happens above the allowance. Without the
+  two secrets the lobby works Dolphin-style (hole punching only) and says so in the list ("no relay").
+- Put the URL into the port: F1 > Online > Advanced > Lobby server for one PC, or into `kDefaultLobbies`
+  (src/recomp/online.cpp) for everyone, then rebuild / release.
+- Never commit secrets; `tools/lobby_worker/.dev.vars` (local test secrets) and `node_modules` are
+  gitignored.
+
+**Free plan budget** (100,000 requests per day shared by the Worker and its Durable Object, 10 ms CPU
+per request):
+
+| Who | Requests |
+|---|---|
+| A host, per hosting session (any length) | 2 at connect + 1/20 per message (registration, player count changes, signal answers): about 3 |
+| A player with the room list open | 1 Worker request per refresh = 6 per minute; the Durable Object is asked at most once per 5 s per Cloudflare location, however many players look |
+| A join | about 4 (two signals, each 1 Worker + 1 Durable Object request), +2 when it needs the relay, +2 for the relay address |
+| Keep-alive pings | answered by the edge without waking the object (if billed at all: 1/20 request each, ~108 per room per day) |
+
+So the list is what counts: 100,000 / 6 = about 16,000 player-minutes of an open room list per day
+(e.g. 500 players looking for 30 minutes each), which is why the client refreshes only while the list is
+visible. Over the limit Cloudflare answers HTTP 429 (error 1027) and the game shows "The lobby is busy
+(its free daily limit may be used up). Try again later"; rooms already joined are not affected (the
+lobby is not in their path). The limit resets at 00:00 UTC.
+
+Local run of the Worker (tests): `npm run dev` in tools/lobby_worker (wrangler dev, local mode, port
+8787; set `WRANGLER_SEND_METRICS=false`), then `CF_LOBBY_TEST_URL=http://127.0.0.1:8787
+cf_lobby_api_test`; the TURN path against `test/fake_turn.mjs` with `.dev.vars` (`TURN_KEY_ID`,
+`TURN_KEY_API_TOKEN`, `TURN_API_BASE=http://127.0.0.1:8788`).
+
+### 13.8 Self-hosting instead (cf_lobby)
+
+For a group that prefers its own server (a small Linux VPS; any always-on machine with a public address):
+```
+g++ -O2 -std=c++17 -pthread tools/lobby/cf_lobby.cpp -o cf_lobby
+./cf_lobby --port 29920 [--turn <host:3478> --turn-user <u> --turn-pass <p>] [--trust-proxy] [--verbose]
+```
+- TCP port 29920 (HTTP + WebSocket, no TLS). Players enter `http://<server>:29920` as the lobby server.
+  For https put a reverse proxy that passes WebSocket upgrades in front (Caddy: `reverse_proxy
+  127.0.0.1:29920`) and add `--trust-proxy` (the client address then comes from `X-Forwarded-For`).
+- Relay: any TURN server; coturn e.g. `turnserver --lt-cred-mech --user cf:<password> --realm cf
+  --listening-port 3478 --no-tls --no-dtls --no-tcp` (UDP 3478 + its relay port range open), then
+  `--turn <server>:3478 --turn-user cf --turn-pass <password>`. This is one shared static credential that
+  every joiner who needs the relay receives: use it only for a group you trust, or leave the relay out.
+- systemd unit (`/etc/systemd/system/cf-lobby.service`):
+  ```
+  [Unit]
+  Description=City Folk Recompiled lobby
+  After=network-online.target
+  [Service]
+  ExecStart=/opt/cf-lobby/cf_lobby --port 29920
+  DynamicUser=yes
+  Restart=always
+  NoNewPrivileges=yes
+  ProtectSystem=strict
+  [Install]
+  WantedBy=multi-user.target
+  ```
+  `systemctl enable --now cf-lobby`; firewall: allow TCP 29920.
+- Size: one thread, a few MB of memory; 500 rooms with a few hundred players watching the list is a few
+  KB/s (a list of 100 rooms is ~15 KB per refresh). The lobby carries no game traffic. A relay is the
+  only bandwidth cost: a relayed visit moves ~500 KB when it starts (the town) and then 1-10 KB/s per
+  player (more with voice chat, ~7 KB/s per speaker and listener); a 1 TB/month VPS covers thousands of
+  relayed hours. coturn's own quotas (`--max-bps`, `--user-quota`) cap it.
+
+### 13.9 Tests (no external service; 2026-11-10)
+
+- `cf_turn_test` (ctest `online_turn`): the TURN client against the in-process stand-in
+  (tools/tests/turn_standin.*), RFC 5769 vectors, wrong credentials, permissions, refresh, lost
+  requests, garbage datagrams.
+- `cf_lobby_api_test` (ctest `lobby_api`): the API against cf_lobby in-process, and with
+  `CF_LOBBY_TEST_URL` against the real Worker under `wrangler dev` (wrangler 4.160, local mode): 0
+  failures in both; verified locally on the Workers runtime: the WebSocket upgrade forwarded to the
+  Durable Object, attachments surviving hibernation, `ping` answered without waking the object, signal
+  waits resolved from the socket handler and the 8 s timeout, abrupt host disconnects, the 5 s list
+  cache, the TURN credential conversion against a fake API. Only checkable on Cloudflare itself: the
+  edge cache on workers.dev, real request accounting, the real TURN API answer, `wss://` end to end.
+- `cf_online_lobby_test` (ctest `online_lobby`, ~100 s): the whole join path in one process, real lobby
+  client + cf_lobby + TURN/STUN stand-ins, each session behind a simulated router (tools/tests/nat_sim.h:
+  full cone, port-restricted cone, symmetric with sequential or random ports; every UDP datagram goes
+  through it). Results (time to Joined, test timers):
+
+| Joiner / host router | Result | Path | Time |
+|---|---|---|---|
+| none / none | joined | direct | 0.39 s |
+| full cone / full cone | joined | direct | 0.39 s |
+| port-restricted / port-restricted | joined | direct | 0.40 s |
+| symmetric (sequential ports) / port-restricted | joined | direct (prediction) | 0.67 s |
+| port-restricted / symmetric (sequential) | joined | direct (prediction) | 0.92 s |
+| symmetric (random ports) / port-restricted | joined | relayed | 3.5 s (before the 1 s rule for symmetric joiners) |
+| symmetric (random) / symmetric (random) | joined | relayed | 3.5 s |
+| full cone / full cone, forced relay | joined | relayed | 0.39 s |
+| symmetric both, lobby without relay | fails with the message of 13.3 | - | 12.2 s |
+| three joiners at once (full cone, symmetric sequential, symmetric random) into a port-restricted host | all joined | direct, direct, relayed | 0.4 / 0.7 / 3.3 s |
+| password room: wrong / right password | refused / joined | - / direct | 0.25 s / 0.47 s |
+| 2-player room, second joiner | "The room is full" | - | 0.08 s |
+| friends-only: friend / stranger's key / wrong expected host key | joined / refused / refused | direct | 0.39 / 0.17 / 0.10 s |
+| ask before join: yes / no | joined / refused | direct | 1.9 / 3.0 s |
+
+  Every connected case also sends 50,000 bytes reliably each way, checks both member lists and the
+  relayed flags, and the relay's byte counter (zero when direct). Also: a joiner's router restarting
+  (new port: the link moves, stays joined), a member / the host vanishing (noticed in ~5 s with test
+  timers, 15 s in play), lost CHALLENGE / ACCEPT, host closes -> room off the list, garbage / replayed
+  signals and 600 random datagrams (no crash, no wrong accept, next join works). Sanitizers (ASan/UBSan,
+  TSan) clean.
+- Known limits found there: a symmetric *host's* port prediction is based on two fixed mappings and goes
+  stale after a few joins or on a busy line (then the relay takes over); symmetric on both sides always
+  needs the relay; relay -> direct takes up to 15 s (probe interval) and the TURN allocation is kept;
+  wrong passwords through the lobby are counted for all lobby joiners together (8 per minute block lobby
+  joins of that room for 60 s: someone can lock a password room that way); a kicked lobby member is
+  banned by profile id only; a lost T_CAND is not resent (the join fails and is tried again by hand);
+  two players behind one router rely on the LAN candidate (not simulated); IPv6 not simulated.

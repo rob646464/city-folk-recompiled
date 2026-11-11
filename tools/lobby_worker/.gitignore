@@ -1,0 +1,4 @@
+# wrangler and its local state; local test secrets
+node_modules/
+.wrangler/
+.dev.vars

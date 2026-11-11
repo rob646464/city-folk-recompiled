@@ -46,6 +46,13 @@ std::string memberCode(uint8_t memberId);
 void requestFriend(uint8_t memberId);
 
 std::vector<Friend> list();
+// Room members whose key is proved and whose roster entry (INFO) arrived, F1 friends and blocked
+// players left out: the game gets them as friends while the room lasts (online.cpp rosterSync),
+// which is what its gate needs for a visit. They do not become F1 friends.
+std::vector<Friend> sessionMembers();
+// A session member went into the game's roster: taken out again (pendingRosterRemovals) once
+// that player is no longer in a room with us, unless an F1 friend by then.
+void noteSessionRoster(uint32_t pid);
 // The friend is in the room now with a proved key (its INFO may still be on its way).
 bool inRoom(const std::string& code);
 // Room member id of a friend's proved key (0xFF: not in the room).

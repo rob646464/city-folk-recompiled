@@ -1,0 +1,12 @@
+{
+  "name": "cf-lobby",
+  "private": true,
+  "description": "City Folk Recompiled online lobby (Cloudflare Worker + one Durable Object). No runtime dependencies: wrangler is only the local runner and the deploy tool.",
+  "scripts": {
+    "dev": "wrangler dev --local --port 8787 --ip 127.0.0.1",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.160.0"
+  }
+}

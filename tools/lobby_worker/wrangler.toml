@@ -1,0 +1,32 @@
+# cf-lobby: the online lobby of City Folk Recompiled on Cloudflare Workers, free plan
+# (docs/ONLINE.md "The lobby"; the API is the one tools/lobby/cf_lobby.cpp implements too).
+#
+# Run it on this PC (no Cloudflare account, nothing leaves the PC):   npm install   then   npm run dev
+# (http://127.0.0.1:8787; the API test runs against it with CF_LOBBY_TEST_URL=http://127.0.0.1:8787).
+#
+# Deploy from this folder:   npx wrangler deploy
+# The lobby's address is printed at the end: https://cf-lobby.<your-subdomain>.workers.dev
+#
+# Optional secrets, for relay credentials (POST /v1/turn) from a Cloudflare Realtime TURN key
+# (dashboard: Realtime > TURN Server > Create; it shows a "Turn Token ID" and an "API Token" once):
+#   npx wrangler secret put TURN_KEY_ID          <- the Turn Token ID
+#   npx wrangler secret put TURN_KEY_API_TOKEN   <- the API Token
+# Without them the lobby works the same and /v1/turn answers "no_turn".
+name = "cf-lobby"
+main = "src/index.js"
+compatibility_date = "2026-05-01"
+workers_dev = true
+
+# No request logs are kept (the lobby never logs client addresses).
+[observability]
+enabled = false
+
+# One Durable Object ("global") holds the hosts' WebSockets (hibernating between messages).
+[[durable_objects.bindings]]
+name = "LOBBY"
+class_name = "Lobby"
+
+# SQLite-backed: the only kind of Durable Object on the free plan. The lobby stores nothing in it.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Lobby"]
