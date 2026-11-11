@@ -726,7 +726,7 @@ Left:
   delivery whenever both games run; no DHT, no letters on the relay (section 10).
 - The public lobby (section 13.7): deploy `tools/lobby_worker` to the Cloudflare account, decide
   whether to create the TURN key (check whether it asks for billing details), then give the URL so
-  it can go into `kDefaultLobbies` (until then: F1 > Online > Advanced > Lobby server).
+  it can go into `kDefaultLobbies` (done 2026-11-11: `https://cf-lobby.cf-lobby.workers.dev`).
 - Session friends (13.4): room members are written into the game's roster while the room lasts and
   removed afterwards. Keep it that way, or leave visitors in the roster after a visit as the Wii did?
 
@@ -846,7 +846,7 @@ meanwhile. F1 friends stay as before (letters, friends-only rooms). Blocked play
 - **In a room**: listed-on-lobby status, router type from the two STUN answers, members with ping and
   connection (direct / relayed / through the host), Kick, join requests, Close / Leave.
 - **Advanced**: the lobby server address (`[online] lobby_server`; the built-in default list in
-  online.cpp `kDefaultLobbies` is empty until the project has a public lobby), "List my room on the
+  online.cpp `kDefaultLobbies` holds the project's lobby `https://cf-lobby.cf-lobby.workers.dev`, deployed 2026-11-11), "List my room on the
   lobby", UDP port, ask before join, port mapping, LAN visibility, direct connections, own cf_relay,
   "Connect to an address", "Join with a room code"; while hosting: the room code and the reply code box.
   The old code flow (sections 5, 7, 10c, 10d) is unchanged there.

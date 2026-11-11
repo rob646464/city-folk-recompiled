@@ -946,9 +946,9 @@ static void friendsSection() {
 
 // ---- the lobby: hosting a listed room, the room list, joining (docs/ONLINE.md "The lobby") ----
 
-// The built-in lobby list. None yet: who hosts the public lobby is not decided, so until then the
-// address comes from F1 > Online > Advanced ([online] lobby_server) and the list says so.
-static const char* const kDefaultLobbies[] = {""};
+// The built-in lobby: the project's Cloudflare Worker (tools/lobby_worker, deployed 2026-11-11).
+// F1 > Online > Advanced ([online] lobby_server) overrides it.
+static const char* const kDefaultLobbies[] = {"https://cf-lobby.cf-lobby.workers.dev"};
 
 std::string lobbyUrl() {
     if (const char* e = envOr("CF_ONLINE_LOBBY")) return lobby::normalizeUrl(e);
