@@ -1,0 +1,36 @@
+# Scripted camera moves at high frame rates (branch cam-jumps; docs/WII.md "Scripted camera
+# moves"): CF_FIXTURE=user-town-clean, -Env "CF_FF=1-4400". From the house door west to Nook's
+# Cranny (precache_nook.txt's walk), in by A (the door camera), Tom Nook's greeting (the talk
+# camera), around the shop and out again (the exit camera), then the pockets open and close in
+# the town (HUD bag button) and a villager talk (TP to the last outdoor villager, module 22).
+include continue_any.txt
+5240:A
++60:A ~6
+after link d_bgo_drawNP 2
++1400:STICKDOWN*30
++40:STICKLEFT+B*186
++190:STICKRIGHT*10
++14:STICKUP*80
++90:A
++40:A ~3
+after link d_bgi_drawNP 2
++150:A
++50:A ~5
++60:STICKLEFT*90
++110:STICKUP*60
++80:STICKRIGHT*200
++220:STICKDOWN*60
++80:STICKLEFT*100
++120:STICKDOWN*250
++300:A
++60:A ~4
++60:STICKDOWN*120
+after link d_bgo_drawNP 3
++400:@-0.82/0.82
++30:A
++150:B
++60:@off
++200:TP=mod22:0/60
++10:STICKUP*20
++60:A
++60:A ~12

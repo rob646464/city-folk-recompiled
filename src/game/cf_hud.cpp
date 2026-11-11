@@ -155,8 +155,18 @@ HLE(CalculateMtx__Q34nw4r3lyt4PaneFRCQ34nw4r3lyt8DrawInfo) {
 // Classified as a full-screen picture it stayed in the 16:9 frame, so the town showed beside it in
 // wider windows. In a WipeScope it is drawn centered (round circle) and widened to the display's
 // edges (hle_gx.cpp widenWipeHeld). At 16:9 and narrower nothing changes.
+// At high frame rates (branch cam-jumps) the circle's texture matrix was untagged (key 0, shown
+// at the game frame): the circle closed and opened in game-frame steps while the scene inside
+// blended at every present. A HUD scope of its own (the fader object) pairs it and the circle
+// grows and shrinks at every present. CF_WIPE_TAG=0: untagged (old).
 HLE(fn_802B6B48) {
+    static const bool sTag = [] {
+        const char* v = std::getenv("CF_WIPE_TAG");
+        return !(v && *v == '0');
+    }();
     ws::WipeScope wipe;
+    if (!sTag) return callOriginal(c, "fn_802B6B48");
+    interp::TagScope t(interp::TagCat::Hud, c.r[3], rd32(c.r[3]), 0x57495045);
     callOriginal(c, "fn_802B6B48");
 }
 

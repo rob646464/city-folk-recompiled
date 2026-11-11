@@ -528,9 +528,12 @@ std::mutex sM;
 std::shared_ptr<const Tape> sNewest, sPrevious;
 // Tapes the FIFO may still be reading (their vertex-array copies) after being replaced.
 std::deque<std::shared_ptr<const Tape>> sRetired;
-// Every closed tape in capture order (the newest 8): the host picks the pair its presentation
+// Every closed tape in capture order (the newest kQueueTapes): the host picks the pair its presentation
 // clock falls between (Pacer), which is not always the newest two.
 std::deque<std::shared_ptr<const Tape>> sQueue;
+// How many: 0.67 s at 60 (was 8), so the pacer can hold a host stall and catch up (Pacer::debt).
+// The replay retires every tape before its pair, so the queue is this long only while it does.
+constexpr size_t kQueueTapes = 40;
 
 // --- host side ---
 std::vector<u8> sReplay;
@@ -2692,7 +2695,7 @@ void endTape(u32 retraceCount) {
         sPrevious = std::move(sNewest);
         sNewest = tape;
         sQueue.push_back(tape);
-        while (sQueue.size() > 8) {
+        while (sQueue.size() > kQueueTapes) {
             sRetired.push_back(std::move(sQueue.front()));
             sQueue.pop_front();
         }
@@ -6999,8 +7002,29 @@ struct Pacer {
     // periods, that keeps the presents halfway between the game-frame changes.
     double lockD = 0;
     u32 lockWraps = 0;
+    // Host stall hold (see pace()): how far the shown time is held behind the on-time timeline g
+    // after the presents stopped for a while (s), and how many stalls were held so.
+    double debt = 0;
+    u32 holds = 0;
+    double heldMax = 0;
 };
 Pacer sPacer;
+// After the presents stop for a moment while the game runs on (a pipeline compiled at its first
+// use: 150-660 ms; the render worker waits for it, Aurora 0013), the shown time used to jump to
+// where the game is by then: everything leapt ahead by the stall (the catch close-up after a fish
+// is pulled out, the first frames in a room). Now the picture goes on from where it stopped, as
+// at the game's own rate (the guest waits for the frame there), and catches up by playing the
+// tapes slightly faster (CF_STALL_CATCHUP, the extra speed: 0.25 = 25 %), at most kMaxDebt behind.
+// CF_STALL_HOLD=0: off (the old jump).
+const bool sStallHold = [] {
+    const char* v = std::getenv("CF_STALL_HOLD");
+    return !(v && *v == '0');
+}();
+const double sStallCatchup = [] {
+    const char* v = std::getenv("CF_STALL_CATCHUP");
+    return v ? std::clamp(std::atof(v), 0.02, 4.0) : 0.25;
+}();
+constexpr double kMaxDebt = 0.5;
 const bool sOldPacing = [] {
     const char* v = std::getenv("CF_INTERP_PACING");
     return v && std::strcmp(v, "old") == 0;
@@ -7047,6 +7071,7 @@ double hostSec(Clock::time_point t) { return std::chrono::duration<double>(t - s
 int pace(const std::vector<std::shared_ptr<const Tape>>& q, Clock::time_point nowTp, float& alpha) {
     Pacer& p = sPacer;
     const double now = hostSec(nowTp);
+    const double gap = p.lastNow < 0 ? 0.0 : now - p.lastNow;  // since the previous present (s)
     // Present clock: advance by the measured period, pulled gently toward the real time; a
     // present that is off by more than 4 ms (a missed refresh, a hitch) resynchronizes.
     if (p.lastNow < 0) {
@@ -7135,15 +7160,35 @@ int pace(const std::vector<std::shared_ptr<const Tape>>& q, Clock::time_point no
         p.stallRun = 0;
     }
     if (p.g < tapeTime(*q.front()) - 0.1) p.haveG = false;  // behind every tape kept: resynchronize next time
-    // The pair around g.
+    // Host stall hold (sStallHold): the presents stopped for more than 4 periods (at least 40 ms,
+    // under a second: longer is a pause or a load) while g moved on with the clock: show the time
+    // one period after the last present instead and catch up. Never behind the oldest tape kept.
+    if (sStallHold) {
+        if (p.haveG && gap > std::max(4.0 * p.period, 0.040) && gap < 1.0) {
+            p.debt = std::min(kMaxDebt, p.debt + gap - p.period);
+            p.holds++;
+            log("[interp] no present for %.0f ms: the picture goes on from where it stopped (%.0f ms behind, catching up)",
+                gap * 1000.0, p.debt * 1000.0);
+        } else if (p.debt > 0) {
+            p.debt = std::max(0.0, p.debt - sStallCatchup * std::max(0.0, dClk));
+        }
+        const double front = tapeTime(*q.front());
+        if (p.g - p.debt < front) p.debt = std::max(0.0, p.g - front);
+        if (!p.haveG) p.debt = 0;
+        p.heldMax = std::max(p.heldMax, p.debt);
+    } else {
+        p.debt = 0;
+    }
+    const double gs = p.g - p.debt;  // the time shown
+    // The pair around the shown time.
     alpha = 1.0f;
     for (size_t i = 1; i < q.size(); i++) {
         const double ta = tapeTime(*q[i - 1]), tb = tapeTime(*q[i]);
-        if (p.g > tb && i + 1 < q.size()) continue;
+        if (gs > tb && i + 1 < q.size()) continue;
         if (tb <= ta) return int(i);
         // A step longer than 6 fields (a load hitch): hold a, then move over the last 2 fields.
         const double start = tb - ta > 6 * kRetrace() ? tb - 2 * kRetrace() : ta;
-        alpha = float(std::clamp((p.g - start) / (tb - start), 0.0, 1.0));
+        alpha = float(std::clamp((gs - start) / (tb - start), 0.0, 1.0));
         return int(i);
     }
     return -1;
@@ -7241,6 +7286,45 @@ bool replay(bool final) {
                 break;
             }
     }
+    // Test aid CF_CAM_PRESENT=<file> (branch cam-jumps): per present the main camera as shown (eye,
+    // forward, projection scale) with its tapes, alpha, the pacer's shown time and the cut state, for
+    // the camera step uniformity check (tools/interp/cam_steps.py).
+    static FILE* const sCamPresent = [] {
+        const char* p = std::getenv("CF_CAM_PRESENT");
+        return p && *p ? std::fopen(p, "w") : nullptr;
+    }();
+    if (sCamPresent && !final) {
+        const u16 mv = b->mainView;
+        const bool paired = a && b->pairedWith == a.get() && !b->cut && alpha < 1.0f;
+        M34 cam{};
+        int how = 0;  // 0 none, 1 b as captured, 2 blended
+        if (mv < b->views.size()) {
+            cam = b->views[mv];
+            how = 1;
+            if (paired && mv < b->viewToA.size() && b->viewToA[mv] >= 0 && u32(b->viewToA[mv]) < a->views.size() &&
+                idealCamera(a->views[b->viewToA[mv]], b->views[mv], alpha, cam))
+                how = 2;
+        }
+        f32 e[3] = {0, 0, 0};
+        if (how) eyeOf(cam, e);
+        // The main pass's first perspective projection as replayed (zoom: p[0] = x scale, p[2] = y scale).
+        float p0 = 0, p2 = 0;
+        for (const Patch& p : b->patches)
+            if (p.kind == Kind::Projection && p.count == 6 && (p.bundle >= b->bundlePass.size() || b->bundlePass[p.bundle] == 0) &&
+                p.offset + 28 <= sReplay.size()) {
+                const u8* t = sReplay.data() + p.offset + 24;
+                if ((u32(t[0]) << 24 | u32(t[1]) << 16 | u32(t[2]) << 8 | t[3]) != 0) continue;  // orthographic
+                p0 = loadBE(sReplay.data() + p.offset), p2 = loadBE(sReplay.data() + p.offset + 8);
+                break;
+            }
+        std::fprintf(sCamPresent,
+                     "%u %.1f %.6f %llu %llu %.4f %u %u %d %d %d %u %u %d %.3f %.3f %.3f %.5f %.5f %.5f %.5f %.5f %.2f %.2f %.0f\n",
+                     sLastPresent.present, judderUs(r0), sPacer.g - sPacer.debt, (unsigned long long)b->seq,
+                     (unsigned long long)(a ? a->seq : 0), alpha, b->gameFrame, b->retrace, int(b->cut),
+                     int(a && b->pairedWith == a.get()), how, u32(b->views.size()), u32(a ? a->views.size() : 0),
+                     mv == 0xFFFF ? -1 : int(mv), e[0], e[1], e[2], cam[8], cam[9], cam[10], p0, p2, b->camMove, b->camTurn,
+                     b->mainDepth);
+    }
     {
         // The FIFO thread reads these tapes' copies (arrays, textures) until the frame is drained in
         // aurora_end_frame, after replay() returned: keep the last few replays' tapes alive here,
@@ -7250,6 +7334,29 @@ bool replay(bool final) {
         sInFlight.push_back(b);
         if (a) sInFlight.push_back(a);
         while (sInFlight.size() > 8) sInFlight.pop_front();
+    }
+    // Test aid CF_TEST_HOST_STALL=<game frame>:<ms>[,...] (branch cam-jumps): the host stops for that
+    // long after the first present of that game frame (a pipeline compiled at its first use, without
+    // depending on what the shader cache holds), for A/B runs of the stall hold.
+    if (!final) {
+        static std::vector<std::pair<u32, u32>> sStalls = [] {
+            std::vector<std::pair<u32, u32>> v;
+            if (const char* e = std::getenv("CF_TEST_HOST_STALL"))
+                for (const char* s = e; *s;) {
+                    unsigned f = 0, ms = 0;
+                    if (std::sscanf(s, "%u:%u", &f, &ms) == 2) v.push_back({f, ms});
+                    const char* c = std::strchr(s, ',');
+                    if (!c) break;
+                    s = c + 1;
+                }
+            return v;
+        }();
+        for (auto& st : sStalls)
+            if (st.second && b->gameFrame >= st.first) {
+                log("[interp] test stall: host stops for %u ms at game frame %u", st.second, b->gameFrame);
+                std::this_thread::sleep_for(std::chrono::milliseconds(st.second));
+                st.second = 0;
+            }
     }
     sReplayUs += u64(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - r0).count());
     if (sTrace) {

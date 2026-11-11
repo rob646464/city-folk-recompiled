@@ -588,6 +588,66 @@ primitive lists the game writes straight into the pipe).
   `DM` lines (the captured values of either game frame equal to the drawn matrix, or `none`: an
   unnoted load).
 
+### Scripted camera moves at high frame rates (branch cam-jumps)
+
+User report (main 0c37043, 4K, 120 Hz G-Sync): "big jumps during camera movement at high frame
+rates (entering Nook's, catching a bug or fish, etc.)". Routes: tools/routes/cam_door.txt
+(user-town-clean, `CF_FF=1-4400`: house -> Nook's Cranny by walking, the door camera, Tom Nook's
+talk, the shop, out again, the pockets, a villager talk) and gameplay_fish_beach.txt (the sea bass
+catch close-up); 120 fps, VSync off, 1280x720, and the user's own settings (Enhanced lighting Ultra,
+4K window, a copy of the user's shader cache).
+
+- **The camera blend is not it.** New test aid `CF_CAM_PRESENT=<file>`: per present the main camera
+  as shown (eye, view direction, projection scale), its tapes, alpha, shown time and cut state;
+  `py tools/interp/cam_steps.py <file>` turns each present's camera step into pixels of a 2160-line
+  picture (turn x focal length + eye move / scene depth + zoom), as velocity per game frame (jerks
+  within an interval / at a game-frame change) and per present (`leaps`: one present's step over 3x
+  its neighbours'). The door camera, the walk into the shop, the shop camera (~10 units per game
+  frame), the exit, the catch close-up and the talk: 1-4 jerks in 900-6000 moving presents, no false
+  cut (cut presents only at scene changes and the route's teleports), the projection constant (City
+  Folk does not zoom by FOV). Picture steps of `CF_INTERP_TEST=2` dumps (phase correlation per tile)
+  even through the door camera: the in-betweens move halfway.
+- **The jumps are host stalls the shown time jumped over.** A pipeline first met in play is
+  compiled while the render worker waits for it (Aurora 0013): 150-200 ms each at default settings,
+  662 ms for the three Enhanced-lighting pipelines of the catch with the user's settings and cache
+  (`CF_PIPELINE_LOG` MISS frames = the present gaps, one for one: 6 misses = 6 gaps in a fresh-cache
+  fishing run). They fall exactly on these moments: the rod in the hand, the first cast, the fish
+  pulled out (5 game frames before the close-up camera starts), the first frames in a room. At the
+  game's own rate the guest waits for the frame, so the picture pauses; interpolated, the game runs
+  on (decoupled) and the next present showed where it was by then: 0.19-0.66 s of camera motion in
+  one present (fish1 present 17745 -> 17746: tapes 10199 -> 10211). The user's last_run.log (52 min
+  at 120): 25 such hitches of 220-430 ms render worker time ([perf] max).
+- **Fix 1, the stall hold** (interp.cpp `pace`, `Pacer::debt`): when no present came for over 4
+  periods (at least 40 ms, under 1 s) the shown time goes on one period after the last present, as
+  at the game's own rate, and catches up by playing the tapes 25 % faster (`CF_STALL_CATCHUP`), at
+  most 0.5 s behind and never behind the oldest tape kept (queue 8 -> 40 tapes, `kQueueTapes`); log
+  line `[interp] no present for N ms: the picture goes on from where it stopped`. A/B
+  `CF_STALL_HOLD=0`; test aid `CF_TEST_HOST_STALL=<game frame>:<ms>,...` (the host stops after that
+  frame's first present). Door route with stalls of 200-300 ms in the town walk, the door camera,
+  the shop camera and the exit: leaps with the camera moving 2 (318 / 444 px against 16 / 79 px
+  neighbours) -> 0.
+- **Fix 2, the precache list**: data/pipelines.bin merged with the configs these runs met and the
+  user's own pipeline cache (2537 -> 3379 configs). Fresh-cache fishing: 6 misses -> 2 (both after
+  the route's later teleports); door route 0. Startup hold with a seeded cache 7 s (cold
+  compiles). Every config first met in play is still a hitch; the hold keeps it from becoming a jump.
+- **Fix 3, the circle wipe** (cf_hud.cpp fn_802B6B48): its texture matrix was untagged (key 0, shown
+  at the game frame), so the circle closed and opened in game-frame steps while the scene inside
+  blended at every present (picture steps 0.3-1.6 within an interval vs 3-7 across). It is a HUD
+  scope of its own now and pairs: the circle grows at every present (steps even). A/B `CF_WIPE_TAG=0`.
+- Judge (`CF_MATCH_JUDGE`) visible defects after the town arrival (the rest are in the
+  fast-forwarded title / bus): door route 0 (main 0), town walk town_trees.txt 0 (main 0; camera
+  jerks 1 + 4, leaps 0; main 4 + 7, 0), city plaza (city_plaza_warp.txt) 0 (camera jerks 1 + 1, leaps 0). Fishing: 22 (main 9), all water
+  effect particles (ef strategies 80291718 / 802905A0, splashes and ripples popping), the same
+  sites on main; their number follows how many bites a run gets, not the camera.
+  Original 60: none of this runs (no capture, no pacer; the wipe scope is bookkeeping): door route
+  dumps every 50 frames 92 of 120 identical to main, the rest in the fast-forwarded part and event
+  timing (a second main run matched neither).
+- Not changed: camera steps from a standstill of 190-225 units in one game frame (the routes'
+  `TP=` teleports) stay below the 250-unit cut threshold and blend over one interval; no such step
+  was seen in play. With three or more game instances on this PC, game frames sometimes arrive two
+  at once and the shown time skips a tape (60-70 px leaps in a town walk run beside other
+  instances; none alone, main or branch).
+
 ## IOS (Starlet)
 
 The game reaches every device through IPC to IOS (`IOS_Open/Ioctl(v)/Read/Write`). Decision
