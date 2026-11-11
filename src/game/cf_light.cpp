@@ -1440,11 +1440,59 @@ void submitEffectLights() {
 }
 }  // namespace
 
+namespace {
+// Test aid CF_MODEL_TRACK=1: every named scene object's world place as last drawn (trackedModel).
+const bool sModelTrack = std::getenv("CF_MODEL_TRACK") != nullptr;
+struct TrackedModel {
+    std::string name;
+    float p[3] = {};
+    u32 frame = 0;
+};
+std::unordered_map<u32, TrackedModel> sTracked;
+}  // namespace
+
+bool trackedModel(const char* prefix, float& x, float& angle, float& playerRadius, std::string& name, bool logCandidates) {
+    float cy = 0, cz = 0, r = 0;
+    if (!sModelTrack || !logAxis(cy, cz, r)) return false;
+    const u32 now = copyDispCount();
+    const TrackedModel* player = nullptr;
+    for (const auto& [obj, t] : sTracked)
+        if (t.frame + 3 >= now && (t.name == "boy" || t.name == "girl") && (!player || t.frame > player->frame)) player = &t;
+    if (!player) return false;
+    const float ap = std::atan2(player->p[2] - cz, player->p[1] - cy);
+    playerRadius = std::hypot(player->p[1] - cy, player->p[2] - cz);
+    const size_t n = std::strlen(prefix);
+    bool found = false;
+    float best = 1e30f;
+    for (const auto& [obj, t] : sTracked) {
+        if (t.frame + 3 < now || t.name.compare(0, n, prefix) != 0) continue;
+        float da = std::atan2(t.p[2] - cz, t.p[1] - cy) - ap;
+        while (da > 3.14159265f) da -= 6.2831853f;
+        while (da < -3.14159265f) da += 6.2831853f;
+        const float d = da * playerRadius, dist = std::hypot(t.p[0] - player->p[0], d);
+        if (logCandidates)
+            log("[track] f%u '%s' %08X world %.1f %.1f %.1f: x %.1f, %.4f rad about the log from the player (log axis %.1f %.1f r %.0f; radius of the "
+                "player %.1f, of the model %.1f)",
+                now, t.name.c_str(), obj, t.p[0], t.p[1], t.p[2], t.p[0], da, cy, cz, r, playerRadius, std::hypot(t.p[1] - cy, t.p[2] - cz));
+        if (dist < best) best = dist, x = t.p[0], angle = da, name = t.name, found = true;
+    }
+    return found;
+}
+
 bool onModel(Ctx& c, u32 obj) {
+    if (sModelTrack) wantGroundFit();
     const bool fit = sFitWanted + 2 >= copyDispCount();  // Enhanced world's effects centre (groundAhead)
     if (!sModelLog && !enh::masterOn() && !fit) return true;
     const ModelInfo& mi = modelInfo(obj);
     const u32 task = c.r[4];
+    if (sModelTrack && !mi.name.empty()) {
+        const float p[3] = {rdf32(obj + 0x48), rdf32(obj + 0x58), rdf32(obj + 0x68)};
+        if ((p[0] != 0.0f || p[1] != 0.0f || p[2] != 0.0f) && std::isfinite(p[0] + p[1] + p[2])) {
+            if (sTracked.size() > 4096) sTracked.clear();
+            TrackedModel& t = sTracked[obj];
+            t.name = mi.name, t.p[0] = p[0], t.p[1] = p[1], t.p[2] = p[2], t.frame = copyDispCount();
+        }
+    }
     if ((enh::masterOn() || fit) && sInStage && sPass == 1 && (task & 0xFFFF) == 6 &&
         (mi.name.compare(0, 4, "obj_") == 0 || mi.name.compare(0, 4, "sdw_") == 0)) {
         // The rolling log's fit (LogFit): reads only.

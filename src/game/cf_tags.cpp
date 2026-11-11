@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace recomp {
@@ -185,8 +186,8 @@ void efBegin(u32 effect) {
     const u32 now = game::guestFrames();
     for (int g = 0; g < 256 && pm >= 0x80000000u && pm < 0x94000000u; g++, pm = rd32(pm + off + 4)) {
         static const bool sLog = std::getenv("CF_EF_TAG_LOG") != nullptr;
-        static std::unordered_map<u32, u32> sNamed;
-        if (sLog && sNamed.size() < 4096 && sNamed.emplace(pm, rd32(pm + 0x24)).second) {
+        static std::unordered_map<u32, u32> sNamed;  // manager -> the emitter resource it was last named with (managers are reused)
+        if (sLog && sNamed.size() < 4096 && std::exchange(sNamed[pm], rd32(pm + 0x24)) != rd32(pm + 0x24)) {
             std::string n;
             const u32 res = rd32(pm + 0x24), str = res >= 0x80000000u ? rd32(res) : 0;
             for (u32 k = 0; str >= 0x80000000u && k < 40; k++) {
@@ -194,7 +195,7 @@ void efBegin(u32 effect) {
                 if (!ch) break;
                 n += ch >= 32 && ch < 127 ? ch : '?';
             }
-            log("[eftag] manager %08X emitter '%s'", pm, n.c_str());
+            log("[eftag] f%u manager %08X emitter '%s'", now, pm, n.c_str());
         }
         const u32 plist = pm + 0x38;
         const u32 poff = rd16(plist + 0xA);

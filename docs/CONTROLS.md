@@ -422,7 +422,12 @@ run).
   last actor of REL module 102 whose structure type, +0x8 >> 16, is 0100: the museum),
   `TP=tortimer`, `TP=addr90537384:0/-110` (110 units north of the float x/y/z stored at that guest
   address: objects that are not actors, e.g. a fish shadow or a flying insect found in a
-  `CF_MEM_DUMP` of the same route and seed; docs/TEST_COVERAGE.md "Gameplay, round 2").
+  `CF_MEM_DUMP` of the same route and seed; docs/TEST_COVERAGE.md "Gameplay, round 2"),
+  `TP=mdlins_:-26/4` (26 units west and 4 south of the nearest drawn scene model whose name starts
+  with `ins_`, an insect, or of where one was last seen; needs `CF_MODEL_TRACK=ins_`: the g3d world
+  is a fixed cylinder the player walks around, so the model's place is turned back into field
+  coordinates from its angle about the log, src/game/cf_light.cpp trackedModel; `[actor] ... model
+  '<name>' in view at x z` log lines name what was seen; tools/routes/gameplay_bug_net.txt).
   Structure types and positions per place: tools/routes/*.txt comments and
   `CF_ACTOR_LOG=<n> CF_ACTOR_MODULES=101,102,103` (lists each actor with its type).
   `WARP=<target>` (route action, same timing as `TP=`) loads another place through the game's
