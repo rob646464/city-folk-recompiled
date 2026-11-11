@@ -1119,7 +1119,7 @@ static std::vector<RoomRow> buildRows(const lobby::ListState& ls) {
     auto versionOf = [&](RoomRow& x, const std::string& g, const std::string& v) {
         if (g != game) {
             x.versionOk = false;
-            x.version = "Other region (" + g + ")";
+            x.version = "Other region";
             x.why = "Towns visit only within one region: this room plays " + g + ", you play " + game + ".";
         } else if (!v.empty() && v != ver) {
             x.versionOk = false;
@@ -1153,7 +1153,7 @@ static std::vector<RoomRow> buildRows(const lobby::ListState& ls) {
             if (!f) continue;
             x.friendRoom = true;
             x.title = f->name + "'s room";
-            x.hostLine = f->name + " (friend)";
+            x.hostLine = f->name + " (friends only)";
         } else {
             x.title = r.name;
             x.hostLine = r.town.empty() ? r.host : r.host + " of " + r.town;
@@ -1214,13 +1214,13 @@ static void roomList() {
     const auto rows = buildRows(ls);
     if (rows.empty()) {
         ImGui::TextDisabled("%s", url.empty() ? "No rooms on your network right now." : "No rooms right now. Host one below, or wait for the next update.");
-    } else if (ImGui::BeginTable("rooms", 7, ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+    } else if (ImGui::BeginTable("rooms", 7, ImGuiTableFlags_BordersInner | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("##lock", ImGuiTableColumnFlags_WidthFixed, ImGui::GetTextLineHeight());
-        ImGui::TableSetupColumn("Room", ImGuiTableColumnFlags_WidthStretch, 3.0f);
-        ImGui::TableSetupColumn("Host / town", ImGuiTableColumnFlags_WidthStretch, 3.0f);
-        ImGui::TableSetupColumn("Players", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-        ImGui::TableSetupColumn("Version", ImGuiTableColumnFlags_WidthStretch, 2.0f);
-        ImGui::TableSetupColumn("Ping", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+        ImGui::TableSetupColumn("Room", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("Host / town", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("Players", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("Players ").x);
+        ImGui::TableSetupColumn("Version", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("Version 00.00.00 ").x);
+        ImGui::TableSetupColumn("Ping", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("~000 ms ").x);
         ImGui::TableSetupColumn("##join", ImGuiTableColumnFlags_WidthFixed, ImGui::CalcTextSize("  Join  ").x + 12.0f * ui::scale());
         ImGui::TableHeadersRow();
         int i = 0;
@@ -1230,18 +1230,19 @@ static void roomList() {
             ImGui::TableNextColumn();
             lockIcon(x.lock);
             ImGui::TableNextColumn();
-            ImGui::TextUnformatted(x.title.c_str());
-            if (x.friendRoom) {
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.55f, 0.85f, 1, 1), "friends only");
-            }
+            // Long names are cut by the column: the whole text on hover.
+            if (x.friendRoom) ImGui::TextColored(ImVec4(0.55f, 0.85f, 1, 1), "%s", x.title.c_str());
+            else ImGui::TextUnformatted(x.title.c_str());
+            ImGui::SetItemTooltip("%s%s", x.title.c_str(), x.friendRoom ? "\nFriends only: listed without a name, you see it because the host is your friend." : "");
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(x.hostLine.c_str());
+            ImGui::SetItemTooltip("%s", x.hostLine.c_str());
             ImGui::TableNextColumn();
             ImGui::Text("%d/%d", x.players, x.max);
             ImGui::TableNextColumn();
             if (x.versionOk) ImGui::TextUnformatted(x.version.c_str());
             else ImGui::TextColored(ImVec4(1, 0.6f, 0.4f, 1), "%s", x.version.c_str());
+            if (!x.versionOk) ImGui::SetItemTooltip("%s", x.why.c_str());
             ImGui::TableNextColumn();
             if (x.lan) ImGui::TextUnformatted("LAN");
             else if (x.ping >= 0) ImGui::Text("~%d ms", x.ping);
@@ -1404,7 +1405,13 @@ bool drawTab() {
                           : snap.state == net::State::WaitingForHost ? "Waiting for the host..."
                                                                      : "Not in a room";
     ImGui::Text("Room: %s", stateText);
-    if (!snap.message.empty() && snap.state != net::State::Hosting) ImGui::TextWrapped("%s", snap.message.c_str());
+    if (!snap.message.empty() && snap.state == net::State::Failed) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0.5f, 0.4f, 1));
+        ImGui::TextWrapped("%s", snap.message.c_str());
+        ImGui::PopStyleColor();
+    } else if (!snap.message.empty() && snap.state != net::State::Hosting) {
+        ImGui::TextWrapped("%s", snap.message.c_str());
+    }
     if (!snap.replyCode.empty()) {
         ImGui::TextWrapped("No answer from the host yet. Send the host this reply code (Advanced > \"Let them in\"):");
         ImGui::TextUnformatted(snap.replyCode.c_str());

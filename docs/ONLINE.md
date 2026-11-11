@@ -773,9 +773,8 @@ JSON over HTTPS; `v=1` in every request (other values: HTTP 426 `version`). Erro
   per minute and 10 relay credentials per hour per address, 8 signals waiting per room, bodies <= 8 KB,
   WebSocket messages <= 4096 bytes, names cleaned (control characters out, 32 / 24 / 16 characters), game
   id `[A-Z0-9]{6}`. No amplification: every answer goes to the TCP/TLS connection that asked.
-The full text with every edge case is the header of `tools/lobby/cf_lobby.cpp` and the test
-`tools/tests/lobby_api_test.cpp` (ctest `lobby_api`, 200+ checks; `CF_LOBBY_TEST_URL=<url>` runs it
-against a running Worker).
+Every edge case is pinned down by `tools/tests/lobby_api_test.cpp` (ctest `lobby_api`, 200+ checks;
+`CF_LOBBY_TEST_URL=<url>` runs it against a running Worker); both servers pass it.
 
 ### 13.3 Joining a listed room (online_net.cpp)
 
@@ -971,8 +970,8 @@ g++ -O2 -std=c++17 -pthread tools/lobby/cf_lobby.cpp -o cf_lobby
 | port-restricted / port-restricted | joined | direct | 0.40 s |
 | symmetric (sequential ports) / port-restricted | joined | direct (prediction) | 0.67 s |
 | port-restricted / symmetric (sequential) | joined | direct (prediction) | 0.92 s |
-| symmetric (random ports) / port-restricted | joined | relayed | 3.5 s (before the 1 s rule for symmetric joiners) |
-| symmetric (random) / symmetric (random) | joined | relayed | 3.5 s |
+| symmetric (random ports) / port-restricted | joined | relayed | 1.4 s (3.5 s before the 1 s rule for symmetric joiners) |
+| symmetric (random) / symmetric (random) | joined | relayed | 1.4 s |
 | full cone / full cone, forced relay | joined | relayed | 0.39 s |
 | symmetric both, lobby without relay | fails with the message of 13.3 | - | 12.2 s |
 | three joiners at once (full cone, symmetric sequential, symmetric random) into a port-restricted host | all joined | direct, direct, relayed | 0.4 / 0.7 / 3.3 s |
@@ -994,3 +993,30 @@ g++ -O2 -std=c++17 -pthread tools/lobby/cf_lobby.cpp -o cf_lobby
   joins of that room for 60 s: someone can lock a password room that way); a kicked lobby member is
   banned by profile id only; a lost T_CAND is not resent (the join fails and is tried again by hand);
   two players behind one router rely on the LAN candidate (not simulated); IPv6 not simulated.
+- **Two game instances on this PC** (dev build, copies of the test_builds/online-letter-test-2
+  profiles, local cf_lobby + two `cf_turn_standin` as relay and STUN servers via `CF_ONLINE_STUN`, so
+  nothing leaves the PC; hosts with `lan_visible=0`, else a same-PC joiner takes the LAN row):
+
+| Test | Result | Evidence |
+|---|---|---|
+| Host a room, it shows in the other game's list, click Join (`CF_MENU_CLICK ... Join##r0`), leave | pass | `[lobby] room listed on ...`, `Bob joined as member 1 through the lobby`, `connected, path to member 1: ... (direct)`, `member 1 (Bob) left: left` |
+| Password room: wrong / right password (the prompt's `Join room`) | pass | `join refused: Wrong password`, shown in F1; right one `Joined "Locked room"` |
+| Friends-only room: an F1 friend / a third install with another key | pass | friend sees "rob64's room", joins, "The host is your friend (key checked)"; the stranger's list stays empty |
+| Forced relay (`CF_ONLINE_FORCE_RELAY=1`) | pass | `relay: ready at 127.0.0.9:...`, `(relayed)` on both sides, F1 "Connection to the host: relayed", the stand-in's byte counter grows |
+| Host quits / is killed | pass | `/v1/rooms` empty 26 ms / 233 ms later; gone from the other game's list at its next refresh |
+| Lobby down / none set | pass | "Could not reach the lobby (...)", nothing hangs; "No lobby server set", hosting still works (LAN / code) |
+| List refresh only while visible | pass | lobby request counter 3 -> 6 in 40 s with the tab open, flat with the menu closed |
+| A complete visit from the room list (visit_host2 / visit_guest2 routes, `CF_ONLINE_JOIN=lobby`) | pass | `ConnectToGameServer: visiting friend 0`, matched, town data, both players on both screens, visitor home again |
+| The same visit with the forced relay | pass | 1,149,936 bytes through the relay; the 478 KB town transfer took 0.10 s (0.08 s direct; loopback, so only "no stall") |
+| Session friends: two installs that are not F1 friends (new keys) | pass | `friend tester (profile id ...) -> game roster slot 1, as tester of test: registered`, `tester is in this room: you can visit each other at the town gate` on both sides, visit completes |
+| Session entries removed after the room (leave in town, or next start) | pass | `profile id ... removed from the game roster (slot 1): done`, no `session` line left in friends.txt |
+| F1 ID sweep (`CF_MENU_ID_CHECK=exit`: list with 7 rows, hosting, joined) | pass | 0 conflicts, three runs |
+
+  Not seen on screen: Copper's town list itself (shots start after it). 4K shots of the page (room list
+  with locked / full / other-region / other-version rooms, password prompt, hosting and joined pages
+  direct and relayed, Advanced, no lobby set): `out/online_lobby/` of the branch's worktree (window
+  capture of a `--window 3840x2160` run; CF_SHOT dumps are taken before the UI). Oddities: a relayed
+  joiner logs "joined" before "connected ... (relayed)"; a room hosted at the title has no town name
+  until a town is loaded; a pending CF_MENU_CLICK opens every collapsing header (test aid only).
+- **Not tested**: two real routers / two PCs, `wss://` to a deployed Worker, the real Cloudflare TURN
+  service, Linux / macOS clients (http.cpp's libcurl WebSocket ran on Linux loopback only), PAL / JP / KR.

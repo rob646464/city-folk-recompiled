@@ -1267,8 +1267,11 @@ struct Session::Impl {
                     blocked[ip] = now() + 60;
                     std::printf("[online] %s blocked for 60 s after %d failed joins\n", ip.c_str(), f.first);
                 }
+                // (a room from the list or by address has no code that could be wrong)
+                const bool code = pj->kind == 1;
+                std::printf("[online] %s: join refused (wrong password%s)\n", pj->name.c_str(), code ? " or room code" : "");
                 pend.erase(pend.begin() + (pj - pend.data()));
-                return reject(from, REJ_AUTH);
+                return reject(from, REJ_AUTH, code ? std::string() : std::string("Wrong password"));
             }
             if (opt.friendsOnly) {  // the joiner's key: one of the host's friends, and proved
                 bool ok = false;
