@@ -368,3 +368,107 @@ clock 2026-10-27 10:00), muted, off screen, scratch APPDATA/NAND; scripted route
   0x18C), and d_shop_fgNP stays linked outside the shop (the shop test is the stage name).
 - Not run: PAL / Japan / Korea (hooks `all`, functions "identical apart from addresses", VA table
   regenerated), Nookington's levels 1-3 (other slot counts), the bulletin paper's town-hall use.
+
+## Photos to the screenshots folder
+
+F1 > Game > SD Card: **"Save photos to the screenshots folder (SD Card)"** (on by default;
+settings.ini `[sd_card] photos_to_folder`) and **"Open screenshots folder"**. Code:
+`src/game/cf_sd_card.cpp`, hooks in `tools/recomp/hooks.txt` (`all`: every version).
+
+What the player sees: take a photo with the camera button (1), open Photos (2), the green
+"SD Card" button > "Save Photo" > "Would you like to save this to an SD Card?" > Save >
+"Saving to the SD Card..." (2.5 to 8 s, the game's own pacing) > "Saving to the SD Card
+complete." > OK!. The file is in `<program folder>\screenshots` (next to CityFolkRecomp.exe; in
+portable mode the same folder that holds `portable\`), or `<data folder>\screenshots` when the
+program folder cannot be written (e.g. Program Files; logged). The folder is made at the first
+save. Names `RUU_0001.JPG`, `RUU_0002.JPG`, ... continue after the highest number already in the
+folder, also after a restart; a name that exists already is never replaced (exclusive create; a
+dated name such as `RUU_0006_20261111-222728.JPG` instead). Option off: as before, a Wii without an
+SD card ("There is no SD Card inserted in the Wii.").
+
+The file is the game's own JPEG, byte for byte what its encoder made for the SD card: the photo
+the game holds (896 x 480 in 16:9, the frame as drawn, HUD and pointer included as on a Wii),
+with Enhanced lighting and the other graphics options as they were when the photo was taken. No
+render-resolution capture (that would be another feature).
+
+### What the game does (USA rev 1; PAL/JP/KR: the same functions, hash matches)
+
+- The SD stack is eSOL PrFILE2 with its SD driver (`pfd_sddrv_*`, ISD_*/sdu* over
+  `/dev/sdio/slot0`; not VF). The photo code (main.dol 0x8008EDF8 .. 0x8008FDB8) reaches it only
+  through thin wrappers that nothing else calls: attach fn_8021C600 (type 0 = SD; drive table
+  0x80588C20, +8 drive letter, +9 bit 0x10 = card in), detach fn_8021C820, mount fn_8021CA84,
+  unmount fn_8021CC38, errnum fn_8021C8C8, fsfirst fn_8021C934 (name at find buffer + 0x22D),
+  fsnext fn_8021C960, mkdir fn_8021CA58, create fn_8021C7F4, write fn_8021C98C, close fn_8021C908,
+  remove fn_8021CBE0, rmdir fn_8021CC0C. They post requests to PrFILE2's file thread
+  (fn_8021B80C).
+- Each step of the Photos window (d_menu_photoNP) runs in a worker thread (fn_8008F0D8 starts it,
+  fn_8008F278 polls; result r13-0x33A4: 1 done, 3 no card, 8 card full, 0xC no photo data, 2
+  "Unable to save.", errnum mapping fn_8008EE94). "SD Card" button: card check (fn_8008F2E0).
+  "Save Photo" > Save: attach + mount (fn_8008F330), mkdir `\DCIM` (fn_8008F398, EEXIST fine),
+  pick the name (fn_8008F798: highest `\DCIM\<100..999>NIN01` folder, highest 4-digit number of
+  `????????.JPG` in it + 1, a new folder when there is none or it reached 9999: DCF layout), write
+  (fn_8008F854: create, write the JPEG fn_800FADCC() / fn_800FADD4() bytes, close; a failed write
+  closes and removes the file). Messages: Script/ENG/script.arc sys_2D/SYS_SDcard.bmg.
+- "Erase All": "If you select Erase, you will lose all of your Animal Crossing: City Folk photos.
+  Erase all of the Animal Crossing pictures on the SD Card?" Cancel / Erase. Erase: attach +
+  mount, fn_8008F950 (any `\DCIM\<n>NIN01\RUU_????.JPG`? none: "There is no Animal Crossing photo
+  data on this SD Card."), fn_8008FB48 (removes every RUU_????.JPG of every NIN01 folder, then
+  folders left empty), "The photos have been erased." On a Wii it erases the card's photos of
+  this game; the photo the game holds is not affected. "Quit" closes the box (no card access).
+
+### What the port does
+
+The wrappers are a small SD card host at the file level (when the option is on at the attach;
+off: every wrapper runs the original, so nothing changes): a card is always in, `\DCIM` exists,
+the NIN01 folders the game makes live for the session and every one of them is the screenshots
+folder, whose files with 8.3 names are what the game lists to number the next photo. Create /
+write / close write the game's bytes into a new file. **Erase All never deletes anything**: while
+fn_8008F950 / fn_8008FB48 run the card shows no photos, so the player sees "There is no Animal
+Crossing photo data on this SD Card." (OK) and the folder is untouched; remove / rmdir never
+delete in any case (logged as refused). Chosen over an SD host at the block level (a FAT image
+behind `/dev/sdio`, the game's whole FAT stack running): the files would sit inside an image and
+need copying out, and Erase All would really erase them there; the file-level host keeps the
+game's own naming, numbering, error paths and JPEG while needing no FAT code.
+
+### Test aids
+
+- `CF_SD_PHOTOS=0|1` overrides the setting; `CF_SD_PHOTO_DIR=<dir>` replaces `<program
+  folder>\screenshots` (a path that cannot be created, e.g. below a file, tests the fallback);
+  `CF_SD_LOG=1` logs every SD call (`[sd] fsfirst(A:\DCIM\100NIN01\????????.JPG -> RUU_0001.JPG)
+  = 0`; the game probes the 900 folder numbers twice per save).
+- `[photo]` lines: the folder chosen (or the fallback and why), each file
+  (`[photo] saved RUU_0001.JPG (896x480, 90925 bytes) to ... in 3.3 ms (file writes 0.2 ms), guest
+  frame 5410`), Erase All, refused removes.
+- Routes (fixture `user-town-clean`, `-Env "CF_SD_PHOTO_DIR=..."`): `tools/routes/photo_sd.txt`
+  (one photo saved), `photo_sd_multi.txt` (three in a row), `photo_sd_indoor.txt` (warp into the
+  house, two photos; dev build), `photo_sd_erase.txt` (Erase All, then Quit), `photo_sd_hold.txt`
+  (the "complete" message stays up for screenshots).
+
+### Verification (USA, cfrecomp, 2026-11-11)
+
+- One photo: `RUU_0001.JPG` 896 x 480, opens (PIL, image viewer), the same picture as the Photos
+  window shows (window content 808 x 432, aspect 1.870 vs 1.867; mean absolute difference to the
+  resized JPEG 7.6 / 255, mirrored 40.8, flipped 52.8: same orientation and colours); the game
+  shows "Saving to the SD Card complete.". Write 0.1-0.2 ms, whole save call 1.3-5 ms (no hitch).
+- Several in a row: three outdoor photos in one session -> RUU_0001..0003; restart with the same
+  folder -> RUU_0004, then RUU_0005 (numbering continues, earlier files unchanged by MD5).
+  Indoors (warp into the house): two photos with Enhanced lighting on and two with it off.
+- Enhanced lighting is in the photo: outdoors at 10:00 the pixels Enhanced lighting darkens on
+  screen (sun shadows of the house and fence, 18550 pixels of the 3D area, mean 152 off -> 119
+  on) are 117 in the photo taken with it on; the photo is 8.2 from the Enhanced-lighting screen
+  and 10.3 from the plain one (mean absolute difference, 3D area). Indoors by day the two
+  screens differ little (1.2-1.6), and so do the two photos (1.6).
+- Never replaced: a folder named RUU_0006.JPG in the way -> `RUU_0006_20261111-222728.JPG`.
+- Erase All with five photos in the folder: confirmation, Erase, "There is no Animal Crossing
+  photo data on this SD Card.", OK; all five files unchanged (MD5). Quit closes the box.
+- Installed layout: `cmake --install` into a scratch folder, CityFolkRecomp.exe from there with a
+  fresh APPDATA (`--setup-auto`, module built), the same route without `CF_SD_PHOTO_DIR`:
+  `[photo] screenshots folder: <install>\screenshots`, `RUU_0001.JPG` there, next to the exe.
+- Fallback: `CF_SD_PHOTO_DIR` below a file -> `[photo] ... cannot be created (read-only folder?):
+  photos go to <data folder>\screenshots`, saved there.
+- Option off: "There is no SD Card inserted in the Wii." after Save Photo, as main. Frame dumps
+  of the whole route (81 shots, frames 3000-7000) against a main build: 76 byte-identical; the 5
+  others are Rover's greeting line, which differs between two runs of main itself.
+- Not run: PAL / Japan / Korea (hooks `all`, all fifteen functions hash- or order-matched in
+  their us_map.txt), a real card full / write error from the PC disk, the Wii Message Board path
+  for photos (WiiConnect24, separate), a console comparison of the JPEG bytes.

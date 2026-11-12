@@ -1,0 +1,21 @@
+# Photo -> Photos window -> SD Card -> Save Photo -> Save (docs/FEATURES.md "Photos to the
+# screenshots folder"). Fixture user-town-clean (CF_FIXTURE), CF_INPUT_CLOCK=frames; run with
+# -Env "CF_SD_PHOTO_DIR=<scratch dir>" so the photo lands in the run's folder. Timed from the
+# arrival in the town (continue_any.txt presses A every 40 frames until then).
+include continue_any.txt
+after link d_bgo_drawNP 2
+
+# 1 = take a photo (shutter), 2 = open the Photos window.
++1400:1*6
++200:2*6
+# The green "SD Card" button at the bottom of the window, then "Save Photo" (first choice).
++200:@0/0.57
++40:A
++80:@0.33/-0.08
++40:A
+# "Would you like to save this to an SD Card?" -> the green "Save" button.
++100:@0.29/0.29
++40:A
+# "Saving to the SD Card..." (2.5 to 8 s) -> "Saving to the SD Card complete." -> OK!.
++100:@0/0.29
++60:A ~10

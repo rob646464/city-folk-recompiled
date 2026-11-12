@@ -287,8 +287,12 @@ Season limits [spec; check what the weather code accepts]:
   `%s\RUU_????.JPG`, `%s\%s%04d.JPG`, `%s\????????.JPG` (TMC JPEG library, `image/jpeg`); devices
   `/dev/sdio/slot0`, `slot1`, `slotw`. Photos can also go to the Wii Message Board (WC24). The
   revisions' fix: saving JPGs; no SDHC support (cards up to 2 GB) [web-medium]. Patterns and
-  letters are not saved to SD [web-medium]. Port: SD HLE to a folder (`%APPDATA%\...\sd\`),
-  F1 button "Open photo folder"; card always present, size reported as 2 GB.
+  letters are not saved to SD [web-medium]. **Done (branch photo-export, docs/FEATURES.md "Photos
+  to the screenshots folder")**: the game's PrFILE2 wrappers (its FAT code with its own SD driver
+  over `/dev/sdio/slot0`; VF has none) are a file-level SD card host over `<program
+  folder>\screenshots` (fallback `<data folder>\screenshots`): Save Photo writes the game's own
+  JPEG (896 x 480 in 16:9) as RUU_0001.JPG, ...; Erase All reports no photo data and deletes
+  nothing; F1 > Game > SD Card toggle (on) and "Open screenshots folder".
 - **Save** [manual p. 5; disc]: NAND `rvforest.dat`, `banner.bin`; one town per console;
   36 blocks; save in bed or from the save icon; autosave when going out/coming back. Miis:
   `/shared2/menu/FaceLib/RFL_DB.dat` (Mii masks at Shampoodle, `d_menu_mii`), so the NAND HLE
