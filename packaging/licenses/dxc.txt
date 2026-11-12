@@ -1,7 +1,12 @@
-DirectX Shader Compiler (dxcompiler.dll, dxil.dll; Windows only), shipped with the prebuilt
-Dawn package (see dawn.txt). https://github.com/microsoft/DirectXShaderCompiler
-DXC is based on LLVM/Clang and is distributed under the LLVM Release License
-(University of Illinois/NCSA Open Source License):
+DirectX Shader Compiler (Windows only), shipped with the prebuilt Dawn package (see dawn.txt).
+https://github.com/microsoft/DirectXShaderCompiler
+
+dxil.dll (the DXIL validator, version 1.8.2502.11) is a binary signed by Microsoft, redistributed
+unmodified under the Microsoft software licence terms published with the DirectX Shader Compiler
+releases.
+
+dxcompiler.dll is built from the DirectX Shader Compiler sources, which are based on LLVM/Clang
+and distributed under the LLVM Release License (University of Illinois/NCSA Open Source License):
 
 ==============================================================================
 LLVM Release License

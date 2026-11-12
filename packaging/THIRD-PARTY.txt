@@ -9,7 +9,7 @@ Aurora                     MIT                             licenses/aurora.txt
 Dear ImGui                 MIT                             licenses/imgui.txt
 SDL 3                      zlib                            licenses/sdl3.txt
 Dawn (WebGPU)              BSD 3-Clause                    licenses/dawn.txt
-DirectX Shader Compiler    NCSA (Windows only)             licenses/dxc.txt
+DirectX Shader Compiler    NCSA; dxil.dll: Microsoft       licenses/dxc.txt (Windows only)
 nod (disc images)          MIT or Apache-2.0               licenses/nod.txt
 libpng                     libpng licence                  licenses/libpng.txt
 zlib-ng                    zlib                            licenses/zlib.txt
