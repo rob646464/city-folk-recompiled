@@ -6,8 +6,9 @@ set with its geometry and the move chosen from every item in 8 directions).
     py tools/nav/check.py <trace>... [--replay new|old] [--verbose] [--sets]
 
 --replay rebuilds tools/nav/replay.cpp with the current src/recomp/menu_nav.cpp and recomputes the
-moves of every logged set (new = current search, old = CF_NAV_OLD), so a change of the selection
-code is checked against every logged screen without a game run.
+moves of every logged set (new = current search, old = CF_NAV_OLD, whole = the first round's modal
+rules, CF_NAV_MODAL=whole), so a change of the selection code is checked against every logged
+screen without a game run.
 
 Rules (isotropic screen units: KPAD x * 16/9; boxes clipped to the screen like the game side):
   for a move from item S in a direction (left/right/up/down):
@@ -50,6 +51,7 @@ class G:
         self.n = it["n"]
         self.g = it["g"]
         self.hud = it["hud"]
+        self.ch = it.get("ch", 0)
         self.lo = (x0 * ASPECT, y0)
         self.hi = (x1 * ASPECT, y1)
         self.container = False
@@ -152,6 +154,11 @@ def check_set(st, moves, warn, navkeys):
             if overlap_frac(a, b) > 0.3 and (a.g, b.g) not in flagged:
                 flagged.add((a.g, b.g))
                 errs.append(("-", a.n, b.n, "behind (layouts %s and %s both navigable, drawn over each other)" % (a.g, b.g)))
+    # A choice box is modal: no item of another menu layout may take moves while its rows are up.
+    if any(g.ch for g in gs):
+        for g in gs:
+            if not g.hud and not g.ch:
+                errs.append(("-", g.n, "", "choice (navigable while a choice box is up)"))
     for src in gs:
         for d, (a, sign) in DIRS.items():
             to = moves.get((src.k, d))
@@ -257,8 +264,9 @@ def replay(sets, mode):
     for i, st in enumerate(sets):
         text.append("set %d %s %d" % (i, st["mode"], len(st["items"])))
         for it in st["items"]:
-            text.append("%s %s %d %d %d %.5f %.5f %.5f %.5f" % (it["k"], it["g"], it["hud"], it["t"], it.get("l", 0), *it["b"]))
-    out = subprocess.run([exe] + (["old"] if mode == "old" else []), input="\n".join(text) + "\n", capture_output=True,
+            text.append("%s %s %d %d %d %.5f %.5f %.5f %.5f %d" % (it["k"], it["g"], it["hud"], it["t"], it.get("l", 0), *it["b"],
+                                                                   it.get("ch", 0)))
+    out = subprocess.run([exe] + ([mode] if mode in ("old", "whole") else []), input="\n".join(text) + "\n", capture_output=True,
                          text=True, check=True).stdout
     moves = [dict() for _ in sets]
     nav = [set() for _ in sets]
@@ -274,7 +282,7 @@ def replay(sets, mode):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("traces", nargs="+")
-    ap.add_argument("--replay", choices=["new", "old"])
+    ap.add_argument("--replay", choices=["new", "old", "whole"])
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--warn", action="store_true", help="also unreachable / not-reversible warnings")
     ap.add_argument("--sets", action="store_true", help="print every set's items")

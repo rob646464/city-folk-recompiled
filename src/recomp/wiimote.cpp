@@ -171,7 +171,8 @@ struct Mouse {
     float x = 0, y = 0;                // window coordinates
     float x0 = 0, y0 = 0, w = 1, h = 1;  // the game picture inside the window (window coordinates)
     bool inside = false;
-    u32 seq = 0;  // bumped on every move
+    u32 moves = 0;      // bumped only when the mouse really moved (position changed)
+    double travel = 0;  // window pixels moved in total (the size of those moves)
 };
 std::mutex sMouseMutex;
 Mouse sMouse;
@@ -335,7 +336,11 @@ struct PortState {
     float px = 0, py = 0;       // pointer (stick/gyro integrate here, the mouse sets it)
     bool valid = true;
     enum Last : u8 { None, MouseDev, StickDev, GyroDev } last = None;
-    u32 mouseSeq = 0;
+    u32 mouseMoves = 0;         // Mouse::moves last seen
+    double mouseTravel = 0;     // Mouse::travel last seen
+    float mouseRecent = 0;      // pixels moved lately (decays over kMouseActive s): the mouse is in use
+    float freeDX = 0, freeDY = 0; // net stick / gyro pointer motion since the snap last placed it
+    float useDX = 0, useDY = 0;   // net stick motion not yet counted as a move (noise filter)
     double lastTime = 0;
     bool gyroOn = false;
     SDL_Gamepad* gyroPad = nullptr;
@@ -379,6 +384,14 @@ void poll() {
 const char* const sTimeoutEnv = std::getenv("CF_POINTER_TIMEOUT");
 const bool sTimeoutLog = sTimeoutEnv != nullptr || std::getenv("CF_WPAD_LOG") != nullptr;
 
+// The mouse is in use when its recent moves add up to kMouseUse window pixels (a sum that decays
+// over kMouseActive s): only then does it take the pointer, and Auto leaves a choice box to it
+// while it is being moved (a mouse nudged by a pixel or two, or resting, does neither). A stick
+// tilt past kStickDeliberate, or stick / gyro motion adding up to kNoiseMove KPAD units, moves the
+// pointer off a snapped item (noise and drift do not).
+constexpr double kMouseActive = 0.25, kNoiseWindow = 1.0;
+constexpr float kMouseUse = 4.0f, kStickDeliberate = 0.35f, kNoiseMove = 0.03f;
+
 float pointerTimeout(const Config& cfg) {
     if (sTimeoutEnv && *sTimeoutEnv) return std::max(0.0f, float(std::atof(sTimeoutEnv)));
     return script().empty() ? cfg.pointerTimeout : 0.0f;
@@ -421,6 +434,7 @@ public:
         // position stays until the next one.
         bool pointerMoved = false;  // a free pointer device (or a scripted position) moved it
         bool pointerUsed = false;   // ... deliberately: everything but the gyro (it never rests)
+        bool snapMoved = false;     // ... enough to let go of a menu item the snap holds (below)
         if (!script().empty()) {
             const u32 clk = scriptClock();
             const ScriptItem* latest = nullptr;
@@ -443,22 +457,39 @@ public:
                 ps.scriptOff = latest->pointerOff;
                 ps.scriptX = latest->px;
                 ps.scriptY = latest->py;
-                pointerMoved = pointerUsed = true;
+                pointerMoved = pointerUsed = snapMoved = true;
             }
         }
 
         // Pointer devices.
         if (!menuOpen) {
+            // The net motion sums leak away over kNoiseWindow s: drift never adds up to a move.
+            const float leak = float(std::exp(-dt / kNoiseWindow));
+            ps.useDX *= leak;
+            ps.useDY *= leak;
+            ps.freeDX *= leak;
+            ps.freeDY *= leak;
             if (rc.pointer & kPtrMouse) {
                 Mouse m;
                 {
                     std::lock_guard lk(sMouseMutex);
                     m = sMouse;
                 }
-                if (m.seq != ps.mouseSeq) {
-                    ps.mouseSeq = m.seq;
-                    ps.last = PortState::MouseDev;
-                    pointerMoved = pointerUsed = true;
+                ps.mouseRecent *= float(std::exp(-dt / kMouseActive));
+                if (m.moves != ps.mouseMoves) {
+                    ps.mouseMoves = m.moves;
+                    ps.mouseRecent += float(m.travel - ps.mouseTravel);
+                    ps.mouseTravel = m.travel;
+                    // Only a real move makes the mouse the pointer's device: not the window losing
+                    // the cursor (leave), a motion event without a position change or a nudge of a
+                    // pixel or two, which used to switch "Snap pointer to menu items" (Auto) off for
+                    // a pad player until the right stick moved the pointer again (the pointer then
+                    // also showed at the resting mouse on every menu).
+                    if (ps.mouseRecent >= kMouseUse) {
+                        ps.last = PortState::MouseDev;
+                        pointerMoved = pointerUsed = snapMoved = true;
+                        if (ps.scriptPointer) ps.scriptPointer = false;  // takes over from a scripted position
+                    }
                 }
                 if (ps.last == PortState::MouseDev) {
                     mouseToPointer(m, ps.px, ps.py);
@@ -476,7 +507,8 @@ public:
                     ps.valid = !ps.scriptOff;
                 }
                 if (cfg.stickAbsolute) {
-                    if (m > 0.02f) pointerMoved = pointerUsed = true;
+                    if (m > 0.5f * kStickDeliberate) pointerMoved = pointerUsed = true;  // not noise at the centre
+                    if (m > kStickDeliberate) snapMoved = true;
                     // While the snap holds the pointer on an item, a centred stick does not take it back.
                     if (m > 0.02f || (ps.last == PortState::StickDev && !ps.snapped)) {
                         ps.last = PortState::StickDev;
@@ -485,11 +517,23 @@ public:
                         ps.valid = true;
                     }
                 } else if (m > 0.02f) {
-                    pointerMoved = pointerUsed = true;
                     ps.last = PortState::StickDev;
                     // Speed grows with the square of the tilt: fine aim near the centre.
-                    ps.px += float(ptrX * m * cfg.stickSpeed * dt);
-                    ps.py -= float(ptrY * m * cfg.stickSpeed * dt);
+                    const float ddx = float(ptrX * m * cfg.stickSpeed * dt), ddy = float(-ptrY * m * cfg.stickSpeed * dt);
+                    ps.px += ddx;
+                    ps.py += ddy;
+                    ps.freeDX += ddx;
+                    ps.freeDY += ddy;
+                    ps.useDX += ddx;
+                    ps.useDY += ddy;
+                    // Moved / used (brings a hidden pointer back, restarts the timeout): a clear
+                    // tilt, or motion that adds up (slow aiming does within a moment); stick noise
+                    // and drift do not, so a worn stick no longer keeps the pointer on the screen.
+                    if (m > kStickDeliberate || std::hypot(ps.useDX, ps.useDY) > kNoiseMove) {
+                        pointerMoved = pointerUsed = true;
+                        ps.useDX = ps.useDY = 0;
+                    }
+                    if (m > kStickDeliberate) snapMoved = true;
                     ps.valid = true;
                 }
             }
@@ -509,8 +553,11 @@ public:
                     if (std::fabs(yaw) + std::fabs(pitch) > 0.03f) {
                         pointerMoved = true;
                         ps.last = PortState::GyroDev;
-                        ps.px -= float(yaw * cfg.gyroSensitivity * dt);
-                        ps.py -= float(pitch * cfg.gyroSensitivity * dt);
+                        const float ddx = -float(yaw * cfg.gyroSensitivity * dt), ddy = -float(pitch * cfg.gyroSensitivity * dt);
+                        ps.px += ddx;
+                        ps.py += ddy;
+                        ps.freeDX += ddx;
+                        ps.freeDY += ddy;
                         ps.valid = true;
                     }
                 }
@@ -518,10 +565,18 @@ public:
             // Snap pointer to menu items (menu_nav.h): on a pointer-driven screen the D-pad and
             // the Nunchuk stick move the pointer between the screen's items.
             {
+                // What counts as moving the pointer freely for the snap (it lets go of the item it
+                // holds): the mouse really moving, a scripted position, a clear stick tilt, or
+                // stick / gyro motion that adds up to kNoiseMove KPAD units since the snap put the
+                // pointer there. Stick noise and drift, gyro jitter, or a mouse event without a
+                // position change (leaving the window) do not: they moved the pointer before, which
+                // let go of the item and, on a choice box, left the pointer where it was.
+                if (std::hypot(ps.freeDX, ps.freeDY) > kNoiseMove) snapMoved = true;
                 menunav::Input ni;
                 ni.mode = rc.snap;
                 ni.mouseDrives = ps.last == PortState::MouseDev && !ps.scriptPointer;
-                ni.pointerMoved = pointerMoved;
+                ni.mouseActive = ni.mouseDrives && ps.mouseRecent >= kMouseUse;
+                ni.pointerMoved = snapMoved;
                 ni.buttons = buttons;
                 ni.stickX = sx;
                 ni.stickY = sy;
@@ -536,16 +591,18 @@ public:
                 // The D-pad / left stick picked a menu item, Recenter went onto the toolbar, or a
                 // choice box that just appeared got the pointer (a hidden pointer shows on its row).
                 constexpr u32 kNavButtons = kBtnUp | kBtnDown | kBtnLeft | kBtnRight | kBtnRecenter;
-                if (no.setPointer &&
-                    (no.placed || (ni.buttons & kNavButtons) || std::sqrt(ni.stickX * ni.stickX + ni.stickY * ni.stickY) > 0.55f))
-                    pointerUsed = true;
+                const bool snapPlaced = no.setPointer && (no.placed || (ni.buttons & kNavButtons) ||
+                                                          std::sqrt(ni.stickX * ni.stickX + ni.stickY * ni.stickY) > 0.55f);
+                if (snapPlaced) pointerUsed = true;
                 // A screen that closes while the snap still holds the pointer on one of its items
                 // (B, or A on a choice): the pointer would stay where the item slid away to, at the
                 // bottom of the screen on the field toolbar, and the next A would click a toolbar
                 // slot instead of using the tool. It goes back where it was before the snap took
                 // it and leaves the screen, like a toggled-off pointer, until it is used again.
                 // (A scripted pointer goes back to what the script last said, on or off.)
-                if (pointerMoved) ps.snapHeld = false;
+                if (snapMoved) ps.snapHeld = false;
+                // The net stick / gyro motion counts from where the snap last put the pointer.
+                if (snapMoved || !no.setPointer || snapPlaced) ps.freeDX = ps.freeDY = 0;
                 if (no.setPointer && no.active) {
                     if (!ps.snapHeld) {
                         ps.snapHeld = true;
@@ -798,6 +855,10 @@ void handleEvent(const SDL_Event& ev) {
         float x0, y0, pw, ph;
         pictureRect(w, h, x0, y0, pw, ph);
         std::lock_guard lk(sMouseMutex);
+        if (std::fabs(ev.motion.x - sMouse.x) >= 1.0f || std::fabs(ev.motion.y - sMouse.y) >= 1.0f) {
+            sMouse.moves++;
+            sMouse.travel += std::hypot(double(ev.motion.x - sMouse.x), double(ev.motion.y - sMouse.y));
+        }
         sMouse.x = ev.motion.x;
         sMouse.y = ev.motion.y;
         sMouse.x0 = x0;
@@ -805,13 +866,11 @@ void handleEvent(const SDL_Event& ev) {
         sMouse.w = pw;
         sMouse.h = ph;
         sMouse.inside = ev.motion.x >= 0 && ev.motion.y >= 0 && ev.motion.x < w && ev.motion.y < h;
-        sMouse.seq++;
         break;
     }
     case SDL_EVENT_WINDOW_MOUSE_LEAVE: {
         std::lock_guard lk(sMouseMutex);
         sMouse.inside = false;
-        sMouse.seq++;
         break;
     }
     case SDL_EVENT_WINDOW_MOUSE_ENTER: {
@@ -823,7 +882,51 @@ void handleEvent(const SDL_Event& ev) {
     }
 }
 
+// Test aid CF_MOUSE_MOVE="<guest frame>:<x>/<y>[*<n>],..." (branch choice-snap): from that guest
+// frame on, a mouse motion event to (x, y) = fractions of the window, through SDL's event queue
+// like a real mouse; *n = n events on consecutive host frames, 1 pixel apart (a mouse being moved).
+// Each item fires once. With --input the first real move also ends the scripted pointer position.
+void mouseScriptFrame() {
+    struct Move {
+        u32 frame;
+        float x, y;
+        int n;
+        int done = 0;
+    };
+    static std::vector<Move> moves = [] {
+        std::vector<Move> v;
+        const char* s = std::getenv("CF_MOUSE_MOVE");
+        for (std::string str = s ? s : ""; !str.empty();) {
+            const size_t c = str.find(',');
+            Move m{};
+            m.n = 1;
+            if (std::sscanf(str.substr(0, c).c_str(), "%u:%f/%f*%d", &m.frame, &m.x, &m.y, &m.n) >= 3) v.push_back(m);
+            str = c == std::string::npos ? "" : str.substr(c + 1);
+        }
+        return v;
+    }();
+    if (moves.empty()) return;
+    SDL_Window* win = aurora_get_window();
+    if (!win) return;
+    int w = 0, h = 0;
+    SDL_GetWindowSize(win, &w, &h);
+    for (auto& m : moves) {
+        if (game::guestFrames() < m.frame || m.done >= std::max(m.n, 1)) continue;
+        SDL_Event ev{};
+        ev.type = SDL_EVENT_MOUSE_MOTION;
+        ev.motion.timestamp = SDL_GetTicksNS();
+        ev.motion.windowID = SDL_GetWindowID(win);
+        ev.motion.x = m.x * float(w) + float(m.done);
+        ev.motion.y = m.y * float(h);
+        ev.motion.xrel = m.done ? 1.0f : 0.0f;
+        SDL_PushEvent(&ev);
+        if (m.done == 0) log("[wiimote] CF_MOUSE_MOVE: mouse to %.0f,%.0f at guest frame %u", ev.motion.x, ev.motion.y, game::guestFrames());
+        m.done++;
+    }
+}
+
 void hostFrame() {
+    mouseScriptFrame();
     bool mousePoints = false, hide = false;
     {
         std::lock_guard lk(sMutex);

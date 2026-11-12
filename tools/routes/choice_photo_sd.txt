@@ -1,0 +1,16 @@
+# Photos window's SD Card box (docs/CONTROLS.md "Choice boxes", round 2): a photo with the pointer
+# on the screen (1), Photos (2), the pointer on the SD Card button and A: "Save Photo / Erase All /
+# Quit" (chc_win) gets the pointer on Save Photo; the SD Card button is not navigable while the box
+# is up (modal). The photo shows the pointer: the game captures the finished frame (Dolphin too).
+# Env CF_FIXTURE=user-town-clean;CF_FF=1-4400;CF_NAV_LOG=1. Verified 2026-11-11.
+include continue_any.txt
+5240:A
++60:A ~6
+after link d_bgo_drawNP 2
++1400:@0.6/-0.4
++60:1
++300:2
++300:@0/0.57
++60:A
++400:B
++200:B

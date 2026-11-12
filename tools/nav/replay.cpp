@@ -3,11 +3,13 @@
 // CF_NAV_TRACE file and prints the move src/recomp/menu_nav.cpp picks from every item in 8
 // directions, so the selection code can be checked against every logged screen without a game run.
 // Built by check.py (clang++ -DMENUNAV_REPLAY with src/recomp/menu_nav.cpp).
-//   stdin:  "set <id> <menu|toolbar> <n>" then n lines "<key> <group> <hud> <tested> <layer> <x0> <y0> <x1> <y1>"
-//           (every visible item of the frame)
+//   stdin:  "set <id> <menu|toolbar> <n>" then n lines "<key> <group> <hud> <tested> <layer> <x0> <y0> <x1> <y1>
+//           [<choice>]" (every visible item of the frame; choice = a choice box row, traces since
+//           choice-snap round 2)
 //   stdout: "n <id> <key>" for each navigable item (the modal rules applied), "m <id> <from> <dir>
 //           <to|->" and "c <id> <key>" for containers
-//   argv[1] == "old": the first version's search (CF_NAV_OLD)
+//   argv[1] == "old": the first version's search (CF_NAV_OLD); "whole": the first round's modal
+//   rules (CF_NAV_MODAL=whole)
 #include "recomp/game.h"
 #include "recomp/menu_nav.h"
 
@@ -35,6 +37,7 @@ namespace menunav::replay {
 const Item* move(const std::vector<Item>& items, const Item& cur, float dx, float dy, bool hudOnly);
 bool container(const std::vector<Item>& items, size_t i);
 void setOld(bool on);
+void setModalWhole(bool on);
 std::vector<Item> nav(const std::vector<Item>& all, bool& hudOnly);
 }  // namespace menunav::replay
 }  // namespace recomp
@@ -42,6 +45,7 @@ std::vector<Item> nav(const std::vector<Item>& all, bool& hudOnly);
 int main(int argc, char** argv) {
     using namespace recomp::menunav;
     replay::setOld(argc > 1 && std::strcmp(argv[1], "old") == 0);
+    replay::setModalWhole(argc > 1 && std::strcmp(argv[1], "whole") == 0);
     static const struct {
         const char* n;
         float x, y;
@@ -56,8 +60,10 @@ int main(int argc, char** argv) {
         for (auto& it : all) {
             if (!std::fgets(line, sizeof line, stdin)) return 1;
             unsigned key = 0, group = 0, layer = 0;
-            int hud = 0, tested = 0;
-            std::sscanf(line, "%x %x %d %d %u %f %f %f %f", &key, &group, &hud, &tested, &layer, &it.x0, &it.y0, &it.x1, &it.y1);
+            int hud = 0, tested = 0, choice = 0;
+            std::sscanf(line, "%x %x %d %d %u %f %f %f %f %d", &key, &group, &hud, &tested, &layer, &it.x0, &it.y0, &it.x1, &it.y1,
+                        &choice);
+            it.choice = choice != 0;
             it.key = key;
             it.group = group;
             it.hud = hud != 0;

@@ -401,7 +401,16 @@ the emulated source only; real Wii Remotes point themselves).
 **Default Auto** (on for every port): snapping is active while the port's pointer was last placed by
 something other than the mouse (gamepad D-pad / sticks / gyro, or nothing yet). The first mouse
 movement turns it off until a controller moves the pointer again, so mouse play is exactly the
-original (the D-pad then reaches the game in menus too). Reason: a gamepad player gets menu
+original (the D-pad then reaches the game in menus too). Since branch choice-snap round 2 only
+real use of the mouse counts and it no longer switches the snap off for good: the mouse takes the
+pointer when its recent moves add up to 4 window pixels (a sum decaying over 0.25 s,
+wiimote.cpp `kMouseUse`), so the cursor leaving the window, a motion event without a position
+change or a nudge of a pixel or two do nothing (each of these used to make the mouse the pointer's
+device: the pointer then showed at the resting OS cursor on every menu and the D-pad and choice
+boxes ignored it until the right stick moved it); a choice box that appears still gets the
+pointer unless the mouse is being moved at that moment (below); and a D-pad / left stick press
+or Recenter on a menu while the mouse rests takes the pointer back for the pad (`[nav] ... the
+pad takes the pointer from the mouse`), until the mouse is moved again. Reason: a gamepad player gets menu
 navigation without finding an option, a mouse player never notices it; the D-pad / stick change
 meaning only while a pointer screen is up, where the game does not use them (it walks and changes
 tools with them in the field, which stays unchanged). On = also while the mouse points; Off = the
@@ -450,6 +459,32 @@ is on the grid, so the first version's rule (any tested item = only tested items
 buttons navigable there, and on a slot the buttons dropped out instead (the set flipped with the
 pointer). `CF_NAV_OLD=1` keeps that rule for A/B.
 
+**Two panels over the pockets** (branch choice-snap round 2; user report "cursor wont move to the
+yellow menu with dpad or control stick controls while using the recycle bin"). The Town Hall's
+recycle bin (d_menu_item05NP: 2 x 6 bin slots `BC_00..11` and `B_btn_00` Close, hit-tested every
+frame) is drawn over the upper half of the pockets (d_menu_itemNP, drawn only): the pockets'
+player circle `BC_player` and the wallet / letter buttons `B_btnL_00/01` lie under the bin's
+panel, the 15 item slots below it stay visible and in use. The pockets' letters panel (the letter
+button: 10 letter slots `B_ltrWin_00..09`) is the same arrangement, and there the game hit-tests
+the pocket slots every frame while the letters are up (they take items onto letters). Round 1 left
+the pockets out as a whole in both: the bin's items overlapped the pockets' extent (the tested /
+drawn rule), and the letters, drawn later, hid every item of the pockets (the rule below); in the
+bin the pointer stopped at Close (nothing below it), so no item could be moved with a pad. Now
+both rules leave out item by item: a pocket item that lies under an item of the screen in front
+(more than 30 % of the smaller one) is out, the rest stays; a layout is out as a whole only when
+half of its items or more lie under the screen in front. A choice box is modal regardless (the
+"Drop / Carry / Quit" popup over the pockets, any box over another screen). Moves: Close down to
+the middle slot of the second pocket row, left / right to the pocket slots beside it, the pocket
+slots up into the bin's columns, the bin's second row down to the pockets or Close. An item is
+moved as with the pointer: hold A on it, move with the D-pad / stick, let go over the slot (also
+the bin <-> pockets). A/B `CF_NAV_MODAL=whole` (the round-1 rules); `py tools/nav/check.py
+--replay whole|new` replays a trace with either.
+The other pocket screens: the item pickers (donate, sell, d_menu_item02NP) have their buttons
+beside the pockets (unchanged: navigable before already); dresser / closet storage, a present for
+a letter and giving an item to a villager were not reached by script (see Verified, round 2): the
+rule is the same for any screen built like these (a panel over the pockets' top), nothing in it is
+specific to the recycle bin.
+
 **Choice boxes: the pointer starts on the highlighted choice** (branch choice-snap; user report "when
 a choice text box appears, the cursor doesn't always snap to the choices immediately"). Before,
 nothing put the pointer on a box when it appeared: the snap only acted on the first D-pad press,
@@ -460,8 +495,8 @@ row and no hand, and the first D-pad press only put the hand on the row nearest 
 (Rover's first box with the pointer away: DOWN landed on "Yeah!" and did not move); over the
 pockets the D-pad's selection was on the slot, which the popup hides, so the snap re-found it on
 the popup's row nearest the slot (Quit, the cancel row, at once); a pointer left over the box by
-the right stick showed the hand on whatever row it was over. Now, in snap mode (Auto while the
-mouse did not place the pointer last, or On; never Off, never real Wii Remotes), every choice box
+the right stick showed the hand on whatever row it was over. Now, in snap mode (Auto, On; never Off, never real Wii Remotes; in Auto also while the mouse
+placed the pointer last, unless it is being moved: round 2), every choice box
 gets the pointer on its highlighted row as soon as it shows, and A takes it, the D-pad moves from
 it:
 
@@ -485,10 +520,33 @@ it:
   (`CF_CHOICE_PLACE=wait` waits until it has opened: `csr_00` resting on a row 2 frames or the rows
   hit-tested 2 frames, at most 20 frames; about 9 frames, 0.15 s, after the box showed). Measured
   with `wait`: Rover's boxes and the pockets popup open in 7 frames. A D-pad / stick press
-  or Recenter in the same sample places first and then moves from the top row; a free pointer move
-  on the box's first frame (right stick, mouse in On, gyro, a scripted `@x/y`) leaves the box to the
-  pointer. While a box waits (`wait` mode) a selection that vanished under it (the pockets slot under
+  or Recenter in the same sample places first and then moves from the top row. Where the pointer
+  was and whether it showed does not matter (round 2, report "if the cursor is already on screen,
+  it doesn't instantly snap to a choice, you have to move the cursor"): a pointer resting anywhere
+  on the screen, one left over the box, one moved by the right stick a moment ago or still being
+  moved by it, one under stick noise or drift, and one the mouse placed last (Auto, the mouse
+  resting) all go onto the row; a stick still held after the placement then moves the pointer on
+  from the row. The one exception is the mouse being moved at that moment (`kMouseUse` above): the
+  box is left to it, as aiming with the mouse is the original play (`left to the mouse (being
+  moved)`). Round 1 instead left the box to the pointer whenever any pointer device moved it on the
+  box's first frame: right-stick noise above 0.02 after the dead zone counted (it also kept the
+  pointer from timing out, so it was always on the screen), and with "Mouse + stick" any mouse
+  event made the whole snap Auto-off. Noise is now told from use (wiimote.cpp): the stick moves the
+  pointer off a snapped item only past a tilt of 0.35 or when its motion adds up to 0.03 KPAD units
+  (sums leaking over 1 s, so drift never does); the same sum decides whether the stick counts as
+  using the pointer (timeout, toggle); the gyro by its summed motion likewise. While a box waits (`wait` mode) a selection that vanished under it (the pockets slot under
   the popup) is not re-found on one of its rows, so a hover never replaces the default.
+- A choice box is modal (round 2): while its rows are up the screen it was opened from takes no
+  moves (the SD Card button under the Photos window's "Save Photo / Erase All / Quit", the pockets
+  under "Drop / Carry / Quit", the design list under "Wear / ... / Quit"); before, the SD Card
+  button stayed reachable from the box.
+- The Photos window (camera: 1 takes a photo, 2 opens Photos; d_menu_photoNP) > "SD Card" opens a
+  chc_win box ("Save Photo / Erase All / Quit", rows `B_msg_00..02`) and gets the placement like
+  any other. A second hand seen in that window (user's screenshot, over the photo) is part of the
+  photo: the game's capture (fn_802B7A7C, an EFB copy of the finished frame when 1 is pressed)
+  takes the 2D overlay with it, clock, toolbar and the pointer included. Dolphin does the same
+  (reference run with the IR pointer on the screen: the photo shows the clock, the toolbar and the
+  hand), so it is the game's own picture, not a second pointer of ours.
 - A hidden pointer (timed out, toggled off, hidden by the previous box) is shown on the row (the
   placement counts as using the pointer), and the timeout stays off while the box is up.
 - Chains: every box is a new placement. Boxes of one talk reuse the same layout and panes, but
@@ -500,10 +558,10 @@ it:
   until used; scripted runs: back to what the script said). A popup over a screen that stays (Drop /
   Quit over the pockets) gives the selection back to the item it was opened from (the slot), so B
   or Quit leaves the hand on the slot.
-- Off / mouse (Auto) / real Wii Remotes: nothing changes. A/B `CF_CHOICE_PLACE=0` (no placement,
+- Off / a mouse being moved (Auto) / real Wii Remotes: nothing changes. A/B `CF_CHOICE_PLACE=0` (no placement,
   the old behaviour). Log lines with `CF_NAV_LOG=1`: `choice box up (N rows) at frame F`, `game's
   cursor <row>`, `pointer onto <row> (game's cursor | top row) after N frames`, `choice box closed,
-  back to <item>`, `left to the pointer (moved freely)`. Test aid `CF_CHOICE_SHOT=<dir>[,<frames>...]`
+  back to <item>`, `left to the mouse (being moved)`. Test aid `CF_CHOICE_SHOT=<dir>[,<frames>...]`
   (efb_copy.cpp): a render-resolution screenshot `<dir>/choice<frame>.ppm` that many frames after
   each placement (default 6; the image lags the guest frame by a few frames under load: 15-20
   shows the hand); `CF_NAV_TREE=1` lists every pane of small menu layouts every 10 frames (how
@@ -529,6 +587,33 @@ choice_rover_dpad.txt, choice_pockets.txt, choice_nook_timeout.txt (new), save_q
 museum_donate.txt, nook_sell.txt, gameplay_gracie_buy.txt, gameplay_letter_villager.txt with snap
 Auto. PAL / Japan / Korea not run: the code reads only pane
 names of `chc_win.arc` (byte-identical on all four discs) through hooks tagged `all`.
+
+Verified, round 2 (USA, `user-town-clean`, snap Auto, settings `remote1_pointer=mouse+stick` as the
+user's; before = main with round 1, after = this branch; Rover's first box at guest frame 2222):
+| Pointer when the box shows | before | after |
+|---|---|---|
+| left on the screen, nothing moved | placed | placed |
+| mouse moved at frame 1800, resting | not placed (Auto off: the hand stays at the mouse) | placed |
+| mouse being moved (120 events from 2150) | not placed | left to the mouse (as intended) |
+| right-stick noise +-0.15 (virtual pad) | left to the pointer (moved freely) | placed |
+| right stick moved, stopped 7 frames before | placed | placed |
+| right stick held across the box | left to the pointer | placed, then moved on by the stick |
+Also after: the pad takes the pointer from a resting mouse on the town map (`CF_MOUSE_MOVE` then
+D-pad: map and pockets moves as without a mouse), and while the mouse moves the D-pad reaches the
+game as before; Rover far / D-pad, pockets popup (placed on Drop, back to the slot), Nook with a
+timed-out pointer, Blathers (donated by D-pad), Nook's sell picker (sold), Labelle's and Pelly's
+chains (every box placed), the Photos SD Card box (placed, modal), the letters panel (pocket slots
+reachable), the recycle bin (moves between bin, Close and all pocket rows; the shirt dragged into
+the bin with A held), snap Off (no moves, nothing placed), 120 fps interpolated (Rover with stick
+noise, the recycle bin drag): all as described; no FATAL / missing HLE / hang in any log.
+tools/nav/check.py: 0 errors on every round-2 trace (44 sets from the routes above, also
+`--replay new` with the snap-donate and earlier traces, 56 sets); `--replay whole` (round 1's
+rules) reports 2 (the SD Card button and the letter button navigable next to a choice box). 4K
+shots: out/choice_snap_r2/ of the worktree. Routes: tools/routes/choice_pointer_left.txt (+
+choice_noise_pad.txt), choice_photo_sd.txt, recycle_bin_dpad.txt, letters_pockets_dpad.txt,
+map_pockets_dpad.txt. Not reached by script: dresser / closet storage, a present attached to a
+letter, giving an item to a villager (the same rule applies), a real mouse and gamepad, PAL / Japan
+/ Korea.
 
 Scripted routes: a scripted pointer that rests somewhere when a box appears is moved onto the
 highlighted row like any other pointer, so A takes the first choice, as it did before with a
@@ -576,7 +661,10 @@ only after the screen is gone, or set `[wiimote] remote1_snap=off` for pointer-o
 **The screen in front is modal** (menu_nav.cpp `navigable()`): besides the tested/drawn rule above,
 of two menu layouts that both hit-test and overlap (the design list's "Wear / Display on Ground /
 Edit Design / Quit" submenu over the patterns; the letters over the pockets) the one drawn later is
-in front and every item of the one behind is left out. Draw order = the order of the root panes'
+in front: the items of the one behind that lie under its items are left out, the whole layout when
+half of its items or more do (round 2: before, every item of the one behind; the design submenu is
+a choice box and stays modal by the choice rule, the letters now leave the pocket slots below them
+reachable, "Two panels over the pockets" above). Draw order = the order of the root panes'
 draws in the frame (`Item::layer`, from `cf::navLayoutDrawn`). Only layouts of several items count
 as "in front" (the town map's house markers are one-item layouts that may touch each other), and
 the HUD toolbar is never left out (it stays reachable below every screen, as before).
@@ -647,7 +735,14 @@ reports no items: open), title file select (Rover's choices are covered).
 Test aids: script tokens `UP DOWN LEFT RIGHT STICK*` drive it like a pad, `RECENTER` presses
 "Recenter pointer"; a scripted `@x/y` counts as a free pointer move. `CF_NAV_LOG=1` (each item set
 as it becomes navigable, every selection change, toolbar enter/leave), `CF_NAV_DUMP=1` (every hit-test
-source with its scale and items, every 30 frames), `CF_NAV_TRACE=<file>` (above), `CF_NAV_OLD=1`.
+source with its scale and items, every 30 frames), `CF_NAV_TRACE=<file>` (above), `CF_NAV_OLD=1`,
+`CF_NAV_MODAL=whole` (round 1's modal rules). `CF_MOUSE_MOVE="<guest frame>:<x>/<y>[*<n>],..."`
+(wiimote.cpp): a mouse motion event to (x, y) = fractions of the window through SDL's event queue,
+`*n` = n events on consecutive host frames 1 pixel apart (a mouse being moved); it also ends a
+scripted pointer position, as a real mouse does. Stick noise / a right-stick move for the snap:
+`CF_VIRTUAL_PAD` with `rightx=` steps (the pad must be attached; run.ps1 hides real controllers).
+Traces carry `"ch"` (choice rows) since round 2; check.py reports a non-choice menu item navigable
+next to a choice box (`choice`).
 
 ## Pointer in ultrawide
 
