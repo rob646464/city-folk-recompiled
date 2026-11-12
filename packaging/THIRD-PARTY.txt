@@ -8,11 +8,11 @@ Component                  Licence                         File
 Aurora                     MIT                             licenses/aurora.txt
 Dear ImGui                 MIT                             licenses/imgui.txt
 SDL 3                      zlib                            licenses/sdl3.txt
-Dawn (webgpu_dawn.dll)     BSD 3-Clause                    licenses/dawn.txt (when present)
-DirectX Shader Compiler    NCSA / Microsoft (dxil.dll)     licenses/dxc.txt (when present)
-nod (nod.dll)              MIT or Apache-2.0               licenses/nod.txt (when present)
+Dawn (WebGPU)              BSD 3-Clause                    licenses/dawn.txt
+DirectX Shader Compiler    NCSA; dxil.dll: Microsoft       licenses/dxc.txt (Windows only)
+nod (disc images)          MIT or Apache-2.0               licenses/nod.txt
 libpng                     libpng licence                  licenses/libpng.txt
-zlib                       zlib                            licenses/zlib.txt
+zlib-ng                    zlib                            licenses/zlib.txt
 FreeType                   FreeType Licence (FTL)          licenses/freetype.txt, licenses/freetype-FTL.txt
 {fmt}                      MIT                             licenses/fmt.txt
 xxHash                     BSD 2-Clause                    licenses/xxhash.txt
@@ -20,9 +20,17 @@ Zstandard                  BSD                             licenses/zstd.txt
 Abseil                     Apache-2.0                      licenses/abseil.txt
 Tracy (client)             BSD 3-Clause                    licenses/tracy.txt
 SQLite                     public domain                   -
-LLVM clang / lld-link      Apache-2.0 WITH LLVM-exception  llvm/LLVM-LICENSE.TXT
+LLVM clang / lld           Apache-2.0 WITH LLVM-exception  llvm/LLVM-LICENSE.TXT
+
+On Linux, libpng, zlib, FreeType, Zstandard and SQLite are the system's own libraries and are
+not part of the package (their licence files are then not in the licenses folder).
 
 Portions of this software are copyright (c) The FreeType Project (www.freetype.org).
 All rights reserved.
+
+Data services the program can use (both optional, off by default):
+- Real-time weather: weather data by Open-Meteo.com (https://open-meteo.com), CC BY 4.0.
+- Nintendo events: distribution archive courtesy of WiiLink (https://wiilink.ca), downloaded
+  at run time, never included in the package.
 
 No Nintendo code or data is included: the game is built on your PC from your own disc.

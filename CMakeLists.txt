@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(cfport LANGUAGES C CXX VERSION 0.0.1)
+project(cfport LANGUAGES C CXX VERSION 1.0.0)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 20)
@@ -229,13 +229,14 @@ install(FILES data/pipelines.bin DESTINATION . OPTIONAL)
 install(FILES packaging/LLVM-LICENSE.TXT DESTINATION llvm)
 # Third-party licence texts (packaging/THIRD-PARTY.txt lists them): copied from the sources the
 # program was built from. The prebuilt Dawn / DXC / nod downloads carry no licence file; their
-# texts go into packaging/licenses/<name>.txt (installed when present).
+# texts are in packaging/licenses/<name>.txt.
 install(FILES packaging/THIRD-PARTY.txt DESTINATION .)
 set(_deps_src ${CMAKE_BINARY_DIR}/_deps)
 foreach (_lic
         "aurora|${CMAKE_SOURCE_DIR}/extern/aurora/LICENSE"
         "imgui|${_deps_src}/imgui-src/LICENSE.txt"
         "sdl3|${_deps_src}/sdl3_prebuilt-src/licenses/SDL3/LICENSE.txt"
+        "sdl3|${_deps_src}/sdl-src/LICENSE.txt"  # SDL built from source (Linux, macOS)
         "libpng|${_deps_src}/png-src/LICENSE"
         "zlib|${_deps_src}/zlib-src/LICENSE.md"
         "freetype|${_deps_src}/freetype-src/LICENSE.TXT"
@@ -246,7 +247,6 @@ foreach (_lic
         "abseil|${_deps_src}/abseil-cpp-src/LICENSE"
         "tracy|${_deps_src}/tracy-src/LICENSE"
         "dawn|${CMAKE_SOURCE_DIR}/packaging/licenses/dawn.txt"
-        "dxc|${CMAKE_SOURCE_DIR}/packaging/licenses/dxc.txt"
         "nod|${CMAKE_SOURCE_DIR}/packaging/licenses/nod.txt")
     string(REPLACE "|" ";" _lic "${_lic}")
     list(GET _lic 0 _name)
@@ -254,6 +254,8 @@ foreach (_lic
     install(FILES "${_file}" DESTINATION licenses RENAME "${_name}.txt" OPTIONAL)
 endforeach ()
 if (WIN32)
+    # dxcompiler.dll / dxil.dll come with Dawn's Windows package only.
+    install(FILES packaging/licenses/dxc.txt DESTINATION licenses)
     install(FILES packaging/windows/README.txt DESTINATION .)
     install(CODE "
         file(GLOB _dlls \"$<TARGET_FILE_DIR:CityFolkRecomp>/*.dll\")

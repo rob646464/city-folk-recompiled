@@ -155,6 +155,12 @@ try {
     } else {
         throw "release notes $notesSrc missing"
     }
+    # Unfinished notes: items still marked "[PLACEHOLDER ...]" (filled in when their branch merges).
+    $placeholders = @([regex]::Matches($notesTemplate, '\[PLACEHOLDER[^\]]*\]') | ForEach-Object { $_.Value })
+    if ($placeholders.Count) {
+        foreach ($p in $placeholders) { Write-Host "Release notes placeholder: $($p.Substring(0, [math]::Min(100, $p.Length)))" -ForegroundColor Yellow }
+        if (-not $DryRun) { throw "$notesSrc still has $($placeholders.Count) placeholder(s): fill them in first" }
+    }
     Step "$(if ($DryRun) { 'Dry run of the release of' } else { 'Releasing' }) $product $version ($tag)"
 
     $branch = (git rev-parse --abbrev-ref HEAD).Trim()

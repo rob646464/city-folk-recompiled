@@ -65,7 +65,10 @@ docs/MACOS.md), with City Folk's names:
   (packages and notes in `out/`, placeholder notes when the file is missing) but never pushes,
   starts a workflow, tags or publishes; it prints the `gh release create` command instead.
 
-No releases or tags exist yet; the repository is private (the updater reports "No published release was found yet").
+The first public release is v1.0.0 (branch release-1.0: version bump, `packaging/release_notes/v1.0.0.md`,
+README.md, `packaging/licenses/` for the prebuilt Dawn / DXC / nod). Release notes may not be published
+while they still contain a `[PLACEHOLDER` marker: `release_windows.ps1` stops on one (a dry run only warns).
+Before the repository is public, the updater reports "No published release was found yet".
 
 ## Discs
 
