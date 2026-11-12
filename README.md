@@ -15,7 +15,7 @@ All options are in the **F1** menu, and everything that changes the game is off 
 - **Controls:** the Wii pointer from the mouse, a stick or gyro, menus with a normal controller, real Wii Remotes (Bluetooth or DolphinBar), PC keyboard typing, DSU motion controllers.
 - **Online play restored** between players of this port: a room list with one-click join, passwords, voice chat from your microphone, keyboard chat and letters between towns.
 - **Nintendo events** (the WiiConnect24 distribution items, designs and letters, from WiiLink's archive, downloaded at run time), content from other regions, hemisphere choice, real-time weather, grass wear and skin tone options, unused items at Nook's.
-- **Save import/export** with Dolphin and Wii backups, a **Mii maker**, and moving in from **Wild World** with a DS save file.
+- **Save import/export** with Dolphin and Wii backups, a **Mii maker**, moving in from **Wild World** with a DS save file, and in-game photos saved to a `screenshots` folder (Photos > SD Card).
 
 ## Building from source
 The repository holds only original code: the recompiler, the runtime and HLE, hooks, function tables (addresses and names) and tools. Building the shipped program needs no game data.
