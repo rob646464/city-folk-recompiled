@@ -1176,15 +1176,11 @@ static void roomList() {
     const std::string url = lobbyUrl();
     auto ls = lobby::state();
     net::session().lanScan(true);
-    if (!url.empty() && !ls.loading && (ls.url != url || ls.age < 0 || ls.age > 10) && !(ls.age < 0 && !ls.error.empty() && ls.url == url))
+    // No automatic refresh (saves lobby requests): the list is fetched once when it is first shown
+    // (or the lobby server changes), then only by the Refresh button. A failed fetch is not retried.
+    if (!url.empty() && !ls.loading && (ls.url != url || (ls.age < 0 && ls.error.empty())))
         lobby::refresh(url, {});
-    // After a failed fetch the next automatic try comes 10 s later.
-    static double sRetryAt = 0;
-    if (!url.empty() && !ls.loading && ls.age < 0 && !ls.error.empty() && ls.url == url && secs() > sRetryAt) {
-        sRetryAt = secs() + 10;
-        lobby::refresh(url, {});
-    }
-    if (menu::SmallButton("Refresh") && !url.empty()) lobby::refresh(url, {});
+    if (menu::SmallButton("Refresh") && !url.empty() && !ls.loading) lobby::refresh(url, {});
     ImGui::SameLine();
     if (url.empty()) {
         ImGui::TextColored(ImVec4(1, 0.75f, 0.3f, 1), "No lobby server set");
@@ -1195,7 +1191,7 @@ static void roomList() {
     } else if (ls.url != url || ls.age < 0) {
         ImGui::TextDisabled("Asking the lobby...");
     } else {
-        ImGui::TextDisabled("%s, updated %d s ago (every 10 s)%s", url.substr(url.find("://") + 3).c_str(), int(ls.age),
+        ImGui::TextDisabled("%s, updated %d s ago%s", url.substr(url.find("://") + 3).c_str(), int(ls.age),
                             ls.relay ? "" : ", no relay");
         if (!ls.relay)
             ImGui::SetItemTooltip("This lobby has no relay: two players whose routers both refuse direct\n"
@@ -1204,7 +1200,7 @@ static void roomList() {
     if (ls.url != url) ls.rooms.clear();
     const auto rows = buildRows(ls);
     if (rows.empty()) {
-        ImGui::TextDisabled("%s", url.empty() ? "No rooms on your network right now." : "No rooms right now. Host one below, or wait for the next update.");
+        ImGui::TextDisabled("%s", url.empty() ? "No rooms on your network right now." : "No rooms right now. Host one below, or press Refresh to look again.");
     } else if (ImGui::BeginTable("rooms", 7, ImGuiTableFlags_BordersInner | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("##lock", ImGuiTableColumnFlags_WidthFixed, ImGui::GetTextLineHeight());
         ImGui::TableSetupColumn("Room", ImGuiTableColumnFlags_WidthStretch, 1.0f);

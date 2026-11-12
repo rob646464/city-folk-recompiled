@@ -835,8 +835,9 @@ meanwhile. F1 friends stay as before (letters, friends-only rooms). Blocked play
 ### 13.5 F1 > Online
 
 - **Rooms**: the list (lock icon, room, host / town, players, version match, ping estimate, Join). It is
-  fetched when the tab is shown and every 10 s while it stays visible (never while the menu is closed),
-  plus a Refresh button. Rooms heard on the local network are in the same list ("LAN"). Rooms of another
+  fetched once when it is first shown (or the lobby server changes), then only with the Refresh button:
+  no automatic refresh (user, 2026-11-11, to save lobby requests; it was every 10 s while visible), and a
+  failed fetch is not retried on its own. Rooms heard on the local network are in the same list ("LAN"). Rooms of another
   region or port version are shown but cannot be joined (tooltip says why). Join on a locked room opens
   a password prompt. "No lobby server set" when there is none.
 - **Host a room**: name, who can join (Public / Password / Friends only), players (2-4), Host room.
@@ -902,7 +903,7 @@ per request):
 | Who | Requests |
 |---|---|
 | A host, per hosting session (any length) | 2 at connect + 1/20 per message (registration, player count changes, signal answers): about 3 |
-| A player with the room list open | 1 Worker request per refresh = 6 per minute; the Durable Object is asked at most once per 5 s per Cloudflare location, however many players look |
+| A player looking at the room list | 1 Worker request when the list is first shown + 1 per Refresh click (no automatic refresh); the Durable Object is asked at most once per 5 s per Cloudflare location, however many players look |
 | A join | about 4 (two signals, each 1 Worker + 1 Durable Object request), +2 when it needs the relay, +2 for the relay address |
 | Keep-alive pings | answered by the edge without waking the object (if billed at all: 1/20 request each, ~108 per room per day) |
 
@@ -911,9 +912,9 @@ status, time and totals per kind: list / connect / msg / ping / signal / turn). 
 the deployed Worker yet (branch lobby-live: hosting a test room lists it publicly, which waits for the
 user's go-ahead).
 
-So the list is what counts: 100,000 / 6 = about 16,000 player-minutes of an open room list per day
-(e.g. 500 players looking for 30 minutes each), which is why the client refreshes only while the list is
-visible. Over the limit Cloudflare answers HTTP 429 (error 1027) and the game shows "The lobby is busy
+So the list is what counts, and since 2026-11-11 it costs one request per look (first view + each
+Refresh click) instead of 6 per minute while open (the old auto refresh: 100,000 / 6 = about 16,000
+player-minutes per day). Over the limit Cloudflare answers HTTP 429 (error 1027) and the game shows "The lobby is busy
 (its free daily limit may be used up). Try again later"; rooms already joined are not affected (the
 lobby is not in their path). The limit resets at 00:00 UTC.
 
@@ -1017,7 +1018,7 @@ g++ -O2 -std=c++17 -pthread tools/lobby/cf_lobby.cpp -o cf_lobby
 | Forced relay (`CF_ONLINE_FORCE_RELAY=1`) | pass | `relay: ready at 127.0.0.9:...`, `(relayed)` on both sides, F1 "Connection to the host: relayed", the stand-in's byte counter grows |
 | Host quits / is killed | pass | `/v1/rooms` empty 26 ms / 233 ms later; gone from the other game's list at its next refresh |
 | Lobby down / none set | pass | "Could not reach the lobby (...)", nothing hangs; "No lobby server set", hosting still works (LAN / code) |
-| List refresh only while visible | pass | lobby request counter 3 -> 6 in 40 s with the tab open, flat with the menu closed |
+| List refresh only while visible | pass | lobby request counter 3 -> 6 in 40 s with the tab open, flat with the menu closed (auto refresh removed since: one fetch on first view, then Refresh only) |
 | A complete visit from the room list (visit_host2 / visit_guest2 routes, `CF_ONLINE_JOIN=lobby`) | pass | `ConnectToGameServer: visiting friend 0`, matched, town data, both players on both screens, visitor home again |
 | The same visit with the forced relay | pass | 1,149,936 bytes through the relay; the 478 KB town transfer took 0.10 s (0.08 s direct; loopback, so only "no stall") |
 | Session friends: two installs that are not F1 friends (new keys) | pass | `friend tester (profile id ...) -> game roster slot 1, as tester of test: registered`, `tester is in this room: you can visit each other at the town gate` on both sides, visit completes |
