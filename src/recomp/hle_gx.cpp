@@ -293,6 +293,9 @@ ProjMode drawMode(ProjMode ortho2D) {
     // texture the receivers project with the unmodified light matrices) must not get the Hor+/FOV
     // or centered-4:3 adjustments (game.h unadjustedPass).
     if (game::unadjustedPass()) return ProjMode::Plain;
+    // A camera-fixed backdrop sized for the game's frame (ws::BackdropScope: City Folk's sky planes)
+    // keeps the game's own projection: the game's frame stretched across the window, which it covers.
+    if (sProj.type == GX_PERSPECTIVE && ws::inBackdrop()) return ProjMode::Plain;
     if (sProj.type == GX_PERSPECTIVE) return ws::adjusting() ? ProjMode::Scaled : ProjMode::Plain;
     return ws::active() ? ortho2D : ProjMode::Plain;
 }
@@ -1928,17 +1931,32 @@ GXHLE(GXLoadNrmMtxImm3x3) {
     GXLoadNrmMtxImm(m, c.r[4]);
     interp::note(at, interp::Kind::NrmMtx, c.r[3], c.r[4], 9);
 }
+// Texture matrices of a backdrop drawn stretched across the window (ws::BackdropScope): the input
+// s is widened by k = 1 / factor() about the backdrop's centre s, s' = k s + (1 - k) s0, so the
+// texture continues at the game's density across the extra width. For texture-coordinate sources
+// (input (s, t, 1, 1)) that is column 0 times k and (1 - k) s0 of the old column 0 added to column 3.
+template <int R>
+void widenBackdropTexMtx(f32 (&m)[R][4]) {
+    if (!ws::inBackdrop() || !ws::active()) return;
+    const f32 k = 1.0f / ws::factor(), s0 = ws::backdropUCentre();
+    for (int r = 0; r < R; r++) {
+        m[r][3] += (1.0f - k) * s0 * m[r][0];
+        m[r][0] *= k;
+    }
+}
 GXHLE(GXLoadTexMtxImm) {
     const GXTexMtxType type = GXTexMtxType(c.r[5]);
     if (type == GX_MTX2x4) {
-        const Mtx<2, 4> m(c.r[3]);
+        Mtx<2, 4> m(c.r[3]);
         if (const u32 id = c.r[4]; id >= GX_TEXMTX0 && id <= GX_TEXMTX9 && (id - GX_TEXMTX0) % 3 == 0)
             std::memcpy(sInd.texMtx[(id - GX_TEXMTX0) / 3], m.m, sizeof(sInd.texMtx[0]));
+        widenBackdropTexMtx(m.m);
         const u32 at = mark3D();
         GXLoadTexMtxImm(m.m, c.r[4], type);
         interp::note(at, interp::Kind::TexMtx, c.r[3], c.r[4], sizeof(m.m) / 4);
     } else {
-        const Mtx<3, 4> m(c.r[3]);
+        Mtx<3, 4> m(c.r[3]);
+        widenBackdropTexMtx(m.m);
         const u32 at = mark3D();
         GXLoadTexMtxImm(m.m, c.r[4], type);
         interp::note(at, interp::Kind::TexMtx, c.r[3], c.r[4], sizeof(m.m) / 4);

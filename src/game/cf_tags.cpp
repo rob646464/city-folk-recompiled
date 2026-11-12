@@ -17,10 +17,13 @@
 #include "game/cf_light.h"
 #include "recomp/enhanced_lighting.h"
 #include "recomp/gx_bridge.h"
+#include "recomp/widescreen.h"
 
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -76,6 +79,30 @@ HLE(DrawXlu__Q34nw4r3g3d7ScnRootFv) {
 }
 
 namespace {
+// The town's sky (d_skyNP, dSky_c): the gradient (bg_sky, a 1024 x 640 quad, s = x / 1024 + 0.5)
+// and the cloud layer (bg_cloud, a 1024 x 512 grid whose s is proportional to x on every row: a
+// perspective mapping of a cloud ceiling, s = 0 at x = 0) are planes the game places 1300 units in
+// front of the camera (their g3d view matrix, ScnObj + 0x6C, is a translate / scale only), sized to
+// cover the game's 16:9 frame. With Hor+ the picture is wider than the planes: black corners
+// above the horizon at 21:9 and wider (2026-11-12 trailer). They are drawn inside a
+// ws::BackdropScope (the game's own projection, s widened about the centre: widescreen.h).
+// sCentre = the plane's s at the picture's centre (x = 0, checked: no sideways offset).
+bool skyBackdrop(u32 obj, float& sCentre) {
+    if (!ws::adjusting()) return false;  // (fast path; ws::inBackdrop decides)
+    const std::string name = cflight::modelName(obj);
+    if (name == "bg_sky") sCentre = 0.5f;
+    else if (name == "bg_cloud") sCentre = 0.0f;
+    else return false;
+    float v[12];
+    for (int k = 0; k < 12; k++) v[k] = rdf32(obj + 0x6C + 4 * k);
+    const float off = std::fabs(v[1]) + std::fabs(v[2]) + std::fabs(v[4]) + std::fabs(v[6]) + std::fabs(v[8]) + std::fabs(v[9]);
+    const bool fixed = std::isfinite(off + v[3] + v[11]) && off < 1e-3f && std::fabs(v[3]) < 0.5f && v[11] < 0.0f;
+    static bool sLogged = false;
+    if (!fixed && v[11] != 0.0f && !std::exchange(sLogged, true))  // (identity until the scene's first view calc)
+        log("[ws] sky plane %s not camera-fixed (view x %.2f z %.1f, rotation %.4f): drawn as the game draws it", name.c_str(), v[3], v[11], off);
+    return fixed;
+}
+
 void objectScope(Ctx& c, const char* name, bool proc = false) {
     const u32 obj = c.r[3];
     // A culled object kept for its shadow (cf_shadow_casters.cpp): a shadow caster only, never
@@ -97,7 +124,11 @@ void objectScope(Ctx& c, const char* name, bool proc = false) {
     const int rim = cflight::rimKind(obj);
     const int rimBefore = enh::rimMaterial();
     if (rim != rimBefore) gx::endPendingDraw(), enh::setRimMaterial(rim);
+    float skyS = 0.0f;
+    std::optional<ws::BackdropScope> backdrop;
+    if (skyBackdrop(obj, skyS)) gx::endPendingDraw(), backdrop.emplace(skyS), gx::recheckDrawState();
     callOriginal(c, name);
+    if (backdrop) gx::endPendingDraw(), backdrop.reset(), gx::recheckDrawState();
     if (rim != rimBefore) gx::endPendingDraw(), enh::setRimMaterial(rimBefore);
     if (shell) gx::endPendingDraw(), enh::setNoCast(true);
     if (cast == 1) cfcast::shadowOnlyEnd();

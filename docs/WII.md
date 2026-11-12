@@ -154,6 +154,26 @@ items done as they land.
   the right edge; the toolbar, dialogue, keyboards and menus stay centred. The anchored buttons are
   clicked where they are drawn and the pointer covers the whole window (docs/CONTROLS.md "Pointer
   in ultrawide"); "Keep HUD at 16:9" stays on by default. Test aid `CF_LYT_LOG=<first>,<last>` (pane tree per frame).
+- **The sky wider than 16:9** (branch sky-ultrawide, found recording the trailer 2026-11-12): at
+  21:9 the town showed black rectangles in the top corners above the horizon (16:9 fine). The
+  sky is d_skyNP's dSky_c: `bg_sky` (gradient, one 1024 x 640 quad, s = x / 1024 + 0.5, its
+  texture matrix samples the middle half) and `bg_cloud` (a 1024 x 512 grid, s proportional to x
+  on every row: a perspective mapping of a cloud ceiling; s = 0 at x = 0), placed by fn_120_1170
+  1300 units in front of the camera (their g3d view matrix, ScnObj + 0x6C, is translate / scale
+  only: sky (0, 110, -1300), clouds scaled 0.9375 x 0.8 at (0, 142, -1300)). They cover the game's
+  16:9 frustum and no more, so Hor+ saw past their sides. Fix (generic part in
+  `ws::BackdropScope`, widescreen.h): cf_tags.cpp's g3d object hook opens the scope around these
+  two models' draws (checked camera-fixed: no rotation, no sideways offset); inside it 3D keeps
+  the game's projection (the 16:9 frame stretched across the window, which the planes cover) and
+  every GXLoadTexMtxImm (g3d loads their SRT / scroll matrices into GX_PTTEXMTX0/1/2) gets
+  s' = k s + (1 - k) s0 with k = 1 / factor and s0 the plane's s at the picture's centre, so the
+  gradient, the noise and the clouds continue at the game's density instead of stretching
+  (21:9 / 32:9 checked: no seam at the old edge, the centre matches the old 16:9 sky to sub-pixel
+  edges). t is left alone (the game's vertical framing; with a wider F1 field of view the sky
+  keeps the game's framing too). Base aspect without FOV: nothing changes (16:9 frame dumps
+  byte-identical, 4K). 120 fps in-betweens covered. Open: at night the **stars** (not the sky
+  models, not nw4r::ef: some other immediate draw) still appear only inside the old 16:9 part of
+  the sky; the sides are plain night sky.
 - Test aids: `AURORA_DRAW_SKIP_SWEEP=1` (with AURORA_DRAW_LOG_FRAMES and CF_SHOT per frame: draw k
   dropped in frame first+k, which pixels each draw makes), `CF_LYT_LOG`, `[interp] raw XF matrix
   loads ...` line once a minute while interpolating. Scripted route: `tools/routes/gen_town.py`
