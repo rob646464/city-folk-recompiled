@@ -503,6 +503,17 @@ void applySettings() {
     c.extraShadowLights = sXlOver[0] >= 0 ? u32(sXlOver[0]) : kXlLights[std::clamp(l.extraShadowLights, 0, 5)];
     c.extraShadowMapSize = sXlOver[1] > 0 ? u32(sXlOver[1]) : kXlSize[std::clamp(l.extraShadowMapSize, 0, 3)];
     c.extraShadowSoftness = l.extraShadowSoftness;
+    // Aurora 0540 (branch player-shadow): receiver offset floor of the point-light shadow maps,
+    // 0.3 units (the player is ~30 tall; the same floor as the focus cascade's). Without it the
+    // player at a lit house door (the window light 12 units from the face) shadowed itself in
+    // blotches that jumped with every pose. Test aids AURORA_ENH_XL_SHADOW_FLOOR=<units> (0 = before),
+    // CF_XL_FLOOR_AB=<n>: no floor in every other block of n game frames (same-run A/B shots).
+    c.extraShadowOffsetFloor = 0.3f;
+    static const u32 sFloorAb = [] {
+        const char* v = std::getenv("CF_XL_FLOOR_AB");
+        return v ? u32(std::max(std::atoi(v), 0)) : 0u;
+    }();
+    if (sFloorAb && (copyDispCount() / sFloorAb) % 2 == 1) c.extraShadowOffsetFloor = 0.0f;
     c.volumetric = l.volumetricBeam;
     c.volumetricIntensity = l.volumetricIntensity;
     c.volumetricQuality = u32(std::clamp(l.volumetricQuality, 0, 2));
