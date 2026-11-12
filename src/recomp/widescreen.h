@@ -105,6 +105,25 @@ struct WipeScope {
 };
 bool inWipe();
 
+// A backdrop the game places in front of its camera, sized to cover the game's own frame and no
+// more (City Folk: the sky and cloud planes of dSky_c, 1300 units ahead in view space; cf_tags.cpp).
+// Hor+ / a wider FOV see past its edges (black corners above the horizon). Inside a BackdropScope
+// (widescreen active, or a field of view wider than the game's) every 3D draw keeps the game's own projection, i.e. the game's
+// frame stretched across the window, which the backdrop always covers; and every texture matrix
+// loaded (GXLoadTexMtxImm) is widened about the texture coordinate `uCentre` (the s the backdrop
+// has at the centre of the picture) by the same 1 / factor(), so its texture continues sideways at
+// the game's density instead of being stretched. Valid for backdrops whose s is proportional to x
+// about the centre on every row (the sky gradient, the cloud layer's perspective mapping); t is
+// left alone (the game's framing vertically). Nothing changes at the base aspect without FOV.
+struct BackdropScope {
+    explicit BackdropScope(float uCentre);
+    ~BackdropScope();
+    BackdropScope(const BackdropScope&) = delete;
+    BackdropScope& operator=(const BackdropScope&) = delete;
+};
+bool inBackdrop();
+float backdropUCentre();
+
 // 2-player split screen (coop_fixes.cpp: two side-by-side halves). A HUD element drawn for
 // one half runs inside a ShiftScope: every 2D draw (and a partial viewport/scissor set in it)
 // is moved right by dx logical pixels and kept centered (anchor 0), at any aspect: with

@@ -184,4 +184,18 @@ WipeScope::WipeScope() { sWipeDepth++; }
 WipeScope::~WipeScope() { sWipeDepth--; }
 bool inWipe() { return sWipeDepth > 0 && active(); }
 
+namespace {
+int sBackdropDepth = 0;
+float sBackdropU = 0.0f;
+}  // namespace
+BackdropScope::BackdropScope(float uCentre) {
+    sBackdropDepth++;
+    sBackdropU = uCentre;
+}
+BackdropScope::~BackdropScope() { sBackdropDepth--; }
+// Only while the view is wider than the game's frame (Hor+, or a wider F1 field of view): a narrower
+// FOV still sees inside the backdrop and keeps the usual projection.
+bool inBackdrop() { return sBackdropDepth > 0 && (active() || sFov.load(std::memory_order_relaxed) > 1.0f); }
+float backdropUCentre() { return sBackdropU; }
+
 }  // namespace recomp::ws
