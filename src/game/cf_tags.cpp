@@ -217,10 +217,11 @@ HLE(G3dProc__Q34nw4r3g3d6ScnMdlFUlUlPv) { objectScope(c, "G3dProc__Q34nw4r3g3d6S
 HLE(G3dProc__Q34nw4r3g3d7ScnProcFUlUlPv) { objectScope(c, "G3dProc__Q34nw4r3g3d7ScnProcFUlUlPv", true); }
 
 
-// The worn Mii mask: the RFL head's opaque / translucent draws (USA: the ScnRfl-style wrappers of
-// RFLDrawOpaCore / RFLDrawXluCore, docs/MIIS.md) belong to the player for its planar reflection.
+// The worn Mii mask: the RFL head's opaque / translucent draws (the ScnRfl-style wrappers of
+// RFLDrawOpaCore / RFLDrawXluCore, docs/MIIS.md; hooks.txt `all`: every version) belong to the
+// player for its planar reflection.
 static void rflDraw(Ctx& c, const char* name) {
-    const bool character = ver::usa() && world::characterBegin(0);
+    const bool character = world::characterBegin(0);
     callOriginal(c, name);
     if (character) world::characterEnd();
 }

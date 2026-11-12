@@ -111,7 +111,8 @@ bool onGuestFrame(Ctx& c) {
     forceWc24OnFrame(c, frame);
     movein::onGuestFrame(c, frame);  // cf_move_in.cpp: CF_OPEN_MENU
     region::onGuestFrame(frame);  // cf_region.cpp test aids
-    // Test aid CF_NO_MII_MASK=1 (USA; from branch trailer): the player's worn Mii mask is not shown.
+    // Test aid CF_NO_MII_MASK=1 (from branch trailer; every version: the save's layout is the same in
+    // all four, docs/NAND.md "Region"): the player's worn Mii mask is not shown.
     // The game finds the worn mask's Mii by the create ID kept in the save at +0x83ED (fn_8008B2E4:
     // RFL lookup fn_802C4528); that ID is cleared in the loaded save in memory (the NAND file
     // changes only if the game saves), so from the next scene load on the player has their own face.
@@ -119,8 +120,8 @@ bool onGuestFrame(Ctx& c) {
         const char* v = std::getenv("CF_NO_MII_MASK");
         return v && *v == '1';
     }();
-    if (sNoMask && ver::usa() && frame % 4 == 0) {
-        const u32 save = gu::call(c, 0x80101894u);
+    if (sNoMask && frame % 4 == 0) {
+        const u32 save = gu::call(c, VA(0x80101894));
         if (save >= 0x80000000u && save < 0x93000000u) {
             const u32 key = save + 0x83EDu;
             bool any = false;
