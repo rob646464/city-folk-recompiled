@@ -1,0 +1,735 @@
+diff --git a/include/aurora/pipeline_cache.h b/include/aurora/pipeline_cache.h
+index dd75ef5..f0506b2 100644
+--- a/include/aurora/pipeline_cache.h
++++ b/include/aurora/pipeline_cache.h
+@@ -16,6 +16,8 @@
+ #include <stddef.h>
+ #include <stdint.h>
+ 
++#include <aurora/enhanced.h>
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+@@ -60,6 +62,11 @@ typedef struct AuroraPipelineStats {
+   // (aurora_pipeline_cache_note_crash); and whether the caches were reset after repeated crashes.
+   uint32_t prevExit;
+   uint32_t cachesReset;
++  // 0550: the standby set (aurora_pipeline_cache_set_standby): pipelines queued or being built
++  // (its pass prewarm included), queued so far, built so far.
++  uint32_t standbyPending;
++  uint32_t standbyQueued;
++  uint32_t standbyDone;
+ } AuroraPipelineStats;
+ 
+ /** Adds the pipeline configs in a precache list file (format below) to the known set; they
+@@ -89,6 +96,20 @@ void aurora_pipeline_cache_set_threads(uint32_t threads);
+  *  while the application waits for a batch that loads from the shader cache (CPU bound, nothing
+  *  else running). The stats' workerThreads is the number currently taking work. */
+ void aurora_pipeline_cache_set_boost(bool enabled);
++/** 0550: a second settings combination (GX accuracy flags + enhanced-lighting configuration,
++ *  e.g. the current settings with enhanced lighting switched the other way) whose pipeline
++ *  variants are built in the background, at the lowest priority, on at most half the pipeline
++ *  threads (AURORA_STANDBY_THREADS), after everything a hold or a draw waits for: a later switch
++ *  to it finds its pipelines (and the enhanced passes' pipelines) built and needs no compile
++ *  hold. Never part of rebuildPending. Re-queued when the combination, the variant bits it
++ *  selects or the render target layout changes. Ignored without pipeline threads. */
++void aurora_pipeline_cache_set_standby(bool enabled, uint32_t accuracy, const AuroraEnhancedConfig* config);
++/** 0550: the pipeline variant bits a configuration selects (two configurations with the same
++ *  bits and accuracy flags use the same pipelines). */
++uint32_t aurora_pipeline_cache_variant_bits(const AuroraEnhancedConfig* config);
++/** 0550: true once the standby set for exactly this combination is queued and nothing of the
++ *  standby queue is pending (switching to it now needs no new pipeline). */
++bool aurora_pipeline_cache_standby_ready(uint32_t accuracy, const AuroraEnhancedConfig* config);
+ /** 0231: tells the crash journal this run is crashing (call from the application's crash handler;
+  *  only stores a flag). Without it an unclean end counts as closed or killed: the configs being
+  *  built are not suspected and nothing is deleted. */
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+index ec6ac44..3ae469f 100644
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -2235,23 +2235,39 @@ bool init_dirty() {
+ // opaque world draws at mask resolution, ray march, copy into the storage buffer.
+ // 0223: the mask pass pipeline, with `ao` also the ambient occlusion mask + blur.
+ void ensure_mask_pipes(bool ao) {
+-  const std::lock_guard initLock{g_initMutex};
+-  if (!g_gpu.maskPipe) {
+-    g_gpu.maskPipe = make_pipeline("fs_xlshadow", wgpu::TextureFormat::RGBA8Unorm, 1, nullptr, wgpu::ColorWriteMask::All);
+-  }
+-  if (ao && !g_gpu.aoMaskPipe) {
+-    // 0224: horizon-based AO at AO resolution (RGBA16F: visibility, view z, normal) + two
+-    // denoise passes before the upsample (fs_aoblur4)
+-    g_gpu.aoMaskPipe = make_pipeline("fs_aomask", wgpu::TextureFormat::RGBA16Float, 1, nullptr, wgpu::ColorWriteMask::All);
+-  }
+-  if (ao && !g_gpu.aoDenoisePipe) {
+-    g_gpu.aoDenoisePipe = make_pipeline("fs_aodenoise", wgpu::TextureFormat::RGBA16Float, 1, nullptr, wgpu::ColorWriteMask::All);
+-  }
+-  if (ao && !g_gpu.aoDenoise2Pipe) {
+-    g_gpu.aoDenoise2Pipe = make_pipeline("fs_aodenoise2", wgpu::TextureFormat::RGBA16Float, 1, nullptr, wgpu::ColorWriteMask::All);
+-  }
+-  if (ao && !g_gpu.aoBlur4Pipe) {
+-    g_gpu.aoBlur4Pipe = make_pipeline("fs_aoblur4", wgpu::TextureFormat::RGBA8Unorm, 1, nullptr, wgpu::ColorWriteMask::All);
++  // 0224: horizon-based AO at AO resolution (RGBA16F: visibility, view z, normal) + two
++  // denoise passes before the upsample (fs_aoblur4)
++  struct Pipe {
++    wgpu::RenderPipeline Gpu::* slot;
++    const char* entry;
++    wgpu::TextureFormat format;
++    bool needed;
++  };
++  const Pipe pipes[] = {
++      {&Gpu::maskPipe, "fs_xlshadow", wgpu::TextureFormat::RGBA8Unorm, true},
++      {&Gpu::aoMaskPipe, "fs_aomask", wgpu::TextureFormat::RGBA16Float, ao},
++      {&Gpu::aoDenoisePipe, "fs_aodenoise", wgpu::TextureFormat::RGBA16Float, ao},
++      {&Gpu::aoDenoise2Pipe, "fs_aodenoise2", wgpu::TextureFormat::RGBA16Float, ao},
++      {&Gpu::aoBlur4Pipe, "fs_aoblur4", wgpu::TextureFormat::RGBA8Unorm, ao},
++  };
++  // 0550: created outside g_initMutex (a pass prewarm of the standby set compiling these cold held
++  // it for the whole compile, and the render thread's init_gpu() waited every frame meanwhile);
++  // two threads may build the same one, the first stored wins.
++  for (const auto& p : pipes) {
++    if (!p.needed) {
++      continue;
++    }
++    {
++      const std::lock_guard initLock{g_initMutex};
++      if (g_gpu.*p.slot) {
++        continue;
++      }
++    }
++    wgpu::RenderPipeline made = make_pipeline(p.entry, p.format, 1, nullptr, wgpu::ColorWriteMask::All);
++    const std::lock_guard initLock{g_initMutex};
++    if (!(g_gpu.*p.slot)) {
++      g_gpu.*p.slot = std::move(made);
++    }
+   }
+ }
+ 
+@@ -3571,10 +3587,18 @@ bool is_emissive(const gx::PipelineConfig& c) noexcept;
+ 
+ // 0217: the parts of the configuration that select pipeline variants (see precache_variants).
+ uint32_t precache_bits() noexcept {
++  AuroraEnhancedConfig c;
++  {
++    std::lock_guard lock{g_cfgMutex};
++    c = g_pending;
++  }
++  return precache_bits_for(c);
++}
++
++// 0550: precache_bits of any configuration (the standby set's).
++uint32_t precache_bits_for(const AuroraEnhancedConfig& c) noexcept {
+   // 0451: Enhanced world's surface mask (independent of the master switch; a change rebuilds too).
+   const uint32_t world = world_fx::precache_mask() ? PrecacheWorldMask : 0u;
+-  std::lock_guard lock{g_cfgMutex};
+-  const auto& c = g_pending;
+   if (!c.enabled) {
+     return world;
+   }
+@@ -5071,7 +5095,10 @@ struct PrewarmJob {
+   uint32_t width = 0, height = 0; // EFB render target
+   wgpu::TextureFormat format = wgpu::TextureFormat::Undefined;
+   uint32_t msaa = 1;
++  bool targets = true; // 0550: false for the standby set (pipelines only, no memory for targets)
+ };
++std::thread g_standbyPrewarmThread; // 0550 (under g_prewarmMutex)
++std::atomic<bool> g_standbyPrewarmRunning{false};
+ 
+ void run_prewarm(const PrewarmJob& j) {
+   const auto start = std::chrono::steady_clock::now();
+@@ -5096,7 +5123,7 @@ void run_prewarm(const PrewarmJob& j) {
+   // Render targets at the current size, unless the passes already run (they resize and swap
+   // them without the lock; a later resize recreates them anyway).
+   uint32_t textures = 0;
+-  if (!g_encoded.load() && j.width > 0 && j.height > 0) {
++  if (j.targets && !g_encoded.load() && j.width > 0 && j.height > 0) {
+     const std::lock_guard initLock{g_initMutex};
+     const auto rt = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
+     const auto depthFormat = webgpu::g_graphicsConfig.depthFormat;
+@@ -5152,7 +5179,8 @@ void run_prewarm(const PrewarmJob& j) {
+       }
+     }
+   }
+-  Log.info("prewarm: enhanced lighting passes ready in {:.1f} ms ({} render targets at {}x{})",
++  Log.info("prewarm{}: enhanced lighting passes ready in {:.1f} ms ({} render targets at {}x{})",
++           j.targets ? "" : " (standby, pipelines only)",
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(), textures,
+            j.width, j.height);
+ }
+@@ -5187,11 +5215,45 @@ bool start_prewarm(std::function<void()> done) noexcept {
+   return true;
+ }
+ 
++bool start_standby_prewarm(const AuroraEnhancedConfig& c, std::function<void()> done) noexcept {
++  static const bool sOff = [] {
++    const char* v = std::getenv("AURORA_ENH_PREWARM");
++    return v != nullptr && std::atoi(v) == 0;
++  }();
++  if (!c.enabled || sOff || !webgpu::g_device) {
++    return false;
++  }
++  PrewarmJob j;
++  j.cfg = c;
++  j.format = webgpu::g_graphicsConfig.surfaceConfiguration.format;
++  j.msaa = std::max(webgpu::g_graphicsConfig.msaaSamples, 1u);
++  j.targets = false;
++  std::lock_guard lock{g_prewarmMutex};
++  if (g_standbyPrewarmRunning.load()) {
++    return false; // (one at a time; the caller's thread never waits for one)
++  }
++  if (g_standbyPrewarmThread.joinable()) {
++    g_standbyPrewarmThread.join(); // finished
++  }
++  // Its own thread: the passes' init functions take g_initMutex, so it runs alongside a real
++  // prewarm safely, and the render thread never joins it.
++  g_standbyPrewarmRunning = true;
++  g_standbyPrewarmThread = std::thread([j, done = std::move(done)] {
++    run_prewarm(j);
++    done();
++    g_standbyPrewarmRunning = false;
++  });
++  return true;
++}
++
+ void stop_prewarm() noexcept {
+   std::lock_guard lock{g_prewarmMutex};
+   if (g_prewarmThread.joinable()) {
+     g_prewarmThread.join();
+   }
++  if (g_standbyPrewarmThread.joinable()) {
++    g_standbyPrewarmThread.join();
++  }
+ }
+ 
+ } // namespace aurora::gfx::enhanced
+diff --git a/lib/gfx/enhanced.hpp b/lib/gfx/enhanced.hpp
+index a82e721..b0f0aef 100644
+--- a/lib/gfx/enhanced.hpp
++++ b/lib/gfx/enhanced.hpp
+@@ -113,6 +113,12 @@ enum : uint8_t {
+ // 0224: render target of the depth pre-pass while ambient occlusion is on.
+ RenderTargetLayout depth_normal_layout() noexcept;
+ uint32_t precache_bits() noexcept;
++// 0550: the bits a configuration `c` would select (Enhanced world's mask bit as currently set).
++uint32_t precache_bits_for(const AuroraEnhancedConfig& c) noexcept;
++// 0550: builds the scene-end passes' pipelines (no render targets) for configuration `c` on a
++// background thread, then calls `done` there; false (nothing started) when `c` is off. For the
++// standby set (pipeline_cache.cpp): a later switch to `c` finds them built. stop_prewarm joins it.
++bool start_standby_prewarm(const AuroraEnhancedConfig& c, std::function<void()> done) noexcept;
+ void precache_variants(const gx::PipelineConfig& c, uint32_t bits,
+                        const std::function<void(const gx::PipelineConfig&, uint8_t targets)>& emit) noexcept;
+ 
+diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
+index 44ae234..4e01b0e 100644
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -129,6 +129,7 @@ struct PendingPipeline {
+   NewPipelineCallback create;
+   bool precache = false; // queued by background precaching (rebuild_pipeline_cache)
+   bool rebuild = false;  // 0217: queued by a rebuild (counted in g_rebuildPending)
++  bool standby = false;  // 0550: queued for the standby set (g_standbyPipelineQueue, g_standbyPending)
+ };
+ 
+ enum class CacheWriteOp : uint8_t {
+@@ -222,6 +223,17 @@ void pipeline_mem_stats(AuroraMemStats& out) noexcept {
+ static std::deque<PendingPipeline> g_pipelineQueue;
+ static std::deque<PendingPipeline> g_backgroundPipelineQueue;
+ static absl::flat_hash_set<PipelineRef> g_pendingPipelines;
++// 0550: the standby set (aurora_pipeline_cache_set_standby): variants of a settings combination
++// that is not in use (e.g. enhanced lighting while it is off), built at the lowest priority by at
++// most g_standbyWorkers threads at a time, never waited for by a hold. A rebuild or a draw that
++// needs one of them moves it to its own queue (counted there). Under g_pipelineMutex.
++static std::deque<PendingPipeline> g_standbyPipelineQueue;
++static absl::flat_hash_set<PipelineRef> g_standbyRefs; // what g_standbyPipelineQueue holds
++static uint32_t g_standbyBusy = 0;                     // standby creations running
++static uint32_t g_standbyWorkers = 1;
++static std::atomic<uint32_t> g_standbyPending{0};      // queued or running, prewarm included
++static std::atomic<uint32_t> g_standbyQueued{0};       // queued so far (all standby sets)
++static std::atomic<uint32_t> g_standbyDone{0};
+ static std::atomic_bool g_gpuCachePrunePending = false;
+ static bool g_gpuCachePruneArmed = false; // prune once the first full rebuild has been queued
+ 
+@@ -520,10 +532,42 @@ enum class PipelinePriority {
+   Background, // cache warmup
+   Normal,     // async skip draw
+   Blocking,   // block until compiled
++  Standby,    // 0550: the standby set (lowest; see g_standbyPipelineQueue)
+ };
+ 
+-static void promote_pending_pipeline(PipelineRef hash, PipelinePriority priority) {
++// 0550: a pipeline queued for the standby set is needed now: into the queue of `priority` (a
++// rebuild's batch counts it as its own).
++static bool promote_standby_pipeline(PipelineRef hash, PipelinePriority priority, bool rebuild) {
++  if (priority == PipelinePriority::Standby || !g_standbyRefs.contains(hash)) {
++    return false;
++  }
++  auto it = find_pending_pipeline(g_standbyPipelineQueue, hash);
++  if (it == g_standbyPipelineQueue.end()) {
++    return false;
++  }
++  PendingPipeline pending = std::move(*it);
++  g_standbyPipelineQueue.erase(it);
++  g_standbyRefs.erase(hash);
++  pending.standby = false;
++  --g_standbyPending;
+   if (priority == PipelinePriority::Background) {
++    pending.precache = true;
++    ++g_precacheTotal;
++    if (rebuild) {
++      pending.rebuild = true;
++      ++g_rebuildPending;
++    }
++    g_backgroundPipelineQueue.emplace_back(std::move(pending));
++  } else if (priority == PipelinePriority::Blocking) {
++    g_pipelineQueue.emplace_front(std::move(pending));
++  } else {
++    g_pipelineQueue.emplace_back(std::move(pending));
++  }
++  return true;
++}
++
++static void promote_pending_pipeline(PipelineRef hash, PipelinePriority priority) {
++  if (priority == PipelinePriority::Background || priority == PipelinePriority::Standby) {
+     return;
+   }
+ 
+@@ -556,6 +600,15 @@ static std::optional<PendingPipeline> take_pending_pipeline(PipelineRef hash) {
+     return pending;
+   }
+ 
++  auto standbyIt = find_pending_pipeline(g_standbyPipelineQueue, hash); // 0550
++  if (standbyIt != g_standbyPipelineQueue.end()) {
++    PendingPipeline pending = std::move(*standbyIt);
++    g_standbyPipelineQueue.erase(standbyIt);
++    g_standbyRefs.erase(hash);
++    g_pendingPipelines.erase(hash);
++    return pending;
++  }
++
+   return std::nullopt;
+ }
+ 
+@@ -653,12 +706,20 @@ static PipelineRef find_pipeline_impl(PipelineRef runtimeKey, NewPipelineCallbac
+       } else {
+         // 0221: a draw needs a pipeline that is still compiling (precached or not): keep its config
+         // for a skipped-draw warning.
+-        if (priority != PipelinePriority::Background && g_missDetails.size() < 4096 && !g_missDetails.contains(runtimeKey)) {
++        if (priority != PipelinePriority::Background && priority != PipelinePriority::Standby &&
++            g_missDetails.size() < 4096 && !g_missDetails.contains(runtimeKey)) {
+           g_missDetails.emplace(runtimeKey, miss_detail());
+         }
+-        promote_pending_pipeline(runtimeKey, priority);
+-        notifyWorker = priority != PipelinePriority::Background;
++        // 0550: queued for the standby set and needed now (by a rebuild's batch or a draw)
++        if (promote_standby_pipeline(runtimeKey, priority, g_inRebuild)) {
++          notifyWorker = true;
++        } else {
++          promote_pending_pipeline(runtimeKey, priority);
++          notifyWorker = priority != PipelinePriority::Background && priority != PipelinePriority::Standby;
++        }
+       }
++    } else if (priority == PipelinePriority::Standby && !g_hasPipelineThread) {
++      // 0550: no standby set without pipeline threads (aurora_pipeline_cache_set_standby is ignored)
+     } else if (!g_hasPipelineThread && (blocking || g_pipelinesPerFrame < BuildPipelinesPerFrame)) {
+       if (priority != PipelinePriority::Background) {
+         ++g_demandCreated;
+@@ -675,12 +736,17 @@ static PipelineRef find_pipeline_impl(PipelineRef runtimeKey, NewPipelineCallbac
+           .create = std::move(cb),
+           .precache = priority == PipelinePriority::Background,
+           .rebuild = priority == PipelinePriority::Background && g_inRebuild,
++          .standby = priority == PipelinePriority::Standby,
+       };
+       if (priority == PipelinePriority::Background) {
+         ++g_precacheTotal;
+         if (pending.rebuild) {
+           ++g_rebuildPending;
+         }
++      } else if (priority == PipelinePriority::Standby) {
++        ++g_standbyPending; // 0550
++        ++g_standbyQueued;
++        g_standbyRefs.insert(runtimeKey);
+       } else {
+         // A draw needs a pipeline nothing precached: a gap in the precache list.
+         ++g_demandCreated;
+@@ -696,6 +762,9 @@ static PipelineRef find_pipeline_impl(PipelineRef runtimeKey, NewPipelineCallbac
+       case PipelinePriority::Background:
+         g_backgroundPipelineQueue.emplace_back(std::move(pending));
+         break;
++      case PipelinePriority::Standby:
++        g_standbyPipelineQueue.emplace_back(std::move(pending));
++        break;
+       case PipelinePriority::Normal:
+         g_pipelineQueue.emplace_back(std::move(pending));
+         break;
+@@ -1696,6 +1765,10 @@ static CompiledPipeline create_pending(PendingPipeline& pending) {
+   if (pending.rebuild) {
+     --g_rebuildPending;
+   }
++  if (pending.standby) {
++    --g_standbyPending; // 0550
++    ++g_standbyDone;
++  }
+   return result;
+ }
+ 
+@@ -1719,28 +1792,46 @@ static void pipeline_worker(uint32_t index) {
+         }
+         // Several workers share the queues: always re-check under the lock.
+         g_pipelineQueueCv.wait(lock, [index] {
+-          return !g_pipelineQueue.empty() || !g_backgroundPipelineQueue.empty() || g_pipelineThreadEnd ||
++          return !g_pipelineQueue.empty() || !g_backgroundPipelineQueue.empty() ||
++                 (!g_standbyPipelineQueue.empty() && g_standbyBusy < g_standbyWorkers) || g_pipelineThreadEnd ||
+                  index >= g_activeWorkers.load(std::memory_order_relaxed);
+         });
+         if (!g_pipelineThreadEnd && index >= g_activeWorkers.load(std::memory_order_relaxed)) {
+           continue;
+         }
+-      } else if (g_pipelineQueue.empty() && g_backgroundPipelineQueue.empty()) {
++      } else if (g_pipelineQueue.empty() && g_backgroundPipelineQueue.empty() && g_standbyPipelineQueue.empty()) {
+         return;
+       }
+       if (g_pipelineThreadEnd) {
+         break;
+       }
+-      auto& source = !g_pipelineQueue.empty() ? g_pipelineQueue : g_backgroundPipelineQueue;
+-      pending = std::move(source.front());
+-      source.pop_front();
++      if (!g_pipelineQueue.empty() || !g_backgroundPipelineQueue.empty()) {
++        auto& source = !g_pipelineQueue.empty() ? g_pipelineQueue : g_backgroundPipelineQueue;
++        pending = std::move(source.front());
++        source.pop_front();
++      } else if (!g_standbyPipelineQueue.empty() && (g_standbyBusy < g_standbyWorkers || !g_hasPipelineThread)) {
++        // 0550: the standby set only when nothing else waits, by at most g_standbyWorkers threads
++        pending = std::move(g_standbyPipelineQueue.front());
++        g_standbyPipelineQueue.pop_front();
++        g_standbyRefs.erase(pending.hash);
++        ++g_standbyBusy;
++      } else {
++        continue;
++      }
+     }
++    const bool wasStandby = pending.standby;
+     auto result = create_pending(pending);
+     const auto pipelineCount = result.pipeline_count();
+     {
+       std::lock_guard lock{g_pipelineMutex};
+       g_pipelines.try_emplace(pending.hash, std::move(result));
+       g_pendingPipelines.erase(pending.hash);
++      if (wasStandby) {
++        --g_standbyBusy;
++      }
++    }
++    if (wasStandby) {
++      g_pipelineQueueCv.notify_one(); // another standby creation may start now
+     }
+     if (!g_hasPipelineThread) {
+       g_pipelinesPerFrame += std::max(1u, pipelineCount);
+@@ -1783,6 +1874,8 @@ static bool wait_for_pending_pipeline(PipelineRef ref, CompiledPipeline& out) {
+       auto pending = std::move(*bit);
+       g_backgroundPipelineQueue.erase(bit);
+       g_pipelineQueue.emplace_front(std::move(pending));
++    } else {
++      promote_standby_pipeline(ref, PipelinePriority::Blocking, false); // 0550
+     }
+     g_pipelineQueueCv.notify_one();
+     g_pipelineReadyCv.wait(lock, [=] { return g_pipelines.contains(ref) || g_pipelineThreadEnd; });
+@@ -1942,7 +2035,27 @@ PipelineRef find_pipeline(const clear::PipelineConfig& config, const RenderTarge
+ }
+ 
+ static void queue_gx_variants(const gx::PipelineConfig& recorded, uint32_t accuracy, uint32_t enhBits,
+-                              absl::flat_hash_set<HashType>* seen);
++                              absl::flat_hash_set<HashType>* seen,
++                              PipelinePriority priority = PipelinePriority::Background);
++
++// 0550: the standby set (aurora_pipeline_cache_set_standby). Requested combination (any thread,
++// under g_standbyMutex) and what was last queued for it (g_standbyQueued*: begin_pipeline_frame's
++// thread; the atomics also for find_pipeline on the FIFO thread).
++static std::mutex g_standbyMutex;
++static bool g_standbyOn = false;
++static uint32_t g_standbyAccuracy = 0;
++static AuroraEnhancedConfig g_standbyConfig{};
++static std::atomic<bool> g_standbyActive{false}; // a standby set is queued (g_standbyQueuedAcc/Bits)
++static std::atomic<uint32_t> g_standbyQueuedAcc{0};
++static std::atomic<uint32_t> g_standbyQueuedBits{0};
++static std::optional<uint64_t> g_standbyQueuedLayout;
++// 0550: (accuracy << 32 | variant bits) of combinations whose whole batch (a rebuild's or a standby
++// set's) was built for the current render target layout: switching to one needs no new pipeline,
++// whatever else the standby queue still holds. Cleared when the layout changes.
++static std::mutex g_completeMutex;
++static absl::flat_hash_set<uint64_t> g_completeKeys;
++static std::optional<uint64_t> g_completeLayout;
++static uint64_t combo_key(uint32_t accuracy, uint32_t bits) { return (uint64_t(accuracy) << 32) | bits; }
+ 
+ PipelineRef find_pipeline(const gx::PipelineConfig& drawConfig, const RenderTargetLayout& layout) {
+   // 0217: pipelines are keyed (and built) by the canonical config.
+@@ -1954,6 +2067,10 @@ PipelineRef find_pipeline(const gx::PipelineConfig& drawConfig, const RenderTarg
+     // A config the precache did not know: queue the variants it leads to under the current
+     // settings now (compiled while this one is), instead of one more miss for each later.
+     queue_gx_variants(config, gx::g_accuracyFlags.load(std::memory_order_relaxed), enhanced::precache_bits(), nullptr);
++    // 0550: and the standby set's, so it stays complete
++    if (g_standbyActive.load(std::memory_order_acquire)) {
++      queue_gx_variants(config, g_standbyQueuedAcc.load(), g_standbyQueuedBits.load(), nullptr, PipelinePriority::Standby);
++    }
+   }
+   return ref;
+ }
+@@ -1999,7 +2116,7 @@ static gx::PipelineConfig adjust_accuracy(const gx::PipelineConfig& config, uint
+ // from the recorded configs at every rebuild, so any combination of settings is covered by one
+ // list recorded with any settings. `seen` (optional) skips configs already queued this rebuild.
+ static void queue_gx_variants(const gx::PipelineConfig& recorded, uint32_t accuracy, uint32_t enhBits,
+-                              absl::flat_hash_set<HashType>* seen) {
++                              absl::flat_hash_set<HashType>* seen, PipelinePriority priority) {
+   static thread_local RenderTargetLayout scene, offscreen;
+   static thread_local uint64_t sceneKey = UINT64_MAX;
+   if (const auto s = scene_render_target_layout(); s.key != sceneKey) {
+@@ -2042,26 +2159,26 @@ static void queue_gx_variants(const gx::PipelineConfig& recorded, uint32_t accur
+       return;
+     }
+     if (targets & enhanced::PrecacheDepthTarget) {
+-      resolve_pipeline(ShaderType::GX, v, sExtra[0], PipelinePriority::Background);
++      resolve_pipeline(ShaderType::GX, v, sExtra[0], priority);
+     }
+     if (targets & enhanced::PrecacheDepthNormalTarget) {
+-      resolve_pipeline(ShaderType::GX, v, sExtra[2], PipelinePriority::Background);
++      resolve_pipeline(ShaderType::GX, v, sExtra[2], priority);
+     }
+     if (targets & enhanced::PrecacheGlowTarget) {
+-      resolve_pipeline(ShaderType::GX, v, sExtra[1], PipelinePriority::Background);
++      resolve_pipeline(ShaderType::GX, v, sExtra[1], priority);
+     }
+     if (targets & enhanced::PrecacheScene) {
+-      resolve_pipeline(ShaderType::GX, v, scene, PipelinePriority::Background);
++      resolve_pipeline(ShaderType::GX, v, scene, priority);
+     }
+     if ((targets & enhanced::PrecacheOffscreen) && offscreen.key != scene.key) {
+-      resolve_pipeline(ShaderType::GX, v, offscreen, PipelinePriority::Background);
++      resolve_pipeline(ShaderType::GX, v, offscreen, priority);
+     }
+   };
+   // 0451: Enhanced world's surface-mask re-draw configs, for its mask target (world_fx.cpp).
+   if ((enhBits & enhanced::PrecacheWorldMask) != 0 && world_fx::is_mask_variant(base)) {
+     const auto key = xxh3_hash(base, static_cast<HashType>(ShaderType::GX));
+     if ((seen == nullptr || seen->insert(key ^ 0xB0000000'00000000ull).second) && !is_quarantined(key)) {
+-      resolve_pipeline(ShaderType::GX, base, world_fx::mask_target_layout(), PipelinePriority::Background);
++      resolve_pipeline(ShaderType::GX, base, world_fx::mask_target_layout(), priority);
+     }
+   }
+   enhanced::precache_variants(base, enhBits, [&](const gx::PipelineConfig& v, uint8_t targets) {
+@@ -2077,6 +2194,68 @@ static void queue_gx_variants(const gx::PipelineConfig& recorded, uint32_t accur
+   });
+ }
+ 
++// 0550: queues the standby set: every known config's variants under the standby combination, at
++// the lowest priority (what a rebuild already queued or built is skipped by resolve_pipeline), and
++// the enhanced passes' pipelines for its configuration.
++static void queue_standby(uint32_t accuracy, uint32_t enhBits, const AuroraEnhancedConfig& cfg) {
++  ZoneScoped;
++  const uint64_t start = now_ns();
++  std::vector<KnownPipeline> known;
++  {
++    std::lock_guard lock{g_pipelineMutex};
++    known.reserve(g_knownPipelines.size());
++    for (const auto& pipeline : g_knownPipelines | std::views::values) {
++      if (pipeline.type == ShaderType::GX) {
++        known.push_back(pipeline);
++      }
++    }
++  }
++  std::ranges::sort(known, {}, &KnownPipeline::firstFrameUsed);
++  const uint32_t before = g_standbyQueued.load();
++  absl::flat_hash_set<HashType> seen;
++  seen.reserve(known.size() * 4);
++  for (const auto& pipeline : known) {
++    queue_gx_variants(std::get<gx::PipelineConfig>(pipeline.config), accuracy, enhBits, &seen, PipelinePriority::Standby);
++  }
++  g_standbyQueuedAcc = accuracy;
++  g_standbyQueuedBits = enhBits;
++  g_standbyActive.store(true, std::memory_order_release);
++  ++g_standbyPending;
++  if (!enhanced::start_standby_prewarm(cfg, [] { --g_standbyPending; })) {
++    --g_standbyPending;
++  }
++  Log.info("Pipeline standby set: {} known configs -> {} configs for accuracy {:#x} enhanced {:#x}, {} new pipelines "
++           "queued ({:.1f} ms)",
++           known.size(), seen.size(), accuracy, enhBits, g_standbyQueued.load() - before, (now_ns() - start) / 1e6);
++  g_pipelineQueueCv.notify_all();
++}
++
++// 0550: (re)queues the standby set when its combination, the variant bits it selects or the
++// render target layout changed since it was last queued.
++static void update_standby() {
++  bool on;
++  uint32_t accuracy;
++  AuroraEnhancedConfig cfg;
++  {
++    std::lock_guard lock{g_standbyMutex};
++    on = g_standbyOn;
++    accuracy = g_standbyAccuracy;
++    cfg = g_standbyConfig;
++  }
++  if (!on || !g_hasPipelineThread) {
++    g_standbyActive = false;
++    g_standbyQueuedLayout.reset();
++    return;
++  }
++  const uint32_t bits = enhanced::precache_bits_for(cfg);
++  if (g_standbyActive.load() && g_standbyQueuedLayout == g_pipelineLayoutKey && g_standbyQueuedAcc.load() == accuracy &&
++      g_standbyQueuedBits.load() == bits) {
++    return;
++  }
++  g_standbyQueuedLayout = g_pipelineLayoutKey;
++  queue_standby(accuracy, bits, cfg);
++}
++
+ void rebuild_pipeline_cache() {
+   ZoneScoped;
+   const auto scene = scene_render_target_layout();
+@@ -2170,6 +2349,12 @@ void initialize_pipeline_cache() {
+     g_boostWorkers =
+         std::max(threads, std::min(std::max(std::thread::hardware_concurrency(), 2u) - 1, 16u));
+     g_activeWorkers = threads;
++    // 0550: standby creations at most on half the workers (AURORA_STANDBY_THREADS=<n>), so a draw
++    // that needs a new pipeline in play always finds a free worker and the game keeps its CPU.
++    g_standbyWorkers = std::max(1u, threads / 2);
++    if (const char* v = std::getenv("AURORA_STANDBY_THREADS")) {
++      g_standbyWorkers = std::clamp(static_cast<uint32_t>(std::atoi(v)), 1u, threads);
++    }
+     for (uint32_t i = 0; i < g_boostWorkers; ++i) {
+       g_pipelineThreads.emplace_back(pipeline_worker, i);
+     }
+@@ -2222,6 +2407,12 @@ void shutdown_pipeline_cache() {
+   g_pipelineLayoutKey.reset();
+   g_pipelineQueue.clear();
+   g_backgroundPipelineQueue.clear();
++  g_standbyPipelineQueue.clear(); // 0550
++  g_standbyRefs.clear();
++  g_standbyBusy = 0;
++  g_standbyPending = 0;
++  g_standbyActive = false;
++  g_standbyQueuedLayout.reset();
+   g_pendingPipelines.clear();
+ 
+   queuedPipelines = 0;
+@@ -2247,7 +2438,8 @@ void begin_pipeline_frame() {
+     bool idle;
+     {
+       std::lock_guard lock{g_pipelineMutex};
+-      idle = g_pendingPipelines.empty() && g_pipelineQueue.empty() && g_backgroundPipelineQueue.empty();
++      idle = g_pendingPipelines.empty() && g_pipelineQueue.empty() && g_backgroundPipelineQueue.empty() &&
++             g_standbyPipelineQueue.empty();
+     }
+     if (idle) {
+       gx::release_shader_module_cache();
+@@ -2258,6 +2450,20 @@ void begin_pipeline_frame() {
+       g_rebuildEnhBits != enhanced::precache_bits()) {
+     rebuild_pipeline_cache();
+   }
++  update_standby(); // 0550
++  {
++    std::lock_guard lock{g_completeMutex};
++    if (g_completeLayout != g_pipelineLayoutKey) {
++      g_completeKeys.clear();
++      g_completeLayout = g_pipelineLayoutKey;
++    }
++    if (g_rebuildPending.load() == 0 && g_rebuildAccuracy && g_rebuildEnhBits) {
++      g_completeKeys.insert(combo_key(*g_rebuildAccuracy, *g_rebuildEnhBits));
++    }
++    if (g_standbyPending.load() == 0 && g_standbyActive.load() && g_standbyQueuedLayout == g_pipelineLayoutKey) {
++      g_completeKeys.insert(combo_key(g_standbyQueuedAcc.load(), g_standbyQueuedBits.load()));
++    }
++  }
+ }
+ 
+ void end_pipeline_frame() {
+@@ -2861,6 +3067,9 @@ void aurora_pipeline_cache_get_stats(AuroraPipelineStats* out) {
+   out->seeded = g_seeded.load(std::memory_order_relaxed);
+   out->droppedDraws = g_droppedDraws.load(std::memory_order_relaxed);
+   out->rebuildPending = g_rebuildPending.load(std::memory_order_relaxed);
++  out->standbyPending = aurora::gfx::g_standbyPending.load(std::memory_order_relaxed); // 0550
++  out->standbyQueued = aurora::gfx::g_standbyQueued.load(std::memory_order_relaxed);
++  out->standbyDone = aurora::gfx::g_standbyDone.load(std::memory_order_relaxed);
+   // 0226
+   const auto cache = aurora::webgpu::cache_stats();
+   out->blobHits = cache.hits;
+@@ -2883,6 +3092,36 @@ void aurora_pipeline_cache_get_stats(AuroraPipelineStats* out) {
+ 
+ void aurora_pipeline_cache_set_log(bool enabled) { g_pipelineLog = enabled; }
+ 
++void aurora_pipeline_cache_set_standby(bool enabled, uint32_t accuracy, const AuroraEnhancedConfig* config) {
++  using namespace aurora::gfx;
++  std::lock_guard lock{g_standbyMutex};
++  g_standbyOn = enabled && config != nullptr;
++  g_standbyAccuracy = accuracy;
++  if (config != nullptr) {
++    g_standbyConfig = *config;
++  }
++}
++
++uint32_t aurora_pipeline_cache_variant_bits(const AuroraEnhancedConfig* config) {
++  return config != nullptr ? aurora::gfx::enhanced::precache_bits_for(*config) : 0u;
++}
++
++bool aurora_pipeline_cache_standby_ready(uint32_t accuracy, const AuroraEnhancedConfig* config) {
++  using namespace aurora::gfx;
++  if (config == nullptr || !g_hasPipelineThread) {
++    return false;
++  }
++  const uint32_t bits = enhanced::precache_bits_for(*config);
++  {
++    std::lock_guard lock{g_completeMutex};
++    if (g_completeKeys.contains(combo_key(accuracy, bits))) {
++      return true;
++    }
++  }
++  return g_standbyActive.load() && g_standbyQueuedAcc.load() == accuracy && g_standbyQueuedBits.load() == bits &&
++         g_standbyPending.load() == 0;
++}
++
+ void aurora_pipeline_cache_set_wait(bool enabled) { g_waitForPipelines = enabled; }
+ 
+ void aurora_pipeline_cache_set_threads(uint32_t threads) { g_requestedThreads = std::min(threads, 32u); }
+diff --git a/lib/gx/pipeline.cpp b/lib/gx/pipeline.cpp
+index 376deda..85eb2a0 100644
+--- a/lib/gx/pipeline.cpp
++++ b/lib/gx/pipeline.cpp
+@@ -9,6 +9,7 @@
+ #include "shader_info.hpp"
+ 
+ #include <absl/container/flat_hash_map.h>
++#include <vector>
+ #include <aurora/mem_stats.h>
+ #include <tracy/Tracy.hpp>
+ 
+@@ -42,15 +43,29 @@ void clear_shader_module_cache() noexcept {
+ }
+ 
+ // 0250: drops the cached modules (released outside the lock), when there are any.
++// 0550: at most 16 per call (oldest first; called once per frame while idle): freeing a module that
++// holds its shader program takes up to ~1-2 ms, and since the standby set (pipeline_cache.cpp)
++// batches finish while the game runs, releasing all 384 at once was a 400-500 ms frame.
+ void release_shader_module_cache() noexcept {
+-  absl::flat_hash_map<HashType, wgpu::ShaderModule> old;
++  std::vector<wgpu::ShaderModule> old;
+   {
+     std::lock_guard lock{g_moduleMutex};
+     if (g_modules.empty()) {
+       return;
+     }
+-    old.swap(g_modules);
+-    g_moduleOrder.clear();
++    while (!g_moduleOrder.empty() && old.size() < 16) {
++      if (const auto it = g_modules.find(g_moduleOrder.front()); it != g_modules.end()) {
++        old.push_back(std::move(it->second));
++        g_modules.erase(it);
++      }
++      g_moduleOrder.pop_front();
++    }
++    if (g_moduleOrder.empty()) {
++      for (auto& [key, module] : g_modules) {
++        old.push_back(std::move(module));
++      }
++      g_modules.clear();
++    }
+   }
+ }
+ 

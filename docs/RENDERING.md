@@ -210,6 +210,147 @@ pipeline key; component type could follow with a switch in the fetch helper. It 
 layout (bump `GXPipelineConfigVersion`, re-record the list) and touches shared shader generation,
 so it is left for a coordinated change (docs/BACKPORT.md).
 
+## Enhanced lighting precached at launch (2026-11-11, branch precache-enh)
+
+User report: "we need to compile shaders for the enhanced graphics mode at launch rather than when
+it's turned on. turning it on during an online session causes a disconnect".
+
+**Why turning it on took long.** Enhanced lighting changes two things every pipeline is keyed by:
+its shader classes / passes (Aurora 0217's variant bits, `enhanced 0x4f` with the defaults, `0x6f`
+with AO) and the GX accuracy flags (it turns the 6-bit EFB off: `accuracy 0x1f -> 0x15`). So the
+switch re-expands the whole known set: 4446-4455 new pipelines on top of the 2178-2185 of the
+start (default settings, this list). Main held the game for them ("Preparing shaders", the
+settings-change hold): 0.70 s when the Dawn cache already had them (a PC that played with it on
+before), but **136-189 s** when it had not (this PC, loaded; cold compiles of 4446 pipelines).
+
+**Why that disconnects (reproduced on main 4d33c0a, two instances, the visit protocol of docs/ONLINE.md
+section 9).** Host `Frunch-rob64` and visitor `test-tester` (copies of the online-letter-test-2
+profiles, default settings, caches that never had Enhanced lighting on), the visitor in the host's
+town, `CF_SETTINGS_AT=22000:enhanced_lighting.enabled=true` in the visitor: `game held for 4446
+pipelines`, `resumed after 135.86 s`. Our room transport stayed up the whole time (its own net
+thread, pings every second, 15 s silence limit: no member left), but the visitor's *game* did not run,
+so it sent none of its per-frame visit messages; the host's game gave up about 3600 of its frames
+(60 s) later (`CloseAllConnectionsHard (2 nodes)`, host frame 25791), and when the visitor resumed its
+own game found the connection gone: "You've been disconnected from Nintendo WFC. Progress from the
+previous save may be lost. Press any button to reset." (shot in `out/precache_enh/repro_main/` of the
+branch's worktree, with both logs). Any hold of a minute or more while visiting (or being visited)
+does this, whatever setting caused it; holds of a second do not.
+
+**What changed.**
+
+1. **Standby set (Aurora 0550)**: `aurora_pipeline_cache_set_standby(enabled, accuracy, config)`
+   names a second settings combination whose variants are built in the background: every known
+   config expanded under it (the same `queue_gx_variants` as a rebuild), plus the enhanced passes'
+   pipelines for that configuration (a prewarm without render targets). Its own queue, the lowest
+   priority, at most half the pipeline threads (`AURORA_STANDBY_THREADS`), never part of
+   `rebuildPending`, so no hold waits for it. When a rebuild or a draw needs a standby pipeline that is
+   still queued, it moves into that queue (and counts for the hold). Re-queued when the combination,
+   its variant bits or the render target layout change; configs first met in play queue their
+   standby variants too. The port (precache.cpp `applyGraphics`, called from `enh::applySettings`
+   every frame) makes **the other state of the Enhanced lighting master switch, everything else as
+   configured**, the standby set: with it off at launch, its "on" variants for the user's sub-options
+   and preset are built from the start; with it on, the "off" set (the default accurate pipelines).
+   Turning it on (or off) later finds them built: no hold (`Pipeline precache: ... 0 new pipelines
+   queued`), only the passes' render targets (~5 ms). The standby set follows sub-option changes (AO,
+   bloom, shadows: they change the variant bits) of the current state too, so the other state always
+   matches what a switch would need.
+2. **Graphics changes while online are deferred** (`applyGraphics`): in an online room (hosting or
+   joined), a change of the accuracy flags or the variant bits whose pipelines are not all built
+   (`aurora_pipeline_cache_standby_ready`) is not applied yet: the previous flags / configuration stay
+   (the time-of-day look follows), the change becomes the standby set and is applied the frame its
+   pipelines are built (`[precache] online: graphics change deferred ...`, `deferred graphics change
+   applied after <s> s`), with a corner note "Preparing shaders for the new graphics settings: n left".
+   Aurora remembers which combinations were built completely for the current layout, so switching back
+   to one never waits for unrelated standby work.
+3. **No compile hold while online** (`holdGame`): what is left (a render target layout change such
+   as MSAA, Enhanced world's surface mask) compiles while the game runs; draws whose pipeline is not
+   built yet are skipped until it is (`aurora_pipeline_cache_set_wait(false)` for that batch;
+   `[precache] online: not holding the game ...`). Offline the hold stays as it was.
+4. Two stalls the standby work exposed (Aurora 0550 too): the shader-module cache (0250) is released
+   16 modules per idle frame instead of all at once (up to 384 modules with their shader programs:
+   400-500 ms frames when a standby batch finished in play), and the enhanced passes' mask/AO pipelines
+   are created outside `g_initMutex` (a standby prewarm compiling them held it, and the render
+   thread's `init_gpu()` waited every frame while Enhanced lighting was on).
+
+**Settings whose change still rebuilds pipelines** (offline: the "Preparing shaders" hold for what is
+not built; online: deferred, or no hold for the last two): every Enhanced lighting part that changes
+the variant bits once lighting is on (bloom with emissive glow, sun / moon shadows and light, night
+lights and their shadows, ambient occlusion and its intensity reaching 0; quality presets and every
+slider do not), the Rendering accuracy toggles (integer TEV, EFB color depth, 6-bit blending, early-Z
+alpha depth, texture copy filter, smooth banding) and the frame-rate settings that switch the early-Z
+merge (target above 60, match display refresh, unlimited), Enhanced world on/off (its surface-mask
+variants, Aurora 0451), MSAA (a new render target layout: every pipeline again). Only the master
+switch is precached; a deferred change while online builds its own set first.
+
+Test aids: `CF_STANDBY=0` (no standby set: the old behaviour), `CF_ONLINE_DEFER=0` (no deferral) /
+`always` (deferral offline too, for single-instance tests), `CF_ONLINE_HOLD=1` (hold online as
+offline), `AURORA_STANDBY_THREADS=<n>`; `CF_PIPELINE_LOG` lines `Pipeline standby set: ...` and
+`standby <done>/<queued>` in the 5 s summary; `[precache] standby set built in the background: <n>
+pipelines in <s> s (<compiled> compiled ...; worst <ms>)` is always logged (last_run.log).
+tools/pipelines/verify.py: `--settings-file <ini>` (a whole settings.ini, e.g. a user's), and per run
+`settings_holds` / `settings_hold_s` / `standby` in results.json.
+
+**Numbers** (2026-11-11, RTX 3090 Ti, 1280x720 off screen; *not* a quiet PC: one to three other
+agents' City Folk instances ran during every run, among them a BelowNormal trailer capture, so cold
+times are 2-3x the quiet-PC ones above; compare main / branch pairs only). Start-up from
+tools/pipelines/verify.py (route town_day, fresh cache, then `--warm`), the standby times from
+title-only runs (`build/standby_time.ps1` of the worktree):
+
+| | main hold | branch hold | branch standby set (background, game running) |
+|---|---|---|---|
+| default settings, cold | 33.7 s (2178 pipelines) | 27.7 s / 22.3 s (2178) | Enhanced lighting "on" set: 4448 pipelines in 250.6 s, game at 59.8 fps meanwhile (13629 frames), no frame over 60 ms but the first |
+| default settings, warm | 0.35 s | 0.30 s / 0.39 s | 4448 loaded in 2.75 s |
+| user's settings (Enhanced lighting on, Ultra, AO, Enhanced world), cold | 179.0 s (6814) | 174.6 s (6814) | "off" set: 592 pipelines (most configs are the same with and without the 6-bit EFB), done 8 s after the game started |
+| user's settings, warm | 1.11 s | 1.05 s | 592 in 1.16 s |
+
+So the start-up hold is unchanged (the standby set never counts for it); what it costs is CPU time in
+the background after the start: on a first start with default settings about four minutes of
+compiling on half the pipeline threads here (~1.5-2 min on a quiet PC by the per-pipeline rates
+above), seconds on later starts. Building it in the hold instead would have made every first start
+with default settings 4-10 times longer for an option off by default, so it is not. **Memory**: the
+standby pipelines stay resident (that is what makes the switch instant). With default settings, warm
+cache, at 120 s: main private 1651-1654 MB / working set 1379-1380 MB (2185 pipelines), branch 2260-2262
+/ 2053-2097 MB (6640 pipelines): about +0.6 GB, i.e. what main also holds after one switch on (it keeps
+the old set). With Enhanced lighting on at start the "off" set is small (592): 2901 vs 2937 MB private.
+Not done (possible follow-up if the 0.6 GB matters): release the standby pipelines once built and
+written to the Dawn cache; a switch would then reload them from the cache (~0.7 s hold offline, as main
+with a warm cache; a deferral of a second or two online).
+
+**Turning it on later** (default settings, Enhanced lighting switched on at frame 6000 in the town,
+offline, `--env CF_SETTINGS_AT=6000:enhanced_lighting.enabled=true`):
+
+| | main | branch |
+|---|---|---|
+| fresh cache (first start; the switch ~100 s after the game started) | held 125.3 s for 4447 pipelines | 1919 already built by the standby set; held 73.3 s for the other 2528 (offline a switch before the set is done holds for what is left, as before) |
+| standby set done (any later moment of that start, every later start) | warm Dawn cache: held 0.70 s for 4455; cold: as above | not held: `0 new pipelines queued`, the passes' render targets in ~5 ms, worst frame of that 5 s window 32.9 ms |
+| MISS lines over the route | 0 | 0 |
+
+**Two-instance visit with the fix** (same profiles and routes as the reproduction, both started from
+caches that never had Enhanced lighting on; logs and a contact sheet in `out/precache_enh/visit_b1/`
+and `visit_final/` of the worktree). Both standby sets compiled in the background while the games
+booted and the visit started (4448 pipelines in 254-255 s with both instances compiling at once, 15136
+game frames meanwhile). Then, in the host's town: visitor Enhanced lighting on, preset Medium, off, on,
+preset Ultra, AO on, off, on; host on, off, on, preset Low, off (final run; the first run did a similar
+set). Result: **0 holds, 0 disconnects** (no `CloseAllConnectionsHard`, the visit went on), 0 dropped
+draws, no MISS in the visitor, 2 in the host (scene configs at the visitor's arrival, frame ~14500,
+before any switch; also in the first run). AO on was deferred 19.8 s (28.9 s in the first run) while its
+667 pipelines compiled, the game running (worst frame 26.6 ms meanwhile; 539 ms in the first run, before
+the mask pipelines left `g_initMutex`). Longest frame in the 5 s window of a switch: 67 ms (the first
+switch on: render targets), 33-37 ms for off; main: 136 s held, then disconnected. Screens: lighting
+visibly on / off as asked, no garbage. Not tested: a real second PC / router, PAL / JP / KR, MSAA or
+Enhanced world changes while online (no hold, draws skipped while their pipelines build: by code, not
+by a run), the user's exact settings in a visit.
+
+Original 60 frame dumps (continue.txt, 3000-6000 every 50, warm cache, nothing switched): main vs main
+54/61 identical; branch with `CF_STANDBY=0` vs main 54-56/61 in one run, 14-16/61 in the other; branch
+with the standby set 14-19/61 in both runs (56/61 between themselves). The runs fall into a few
+outcomes that differ in *game state*, not rendering: Rover's line after "Preparing saved data" ("Thanks
+for waiting" vs "Sorry for keeping you waiting", picked by how long the load took in real time), and
+from there the arrival wipe and the pond's water phase (max 18-20 levels) at the same frame numbers.
+Frames of runs with the same outcome are identical across the builds, so nothing renders differently;
+the standby set's background loading at the title (2.75 s warm) makes the second outcome more likely
+here. Interpolated runs (the default) varied more between runs of the same build (0-54 of 61).
+
 ## Performance on a quiet PC (2026-11-04, branch perf-2)
 
 RTX 3090 Ti, nothing else running, 1280x720 window off screen on a 60 Hz display, VSync off,

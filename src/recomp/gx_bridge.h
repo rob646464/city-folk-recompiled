@@ -11,8 +11,13 @@ struct DisplayCopy {
     uint16_t efbHeight = 480;                       // display copy source height (EFB lines)
 };
 const DisplayCopy& displayCopy();
-// Pushes the F1 > Visuals > Rendering accuracy options to Aurora (host thread, every frame).
+// F1 > Visuals > Rendering accuracy options -> the flags to use (host thread, every frame; pushed to
+// Aurora with the enhanced-lighting configuration by precache::applyGraphics, called from
+// enh::applySettings, which runs right after this).
 void applyAccuracySettings();
+uint32_t requestedAccuracy();
+// The flags the F1 options give with enhanced lighting on / off (no test A/B alternation).
+uint32_t accuracyFlagsFor(bool enhancedOn);
 // Enhanced lighting is on: "EFB color depth" (and "6-bit blending") are off whatever the
 // setting says (their F1 toggles are greyed out; docs/RENDERING.md).
 bool enhancedOverridesEfbDepth();

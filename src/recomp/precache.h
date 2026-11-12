@@ -7,9 +7,22 @@
 // before (pipeline_cache.db in the cache directory) are compiled in the background from the
 // first frame on; a draw whose pipeline is not ready yet waits for it (Aurora patch 0013),
 // so nothing ever flickers. Setup shows the first compile with a progress bar.
+#include <aurora/enhanced.h>
+
 #include <cstdint>
 
 namespace recomp::precache {
+// Branch precache-enh (docs/RENDERING.md "Enhanced lighting precached at launch", "Graphics
+// changes while online"). Host thread, every frame (enh::applySettings): pushes the GX accuracy
+// flags and the enhanced-lighting configuration to Aurora, and makes (otherAccuracy, other) -
+// the other state of the enhanced-lighting master switch - Aurora's standby set (Aurora 0550:
+// its pipeline variants and passes are built in the background from the start, so switching
+// later needs no compile hold). While in an online room, a change whose pipelines are not built
+// yet is deferred (the previous flags / configuration stay, the change becomes the standby set)
+// until they are, so the game never stops for compiles there; `cfg` is updated to what was
+// pushed. Test aids: CF_STANDBY=0 (no standby set), CF_ONLINE_DEFER=0 (no deferral; the old
+// hold), CF_ONLINE_DEFER=always (defer offline too).
+void applyGraphics(uint32_t accuracy, AuroraEnhancedConfig& cfg, uint32_t otherAccuracy, const AuroraEnhancedConfig& other);
 void configure();  // before aurora_initialize: worker thread count (CF_PIPELINE_THREADS)
 void init();       // after aurora_initialize, before the first frame: logging, precache list, GX accuracy flags
 void frame();      // host thread, once per frame (inside the ImGui frame): stats log, "compiling" indicator
@@ -29,6 +42,9 @@ Progress progress();
 // shader cache (a sample of the batch loaded without a miss) the rest loads while the game runs (Aurora
 // 0226, docs/RENDERING.md "Warm starts"). Test overrides: CF_PRECACHE_WAIT=0 (start at once,
 // compile in the background as before), CF_PIPELINE_BOOST=0 (no extra threads while held).
+// Branch precache-enh: never after startup while in an online room (the other players' games
+// would time out the visit): a batch then compiles while the game runs, draws whose pipeline is
+// not built yet are skipped until it is (CF_ONLINE_HOLD=1: hold as offline, test aid).
 bool holdGame();
 void drawHold();  // inside the ImGui frame while holdGame(): "Loading..." / "Compiling shaders... n / m"
 // After each hold frame (aurora_end_frame): waits until the next one is due. Hold frames run at most

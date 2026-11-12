@@ -9,7 +9,7 @@ CF_PIPELINE_LOG=1). Also reports the startup shader hold ("game starts after ...
 
     py -3.14 tools/pipelines/verify.py --work <scratch dir> [--routes town_day,museum,...]
         [--presets default,enh,fps120,...] [--list <pipelines.bin> | --no-list]
-        [--exe build/windows-clang/cfrecomp.exe] [--disc "<US DATA/DATA>"] [--warm]
+        [--exe build/windows-clang/cfrecomp.exe] [--disc "<US DATA/DATA>"] [--warm] [--settings-file <ini>]
 
 Recording: run with --no-list (or the current list) and merge every run's pipeline_cache.db:
     py -3.14 tools/pipelines/pipelines.py build -o data/pipelines.bin [data/pipelines.bin] <work>/*/*/cache/pipeline_cache.db
@@ -137,7 +137,16 @@ def run_once(a, d: Path, route, frames, extra, ini, cache: Path, tag: str):
         p.mkdir(parents=True)
     cfg = app / "Animal Crossing City Folk Recompiled"
     cfg.mkdir(parents=True)
-    if ini:
+    if a.settings_file:
+        # a whole settings.ini (e.g. a copy of a user's report), the preset's sections after it
+        text = Path(a.settings_file).read_text(encoding="utf-8", errors="replace")
+        if ini:
+            tmp = cfg / "preset.ini"
+            write_ini(tmp, ini)
+            text += "\n" + tmp.read_text(encoding="utf-8")
+            tmp.unlink()
+        (cfg / "settings.ini").write_text(text, encoding="utf-8")
+    elif ini:
         write_ini(cfg / "settings.ini", ini)
     cache.mkdir(parents=True, exist_ok=True)
     e = dict(os.environ)
@@ -184,6 +193,14 @@ def run_once(a, d: Path, route, frames, extra, ini, cache: Path, tag: str):
          "hold_s": float(start.group(1)) if start else None, "pipelines": int(start.group(3)) if start else None,
          "presents": int(seen[-1]) if seen else 0}
     r["complete"] = r["presents"] >= frames or "[warp] sweep done" in text
+    # Branch precache-enh: settings-change holds (game held / resumed after) and the standby set
+    # (Aurora 0550: the other state of Enhanced lighting, built in the background).
+    held = [float(x) for x in re.findall(r"\[precache\] resumed after ([0-9.]+) s", text)]
+    r["settings_holds"] = len(re.findall(r"\[precache\] game held for", text))
+    r["settings_hold_s"] = round(sum(held), 2)
+    sb = re.findall(r"standby set built in the background: (\d+) pipelines in ([0-9.]+) s \((\d+) compiled.*?worst ([0-9.]+) ms\)", text)
+    if sb:
+        r["standby"] = [{"pipelines": int(n), "s": float(t), "compiled": int(c), "worst_ms": float(w)} for n, t, c, w in sb]
     (d / f"misses{tag}.txt").write_text("\n".join(misses) + "\n", encoding="utf-8")
     print(json.dumps(r), flush=True)
     return r
@@ -201,6 +218,7 @@ def main():
     ap.add_argument("--cache-from", help="start from a copy of this cache folder (a warm cache) instead of an empty one")
     ap.add_argument("--warm", action="store_true", help="start each run a second time with its cache (warm hold)")
     ap.add_argument("--env", action="append", default=[], help="extra VAR=value for every run")
+    ap.add_argument("--settings-file", help="settings.ini for every run (the preset's sections are added after it)")
     ap.add_argument("--file", help="ad-hoc route file (run name 'adhoc'; with --frames, fixture save)")
     ap.add_argument("--frames", type=int, default=9000)
     ap.add_argument("--startup-seconds", type=float, default=180)
