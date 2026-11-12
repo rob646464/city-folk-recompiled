@@ -633,6 +633,44 @@ stream: frames are byte-identical to the game's.
   why each ray ends). A planar reflection (re-rendering the world mirrored) would add off-screen
   trees and houses; not done.
 
+### The player's reflection at the shore (branch reflection-face, Aurora 0560)
+
+User report (4K, Enhanced lighting Ultra, reflection strength 1.5, autumn 11:00, standing at the
+sea's edge on the beach, the player wearing a Mii mask): the body and shirt reflected faintly, the
+head was faint or missing, and the Mii face (eyes, glasses, nose, mouth) sat apart from it, further
+from the waterline. Reproduced with a copy of the user's town (beach warp, down to the water,
+standing facing the camera; `CF_WFX_FREEZE=1`).
+
+Not a decal / depth problem: the worn mask is the game's RFL head (fn_802B3950 / fn_802B39B0 wrap
+RFLDrawOpaCore / RFLDrawXluCore; the face mask is drawn with late Z and an alpha test, depth
+writes on), and the scene depth the march reads is continuous over hair, face and body (view z
+357-364 units over the head, 364-373 over the body, decoded from a 16-bit debug view). Re-projecting
+every visible player pixel through the water plane (mask depth: the surface 9 units below the
+shoes) put the mirrored face where the march put it, within ~40 px. What was wrong:
+
+- **Shallow-water weight** (0391): the reflection weight there was 0.09 under the legs and body
+  (water a few units deep at the shore: 15 % of the deep-water weight) and rose to 0.55 where the
+  head reflects, over deeper water (`AURORA_WORLD_FX_SHOW=5`, green). So the body nearly vanished
+  and the face stood out alone. Scene hits that stand above the water now keep 60 % at the
+  waterline (`g_ssrLift`: 0 for things lying on the water, foam / surf / a bank's foot, 1 from
+  3 % of the distance up); the sky part keeps 0391's 15 % (no milky shallows), and without the
+  lift test the river's foam edge came back as a pale band along the bank.
+- **March steps too long near the start**: 24 steps of 1.6 x distance / 24 (24 units here) growing
+  by 6 %, against a player 33 units tall with a 20-unit head: the hits came at steps 0-2, a step
+  often jumped over the head (rays left the picture: `SHOW=8` "off screen" in the middle of the
+  reflected head) and the hit positions stepped (contour stripes). Steps are now spaced
+  quadratically up to the fade-out length (`ssr_t`: fine at the start, none spent past it; the
+  old ones ran to 1.6-3.8 x of it), the hit is refined by 8 halvings instead of 5, and a ray that
+  went behind something by 1-3 x the thickness and found nothing else returns that colour instead
+  of the sky (the hidden underside of a head or a chin).
+
+Result: legs, shorts, shirt and the whole head reflect as one figure, the face in it. A small
+dark patch of hair can still show past the forehead: the top of the head as the camera sees it,
+which a real mirror would hide behind the head (screen space has no back faces). GPU: "World FX
+surfaces" 0.387 -> 0.612 ms at 3840x2160 in this scene (more steps before a ray leaves the
+picture), busy 6.09 -> 6.35 ms per frame. Reflections off: the changed code is not run. Checked:
+the beach, the river by the house (bank reflections as before), rain (puddles, ripples).
+
 ### Cost (RTX 3090 Ti, rain in the town with every option on incl. tilt-shift; other agents' game
 instances were running on the same GPU, so these are upper bounds)
 

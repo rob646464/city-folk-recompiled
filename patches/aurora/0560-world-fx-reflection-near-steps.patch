@@ -1,0 +1,161 @@
+diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
+--- a/lib/gfx/world_fx.cpp
++++ b/lib/gfx/world_fx.cpp
+@@ -300,14 +300,34 @@
+   return c;
+ }
+ 
++// (0560) Distance along the ray of march step i (+ jitter offset in steps): quadratic spacing that
++// reaches maxLen at the last step. The steps grow with the distance (finer where the reflected
++// object is near: a character standing in the water is a few steps long instead of one, so a step
++// can no longer jump over a head or an arm), and none is spent past maxLen, where the reflection has
++// faded out (the old geometric steps, maxLen / steps growing by 6 %, ended at 1.6-3.8 maxLen).
++fn ssr_t(i: f32, steps: i32, maxLen: f32) -> f32 {
++  let x = i / f32(steps);
++  return maxLen * x * x;
++}
++// (0560) How far the last ssr() hit stands above the reflecting plane: 0 at the plane (foam and
++// surf decals lying on the water, the bank's foot) .. 1 from 3 % of the distance up (a character's
++// shoes and everything above).
++var<private> g_ssrLift: f32 = 0.0;
++fn ssr_lift(hit: vec3f, p: vec3f, dist: f32) -> f32 {
++  return smoothstep(0.01 * dist, 0.03 * dist, dot(hit - p, up_view()));
++}
+ // Screen-space reflection of view ray `r` from `p`: rgb, a = how much of it is a scene hit.
+ fn ssr(p: vec3f, r: vec3f, steps: i32, jitter: f32) -> vec4f {
+   let dist = max(-p.z, 1.0);
+   let maxLen = dist * 1.6;
+-  var stepLen = maxLen / f32(steps);
+-  var t = stepLen * (0.3 + 0.7 * jitter);
++  let j0 = 0.3 + 0.7 * jitter;
+   var prevT = 0.0;
++  var fb = vec4f(0.0);
++  var fbLift = 0.0;
++  g_ssrLift = 0.0;
+   for (var i = 0; i < steps; i++) {
++    let t = ssr_t(f32(i) + j0, steps, maxLen);
++    let stepLen = t - prevT;
+     let q = p + r * t;
+     if (q.z > -1.0) { break; }
+     let s = project(q);
+@@ -319,7 +339,7 @@
+       // refine between prevT and t
+       var lo = prevT;
+       var hi = t;
+-      for (var k = 0; k < 5; k++) {
++      for (var k = 0; k < 8; k++) {
+         let mid = 0.5 * (lo + hi);
+         let qm = p + r * mid;
+         let sm = project(qm);
+@@ -332,12 +352,12 @@
+       // water the scene depth is the bed (the sea floor, the terraces' sides below the water
+       // line), so rays from the surface "hit" those underwater faces: the striped terrace sides
+       // came back as long vertical bands. Hits below the ray's origin plane: march on.
+-      if (dot(view_pos(sh.xy, load_depth(sh.xy)) - p, up_view()) < -0.01 * dist) {
++      let hp = view_pos(sh.xy, load_depth(sh.xy));
++      if (dot(hp - p, up_view()) < -0.01 * dist) {
+         prevT = t;
+-        t += stepLen;
+-        stepLen *= 1.06;
+         continue;
+       }
++      g_ssrLift = ssr_lift(hp, p, dist);
+       let uv = sh.xy * u.size.zw;
+       let col = textureSampleLevel(tcolor, samp, uv, 0.0).rgb;
+       // fade near the picture edges and with distance along the ray
+@@ -346,19 +366,32 @@
+       let along = 1.0 - smoothstep(0.6, 1.0, hi / maxLen);
+       return vec4f(col, edge * along);
+     }
++    // (0560) the ray went behind something by more than the thickness (under a character's chin,
++    // over the top of its head: surfaces the camera cannot see, so no sample is ever "on" them).
++    // If the ray finds nothing else, what it passed behind stands in for that hidden side, rather
++    // than the sky showing through the middle of the object (the head's reflection split in two,
++    // the hair floating apart). Only near the surface (3x the thickness): a ray far behind a
++    // fence or a trunk still goes on to the sky.
++    if (fb.a == 0.0 && diff >= thick && diff < 3.0 * thick && dot(sp - p, up_view()) > 0.0) {
++      let e = min(min(s.x - u.vp.x, u.vp.x + u.vp.z - s.x), min(s.y - u.vp.y, u.vp.y + u.vp.w - s.y));
++      let along = 1.0 - smoothstep(0.6, 1.0, t / maxLen);
++      fb = vec4f(textureSampleLevel(tcolor, samp, s.xy * u.size.zw, 0.0).rgb, smoothstep(0.0, 0.08 * u.vp.w, e) * along);
++      fbLift = ssr_lift(sp, p, dist);
++    }
+     prevT = t;
+-    t += stepLen;
+-    stepLen *= 1.06;
+   }
+-  return vec4f(0.0);
++  g_ssrLift = fbLift;
++  return fb;
+ }
+ fn ssr_why(p: vec3f, r: vec3f, steps: i32) -> vec4f {
+   let dist = max(-p.z, 1.0);
+   let maxLen = dist * 1.6;
+-  var stepLen = maxLen / f32(steps);
+-  var t = stepLen * 0.65;
+   var minDiff = 1e9;
++  var prevT = 0.0;
+   for (var i = 0; i < steps; i++) {
++    let t = ssr_t(f32(i) + 0.65, steps, maxLen);
++    let stepLen = t - prevT;
++    prevT = t;
+     let q = p + r * t;
+     if (q.z > -1.0) { return vec4f(0.25, f32(i) / f32(steps), 0.0, 1.0); }
+     let s = project(q);
+@@ -370,18 +403,18 @@
+     if (abs(diff) < abs(minDiff)) { minDiff = diff; }
+     let thick = max(stepLen * 1.5, 0.04 * dist);
+     if (diff > 0.0 && diff < thick) { return vec4f(1.0, f32(i) / f32(steps), 0.0, 1.0); }
+-    t += stepLen;
+-    stepLen *= 1.06;
+   }
+   return vec4f(0.75, 1.0, clamp(minDiff / 100.0 * 0.5 + 0.5, 0.0, 1.0), 1.0);
+ }
+-fn reflection(p: vec3f, n: vec3f, steps: i32, jitter: f32, march: bool) -> vec3f {
++// rgb, a = scene hit share x its lift above the water (0560: the water's shallow weight treats
++// things standing above the water apart from the sky)
++fn reflection(p: vec3f, n: vec3f, steps: i32, jitter: f32, march: bool) -> vec4f {
+   let v = normalize(p);
+   let r = reflect(v, n);
+   let sky = sky_color(r, true);
+-  if (!march) { return sky; }
++  if (!march) { return vec4f(sky, 0.0); }
+   let h = ssr(p + n * (0.002 * max(-p.z, 1.0)), r, steps, jitter);
+-  return mix(sky, h.rgb, h.a);
++  return vec4f(mix(sky, h.rgb, h.a), h.a * g_ssrLift);
+ }
+ fn schlick(cosT: f32, f0: f32) -> f32 { return f0 + (1.0 - f0) * pow(1.0 - clamp(cosT, 0.0, 1.0), 5.0); }
+ 
+@@ -458,7 +491,8 @@
+         n = tangent_bend(n, ripples(wpos.xz, t, 0.55 + 0.9 * u.p1.x, ws * 0.55) * 0.35 * min(u.p1.x * 1.5, 1.0));
+       }
+       if ((en & 1u) != 0u) {
+-        let refl = reflection(pw, n, steps, jitter, true);
++        let rh = reflection(pw, n, steps, jitter, true);
++        let refl = rh.rgb;
+         let v = normalize(-pw);
+         let f = schlick(dot(v, n), 0.04);
+         // (0391) shallow water: the game draws the sea / river over its bed with a low alpha near
+@@ -467,7 +501,13 @@
+         // depth = surface, scene depth = bed): full from 1.5 "metres", a trace at the waterline.
+         let bedDepth = max(pw.z - p.z, 0.0);
+         let deep = smoothstep(0.0, 1.5 * ws, bedDepth);
+-        let k = u.refl.x * (0.35 + 0.65 * f) * mix(0.15, 1.0, deep);
++        // (0560) ...for the sky. Things standing in or at the water (a player at the shore) are
++        // reflected right where the water is shallowest, and the 0391 weight drew a character's
++        // legs and body at 15 % and its head, further out over deeper water, at up to 100 %: the
++        // face seemed to float apart from a missing body. Scene hits that stand above the water
++        // keep 60 % at the waterline; the sky part and things lying on the water (foam, surf, the
++        // bank's foot: lift 0) keep 0391's trace (no milky shallows, no bright foam bands).
++        let k = u.refl.x * (0.35 + 0.65 * f) * mix(mix(0.15, 0.6, rh.a), 1.0, deep);
+         if (u.pp.y > 4.5) { // debug view 5: scene hit share of the reflection, its weight, normal tilt
+           if (u.pp.y > 7.5) { // 8: why the march ends (r: 0.25 behind camera, 0.5 off screen, 0.75 no hit, 1 hit; g: step; b: closest miss)
+             return ssr_why(pw + n * (0.002 * max(-pw.z, 1.0)), reflect(-v, n), steps);
+@@ -508,7 +548,7 @@
+         let pud = puddle * smoothstep(0.85, 0.97, flatness);
+         var refl = vec3f(0.0);
+         if (pud > 0.03) {
+-          refl = reflection(p, pn, max(steps / 2, 8), jitter, (en & 1u) != 0u);
++          refl = reflection(p, pn, max(steps / 2, 8), jitter, (en & 1u) != 0u).rgb;
+         } else {
+           refl = sky_color(reflect(-v, n), false);
+         }
