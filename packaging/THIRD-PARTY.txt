@@ -22,6 +22,9 @@ Tracy (client)             BSD 3-Clause                    licenses/tracy.txt
 SQLite                     public domain                   -
 LLVM clang / lld           Apache-2.0 WITH LLVM-exception  llvm/LLVM-LICENSE.TXT
 
+On Linux, libpng, zlib, FreeType, Zstandard and SQLite are the system's own libraries and are
+not part of the package (their licence files are then not in the licenses folder).
+
 Portions of this software are copyright (c) The FreeType Project (www.freetype.org).
 All rights reserved.
 

@@ -236,6 +236,7 @@ foreach (_lic
         "aurora|${CMAKE_SOURCE_DIR}/extern/aurora/LICENSE"
         "imgui|${_deps_src}/imgui-src/LICENSE.txt"
         "sdl3|${_deps_src}/sdl3_prebuilt-src/licenses/SDL3/LICENSE.txt"
+        "sdl3|${_deps_src}/sdl-src/LICENSE.txt"  # SDL built from source (Linux, macOS)
         "libpng|${_deps_src}/png-src/LICENSE"
         "zlib|${_deps_src}/zlib-src/LICENSE.md"
         "freetype|${_deps_src}/freetype-src/LICENSE.TXT"
