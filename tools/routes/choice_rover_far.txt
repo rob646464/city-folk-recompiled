@@ -1,0 +1,9 @@
+# Choice-box placement test (docs/CONTROLS.md "Choice boxes: the pointer starts on the highlighted choice"); run with CF_NAV_LOG=1 CF_CHOICE_SHOT=<dir>,20.
+# Rover's choice boxes with the pointer visible far away (top left) while his text runs: the
+# placement must still put it onto the highlighted first choice ("Yeah!", then the saved player).
+1000:@off
+1300:A
++40:A ~20
+2000:@-0.85/-0.85
+2040:A
++40:A ~70
