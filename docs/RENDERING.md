@@ -633,6 +633,108 @@ stream: frames are byte-identical to the game's.
   why each ray ends). A planar reflection (re-rendering the world mirrored) would add off-screen
   trees and houses; not done.
 
+### Planar reflections of characters (branch reflection-face, Aurora 0570)
+
+User report (4K, Enhanced lighting Ultra, reflection strength 1.5, autumn 11:00, standing at the
+sea's edge on the beach; plain villager head, also seen with a Mii mask): the body reflected
+faintly, the head was faint or missing and the face sat apart from it, further from the waterline.
+Reproduced with a copy of the user's town (beach warp, down to the water; `CF_NO_MII_MASK=1` for
+the plain head, `CF_WFX_FREEZE=1`).
+
+**Why the screen-space march could not do it.** Not a decal or depth problem: the scene depth is
+continuous over hair, face and body (view z 357-364 units over the head, 364-373 over the body;
+the Mii mask's RFL face is drawn with late Z and depth writes on), and re-projecting every visible
+player pixel through the water plane put the mirrored face where the march put it, within ~40 px.
+A mirror under a character shows its underside (soles, under the shirt, the chin); the camera
+looks down at it, so the picture only holds the top of the hair, the face and the shirt front.
+The march can only put those pieces back upside down with gaps between them (the face as a
+separate patch beyond an empty chin, a cap of hair below it), and 0391's shallow-water weight drew
+the legs and body at 15 % over the shallow shore water while the head, further out, got up to
+100 % (`AURORA_WORLD_FX_SHOW=5`). Tuning the march (finer steps, a "passed behind" colour, back-face
+tests) only moved the pieces about and added grey columns beside the body; it was dropped.
+
+**Planar reflection** (Aurora 0570, `lib/gfx/world_fx.cpp`): characters are drawn a second time,
+mirrored through the water under them; screen-space reflection stays for the world.
+
+- *Which draws*: `cf_world.cpp` classes them `AURORA_SURFACE_CHARACTER`, one run of the kind per
+  object: the players' `boy` / `girl` models and their own heads (`boy01a`, ...), the worn Mii
+  mask (RFL head: hooks on its opaque / translucent draw wrappers fn_802B3950 / fn_802B39B0, `all`:
+  hash-matched in PAL, Japan and Korea too),
+  and the villagers' and NPCs' three-letter species models (`kal`, `cbr`, `squ`, `duk`, ...;
+  `CF_WFX_CHAR_LOG=1` lists the objects tested). The material classification keeps the kind
+  inside a character. Only while Enhanced world and its reflections are on.
+- *Recording*: Aurora notes each run's recorded commands (pass, first..last), an anchor (a
+  position matrix of its first draw: a point in the character, view space) and the projection
+  rows as the GX uniform holds them. At the scene end every GX draw of the run (merged draws,
+  early-Z split halves and all) gets a copy of its uniform block; with frame interpolation the
+  replayed frame's draws are taken, so the mirrored characters move with the in-between frames.
+- *Water height per character* ("plane pass", one RGBA32F texel per projection row): the water
+  surface's depth (surface mask) in a window around the anchor's screen position gives the
+  plane's height (weighted by the horizontal distance to the anchor: the sea and a river beside it
+  differ); the projection rows mirrored through that plane and flipped vertically on the screen
+  (the flip restores the triangle winding the mirror reversed, so every draw keeps the pipeline
+  the scene used: no new shaders). No water near the character, or the character far above it:
+  rows that clip everything. The rows are copied into the draws' uniform copies on the GPU.
+- *Planar pass*: those draws into a target shaped like the EFB (same colour / normal / depth
+  formats and sample count), cleared, at full resolution (the enhanced lighting's screen-space
+  shadow / AO / light-tile lookups index by pixel); below that image, in the same target, the
+  same draws once more with their own (unmirrored) uniforms at half size: the characters as the
+  camera sees them, a character mask; then a depth snapshot of both.
+- *Composite* (surfaces pass, water pixels only): a march hit on a scene pixel the character mask
+  covers (its depth matching the scene depth there, one mask texel of slack: the half-size copy
+  loses thin gaps such as the one between the legs) is a character seen from above and is dropped
+  for the sky: the old pieces, and the slivers along a character's outline. Where the planar target
+  holds a character for this pixel (read through the same bend the water pattern and ripples give
+  the march's rays), it replaces the march's result, unless the march hit the world nearer along
+  the ray, or a short march (8 steps) from the water toward the character's own point finds a
+  non-character surface on the way (the deck of the bridge a player stands on: the march's long
+  steps skip it, and the player's shoe used to show through the bridge's reflection as a blue
+  shard). Same weight as the march, except that 0391's shallow-water trace (15 % at the waterline)
+  becomes 60 % for a planar character: a character at the water's edge is reflected right over
+  the shallowest water, and its legs and body vanished while its head, further out, got up to
+  100 %.
+- *Not done*: geometry below the water plane is not clipped (a character wading would show its
+  submerged part mirrored; City Folk's characters do not wade); shadows and AO in the planar copy
+  are looked up at the mirrored pixel (usually water: next to none).
+
+The world's reflections (terrain, trees, houses, the bridge, the sky fallback) are the march as
+before: a first round of this branch (finer near steps, a 60 % shallow weight for world hits, a
+"passed behind" colour) changed them visibly (bank and bridge reflections stronger, grey columns
+beside the body) and was dropped.
+
+Checked (before / after at 3840x2160 with the user's settings, scratch copy of the user's town):
+the beach facing the camera, side-on and walking, Mii mask and plain head; a pond bank by the
+player's house; the river-mouth bridge (the player on it is hidden by the bridge's reflection);
+120 fps with interpolation (the mirrored player follows every presented frame). Not checked: a
+villager next to water (none stood by the water in the scratch town; villagers are classed and
+mirrored the same way), held tools and hats beyond the shell the player picked up (they are part
+of the player's model draws when the game draws them inside it). Reflections off (or Enhanced
+world off): no character run is noted and no pass recorded (`AURORA_WORLD_FX_LOG`: "0 groups
+noted, 0 draws mirrored"), the composite skips (`pp.w` 0).
+
+Other versions: the RFL wrappers are hooked `all` (hash-matched, config/<id>/us_map.txt), the model
+names are the same disc data. Checked on the PAL and Japanese dev builds (`toolsuild.ps1 -Game
+RUUP01 / RUUJ01`) with a copy of the user's town whose title folder was renamed (52555550 /
+5255554A; the save format is the same in all four, docs/NAND.md "Region"), beach route, Mii mask
+on and off (`CF_NO_MII_MASK=1` works on every version): the same groups as USA (player + Mii head;
+player + own head) and the same planar picture; before / after with `AURORA_WORLD_FX_PLANAR=0`.
+Korea: the dev build links (the hooks match), not run. A version where no character is tagged
+draws nothing extra and looks as before (no group, `pp.w` 0).
+
+Pipelines: the planar draws use the pipelines the scene used (same configs, same EFB-shaped
+layout), and the plane pass is created with the world effects' own shaders. With an empty shader
+cache, Enhanced lighting Ultra + Enhanced world, the beach route (`CF_PIPELINE_LOG=1`): 13
+`MISS (not precached)` lines, all before the town is reached (frames 3056-4900: title, Rover's bus,
+arrival), the same 13 configs as main's build; none after the warp to the beach.
+
+GPU cost (RTX 3090 Ti, 3840x2160, the beach scene above, the player at the water): busy 6.24 ->
+6.85 ms per frame (+0.61 ms): "World FX planar characters" 0.58 ms (clear of the 1.5x tall
+target, the mirrored and the half-size unmirrored draws, resolve, depth snapshot), "World FX
+plane" 0.11 ms, "World FX surfaces" 0.40 -> 0.45 ms. The two passes run whenever a character is
+drawn in a frame with a surface mask (water or ground drawn); whether there is water near it is
+only known on the GPU, so a character far from any water costs the same (its rows clip
+everything). The plane pass is one serial loop per texel and could be trimmed.
+
 ### Cost (RTX 3090 Ti, rain in the town with every option on incl. tilt-shift; other agents' game
 instances were running on the same GPU, so these are upper bounds)
 
@@ -676,7 +778,7 @@ wet ground, puddles, ripples, haze, leaves), snow (Jan 15 11:00: sparkle, snowfl
 (camera / projection / draws at the scene end), `AURORA_WORLD_FX_MTX_LOG=1` (a surface draw's
 matrix), `AURORA_WORLD_FX_SHOW=<n>` debug views: 1 surface mask, 2 depth / focus row, 3 mask alpha +
 wetness, 4 ground branch, 5 reflection hit share / weight, 6 focus distance / scale, 7 raw depth,
-8 why each water ray's march ends. `CF_WFX_SET` takes `;` or `,` between keys (`,` inside
+8 why each water ray's march ends, 9 planar character here / march hit dropped as a character / march hit, 10 the planar character target as drawn (0570). `AURORA_WORLD_FX_PLANAR=0` turns the planar characters off (A/B), `CF_WFX_CHAR_LOG=1` (objects tested as characters), `CF_NO_MII_MASK=1` (USA: the worn Mii mask is not shown from the next scene load on; the plain villager head). `CF_WFX_SET` takes `;` or `,` between keys (`,` inside
 run.ps1's -Env).
 Weather and season: `CF_WEATHER_FAKE=rain|heavyrain|snow|clear`, `CF_CLOCK_START` (docs/CALENDAR.md,
 tools/routes/run.ps1).

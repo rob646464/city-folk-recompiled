@@ -835,6 +835,15 @@ bool mainView(float view[12]) {
     return true;
 }
 std::string modelName(u32 scnObj) { return modelInfo(scnObj).name; }
+// The cache entry checked against the object (its MDL0 pointer still there), refreshed if not: a
+// scene load can put another model at a cached object's address (outdoors too: the player's model
+// rebuilt after the Mii mask came off kept the old entry's name; planar reflections, cf_world.cpp).
+std::string modelNameChecked(u32 scnObj) {
+    const ModelInfo& m = modelInfo(scnObj);
+    if (m.mdl && rd32(scnObj + m.off) == m.mdl && rd32(m.mdl) == 0x4D444C30u) return m.name;
+    sModels.erase(scnObj);
+    return modelInfo(scnObj).name;
+}
 
 namespace {
 

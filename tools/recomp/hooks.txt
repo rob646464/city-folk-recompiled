@@ -93,6 +93,10 @@ fn_802B5598 all
 # Enhanced world (src/game/cf_world.cpp, docs/RENDERING.md "Enhanced world"): dWeather_c's per-frame
 # update (its weather state at +0x5884).
 fn_801C92F0 all
+# Planar reflections of characters (src/game/cf_tags.cpp): the worn Mii mask's RFL head draws
+# (opaque / translucent wrappers of RFLDrawOpaCore / RFLDrawXluCore; hash-matched in all four).
+fn_802B3950 all
+fn_802B39B0 all
 
 # Nintendo events (docs/DISTRIBUTIONS.md): the game keeps a Nintendo letter from a WiiConnect24
 # package (save letter slot, letter, item, letter id); src/recomp/distributions.cpp records which

@@ -1,0 +1,747 @@
+diff --git a/include/aurora/world_fx.h b/include/aurora/world_fx.h
+--- a/include/aurora/world_fx.h
++++ b/include/aurora/world_fx.h
+@@ -34,6 +34,11 @@ extern "C" {
+ #define AURORA_SURFACE_WATER 1  // rivers, ponds, the sea: reflections, rain ripples
+ #define AURORA_SURFACE_GROUND 2 // walkable ground: wet sheen and puddles in rain, snow sparkle
+ #define AURORA_SURFACE_WORLD 3  // any other draw of the main 3D view (camera capture only)
++// 0570: a character (player, villager, NPC): drawn a second time at the scene end, mirrored
++// through the water under it, into a planar reflection that replaces the screen-space march over
++// the water where it lies. One character per run of the kind: switch to another kind (WORLD)
++// between two characters drawn back to back.
++#define AURORA_SURFACE_CHARACTER 4
+ 
+ #define AURORA_WORLD_FX_XF_VIEW 0x0700u
+ // 0440 (optional): the point the effects centre on, as a 3x4 model -> view matrix whose
+diff --git a/lib/gfx/recording.cpp b/lib/gfx/recording.cpp
+--- a/lib/gfx/recording.cpp
++++ b/lib/gfx/recording.cpp
+@@ -1365,6 +1365,17 @@ Range push_uniform(const uint8_t* data, size_t length) {
+   return push(current_frame_packet().uniforms, data, length, resources().limits.minUniformBufferOffsetAlignment);
+ }
+ 
++const uint8_t* uniform_bytes(const Range& range) noexcept {
++  if (!g_recorder.active()) {
++    return nullptr;
++  }
++  const auto& buf = current_frame_packet().uniforms;
++  if (uint64_t(range.offset) + range.size > buf.size()) {
++    return nullptr;
++  }
++  return buf.data() + range.offset;
++}
++
+ Range push_storage(const uint8_t* data, size_t length) {
+   ZoneScoped;
+   if (!check_recording("push_storage")) {
+diff --git a/lib/gfx/recording.hpp b/lib/gfx/recording.hpp
+--- a/lib/gfx/recording.hpp
++++ b/lib/gfx/recording.hpp
+@@ -86,6 +86,8 @@ Range push_indices(ArrayRef<T> data, size_t alignment) {
+   return push_indices(reinterpret_cast<const uint8_t*>(data.data()), data.size() * sizeof(T), alignment);
+ }
+ Range push_uniform(const uint8_t* data, size_t length);
++// 0570: the bytes of a uniform range pushed this frame (CPU side, until the frame is encoded).
++const uint8_t* uniform_bytes(const Range& range) noexcept;
+ template <typename T>
+ Range push_uniform(const T& data) {
+   return push_uniform(reinterpret_cast<const uint8_t*>(&data), sizeof(T));
+diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
+--- a/lib/gfx/world_fx.cpp
++++ b/lib/gfx/world_fx.cpp
+@@ -82,6 +82,37 @@ struct Camera {
+   Viewport vp{};
+ };
+ Camera g_camera;
++// 0570: planar reflections of characters. A character (AURORA_SURFACE_CHARACTER) is a run of
++// recorded commands in one pass, drawn again at the scene end with its projection mirrored through
++// the water under it. The anchor (a point of the character in view space, from its first draw's
++// position matrix) and the projection rows (as the GX uniform holds them) come from its first draw.
++struct CharGroup {
++  uint32_t pass = 0, begin = 0, end = UINT32_MAX;
++  float anchor[3]{};
++  float proj[16]{};
++  bool anchored = false;
++};
++constexpr size_t MaxCharGroups = 16;
++constexpr size_t MaxMirrorDraws = 1024;
++std::vector<CharGroup> g_chars;
++struct MirrorDraw {
++  gx::DrawData data;  // with its uniform copy (projection mirrored on the GPU)
++  Range original{};   // the draw's own uniform block (the unmirrored copy: character mask)
++  uint32_t group = 0;
++};
++struct PlaneUniform {
++  float anchors[MaxCharGroups][4]; // view-space anchor, w = 1
++  float rows[MaxCharGroups][4][4]; // projection rows
++  float info[4];                   // group count
++};
++static_assert(sizeof(PlaneUniform) % 16 == 0);
++bool planar_on() noexcept {
++  static const bool sOff = [] {
++    const char* v = std::getenv("AURORA_WORLD_FX_PLANAR");
++    return v && v[0] == '0';
++  }();
++  return !sOff;
++}
+ bool g_cameraFromSurface = false;
+ 
+ constexpr wgpu::TextureFormat MaskFormat = wgpu::TextureFormat::RGBA8Unorm;
+@@ -107,6 +138,7 @@ struct Tex {
+   wgpu::TextureView view;
+   uint32_t width = 0, height = 0;
+   wgpu::TextureFormat format = wgpu::TextureFormat::Undefined;
++  uint32_t samples = 1;
+ };
+ 
+ struct Gpu {
+@@ -120,6 +152,12 @@ struct Gpu {
+   wgpu::TextureFormat finalFormat = wgpu::TextureFormat::Undefined;
+   uint32_t finalSamples = 0;
+   Tex depth, mask, maskDepthTex, work, tmp, dummy, dummyDepth, dummyZ;
++  // 0570: planar character reflections
++  wgpu::BindGroupLayout planeBgl;
++  wgpu::PipelineLayout planeLayout;
++  wgpu::RenderPipeline planePipe;
++  wgpu::Buffer planeBuf;
++  Tex planeTex, reflColor, reflResolve, reflNormal, reflDepth, reflDepthR;
+ };
+ Gpu g_gpu;
+ std::mutex g_initMutex;
+@@ -161,6 +199,11 @@ struct FxU {
+ @group(0) @binding(4) var twork: texture_2d<f32>;
+ @group(0) @binding(5) var tdepth: texture_2d<f32>;
+ @group(0) @binding(6) var tmdepth: texture_depth_2d;
++// 0570: the planar reflection of the characters (its depth; its colour is twork in the surfaces
++// pass) and the plane pass's groups (anchor + projection rows per character).
++@group(0) @binding(7) var trefld: texture_2d<f32>;
++struct PlaneU { anchors: array<vec4f, 16>, rows: array<vec4f, 64>, info: vec4f };
++@group(0) @binding(8) var<uniform> pg: PlaneU;
+ 
+ struct VsOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f };
+ @vertex fn vs_full(@builtin(vertex_index) i: u32) -> VsOut {
+@@ -300,6 +343,10 @@ fn sky_color(rv: vec3f, clouds: bool) -> vec3f {
+   return c;
+ }
+ 
++// (0570) distance along the ray of the last ssr() hit (1e9: none) and its scene point (view space)
++var<private> g_ssrT: f32 = 1e9;
++var<private> g_ssrHit: vec3f = vec3f(0.0);
++var<private> g_ssrHitPx: vec2f = vec2f(0.0);
+ // Screen-space reflection of view ray `r` from `p`: rgb, a = how much of it is a scene hit.
+ fn ssr(p: vec3f, r: vec3f, steps: i32, jitter: f32) -> vec4f {
+   let dist = max(-p.z, 1.0);
+@@ -307,6 +354,7 @@ fn ssr(p: vec3f, r: vec3f, steps: i32, jitter: f32) -> vec4f {
+   var stepLen = maxLen / f32(steps);
+   var t = stepLen * (0.3 + 0.7 * jitter);
+   var prevT = 0.0;
++  g_ssrT = 1e9;
+   for (var i = 0; i < steps; i++) {
+     let q = p + r * t;
+     if (q.z > -1.0) { break; }
+@@ -332,12 +380,16 @@ fn ssr(p: vec3f, r: vec3f, steps: i32, jitter: f32) -> vec4f {
+       // water the scene depth is the bed (the sea floor, the terraces' sides below the water
+       // line), so rays from the surface "hit" those underwater faces: the striped terrace sides
+       // came back as long vertical bands. Hits below the ray's origin plane: march on.
+-      if (dot(view_pos(sh.xy, load_depth(sh.xy)) - p, up_view()) < -0.01 * dist) {
++      let hp = view_pos(sh.xy, load_depth(sh.xy));
++      if (dot(hp - p, up_view()) < -0.01 * dist) {
+         prevT = t;
+         t += stepLen;
+         stepLen *= 1.06;
+         continue;
+       }
++      g_ssrT = hi;
++      g_ssrHit = hp;
++      g_ssrHitPx = sh.xy;
+       let uv = sh.xy * u.size.zw;
+       let col = textureSampleLevel(tcolor, samp, uv, 0.0).rgb;
+       // fade near the picture edges and with distance along the ray
+@@ -375,13 +427,14 @@ fn ssr_why(p: vec3f, r: vec3f, steps: i32) -> vec4f {
+   }
+   return vec4f(0.75, 1.0, clamp(minDiff / 100.0 * 0.5 + 0.5, 0.0, 1.0), 1.0);
+ }
+-fn reflection(p: vec3f, n: vec3f, steps: i32, jitter: f32, march: bool) -> vec3f {
++// rgb, a = scene hit share (0570)
++fn reflection(p: vec3f, n: vec3f, steps: i32, jitter: f32, march: bool) -> vec4f {
+   let v = normalize(p);
+   let r = reflect(v, n);
+   let sky = sky_color(r, true);
+-  if (!march) { return sky; }
++  if (!march) { return vec4f(sky, 0.0); }
+   let h = ssr(p + n * (0.002 * max(-p.z, 1.0)), r, steps, jitter);
+-  return mix(sky, h.rgb, h.a);
++  return vec4f(mix(sky, h.rgb, h.a), h.a);
+ }
+ fn schlick(cosT: f32, f0: f32) -> f32 { return f0 + (1.0 - f0) * pow(1.0 - clamp(cosT, 0.0, 1.0), 5.0); }
+ 
+@@ -417,6 +470,72 @@ fn tangent_bend(n: vec3f, gw: vec2f) -> vec3f {
+   return normalize(n + tx * gw.x + tz * gw.y);
+ }
+ 
++// (0570) Plane pass: one RGBA32F texel per projection row of each character (x = 4 group + row):
++// the water height under the character from the water surface's depth around its anchor on the
++// screen (rivers, ponds and the sea lie at different heights), and its projection rows mirrored
++// through that plane (and flipped vertically on the screen, which restores the triangle winding
++// the mirror reversed, so the draws keep their own pipelines). No water near it: a row set that
++// clips every vertex (w = -1).
++@fragment fn fs_plane(in: VsOut) -> @location(0) vec4f {
++  let x = u32(in.pos.x);
++  let g = x / 4u;
++  let ri = x % 4u;
++  let none = select(vec4f(0.0), vec4f(0.0, 0.0, 0.0, -1.0), ri == 3u);
++  if (g >= u32(pg.info.x)) { return none; }
++  let a = pg.anchors[g].xyz;
++  if (a.z > -1.0) { return none; }
++  let up = up_view();
++  let dist = -a.z;
++  let s = project(a).xy;
++  let rad = 0.14 * u.vp.w;
++  var hs = 0.0;
++  var wsum = 0.0;
++  for (var j = 0; j < 12; j++) {
++    for (var i = 0; i < 12; i++) {
++      let q = s + vec2f(mix(-rad, rad, f32(i) / 11.0), mix(-0.4 * rad, 1.6 * rad, f32(j) / 11.0));
++      if (q.x < u.vp.x || q.y < u.vp.y || q.x >= u.vp.x + u.vp.z || q.y >= u.vp.y + u.vp.w) { continue; }
++      if (textureLoad(tmask, vec2i(q), 0).a < 0.75) { continue; }
++      let pw = view_pos(q, load_mdepth(q));
++      let d = pw - a;
++      let hd = length(d - dot(d, up) * up) / (0.08 * dist);
++      let w = 1.0 / (1.0 + hd * hd);
++      hs += dot(pw, up) * w;
++      wsum += w;
++    }
++  }
++  if (wsum < 1e-3) { return none; }
++  let h = hs / wsum;
++  let above = dot(a, up) - h;
++  if (above < -0.02 * dist || above > 0.4 * dist) { return none; }
++  let row = pg.rows[g * 4u + ri];
++  let dn = dot(row.xyz, up);
++  let m = vec4f(row.xyz - 2.0 * dn * up, row.w + 2.0 * h * dn);
++  return select(m, -m, ri == 1u);
++}
++fn refl_depth(q: vec2f) -> f32 {
++  let dims = vec2i(textureDimensions(trefld));
++  return textureLoad(trefld, clamp(vec2i(q), vec2i(0), dims - vec2i(1)), 0).r;
++}
++// (0570) The characters as the camera sees them (the unmirrored copy, half resolution, below the
++// planar image in the same target): a character is visible at scene pixel q (or one mask texel
++// beside it: the half-size copy loses thin gaps, e.g. between the legs).
++fn char_at(q: vec2f) -> bool {
++  let zs = view_pos(q, load_depth(q)).z;
++  let tol = 0.02 * max(-zs, 1.0);
++  let c = q * 0.5 + vec2f(0.0, u.size.y);
++  for (var k = 0; k < 5; k++) {
++    let o = select(select(select(select(vec2f(0.0), vec2f(1.0, 0.0), k == 1), vec2f(-1.0, 0.0), k == 2), vec2f(0.0, 1.0), k == 3),
++                   vec2f(0.0, -1.0), k == 4);
++    let du = refl_depth(c + o);
++    if (refl_covered(du) && abs(view_pos(q, du).z - zs) < tol) { return true; }
++  }
++  return false;
++}
++fn refl_covered(d: f32) -> bool {
++  if (u.dr.z > 0.5) { return d > 0.00001; }
++  return d < 0.99999;
++}
++
+ @fragment fn fs_maskdepth(in: VsOut) -> @builtin(frag_depth) f32 {
+   let d = load_depth(floor(in.pos.xy) + vec2f(0.5));
+   if (u.dr.z > 0.5) { return d * (1.0 - 2e-5); }
+@@ -435,6 +554,10 @@ fn tangent_bend(n: vec3f, gw: vec2f) -> vec3f {
+   let ws = wscale(fv);
+   let jitter = 0.5;
+   let steps = i32(u.refl.y);
++  if (u.pp.y > 9.5 && u.pp.y < 10.5 && u.pp.w > 0.5) { // debug view 10: the planar character reflection as drawn
++    let tq = vec2f(px.x, 2.0 * u.vp.y + u.vp.w - px.y);
++    return vec4f(select(col * 0.3, textureSampleLevel(twork, samp, tq / vec2f(textureDimensions(twork)), 0.0).rgb, refl_covered(refl_depth(tq))), 1.0);
++  }
+   if (u.part.w > 0.5 && view_ok()) {
+     let m = textureLoad(tmask, vec2i(px), 0);
+     let water = m.a > 0.75;
+@@ -458,7 +581,62 @@ fn tangent_bend(n: vec3f, gw: vec2f) -> vec3f {
+         n = tangent_bend(n, ripples(wpos.xz, t, 0.55 + 0.9 * u.p1.x, ws * 0.55) * 0.35 * min(u.p1.x * 1.5, 1.0));
+       }
+       if ((en & 1u) != 0u) {
+-        let refl = reflection(pw, n, steps, jitter, true);
++        let rh = reflection(pw, n, steps, jitter, true);
++        var refl = rh.rgb;
++        var planar = 0.0;
++        // (0570) planar reflection of the characters: where one is mirrored over this water pixel
++        // it replaces the screen-space march (which can only put the camera's view of a character
++        // back upside down, in pieces), unless the march hit the world in front of it. The water's
++        // own bend (pattern, ripples) moves it like the march's rays.
++        if (u.pp.w > 0.5) {
++          let fy = 2.0 * u.vp.y + u.vp.w;
++          // A march hit on a character (its scene pixel shows the character: the unmirrored copy)
++          // is dropped for the sky: the camera's view of a character, put back upside down in
++          // pieces (the face apart from the head, a cap of hair, slivers at its outline). The
++          // planar character below takes its place where it lies.
++          var ssrWorld = rh.a > 0.0;
++          if (ssrWorld && char_at(g_ssrHitPx)) {
++            refl = sky_color(reflect(normalize(pw), n), true);
++            ssrWorld = false;
++          }
++          let d0 = refl_depth(vec2f(px.x, fy - px.y));
++          if (refl_covered(d0)) {
++            let mp = view_pos(px, d0);
++            let pathLen = max(length(mp) - length(pw), 0.0);
++            let vd = normalize(pw);
++            let dl = (reflect(vd, n) - reflect(vd, up)) * pathLen;
++            let sp = project(mp + dl - 2.0 * dot(dl, up) * up).xy;
++            let tq = vec2f(sp.x, fy - sp.y);
++            var world = ssrWorld && g_ssrT < pathLen * 0.9;
++            if (!world) {
++              // The march may step over a thin thing between the water and the character (the deck
++              // of a bridge the player stands on): a short march toward the character's own point
++              // finds it and shows that instead of the character (it would hide it in a mirror).
++              let pc = mp - 2.0 * dot(mp - pw, up) * up;
++              let dist = max(-pw.z, 1.0);
++              for (var k = 1; k < 9; k++) {
++                let qk = mix(pw, pc, f32(k) / 9.0);
++                if (qk.z > -1.0) { break; }
++                let sk = project(qk).xy;
++                if (sk.x < u.vp.x || sk.y < u.vp.y || sk.x >= u.vp.x + u.vp.z || sk.y >= u.vp.y + u.vp.w) { break; }
++                let spk = view_pos(sk, load_depth(sk));
++                let dk = spk.z - qk.z;
++                if (dk > 0.0 && dk < 0.04 * dist && dot(spk - pw, up) > 0.01 * dist && !char_at(sk)) {
++                  refl = textureSampleLevel(tcolor, samp, sk * u.size.zw, 0.0).rgb;
++                  world = true;
++                  break;
++                }
++              }
++            }
++            if (!world && refl_covered(refl_depth(tq))) {
++              refl = textureSampleLevel(twork, samp, tq / vec2f(textureDimensions(twork)), 0.0).rgb;
++              planar = 1.0;
++            }
++          }
++          if (u.pp.y > 8.5 && u.pp.y < 9.5) { // debug view 9: planar here, march hit dropped as a character, march hit
++            return vec4f(select(0.0, 1.0, refl_covered(d0)), select(0.0, 1.0, rh.a > 0.0 && !ssrWorld), select(0.0, 1.0, rh.a > 0.0), 1.0);
++          }
++        }
+         let v = normalize(-pw);
+         let f = schlick(dot(v, n), 0.04);
+         // (0391) shallow water: the game draws the sea / river over its bed with a low alpha near
+@@ -467,7 +645,11 @@ fn tangent_bend(n: vec3f, gw: vec2f) -> vec3f {
+         // depth = surface, scene depth = bed): full from 1.5 "metres", a trace at the waterline.
+         let bedDepth = max(pw.z - p.z, 0.0);
+         let deep = smoothstep(0.0, 1.5 * ws, bedDepth);
+-        let k = u.refl.x * (0.35 + 0.65 * f) * mix(0.15, 1.0, deep);
++        // (0570) ...for the sky and the world. A character standing at the water's edge is
++        // reflected right where the water is shallowest: 0391's trace drew its legs and body at
++        // 15 % and its head, further out over deeper water, at up to 100 %. The planar character
++        // keeps 60 % at the waterline.
++        let k = u.refl.x * (0.35 + 0.65 * f) * mix(mix(0.15, 0.6, planar), 1.0, deep);
+         if (u.pp.y > 4.5) { // debug view 5: scene hit share of the reflection, its weight, normal tilt
+           if (u.pp.y > 7.5) { // 8: why the march ends (r: 0.25 behind camera, 0.5 off screen, 0.75 no hit, 1 hit; g: step; b: closest miss)
+             return ssr_why(pw + n * (0.002 * max(-pw.z, 1.0)), reflect(-v, n), steps);
+@@ -508,7 +690,7 @@ fn tangent_bend(n: vec3f, gw: vec2f) -> vec3f {
+         let pud = puddle * smoothstep(0.85, 0.97, flatness);
+         var refl = vec3f(0.0);
+         if (pud > 0.03) {
+-          refl = reflection(p, pn, max(steps / 2, 8), jitter, (en & 1u) != 0u);
++          refl = reflection(p, pn, max(steps / 2, 8), jitter, (en & 1u) != 0u).rgb;
+         } else {
+           refl = sky_color(reflect(-v, n), false);
+         }
+@@ -741,10 +923,11 @@ fn blur(px: vec2f, dir: vec2f) -> vec3f {
+ }
+ )";
+ 
+-void ensure_tex(Tex& t, uint32_t w, uint32_t h, wgpu::TextureFormat format, wgpu::TextureUsage usage, const char* label) {
++void ensure_tex(Tex& t, uint32_t w, uint32_t h, wgpu::TextureFormat format, wgpu::TextureUsage usage, const char* label,
++                uint32_t samples = 1) {
+   w = std::max(w, 1u);
+   h = std::max(h, 1u);
+-  if (t.texture && t.width == w && t.height == h && t.format == format) {
++  if (t.texture && t.width == w && t.height == h && t.format == format && t.samples == samples) {
+     return;
+   }
+   const wgpu::TextureDescriptor desc{
+@@ -754,7 +937,7 @@ void ensure_tex(Tex& t, uint32_t w, uint32_t h, wgpu::TextureFormat format, wgpu
+       .size = {w, h, 1},
+       .format = format,
+       .mipLevelCount = 1,
+-      .sampleCount = 1,
++      .sampleCount = samples,
+   };
+   const webgpu::CreateTimer createTimer{label};
+   t.texture = webgpu::g_device.CreateTexture(&desc);
+@@ -762,6 +945,7 @@ void ensure_tex(Tex& t, uint32_t w, uint32_t h, wgpu::TextureFormat format, wgpu
+   t.width = w;
+   t.height = h;
+   t.format = format;
++  t.samples = samples;
+ }
+ 
+ wgpu::RenderPipeline make_pipeline(const char* vs, const char* fs, wgpu::TextureFormat format, uint32_t samples,
+@@ -789,7 +973,7 @@ bool init_gpu() {
+   const wgpu::ShaderSourceWGSL wgsl{{.code = FxShader}};
+   const wgpu::ShaderModuleDescriptor moduleDesc{.nextInChain = &wgsl, .label = "World effects"};
+   g_gpu.module = webgpu::g_device.CreateShaderModule(&moduleDesc);
+-  std::array<wgpu::BindGroupLayoutEntry, 7> entries{};
++  std::array<wgpu::BindGroupLayoutEntry, 8> entries{};
+   entries[0] = {.binding = 0,
+                 .visibility = wgpu::ShaderStage::Fragment | wgpu::ShaderStage::Vertex,
+                 .buffer = {.type = wgpu::BufferBindingType::Uniform, .minBindingSize = sizeof(FxUniform)}};
+@@ -806,6 +990,10 @@ bool init_gpu() {
+   entries[6] = {.binding = 6,
+                 .visibility = wgpu::ShaderStage::Fragment,
+                 .texture = {.sampleType = wgpu::TextureSampleType::Depth, .viewDimension = wgpu::TextureViewDimension::e2D}};
++  entries[7] = {.binding = 7,
++                .visibility = wgpu::ShaderStage::Fragment,
++                .texture = {.sampleType = wgpu::TextureSampleType::UnfilterableFloat,
++                            .viewDimension = wgpu::TextureViewDimension::e2D}};
+   const wgpu::BindGroupLayoutDescriptor bglDesc{.label = "World FX", .entryCount = entries.size(), .entries = entries.data()};
+   g_gpu.bgl = webgpu::g_device.CreateBindGroupLayout(&bglDesc);
+   const wgpu::PipelineLayoutDescriptor plDesc{.label = "World FX", .bindGroupLayoutCount = 1, .bindGroupLayouts = &g_gpu.bgl};
+@@ -845,9 +1033,38 @@ bool init_gpu() {
+       .alpha = {.operation = wgpu::BlendOperation::Add, .srcFactor = wgpu::BlendFactor::Zero, .dstFactor = wgpu::BlendFactor::One},
+   };
+   g_gpu.surfaces = make_pipeline("vs_full", "fs_surfaces", WorkFormat, 1, nullptr);
++  {
++    // 0570: the plane pass (FxU, mask, mask depth, the groups' uniform)
++    std::array<wgpu::BindGroupLayoutEntry, 4> pe{};
++    pe[0] = entries[0];
++    pe[1] = entries[3];
++    pe[2] = entries[6];
++    pe[3] = {.binding = 8,
++             .visibility = wgpu::ShaderStage::Fragment,
++             .buffer = {.type = wgpu::BufferBindingType::Uniform, .minBindingSize = sizeof(PlaneUniform)}};
++    const wgpu::BindGroupLayoutDescriptor pd{.label = "World FX plane", .entryCount = pe.size(), .entries = pe.data()};
++    g_gpu.planeBgl = webgpu::g_device.CreateBindGroupLayout(&pd);
++    const wgpu::PipelineLayoutDescriptor pl{.label = "World FX plane", .bindGroupLayoutCount = 1, .bindGroupLayouts = &g_gpu.planeBgl};
++    g_gpu.planeLayout = webgpu::g_device.CreatePipelineLayout(&pl);
++    const wgpu::ColorTargetState target{.format = wgpu::TextureFormat::RGBA32Float, .writeMask = wgpu::ColorWriteMask::All};
++    const wgpu::FragmentState fragment{.module = g_gpu.module, .entryPoint = "fs_plane", .targetCount = 1, .targets = &target};
++    const wgpu::RenderPipelineDescriptor desc{
++        .label = "World FX plane",
++        .layout = g_gpu.planeLayout,
++        .vertex = {.module = g_gpu.module, .entryPoint = "vs_full"},
++        .primitive = {.topology = wgpu::PrimitiveTopology::TriangleList},
++        .fragment = &fragment,
++    };
++    const webgpu::CreateTimer createTimer{"World FX plane"};
++    g_gpu.planePipe = webgpu::g_device.CreateRenderPipeline(&desc);
++    const wgpu::BufferDescriptor bd{.label = "World FX planes",
++                                    .usage = wgpu::BufferUsage::CopySrc | wgpu::BufferUsage::CopyDst,
++                                    .size = MaxCharGroups * 64};
++    g_gpu.planeBuf = webgpu::g_device.CreateBuffer(&bd);
++  }
+   g_gpu.particles = make_pipeline("vs_particles", "fs_particles", WorkFormat, 1, &premul);
+   g_gpu.tiltH = make_pipeline("vs_full", "fs_tilt_h", WorkFormat, 1, nullptr);
+-  if (!g_gpu.module || !g_gpu.maskDepth || !g_gpu.surfaces || !g_gpu.particles || !g_gpu.tiltH) {
++  if (!g_gpu.module || !g_gpu.maskDepth || !g_gpu.surfaces || !g_gpu.particles || !g_gpu.tiltH || !g_gpu.planePipe) {
+     Log.error("World effects failed to build; disabled");
+     g_gpu.failed = true;
+   }
+@@ -855,8 +1072,9 @@ bool init_gpu() {
+ }
+ 
+ wgpu::BindGroup bind(const Range& uniform, const wgpu::TextureView& color, const wgpu::TextureView& mask,
+-                     const wgpu::TextureView& work, const wgpu::TextureView& depth, const wgpu::TextureView& mdepth) {
+-  const std::array<wgpu::BindGroupEntry, 7> entries{
++                     const wgpu::TextureView& work, const wgpu::TextureView& depth, const wgpu::TextureView& mdepth,
++                     const wgpu::TextureView& refld = {}) {
++  const std::array<wgpu::BindGroupEntry, 8> entries{
+       wgpu::BindGroupEntry{.binding = 0, .buffer = detail::resources().uniformBuffer, .offset = uniform.offset, .size = sizeof(FxUniform)},
+       wgpu::BindGroupEntry{.binding = 1, .sampler = g_gpu.sampler},
+       wgpu::BindGroupEntry{.binding = 2, .textureView = color ? color : g_gpu.dummy.view},
+@@ -864,6 +1082,7 @@ wgpu::BindGroup bind(const Range& uniform, const wgpu::TextureView& color, const
+       wgpu::BindGroupEntry{.binding = 4, .textureView = work ? work : g_gpu.dummy.view},
+       wgpu::BindGroupEntry{.binding = 5, .textureView = depth ? depth : g_gpu.dummyDepth.view},
+       wgpu::BindGroupEntry{.binding = 6, .textureView = mdepth ? mdepth : g_gpu.dummyZ.view},
++      wgpu::BindGroupEntry{.binding = 7, .textureView = refld ? refld : g_gpu.dummyDepth.view},
+   };
+   const wgpu::BindGroupDescriptor desc{.layout = g_gpu.bgl, .entryCount = entries.size(), .entries = entries.data()};
+   return webgpu::g_device.CreateBindGroup(&desc);
+@@ -871,6 +1090,9 @@ wgpu::BindGroup bind(const Range& uniform, const wgpu::TextureView& color, const
+ 
+ struct SceneJob {
+   std::vector<SurfaceDraw> draws;
++  std::vector<MirrorDraw> mirror; // 0570
++  Range planeU{};
++  RenderTargetLayout layout{};
+   Range base{}, tiltH{}, finalU{};
+   bool mask = false, surfaces = false, tilt = false;
+   uint32_t particles = 0; // instance count
+@@ -953,10 +1175,114 @@ void encode(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, const Sc
+     maskDepthView = g_gpu.maskDepthTex.view;
+   }
+ 
++  // 2b. 0570: planar reflection of the characters: the plane under each one (plane pass), its
++  // mirrored projection copied into its draws' uniform copies, then those draws again into a
++  // target shaped like the EFB (same layout: the pipelines the scene used).
++  wgpu::TextureView reflColorView, reflDepthView;
++  if (job.mask && !job.mirror.empty()) {
++    const auto& lay = job.layout;
++    const uint32_t samples = std::max(lay.sampleCount, 1u);
++    {
++      ensure_tex(g_gpu.planeTex, MaxCharGroups * 4, 1, wgpu::TextureFormat::RGBA32Float,
++                 wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc, "World FX planes");
++      const wgpu::RenderPassColorAttachment att{
++          .view = g_gpu.planeTex.view, .loadOp = wgpu::LoadOp::Clear, .storeOp = wgpu::StoreOp::Store, .clearValue = {0, 0, 0, 0}};
++      const wgpu::RenderPassDescriptor desc{.label = "World FX plane", .colorAttachmentCount = 1, .colorAttachments = &att,
++                                            .timestampWrites = webgpu::gpu_prof::pass_writes("World FX plane")};
++      const std::array<wgpu::BindGroupEntry, 4> pe{
++          wgpu::BindGroupEntry{.binding = 0, .buffer = detail::resources().uniformBuffer, .offset = job.base.offset, .size = sizeof(FxUniform)},
++          wgpu::BindGroupEntry{.binding = 3, .textureView = maskView},
++          wgpu::BindGroupEntry{.binding = 6, .textureView = maskDepthView},
++          wgpu::BindGroupEntry{.binding = 8, .buffer = detail::resources().uniformBuffer, .offset = job.planeU.offset, .size = sizeof(PlaneUniform)},
++      };
++      const wgpu::BindGroupDescriptor bgd{.layout = g_gpu.planeBgl, .entryCount = pe.size(), .entries = pe.data()};
++      const auto bg = webgpu::g_device.CreateBindGroup(&bgd);
++      const auto pass = cmd.BeginRenderPass(&desc);
++      pass.SetPipeline(g_gpu.planePipe);
++      pass.SetBindGroup(0, bg);
++      pass.Draw(3);
++      pass.End();
++      const wgpu::TexelCopyTextureInfo src{.texture = g_gpu.planeTex.texture};
++      const wgpu::TexelCopyBufferInfo dst{.layout = {.offset = 0, .bytesPerRow = MaxCharGroups * 64, .rowsPerImage = 1},
++                                          .buffer = g_gpu.planeBuf};
++      const wgpu::Extent3D ext{MaxCharGroups * 4, 1, 1};
++      cmd.CopyTextureToBuffer(&src, &dst, &ext);
++      for (const auto& m : job.mirror) {
++        cmd.CopyBufferToBuffer(g_gpu.planeBuf, uint64_t(m.group) * 64, detail::resources().uniformBuffer, m.data.uniformRange.offset + 32, 64);
++      }
++    }
++    const auto ra = wgpu::TextureUsage::RenderAttachment;
++    const auto rs = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
++    const auto colorFormat = lay.colorAttachments[0].format;
++    // the planar image (target size) with the characters' unmirrored copy below it at half size
++    const uint32_t reflH = t.height + (t.height + 1) / 2;
++    ensure_tex(g_gpu.reflColor, t.width, reflH, colorFormat, samples > 1 ? ra : rs, "World FX planar colour", samples);
++    if (samples > 1) {
++      ensure_tex(g_gpu.reflResolve, t.width, reflH, colorFormat, rs, "World FX planar colour (resolved)");
++    }
++    const bool normal = lay.colorAttachmentCount > 1;
++    if (normal) {
++      ensure_tex(g_gpu.reflNormal, t.width, reflH, lay.colorAttachments[1].format, ra, "World FX planar normals", samples);
++    }
++    ensure_tex(g_gpu.reflDepth, t.width, reflH, lay.depthStencilFormat, rs, "World FX planar depth", samples);
++    ensure_tex(g_gpu.reflDepthR, t.width, reflH, wgpu::TextureFormat::R32Float, rs, "World FX planar depth snapshot");
++    std::array<wgpu::RenderPassColorAttachment, 2> atts{};
++    atts[0] = {.view = g_gpu.reflColor.view,
++               .resolveTarget = samples > 1 ? g_gpu.reflResolve.view : wgpu::TextureView{},
++               .loadOp = wgpu::LoadOp::Clear,
++               .storeOp = samples > 1 ? wgpu::StoreOp::Discard : wgpu::StoreOp::Store,
++               .clearValue = {0, 0, 0, 0}};
++    if (normal) {
++      atts[1] = {.view = g_gpu.reflNormal.view, .loadOp = wgpu::LoadOp::Clear, .storeOp = wgpu::StoreOp::Discard, .clearValue = {0, 0, 0, 0}};
++    }
++    const wgpu::RenderPassDepthStencilAttachment da{
++        .view = g_gpu.reflDepth.view,
++        .depthLoadOp = wgpu::LoadOp::Clear,
++        .depthStoreOp = wgpu::StoreOp::Store,
++        .depthClearValue = gx::UseReversedZ ? 0.f : 1.f,
++    };
++    const wgpu::RenderPassDescriptor desc{.label = "World FX planar characters",
++                                          .colorAttachmentCount = normal ? 2u : 1u,
++                                          .colorAttachments = atts.data(),
++                                          .depthStencilAttachment = &da,
++                                          .timestampWrites = webgpu::gpu_prof::pass_writes("World FX planar characters")};
++    const auto pass = cmd.BeginRenderPass(&desc);
++    reset_bound_pipeline();
++    pass.SetBindGroup(0, detail::resources().staticBindGroup);
++    pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
++    const auto& vp = g_camera.vp;
++    const float minDepth = gx::UseReversedZ ? 1.f - vp.zfar : vp.znear;
++    const float maxDepth = gx::UseReversedZ ? 1.f - vp.znear : vp.zfar;
++    pass.SetViewport(vp.left, vp.top, std::max(vp.width, 1.f), std::max(vp.height, 1.f), minDepth, maxDepth);
++    const uint32_t x0 = uint32_t(std::clamp(std::floor(vp.left), 0.f, float(t.width)));
++    const uint32_t y0 = uint32_t(std::clamp(std::floor(vp.top), 0.f, float(t.height)));
++    const uint32_t x1 = uint32_t(std::clamp(std::ceil(vp.left + vp.width), 0.f, float(t.width)));
++    const uint32_t y1 = uint32_t(std::clamp(std::ceil(vp.top + vp.height), 0.f, float(t.height)));
++    pass.SetScissorRect(x0, y0, x1 > x0 ? x1 - x0 : 0, y1 > y0 ? y1 - y0 : 0);
++    for (const auto& m : job.mirror) {
++      gx::render(m.data, pass);
++    }
++    // the unmirrored copy (character mask for the march's hits): their own uniforms, half size
++    pass.SetViewport(vp.left * 0.5f, float(t.height) + vp.top * 0.5f, std::max(vp.width * 0.5f, 1.f), std::max(vp.height * 0.5f, 1.f),
++                     minDepth, maxDepth);
++    pass.SetScissorRect(0, t.height, t.width, reflH - t.height);
++    for (const auto& m : job.mirror) {
++      gx::DrawData d = m.data;
++      d.uniformRange = m.original;
++      gx::render(d, pass);
++    }
++    pass.End();
++    reset_bound_pipeline();
++    tex_copy_conv::snapshot_depth(cmd, g_gpu.reflDepth.view, samples, g_gpu.reflDepthR.view);
++    reflColorView = samples > 1 ? g_gpu.reflResolve.view : g_gpu.reflColor.view;
++    reflDepthView = g_gpu.reflDepthR.view;
++    g_statPasses.fetch_add(2, std::memory_order_relaxed);
++  }
++
+   // 3. surfaces + haze -> work
+   ensure_tex(g_gpu.work, t.width, t.height, WorkFormat, rt, "World FX work");
+   run_full(cmd, "World FX surfaces", g_gpu.work.view, g_gpu.surfaces,
+-           bind(job.base, sceneView, maskView, {}, g_gpu.depth.view, maskDepthView));
++           bind(job.base, sceneView, maskView, reflColorView, g_gpu.depth.view, maskDepthView, reflDepthView));
+ 
+   // 4. particles
+   if (job.particles > 0) {
+@@ -1059,6 +1385,30 @@ void note_draw(const gx::PipelineConfig& config, uint8_t kind, const gx::DrawDat
+   if (st.projType != GX_PERSPECTIVE) {
+     return;
+   }
++  if (kind == AURORA_SURFACE_CHARACTER) { // 0570: the character's anchor and projection
++    if (!g_chars.empty() && !g_chars.back().anchored && g_chars.back().end == UINT32_MAX) {
++      // the draw's current position matrix, else (skinned shapes index theirs per vertex) the first
++      // loaded one that places something in front of the camera
++      const float* m = reinterpret_cast<const float*>(&st.pnMtx[st.currentPnMtx % gx::MaxPnMtx].pos);
++      const auto placed = [](const float* x) { return std::isfinite(x[3]) && std::isfinite(x[7]) && std::isfinite(x[11]) && x[11] < -1.f; };
++      for (uint32_t k = 0; k < gx::MaxPnMtx && !placed(m); ++k) {
++        m = reinterpret_cast<const float*>(&st.pnMtx[k].pos);
++      }
++      if (placed(m)) {
++        auto& g = g_chars.back();
++        g.anchor[0] = m[3], g.anchor[1] = m[7], g.anchor[2] = m[11];
++        auto pr = st.proj; // as fill_uniform writes it
++        if constexpr (gx::UseReversedZ) {
++          pr.m2 = pr.m2 * Vec4<float>{-1.f, -1.f, -1.f, -1.f};
++        } else {
++          pr.m2 = pr.m2 + pr.m3;
++        }
++        static_assert(sizeof(pr) == sizeof(g.proj));
++        std::memcpy(g.proj, &pr, sizeof(g.proj));
++        g.anchored = true;
++      }
++    }
++  }
+   // The camera: the projection of the surface draws (the world proper; the sky dome and other
+   // world draws may use their own depth range), any world draw until the first surface draw.
+   const bool surface = kind == AURORA_SURFACE_WATER || kind == AURORA_SURFACE_GROUND;
+@@ -1116,7 +1466,28 @@ void note_draw(const gx::PipelineConfig& config, uint8_t kind, const gx::DrawDat
+   g_draws.push_back(s);
+ }
+ 
++// 0570: GX_AURORA_SET_SURFACE into / out of AURORA_SURFACE_CHARACTER.
++void character_scope(bool begin) noexcept {
++  sync();
++  if (!g_cfg.enabled || !g_cfg.reflections || !planar_on()) {
++    return;
++  }
++  const auto [pass, command] = next_command_position();
++  if (begin) {
++    if (g_chars.size() < MaxCharGroups) {
++      g_chars.push_back({.pass = pass, .begin = command});
++    }
++  } else if (!g_chars.empty() && g_chars.back().end == UINT32_MAX) {
++    if (pass == g_chars.back().pass) {
++      g_chars.back().end = command;
++    } else {
++      g_chars.pop_back(); // (the pass changed inside the character: not drawn again)
++    }
++  }
++}
++
+ void begin_frame() noexcept {
++  g_chars.clear();
+   g_draws.clear();
+   g_camera.valid = false;
+   g_cameraFromSurface = false;
+@@ -1128,6 +1499,7 @@ void scene_end() noexcept {
+   g_statEnds.fetch_add(1, std::memory_order_relaxed);
+   struct Reset {
+     ~Reset() {
++      g_chars.clear();
+       g_draws.clear();
+       g_camera.valid = false;
+   g_cameraFromSurface = false;
+@@ -1236,6 +1608,47 @@ void scene_end() noexcept {
+     return v ? std::atoi(v) : 0;
+   }();
+   u.pass[1] = float(sShowAll);
++  if (c.reflections && job.mask && planar_on() && !g_chars.empty()) { // 0570
++    PlaneUniform pu{};
++    uint32_t groups = 0;
++    const auto [curPass, curCommand] = next_command_position();
++    for (const auto& g : g_chars) {
++      if (!g.anchored || groups >= MaxCharGroups) {
++        continue;
++      }
++      const uint32_t end = g.end != UINT32_MAX ? g.end : (g.pass == curPass ? curCommand : g.begin);
++      bool any = false;
++      for (uint32_t i = g.begin; i < end && job.mirror.size() < MaxMirrorDraws; ++i) {
++        const auto* d = gx_draw_at(g.pass, i);
++        // (triangles: the projection sits at byte 32 of the GX uniform block; lines / points and
++        // wireframe put more in front of it)
++        if (d == nullptr || d->uniformRange.size < 96 || (d->vtxCount == 0 && d->indexCount == 0)) {
++          continue;
++        }
++        const uint8_t* src = uniform_bytes(d->uniformRange);
++        if (src == nullptr) {
++          continue;
++        }
++        MirrorDraw m{.data = *d, .original = d->uniformRange, .group = groups};
++        m.data.uniformRange = push_uniform(src, d->uniformRange.size);
++        job.mirror.push_back(m);
++        any = true;
++      }
++      if (!any) {
++        continue;
++      }
++      pu.anchors[groups][0] = g.anchor[0], pu.anchors[groups][1] = g.anchor[1], pu.anchors[groups][2] = g.anchor[2];
++      pu.anchors[groups][3] = 1.f;
++      std::memcpy(pu.rows[groups], g.proj, sizeof(g.proj));
++      ++groups;
++    }
++    if (!job.mirror.empty()) {
++      pu.info[0] = float(groups);
++      job.planeU = push_uniform(reinterpret_cast<const uint8_t*>(&pu), sizeof(pu));
++      job.layout = scene_render_target_layout();
++      u.pass[3] = 1.f;
++    }
++  }
+   job.base = push_uniform(reinterpret_cast<const uint8_t*>(&u), sizeof(u));
+   if (job.tilt) {
+     FxUniform pu = u;
+@@ -1256,6 +1669,15 @@ void scene_end() noexcept {
+     if (sLogged++ % 120 == 0) {
+       Log.info("camera p00 {} p11 {} p02 {} p12 {} A {} B {} dr {} {} en {} wet {}", u.proj[0], u.proj[1], u.proj[2], u.proj[3],
+                u.projz[0], u.projz[1], u.dr[0], u.dr[1], u.wind[2], u.refl[3]);
++      Log.info("planar characters: {} groups noted, {} draws mirrored", g_chars.size(), job.mirror.size());
++      for (const auto& g : g_chars) {
++        uint32_t gxDraws = 0;
++        for (uint32_t i = g.begin; i < g.end && i < g.begin + 4096; ++i) {
++          gxDraws += gx_draw_at(g.pass, i) != nullptr ? 1u : 0u;
++        }
++        Log.info("  group pass {} commands {}..{} anchored {} anchor {} {} {}, {} GX draws", g.pass, g.begin, g.end, g.anchored,
++                 g.anchor[0], g.anchor[1], g.anchor[2], gxDraws);
++      }
+       Log.info("scene end: {} surface draws, mask {}, particles {}, tilt {}, vp {} {} {} {}, view {} {} {} / {} {} {} / {} {} {}, "
+                "focus {} {} {} (row {})",
+                job.draws.size(), job.mask, job.particles, job.tilt, vp.left, vp.top, vp.width, vp.height, xv[0], xv[1], xv[2],
+diff --git a/lib/gfx/world_fx.hpp b/lib/gfx/world_fx.hpp
+--- a/lib/gfx/world_fx.hpp
++++ b/lib/gfx/world_fx.hpp
+@@ -23,6 +23,8 @@ bool active() noexcept;
+ void note_draw(const gx::PipelineConfig& config, uint8_t kind, const gx::DrawData& data) noexcept;
+ // GX_AURORA_WORLD_FX_END.
+ void scene_end() noexcept;
++// 0570: GX_AURORA_SET_SURFACE into (begin) or out of AURORA_SURFACE_CHARACTER.
++void character_scope(bool begin) noexcept;
+ // New frame recording (drops what the last frame noted without a scene end).
+ void begin_frame() noexcept;
+ 
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -1846,7 +1846,14 @@ void handle_aurora(ByteReader& reader) noexcept {
+       gfx::enhanced::scene_end();
+     }
+   } else if (subCmd == GX_AURORA_SET_SURFACE) { // 0350
+-    g_gxState.surfaceKind = reader.read<u8>();
++    const u8 kind = reader.read<u8>();
++    const u8 was = g_gxState.surfaceKind;
++    if (kind != was && (kind == AURORA_SURFACE_CHARACTER || was == AURORA_SURFACE_CHARACTER) && gfx::world_fx::active()) {
++      // 0570: a character's draws start / end here: none is merged across the boundary
++      sDrawCache.lastDrawFmt = GX_MAX_VTXFMT;
++      gfx::world_fx::character_scope(kind == AURORA_SURFACE_CHARACTER);
++    }
++    g_gxState.surfaceKind = kind;
+   } else if (subCmd == GX_AURORA_WORLD_FX_END) { // 0350
+     if (!g_gxState.replayMask) {
+       gfx::world_fx::scene_end();

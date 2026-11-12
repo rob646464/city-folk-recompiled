@@ -32,6 +32,8 @@
 namespace recomp {
 namespace world {
 void onScnRoot(u32 root, bool xlu, bool begin);  // cf_world.cpp (F1 > Visuals > Enhanced world)
+bool characterBegin(u32 obj);  // cf_world.cpp: planar reflections of characters (Aurora 0570)
+void characterEnd();
 }
 namespace {
 u32 sViewSrc = 0;
@@ -127,7 +129,9 @@ void objectScope(Ctx& c, const char* name, bool proc = false) {
     float skyS = 0.0f;
     std::optional<ws::BackdropScope> backdrop;
     if (skyBackdrop(obj, skyS)) gx::endPendingDraw(), backdrop.emplace(skyS), gx::recheckDrawState();
+    const bool character = cast == 0 && world::characterBegin(obj);
     callOriginal(c, name);
+    if (character) world::characterEnd();
     if (backdrop) gx::endPendingDraw(), backdrop.reset(), gx::recheckDrawState();
     if (rim != rimBefore) gx::endPendingDraw(), enh::setRimMaterial(rimBefore);
     if (shell) gx::endPendingDraw(), enh::setNoCast(true);
@@ -242,5 +246,17 @@ void efEnd() { interp::setEffectParticles({}); }
 HLE(G3dProc__Q34nw4r3g3d12ScnMdlSimpleFUlUlPv) { objectScope(c, "G3dProc__Q34nw4r3g3d12ScnMdlSimpleFUlUlPv"); }
 HLE(G3dProc__Q34nw4r3g3d6ScnMdlFUlUlPv) { objectScope(c, "G3dProc__Q34nw4r3g3d6ScnMdlFUlUlPv"); }
 HLE(G3dProc__Q34nw4r3g3d7ScnProcFUlUlPv) { objectScope(c, "G3dProc__Q34nw4r3g3d7ScnProcFUlUlPv", true); }
+
+
+// The worn Mii mask: the RFL head's opaque / translucent draws (the ScnRfl-style wrappers of
+// RFLDrawOpaCore / RFLDrawXluCore, docs/MIIS.md; hooks.txt `all`: every version) belong to the
+// player for its planar reflection.
+static void rflDraw(Ctx& c, const char* name) {
+    const bool character = world::characterBegin(0);
+    callOriginal(c, name);
+    if (character) world::characterEnd();
+}
+HLE(fn_802B3950) { rflDraw(c, "fn_802B3950"); }
+HLE(fn_802B39B0) { rflDraw(c, "fn_802B39B0"); }
 
 }  // namespace recomp
