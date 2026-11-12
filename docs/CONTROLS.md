@@ -450,6 +450,92 @@ is on the grid, so the first version's rule (any tested item = only tested items
 buttons navigable there, and on a slot the buttons dropped out instead (the set flipped with the
 pointer). `CF_NAV_OLD=1` keeps that rule for A/B.
 
+**Choice boxes: the pointer starts on the highlighted choice** (branch choice-snap; user report "when
+a choice text box appears, the cursor doesn't always snap to the choices immediately"). Before,
+nothing put the pointer on a box when it appeared: the snap only acted on the first D-pad press,
+which went to the row nearest wherever the pointer happened to be, and what showed in between
+depended on that place. After the previous box the pointer was hidden ("A menu closed with the
+pointer snapped to it", above) or timed out, so the box showed the game's own arrow on its first
+row and no hand, and the first D-pad press only put the hand on the row nearest the old place
+(Rover's first box with the pointer away: DOWN landed on "Yeah!" and did not move); over the
+pockets the D-pad's selection was on the slot, which the popup hides, so the snap re-found it on
+the popup's row nearest the slot (Quit, the cancel row, at once); a pointer left over the box by
+the right stick showed the hand on whatever row it was over. Now, in snap mode (Auto while the
+mouse did not place the pointer last, or On; never Off, never real Wii Remotes), every choice box
+gets the pointer on its highlighted row as soon as it shows, and A takes it, the D-pad moves from
+it:
+
+- Which boxes: the choice window layout `Layout/chc_win.arc` (the same file on every disc: rows
+  `B_msg_00..04`, window `N_chcWin_all`, cursor `csr_00`), i.e. the dialogue choices of every
+  character (one choice window class in the DOL, fn_8015C83C..fn_8015E5DC) and the pockets' item
+  popup (Drop / Carry / Quit). Not the town map's resident list or Copper's town list (also
+  `B_msg_*` panes, other layouts), not the pockets, map, keyboards, shops' lists or the field HUD.
+  `Item::choice` / `Item::cursor` (cf_menu_nav.cpp scanChoicePane / markChoices).
+- Which row: the box object (USA fn_8015D27C builds it: +0x930 rows, +0x934 cursor, +0x938 the row
+  B takes, e.g. Quit; all -1 at first) puts its cursor on the top row when it has opened
+  (fn_8015C83C) and whenever the pointer leaves the screen (fn_8015DCC0 mode 1); while the pointer
+  is on the screen its cursor is the row under the pointer (fn_8015DEC4's walk), none elsewhere.
+  So the box's own default is always its top row: with the pointer away the game draws its arrow
+  `csr_00` there (blue text), with the hand on a row that row is highlighted (green). The
+  placement takes the row of `csr_00` when it shows and the game is not hit-testing (its own
+  highlight), else the top row.
+- When: on the box's first frame (it then scales / fades in for about 7 frames, without a cursor
+  and without hit-testing its rows; the pointer follows the top row through the animation), so the
+  hand is on the choice as soon as the box shows and A takes it as soon as the box takes input
+  (`CF_CHOICE_PLACE=wait` waits until it has opened: `csr_00` resting on a row 2 frames or the rows
+  hit-tested 2 frames, at most 20 frames; about 9 frames, 0.15 s, after the box showed). Measured
+  with `wait`: Rover's boxes and the pockets popup open in 7 frames. A D-pad / stick press
+  or Recenter in the same sample places first and then moves from the top row; a free pointer move
+  on the box's first frame (right stick, mouse in On, gyro, a scripted `@x/y`) leaves the box to the
+  pointer. While a box waits (`wait` mode) a selection that vanished under it (the pockets slot under
+  the popup) is not re-found on one of its rows, so a hover never replaces the default.
+- A hidden pointer (timed out, toggled off, hidden by the previous box) is shown on the row (the
+  placement counts as using the pointer), and the timeout stays off while the box is up.
+- Chains: every box is a new placement. Boxes of one talk reuse the same layout and panes, but
+  their rows leave the navigable set while the text between them runs (and a box with other rows
+  counts as another box as well), so Rover's "Yeah!" then "Rob64.", Pelly's boxes one after the
+  other, Labelle's (GracieGrace) "How much is it?" then "I'll take it!" each get the pointer.
+- Closing: a box over the field / a talk closes with the pointer on it, so "the pointer goes back
+  where it was" applies as before (back to where it was before the placement and off the screen
+  until used; scripted runs: back to what the script said). A popup over a screen that stays (Drop /
+  Quit over the pockets) gives the selection back to the item it was opened from (the slot), so B
+  or Quit leaves the hand on the slot.
+- Off / mouse (Auto) / real Wii Remotes: nothing changes. A/B `CF_CHOICE_PLACE=0` (no placement,
+  the old behaviour). Log lines with `CF_NAV_LOG=1`: `choice box up (N rows) at frame F`, `game's
+  cursor <row>`, `pointer onto <row> (game's cursor | top row) after N frames`, `choice box closed,
+  back to <item>`, `left to the pointer (moved freely)`. Test aid `CF_CHOICE_SHOT=<dir>[,<frames>...]`
+  (efb_copy.cpp): a render-resolution screenshot `<dir>/choice<frame>.ppm` that many frames after
+  each placement (default 6; the image lags the guest frame by a few frames under load: 15-20
+  shows the hand); `CF_NAV_TREE=1` lists every pane of small menu layouts every 10 frames (how
+  `csr_00` was found).
+
+Verified (USA, fixture `user-town-clean`, snap Auto, `CF_NAV_LOG` + `CF_CHOICE_SHOT`; every box
+below was placed on its first frame, the hand drawn on the highlighted top row once it opened):
+Rover's two boxes ("Yeah! / DS Suitcase / ..." then "Rob64. / I'm new! / Never mind.") with the
+pointer away, with the pointer left far away at the top left (`@-0.85/-0.85`), and by D-pad
+(DOWN right after the box showed: "Yeah!" -> "DS Suitcase.", UP back, A took "Yeah!"; the same
+on "Rob64." / "I'm new!"); the Save button's "Would you like to
+quit now?" with the pointer left on the Save button; the pockets popup by D-pad (rod slot, A:
+placed on Drop, DOWN = Carry, B: back on the rod slot, A: placed again, B, B); Blathers' "Donation!
+/ Check a fossil! / ...", Tom Nook's "I want to sell! / Catalog, please. / ...", Labelle's chain
+"How much is it?" then "I'll take it! / Never mind.", Pelly's chain ("Send mail" box, "Frunch. /
+Future self. / Never mind.", "other letters? Yes. / Nope." where the route's wiggle moved the
+pointer to Nope. and that took over, "anything else?"), the stationery popup in the pockets; a
+pointer hidden by the timeout (`CF_POINTER_TIMEOUT=3`) shown on Nook's box (`pointer back`,
+the timeout off while the box is up); the D-pad route with interpolation on (`target_fps=120`,
+VSync off; the pacing governor held about 60 fps on the loaded PC) the same; true 4K shots (out/choice_snap/ of the branch's worktree). tools/nav/check.py: 0 errors
+on every trace (also `--replay new`). Routes: tools/routes/choice_rover_far.txt,
+choice_rover_dpad.txt, choice_pockets.txt, choice_nook_timeout.txt (new), save_quit.txt,
+museum_donate.txt, nook_sell.txt, gameplay_gracie_buy.txt, gameplay_letter_villager.txt with snap
+Auto. PAL / Japan / Korea not run: the code reads only pane
+names of `chc_win.arc` (byte-identical on all four discs) through hooks tagged `all`.
+
+Scripted routes: a scripted pointer that rests somewhere when a box appears is moved onto the
+highlighted row like any other pointer, so A takes the first choice, as it did before with a
+pointer that had not moved while the box was up (docs/TEST_COVERAGE.md "Route lessons": the game
+ignored such a pointer and A took the highlighted first choice); routes that pick another choice
+move the pointer while the box is up (the wiggle), which leaves the box to the script as before.
+
 Verified (USA, fixture `user-town` and the new-game route, scripted D-pad presses and screenshots):
 - Dialogue choices: Rover's "Yeah! / DS Suitcase / ..." chosen with D-pad down (lands on the choice
   nearest the pointer), up, A.

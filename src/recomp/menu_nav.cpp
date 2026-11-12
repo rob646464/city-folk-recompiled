@@ -9,6 +9,8 @@
 //     along the other axis (moveCardinal below); the screen in front is modal (navigable());
 //   - the pointer is then kept on the selected item's centre (clipped to the screen) every sample,
 //     so it follows slide-in animations and scrolling lists, until a free pointer device moves it;
+//   - a choice box (Item::choice: dialogue choices, the pockets' item popup) that appears gets the
+//     pointer on its highlighted row at once, so A takes it and the D-pad moves from it;
 //   - "Recenter pointer" jumps to the item nearest the pointer instead of the screen centre;
 //   - the field HUD (toolbar) alone does not take the D-pad / stick (they change tools and walk):
 //     "Recenter pointer" enters it, B / Recenter / moving the pointer leaves it.
@@ -50,11 +52,19 @@ bool envOn(const char* name) {
 }
 const bool sLog = envOn("CF_NAV_LOG");
 bool sOld = envOn("CF_NAV_OLD");  // not const: the offline replay switches it
+// A/B CF_CHOICE_PLACE=0: no placement on choice boxes (the behaviour before branch choice-snap);
+// =wait: place only once the box has opened (its cursor rested on a row, or its rows hit-tested,
+// for kCursorFrames frames; at the latest after kChoiceWaitMax), instead of on its first frame.
+const char* const sChoicePlaceEnv = std::getenv("CF_CHOICE_PLACE");
+const bool sNoChoicePlace = sChoicePlaceEnv && *sChoicePlaceEnv == '0';
+const bool sChoiceWaitOpen = sChoicePlaceEnv && std::strcmp(sChoicePlaceEnv, "wait") == 0;
+constexpr u32 kCursorFrames = 2, kChoiceWaitMax = 20;
 
 std::mutex sMutex;
 std::vector<Item> sCollect, sPublished;
 u32 sCollectFrame = 0, sPublishedFrame = 0;
 std::atomic<bool> sWanted{true};
+std::atomic<unsigned> sLastPlacement{0};  // lastChoicePlacement()
 
 struct PointerNote {
     bool valid = false;
@@ -77,6 +87,16 @@ struct ChanState {
     bool stickHeld = false;
     bool wasActive = false;
     bool swallowB = false;      // the B that left the toolbar is kept from the game until released
+    // Choice boxes (Item::choice): the pointer goes onto the box's highlighted row when it appears.
+    bool choiceUp = false;      // a choice box is navigable
+    u32 choiceSig = 0;          // its rows (keys, count): other rows = another box (a chain)
+    bool choicePlaced = false;  // placed for this box (or left alone: the pointer was moved freely)
+    u32 choiceFrame = 0;        // guest frame of the item set last counted
+    u32 choiceSeen = 0;         // frames the box has been up
+    u32 cursorKey = 0;          // row of the game's cursor in the last counted frame
+    u32 cursorFrames = 0;       // frames in a row it has been on that row
+    u32 choiceTested = 0;       // frames the game hit-tested its rows (pointer mode: the box is up)
+    u32 beforeSel = 0;          // the selection under the box (a pockets slot): taken back after it
 };
 std::array<ChanState, wiimote::kRemotes> sChan;
 
@@ -614,6 +634,8 @@ bool calibrate(Scale& s, int chan, float qx, float qy) {
 
 void setWanted(bool on) { sWanted.store(on, std::memory_order_relaxed); }
 
+unsigned lastChoicePlacement() { return sLastPlacement.load(std::memory_order_relaxed); }
+
 Output apply(int chan, const Input& in) {
     Output out;
     out.buttons = in.buttons;
@@ -637,6 +659,9 @@ Output apply(int chan, const Input& in) {
         st.dirX = st.dirY = 0;
         st.stickHeld = false;
         st.wasActive = false;
+        st.choiceUp = false;
+        st.choicePlaced = false;
+        st.beforeSel = 0;
     };
     if (in.mode == Mode::Off || (in.mode == Mode::Auto && in.mouseDrives)) {
         reset();
@@ -644,16 +669,62 @@ Output apply(int chan, const Input& in) {
     }
 
     std::vector<Item> published;
+    u32 publishedFrame = 0;
     {
         std::lock_guard lk(sMutex);
         rotate(game::guestFrames());
-        if (sPublishedFrame + 3 >= game::guestFrames()) published = sPublished;
+        if (sPublishedFrame + 3 >= game::guestFrames()) {
+            published = sPublished;
+            publishedFrame = sPublishedFrame;
+        }
     }
     bool menu = false, hud = false;
     std::vector<Item> items = navigable(published, menu, hud);
     if (!menu && !hud) {
         reset();
         return out;
+    }
+
+    // Choice boxes up now (navigable rows: a box behind another screen does not count).
+    std::vector<const Item*> rows;
+    if (!sNoChoicePlace)
+        for (const auto& it : items)
+            if (it.choice) rows.push_back(&it);
+    u32 sig = 0;
+    if (!rows.empty()) {
+        std::vector<u32> keys;
+        for (const Item* r : rows) keys.push_back(r->key);
+        std::sort(keys.begin(), keys.end());
+        sig = 2166136261u;
+        for (u32 k : keys) sig = (sig ^ k) * 16777619u;
+    }
+    if (rows.empty() && st.choiceUp) {
+        // The box went away. Over a screen that stays (the pockets under "Drop / Quit"), the
+        // selection goes back to the item it was opened from, as the pointer would.
+        st.choiceUp = false;
+        st.choicePlaced = false;
+        if (st.beforeSel && findKey(items, st.beforeSel) && (!st.selected || !findKey(items, st.selected))) {
+            st.selected = st.beforeSel;
+            st.haveMem = false;
+            if (sLog) log("[nav] remote %d: choice box closed, back to %s", chan + 1, findKey(items, st.beforeSel)->name);
+        }
+        st.beforeSel = 0;
+    } else if (!rows.empty() && (!st.choiceUp || sig != st.choiceSig)) {
+        // A box appeared (or another one replaced it): placed below (on its first frame).
+        // (the item under the box is no longer navigable: the box in front is modal)
+        const Item* sel = st.selected ? findKey(published, st.selected) : nullptr;
+        if (sel && !sel->choice) st.beforeSel = st.selected;
+        else if (!st.choiceUp) st.beforeSel = 0;
+        if (sel && sel->choice) st.selected = 0;  // a row of the box before: not this box's
+        st.choiceUp = true;
+        st.choiceSig = sig;
+        st.choicePlaced = false;
+        st.choiceSeen = 0;
+        st.choiceFrame = 0;
+        st.cursorKey = 0;
+        st.cursorFrames = 0;
+        st.choiceTested = 0;
+        if (sLog) log("[nav] remote %d: choice box up (%zu rows) at frame %u", chan + 1, rows.size(), publishedFrame);
     }
     if (menu) st.toolbar = false;
     if (in.pointerMoved) {
@@ -663,7 +734,7 @@ Output apply(int chan, const Input& in) {
         st.haveMem = false;
     }
 
-    const bool recenter = (pressed & wiimote::kBtnRecenter) != 0;
+    bool recenter = (pressed & wiimote::kBtnRecenter) != 0;
     if (!menu && !st.toolbar) {
         st.selected = 0;
         st.wasActive = false;
@@ -716,11 +787,46 @@ Output apply(int chan, const Input& in) {
     out.buttons &= ~(kDpad | wiimote::kBtnRecenter);
     out.stickX = out.stickY = 0;
 
+    // A choice box that is up but not placed yet: count frames and the box's own cursor (once per
+    // guest frame), and give up when the pointer is moved freely (it is the player's then). The
+    // box opens for about 7 frames without a cursor and without hit-testing; then, with the pointer
+    // off the screen, csr_00 shows its highlight (the top row), or, with the pointer on the screen,
+    // the game hit-tests the rows (csr_00 is then only the row under the pointer: ignored). The
+    // box starts on its top row in every case (cf_menu_nav.cpp markChoices), so the pointer goes
+    // there on the box's first frame and rides the opening animation (CF_CHOICE_PLACE=wait: once
+    // it has opened, onto csr_00's row).
+    if (st.choiceUp && !st.choicePlaced) {
+        if (in.pointerMoved) {
+            st.choicePlaced = true;
+            if (sLog) log("[nav] remote %d: choice box left to the pointer (moved freely)", chan + 1);
+        } else if (publishedFrame != st.choiceFrame) {
+            st.choiceFrame = publishedFrame;
+            st.choiceSeen++;
+            const Item* cur = nullptr;
+            bool tested = false;
+            for (const Item* r : rows) tested |= r->tested;
+            for (const Item* r : rows)
+                if (r->cursor && !tested) cur = r;
+            if (tested) st.choiceTested++;
+            if (cur && cur->key == st.cursorKey) {
+                st.cursorFrames++;
+            } else {
+                if (sLog && ((cur ? cur->key : 0) != st.cursorKey || st.choiceSeen == 1))
+                    log("[nav] remote %d: choice box frame %u (+%u): game's cursor %s%s", chan + 1, publishedFrame, st.choiceSeen - 1,
+                        cur ? cur->name : "not on a row", tested ? " (hit-tested)" : "");
+                st.cursorKey = cur ? cur->key : 0;
+                st.cursorFrames = cur ? 1 : 0;
+            }
+        }
+    }
+
     // A selection that vanished (a list scrolled it away, the screen rebuilt its panes): the item
-    // now nearest where it was, preferring its own group, keeps the place in the list.
+    // now nearest where it was, preferring its own group, keeps the place in the list. Not into a
+    // choice box that is still waiting for its cursor: moving the pointer onto one of its rows
+    // would make the game highlight that row instead of its default.
     if (st.selected && !findKey(items, st.selected)) {
         st.selected = 0;
-        if (!sOld) {
+        if (!sOld && !(st.choiceUp && !st.choicePlaced)) {
             std::vector<Item> same;
             for (const auto& it : items)
                 if (it.group == st.selGroup && (!hudOnly || it.hud)) same.push_back(it);
@@ -767,6 +873,32 @@ Output apply(int chan, const Input& in) {
         st.dirY = dy;
     } else {
         st.dirX = st.dirY = 0;
+    }
+
+    // Place the pointer on the new choice box: on its first frame (CF_CHOICE_PLACE=wait: once its
+    // cursor has rested on a row for kCursorFrames frames, or the game has hit-tested its rows that
+    // long, at the latest after kChoiceWaitMax frames), and at once when a D-pad / stick press or
+    // Recenter comes first (that press then moves from there): onto the row of the box's own
+    // cursor if it shows one (its highlight), else the top row (where the box starts).
+    if (st.choiceUp && !st.choicePlaced &&
+        ((!sChoiceWaitOpen && st.choiceSeen >= 1) || st.cursorFrames >= kCursorFrames || st.choiceTested >= kCursorFrames ||
+         st.choiceSeen >= kChoiceWaitMax || move || recenter)) {
+        const Item* to = nullptr;
+        if (st.cursorFrames > 0) to = findKey(items, st.cursorKey);
+        if (!to)
+            for (const Item* r : rows)
+                if (!to || r->y0 < to->y0) to = r;
+        st.choicePlaced = true;
+        if (to) {
+            st.selected = to->key;
+            st.haveMem = false;
+            out.placed = true;
+            sLastPlacement.store(game::guestFrames(), std::memory_order_relaxed);
+            if (sLog)
+                log("[nav] remote %d: choice box: pointer onto %s (%s) after %u frames", chan + 1, to->name,
+                    st.cursorFrames > 0 && to->key == st.cursorKey ? "game's cursor" : "top row", st.choiceSeen);
+        }
+        recenter = false;  // the press placed it
     }
 
     if (recenter && menu) {

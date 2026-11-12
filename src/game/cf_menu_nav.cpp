@@ -131,11 +131,54 @@ struct Pending {
     u32 pane;
     std::string name;
     float x0, y0, x1, y1;
+    bool choice = false, cursor = false;
 };
+
+// Choice boxes (Layout/chc_win.arc, the same file on every disc): the dialogue choices and the
+// pockets' "Drop / Carry / Quit" popup. Rows B_msg_00..04 (the unused ones hidden), the window
+// N_chcWin_all, and csr_00 = the game's own cursor (the arrow in front of the highlighted row; it
+// starts on the box's default row and follows the pointer). Noted during the pane walks.
+struct ChoiceScan {
+    bool choice = false;  // the layout is a choice box
+    bool cursor = false;  // csr_00 visible, centre y (layout coordinates) in cy
+    float cy = 0;
+};
+
+void scanChoicePane(u32 p, ChoiceScan& cs) {
+    const u8 c0 = u8(rd8(p + 0xBC));
+    if (c0 != 'N' && c0 != 'c') return;
+    const std::string n = paneName(p);
+    if (n == "N_chcWin_all") {
+        cs.choice = true;
+    } else if (n == "csr_00" && visibleChain(p)) {
+        float x0, y0, x1, y1;
+        if (paneBox(p, 1.0f, x0, y0, x1, y1)) {
+            cs.cursor = true;
+            cs.cy = (y0 + y1) * 0.5f;
+        }
+    }
+}
+
+// Marks the rows of a choice box and the row csr_00 is on. The box object (USA fn_8015D27C builds
+// it: +0x930 rows, +0x934 cursor, +0x938 cancel row for B, all -1 at first) puts its cursor on the
+// top row when it has opened (fn_8015C83C) and whenever the pointer leaves the screen
+// (fn_8015DCC0 mode 1); while the pointer is on the screen (mode 0) the cursor is the row under
+// the pointer, or none (-1, csr_00 hidden). So csr_00 shows the box's own highlight only while the
+// game does not hit-test the rows (menu_nav.cpp uses it then, and the top row otherwise).
+void markChoices(std::vector<Pending>& v, const ChoiceScan& cs) {
+    if (!cs.choice) return;
+    for (auto& p : v) {
+        if (p.name.rfind("B_msg_", 0) != 0) continue;
+        p.choice = true;
+        if (cs.cursor && cs.cy >= std::min(p.y0, p.y1) && cs.cy <= std::max(p.y0, p.y1)) p.cursor = true;
+    }
+}
 
 void publish(const std::vector<Pending>& v, const menunav::Scale& s, u32 group, bool hud, bool tested = true, u16 layer = 0) {
     for (const auto& p : v) {
         menunav::Item it;
+        it.choice = p.choice;
+        it.cursor = p.cursor;
         float ax, ay, bx, by;
         menunav::layoutToPointer(s, p.x0, p.y0, ax, ay);
         menunav::layoutToPointer(s, p.x1, p.y1, bx, by);
@@ -170,7 +213,9 @@ HLE(fn_802B5598) {
     sLastWalkScale = s;
     std::vector<Pending> found;
     bool hud = true;
+    ChoiceScan cs;
     walk(rd32(layout + 0x20), 0, [&](u32 p) {
+        scanChoicePane(p, cs);
         if (rd8(p + 0xBC) != 'B' || !visibleChain(p)) return;
         if (filter && !guestCall(c, filter, p)) return;
         Pending pd{p, paneName(p), 0, 0, 0, 0};
@@ -183,6 +228,7 @@ HLE(fn_802B5598) {
             lr, layout, filter, qx, qy, qs, s.sx, s.sy, found.size(), hud ? " (hud)" : "");
         for (const auto& p : found) log("[navdump]   %s %.1f,%.1f .. %.1f,%.1f", p.name.c_str(), p.x0, p.y0, p.x1, p.y1);
     }
+    markChoices(found, cs);
     publish(found, s, rd32(layout + 0x20), hud && !found.empty());  // group = root pane, as in 1b
     c.r[3] = ret;
 }
@@ -195,7 +241,9 @@ void cf::navLayoutDrawn(Ctx& c, u32 root) {
     if (!menunav::wanted() || !root) return;
     std::vector<Pending> found;
     bool hud = true;
+    ChoiceScan cs;
     walk(root, 0, [&](u32 p) {
+        scanChoicePane(p, cs);
         if (rd8(p + 0xBC) != 'B' || rd32(p) != kBoundingVtable || !visibleChain(p)) return;
         Pending pd{p, paneName(p), 0, 0, 0, 0};
         if (pd.name == "B_msgWin") return;  // the text box: A advances it wherever the pointer is
@@ -204,6 +252,17 @@ void cf::navLayoutDrawn(Ctx& c, u32 root) {
         found.push_back(pd);
     });
     if (found.empty()) return;
+    markChoices(found, cs);
+    // Test aid CF_NAV_TREE=1: every pane of small menu layouts (up to 8 items) every 10 frames, to
+    // find what a screen's own cursor / highlight is (csr_00 of the choice boxes was found this way).
+    static const bool sTree = std::getenv("CF_NAV_TREE") != nullptr;
+    if (sTree && game::guestFrames() % 10 == 0 && !hud && found.size() <= 8) {
+        log("[navtree] f%u root %08X", game::guestFrames(), root);
+        walk(root, 0, [&](u32 p) {
+            log("[navtree]   %08X %-16s vt %08X vis %u a %u/%u t %.1f,%.1f s %.2f,%.2f", p, paneName(p).c_str(), rd32(p),
+                rd8(p + 0xBB) & 1, rd8(p + 0xB8), rd8(p + 0xB9), rdf32(p + 0x90), rdf32(p + 0xA0), rdf32(p + 0x4C), rdf32(p + 0x50));
+        });
+    }
     // Draw order of the layouts with items this frame: a layout drawn later is in front (a submenu
     // over the design list; menu_nav.cpp leaves out the screen behind it).
     static u32 seqFrame = 0;

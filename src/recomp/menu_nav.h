@@ -28,6 +28,9 @@ struct Item {
     bool tested = true; // the game hit-tested it this frame (false: only seen drawn). While tested
                         // non-HUD items are up (a choice box over the pockets), only tested items
                         // are navigable: the screen in front is modal.
+    bool choice = false;  // a row of a choice box (dialogue choices, the pockets' "Drop / Quit"):
+                          // the pointer is put on the box's highlighted row when it appears
+    bool cursor = false;  // ... the row the box's own cursor (csr_00) is on this frame
     char name[17] = {};
 };
 
@@ -76,6 +79,7 @@ struct Input {
 struct Output {
     bool active = false;        // a navigable screen is up and snapping applies: D-pad / stick were taken
     bool setPointer = false;    // move the pointer to (px, py)
+    bool placed = false;        // ... onto a choice box that just appeared (counts as using the pointer)
     float px = 0, py = 0;
     u32 buttons = 0;            // buttons left for the game (and port actions still to apply)
     float stickX = 0, stickY = 0;
@@ -85,5 +89,8 @@ Output apply(int chan, const Input& in);
 void notePointer(int chan, bool valid, float x, float y);
 // Whether any port may snap (the settings); the game side skips collecting while false.
 void setWanted(bool on);
+// Guest frame of the last time a choice box that appeared got the pointer (0 never; test aid
+// CF_CHOICE_SHOT in efb_copy.cpp).
+unsigned lastChoicePlacement();  // (not u32: the offline replay sees two u32 types)
 
 }  // namespace recomp::menunav

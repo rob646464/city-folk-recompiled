@@ -11,6 +11,7 @@
 #include "port/settings.h"
 #include "recomp/hle.h"
 #include "recomp/interp.h"
+#include "recomp/menu_nav.h"
 
 #include <aurora/aurora.h>
 #include <aurora/efb_ram.h>
@@ -19,6 +20,7 @@
 #include <cstdlib>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace recomp::efbcopy {
@@ -212,6 +214,36 @@ void onFrame(u32 frameNo) {
         std::snprintf(path, sizeof path, "%s/s%05u.ppm", sShot.dir.c_str(), frameNo);
         aurora_request_screenshot(path);
     }
+    // Test aid CF_CHOICE_SHOT=<dir>[,<frames>...] (branch choice-snap): a CF_SHOT-style screenshot
+    // <dir>/choice<frame>.ppm that many guest frames (default 6) after each time the menu snap put
+    // the pointer on a choice box that appeared (menu_nav.h lastChoicePlacement).
+    static const std::pair<std::string, std::vector<unsigned>> sChoiceShot = [] {
+        std::pair<std::string, std::vector<unsigned>> r;
+        if (const char* v = std::getenv("CF_CHOICE_SHOT"); v && *v) {
+            std::string str = v;
+            size_t c = str.find(',');
+            r.first = str.substr(0, c);
+            while (c != std::string::npos) {
+                const size_t n = str.find(',', c + 1);
+                r.second.push_back(unsigned(std::strtoul(str.substr(c + 1, n - c - 1).c_str(), nullptr, 10)));
+                c = n;
+            }
+            if (r.second.empty()) r.second.push_back(6);
+        }
+        return r;
+    }();
+    static u32 sChoiceSeen = 0, sChoiceBase = 0;  // placement noticed at this copy frame
+    if (!sChoiceShot.first.empty() && menunav::lastChoicePlacement() != sChoiceSeen) {
+        sChoiceSeen = menunav::lastChoicePlacement();
+        sChoiceBase = frameNo;
+    }
+    if (!sChoiceShot.first.empty() && sChoiceSeen)
+        for (unsigned d : sChoiceShot.second)
+            if (frameNo == sChoiceBase + d) {
+                char path[512];
+                std::snprintf(path, sizeof path, "%s/choice%05u.ppm", sChoiceShot.first.c_str(), frameNo);
+                aurora_request_screenshot(path);
+            }
     if (sShot.on && envInt("CF_DUMP_EXIT", 0) != 0 && !sDump.active && frameNo > sShot.last + 10) {
         log("[efb] screenshot range done, exiting (CF_DUMP_EXIT)");
         std::fflush(nullptr);

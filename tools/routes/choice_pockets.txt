@@ -1,0 +1,19 @@
+# Choice-box placement in the pockets (docs/CONTROLS.md "Choice boxes: the pointer starts on the
+# highlighted choice"): MINUS opens the pockets, LEFT (first press: from the slot under the
+# pointer), LEFT onto the fishing rod, A = "Drop / Carry / Quit" (placed on Drop), DOWN (Carry),
+# B (back on the rod slot), A (placed again), B, B (pockets closed). Verified 2026-11-11.
+# Env CF_FIXTURE=user-town-clean;CF_FF=1-4400;CF_GIVE_ITEM=5600:CEA0,5600:CEA4;CF_NAV_LOG=1
+include continue_any.txt
+5240:A
++60:A ~6
+after link d_bgo_drawNP 2
++1400:MINUS
+after link d_menu_itemNP 1
++400:LEFT
++40:LEFT
++60:A
++150:DOWN
++60:B
++150:A
++150:B
++100:B

@@ -1,0 +1,15 @@
+# Tom Nook's menu box with a pointer hidden by the pointer timeout (CF_POINTER_TIMEOUT=3): the
+# pointer is put on the screen (scripted, like a right-stick move), left alone until it times out,
+# then A talks to Nook and the A presses run his text; his choice box must show the pointer on
+# "I want to sell!" (placement = the pointer used again). Env CF_FIXTURE=user-town-clean;CF_FF=1-4400
+include continue_any.txt
+5240:A
++60:A ~6
+after link d_bgo_drawNP 2
++1600:WARP=nook
+after link d_bgi_drawNP 2
++300:TP=256/0/410
++30:STICKUP*4
++20:@0.3/0.3
++400:A
++40:A ~14

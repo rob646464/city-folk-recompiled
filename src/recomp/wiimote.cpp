@@ -533,9 +533,11 @@ public:
                 sx = no.stickX;
                 sy = no.stickY;
                 ps.snapped = no.setPointer;
-                // The D-pad / left stick picked a menu item, or Recenter went onto the toolbar.
+                // The D-pad / left stick picked a menu item, Recenter went onto the toolbar, or a
+                // choice box that just appeared got the pointer (a hidden pointer shows on its row).
                 constexpr u32 kNavButtons = kBtnUp | kBtnDown | kBtnLeft | kBtnRight | kBtnRecenter;
-                if (no.setPointer && ((ni.buttons & kNavButtons) || std::sqrt(ni.stickX * ni.stickX + ni.stickY * ni.stickY) > 0.55f))
+                if (no.setPointer &&
+                    (no.placed || (ni.buttons & kNavButtons) || std::sqrt(ni.stickX * ni.stickX + ni.stickY * ni.stickY) > 0.55f))
                     pointerUsed = true;
                 // A screen that closes while the snap still holds the pointer on one of its items
                 // (B, or A on a choice): the pointer would stay where the item slid away to, at the
