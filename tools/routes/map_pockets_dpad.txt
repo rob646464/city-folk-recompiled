@@ -1,0 +1,28 @@
+# Town map and pockets by D-pad (snap Auto): map (+), moves, B; pockets (-), moves incl. down onto the
+# toolbar, B. Env CF_FIXTURE=user-town-clean;CF_FF=1-4400;CF_NAV_TRACE=<file>. With
+# CF_MOUSE_MOVE=6300:0.5/0.5*8 (settings remote1_pointer=mouse+stick) the first D-pad press on the map
+# takes the pointer back from the resting mouse. Verified 2026-11-11.
+include continue_any.txt
+5240:A
++60:A ~6
+after link d_bgo_drawNP 2
++1400:PLUS
++300:DOWN
++40:DOWN
++40:LEFT
++40:DOWN
++40:DOWN
++40:RIGHT
++40:UP
++60:B
++300:MINUS
++300:LEFT
++40:LEFT
++40:DOWN
++40:DOWN
++40:DOWN
++40:RIGHT
++40:UP
++40:UP
++40:UP
++60:B

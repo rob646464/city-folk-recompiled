@@ -1,0 +1,13 @@
+# Choice-box placement with the pointer left on the screen (docs/CONTROLS.md "Choice boxes: the
+# pointer starts on the highlighted choice", round 2): continue with no scripted pointer (A every
+# 40 frames), Rover's boxes must get the pointer on "Yeah!" / the saved player wherever the pointer
+# rests. Variants by env (settings [wiimote] remote1_pointer=mouse+stick, as the user's):
+#   CF_MOUSE_MOVE=1800:0.3/0.8*8           mouse moved earlier, resting when the box shows: placed
+#   CF_MOUSE_MOVE=2150:0.25/0.3*120        mouse being moved when the box shows: left to the mouse
+#   CF_VIRTUAL_PAD=@tools/routes/choice_noise_pad.txt   right-stick noise (+-0.15): placed
+#   CF_VIRTUAL_PAD="1:attach,f2150:rightx=0.6*64"       right stick moved, stopped before: placed
+#   CF_VIRTUAL_PAD="1:attach,f2205:rightx=0.6*40"       right stick held across the box: placed,
+#                                                        then the stick moves on from the row
+# Env CF_FIXTURE=user-town-clean;CF_NAV_LOG=1;CF_CHOICE_SHOT=<dir>,1,20. Verified 2026-11-11.
+1300:A
++40:A ~97

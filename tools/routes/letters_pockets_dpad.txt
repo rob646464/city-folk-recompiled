@@ -1,0 +1,27 @@
+# Pockets > letter button (letters panel over the pockets' top, docs/CONTROLS.md "Two panels over
+# the pockets"), then the toolbar's designs and the first design's submenu (a choice box). Env
+# CF_FIXTURE=user-town-clean;CF_FF=1-4400;CF_NAV_TRACE=<file>: tools/nav/check.py 0 errors, the
+# pocket slots stay navigable under the letters. Verified 2026-11-11.
+include continue_any.txt
+5240:A
++60:A ~6
+after link d_bgo_drawNP 2
++1400:MINUS
+after link d_menu_itemNP 1
++300:@0.6/-0.65
++10:@0.61/-0.64
++30:A
++300:DOWN
++40:DOWN
++40:UP
++40:UP
++40:LEFT
++140:B
++200:B
++300:@-0.575/0.806
++30:A
++400:@-0.44/-0.06
++10:@-0.43/-0.05
++30:A
++400:B
++200:B

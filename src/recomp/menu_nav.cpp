@@ -52,6 +52,11 @@ bool envOn(const char* name) {
 }
 const bool sLog = envOn("CF_NAV_LOG");
 bool sOld = envOn("CF_NAV_OLD");  // not const: the offline replay switches it
+// A/B CF_NAV_MODAL=whole: the first round's modal rules (whole layouts left out; navigableWhole).
+bool sModalWhole = [] {
+    const char* v = std::getenv("CF_NAV_MODAL");
+    return v && std::strcmp(v, "whole") == 0;
+}();
 // A/B CF_CHOICE_PLACE=0: no placement on choice boxes (the behaviour before branch choice-snap);
 // =wait: place only once the box has opened (its cursor rested on a row, or its rows hit-tested,
 // for kCursorFrames frames; at the latest after kChoiceWaitMax), instead of on its first frame.
@@ -160,24 +165,11 @@ bool overlapping(const Item& a, const Item& b) {
     return w * h > 0.3f * small;
 }
 
-// The navigable set as apply() sees it. The screen in front is modal, as in the game:
-//   - a screen the game hit-tests (a choice box over the pockets) is in front of the layouts
-//     only seen drawn that it overlaps (the whole layout's extent): those are left out. Drawn
-//     layouts beside the tested items stay: the "Donate what?" / sell / give pickers hit-test
-//     their Quit / OK buttons every frame (fn_80008ADC) but their item slots only while the
-//     pointer is on the grid (or from stored positions), so "tested" alone does not mean "in
-//     front" (it left only the two buttons navigable there). Drawn-only HUD items are left out
-//     while any tested menu item is up (the toolbar is hit-tested whenever the game uses it);
-//   - of two menu layouts that overlap (a submenu over the design list, both hit-tested), the one
-//     drawn later is in front: every item of the one behind is left out (only menu items: the
-//     toolbar stays reachable below every screen, and layouts side by side, e.g. the map's house
-//     markers next to its resident list, are not affected).
-// Items with nothing on screen are dropped. `menu` / `hud`: whether non-HUD / HUD items remain.
-std::vector<Item> navigable(const std::vector<Item>& in, bool& menu, bool& hud) {
+// The first round's modal rules (CF_NAV_MODAL=whole, A/B): a drawn-only layout whose extent a tested
+// item overlaps, and every layout drawn under another one, are left out as a whole.
+std::vector<Item> navigableWhole(const std::vector<Item>& in, bool& menu, bool& hud) {
     std::vector<Item> items;
     const bool front = std::any_of(in.begin(), in.end(), [](const Item& it) { return it.tested && !it.hud; });
-    // Drawn-only layouts covered by a tested menu item of another layout (CF_NAV_OLD: every
-    // drawn-only item while anything is tested, the first version's rule).
     std::vector<u32> covered;
     if (front && !sOld) {
         struct Extent {
@@ -234,6 +226,114 @@ std::vector<Item> navigable(const std::vector<Item>& in, bool& menu, bool& hud) 
                                            return !it.hud && std::find(behind.begin(), behind.end(), it.group) != behind.end();
                                        }),
                         items.end());
+    }
+    menu = hud = false;
+    for (const auto& it : items) (it.hud ? hud : menu) = true;
+    return items;
+}
+
+// The navigable set as apply() sees it. The screen in front is modal, as in the game:
+//   - a choice box (Item::choice: dialogue choices, the pockets' item popup, the design list's
+//     "Wear / ... / Quit", the Photos window's SD Card box) is modal: while one is up only its
+//     rows (and the field toolbar's tested items) are navigable, not the screen it was opened from;
+//   - a screen the game hit-tests is in front of the items only seen drawn that lie under its
+//     own items: those are left out, one by one. The recycle bin and the letters are drawn over
+//     the upper half of the pockets (player circle, wallet and letter buttons hidden under them)
+//     while the pockets' slots below stay in use (the game hit-tests them there too), so the
+//     slots stay navigable; the "Donate what?" / sell / give pickers' Quit / OK buttons lie beside
+//     the pockets. Only a layout that is mostly under the screen in front (half of its items or
+//     more) is left out as a whole. Drawn-only HUD items are left out while any tested menu item
+//     is up (the toolbar is hit-tested whenever the game uses it);
+//   - of two menu layouts drawn over each other (both hit-tested, or both only drawn), the one
+//     drawn later is in front by the same rule: the items of the one behind that lie under its
+//     items are left out, all of them when most do (only menu items: the toolbar stays reachable
+//     below every screen; one-item layouts such as the map's house markers are never in front).
+// Items with nothing on screen are dropped. `menu` / `hud`: whether non-HUD / HUD items remain.
+// CF_NAV_OLD=1: the first version's rule (any tested item = only tested items).
+// Branch choice-snap round 2 (the recycle bin report): before, a drawn layout was left out as a
+// whole as soon as a tested one overlapped its extent, and the layout drawn later hid every item
+// of the one behind, so the pockets were unreachable from the recycle bin's Close button.
+std::vector<Item> navigable(const std::vector<Item>& in, bool& menu, bool& hud) {
+    if (sModalWhole) return navigableWhole(in, menu, hud);
+    std::vector<Item> items;
+    const bool front = std::any_of(in.begin(), in.end(), [](const Item& it) { return it.tested && !it.hud; });
+    // Drawn-only items under a tested menu item of another layout (CF_NAV_OLD: every drawn-only
+    // item while anything is tested), and layouts mostly under one (`covered`).
+    std::vector<u32> under;    // item keys
+    std::vector<u32> covered;  // groups
+    if (front && !sOld) {
+        struct Count {
+            u32 group;
+            int n = 0, under = 0;
+        };
+        std::vector<Count> counts;
+        for (const auto& it : in) {
+            Box b;
+            if (it.tested || it.hud || !visibleBox(it, b)) continue;
+            auto c = std::find_if(counts.begin(), counts.end(), [&](const Count& x) { return x.group == it.group; });
+            if (c == counts.end()) c = counts.insert(counts.end(), Count{it.group});
+            c->n++;
+            const bool hidden = std::any_of(in.begin(), in.end(), [&](const Item& t) {
+                return t.tested && !t.hud && t.group != it.group && overlapping(it, t);
+            });
+            if (hidden) {
+                c->under++;
+                under.push_back(it.key);
+            }
+        }
+        for (const auto& c : counts)
+            if (c.under * 2 >= c.n && c.under > 0) covered.push_back(c.group);
+    }
+    for (const auto& it : in) {
+        Box b;
+        if (!visibleBox(it, b)) continue;
+        if (front && !it.tested &&
+            (sOld || it.hud || std::find(under.begin(), under.end(), it.key) != under.end() ||
+             std::find(covered.begin(), covered.end(), it.group) != covered.end()))
+            continue;
+        items.push_back(it);
+    }
+    if (!sOld) {
+        // In front = a layout of several items (a single marker drawn over its neighbour is not a
+        // screen in front of it).
+        auto several = [&](u32 group) {
+            int n = 0;
+            for (const auto& it : items) n += it.group == group;
+            return n >= 2;
+        };
+        std::vector<u32> behindKeys, behindGroups;
+        struct Count {
+            u32 group;
+            int n = 0, under = 0;
+        };
+        std::vector<Count> counts;
+        for (const auto& a : items) {
+            if (a.hud) continue;
+            auto c = std::find_if(counts.begin(), counts.end(), [&](const Count& x) { return x.group == a.group; });
+            if (c == counts.end()) c = counts.insert(counts.end(), Count{a.group});
+            c->n++;
+            const bool hidden = std::any_of(items.begin(), items.end(), [&](const Item& b) {
+                return !b.hud && a.group != b.group && a.layer && b.layer && a.layer < b.layer && overlapping(a, b) && several(b.group);
+            });
+            if (hidden) {
+                c->under++;
+                behindKeys.push_back(a.key);
+            }
+        }
+        for (const auto& c : counts)
+            if (c.under > 0 && c.under * 2 >= c.n) behindGroups.push_back(c.group);
+        if (!behindKeys.empty())
+            items.erase(std::remove_if(items.begin(), items.end(),
+                                       [&](const Item& it) {
+                                           return !it.hud &&
+                                                  (std::find(behindKeys.begin(), behindKeys.end(), it.key) != behindKeys.end() ||
+                                                   std::find(behindGroups.begin(), behindGroups.end(), it.group) != behindGroups.end());
+                                       }),
+                        items.end());
+        // A choice box is modal: the screen it was opened from (the pockets under "Drop / Quit",
+        // the SD Card button under "Save Photo / Erase All / Quit") takes no moves while it is up.
+        if (std::any_of(items.begin(), items.end(), [](const Item& it) { return it.choice; }))
+            items.erase(std::remove_if(items.begin(), items.end(), [](const Item& it) { return !it.hud && !it.choice; }), items.end());
     }
     menu = hud = false;
     for (const auto& it : items) (it.hud ? hud : menu) = true;
@@ -522,7 +622,7 @@ void traceSet(const std::vector<Item>& published, u32 frame) {
     std::sort(all.begin(), all.end(), [](const Item& a, const Item& b) { return a.key < b.key; });
     auto isNav = [&](const Item& it) { return findKey(items, it.key) != nullptr; };
     std::string sig;
-    char buf[200];
+    char buf[256];
     for (const auto& it : all) {
         std::snprintf(buf, sizeof buf, "%08X %.2f %.2f %.2f %.2f %d %d|", it.key, it.x0, it.y0, it.x1, it.y1, it.tested ? 1 : 0,
                       isNav(it) ? 1 : 0);
@@ -542,9 +642,9 @@ void traceSet(const std::vector<Item>& published, u32 frame) {
         for (const char* p = it.name; *p; p++)
             if (*p != '"' && *p != '\\') name += *p;
         std::snprintf(buf, sizeof buf,
-                      "%s{\"k\":\"%08X\",\"n\":\"%s\",\"g\":\"%08X\",\"b\":[%.4f,%.4f,%.4f,%.4f],\"hud\":%d,\"t\":%d,\"l\":%u,\"nav\":%d}",
+                      "%s{\"k\":\"%08X\",\"n\":\"%s\",\"g\":\"%08X\",\"b\":[%.4f,%.4f,%.4f,%.4f],\"hud\":%d,\"t\":%d,\"l\":%u,\"ch\":%d,\"nav\":%d}",
                       i ? "," : "", it.key, name.c_str(), it.group, it.x0, it.y0, it.x1, it.y1, it.hud ? 1 : 0, it.tested ? 1 : 0,
-                      unsigned(it.layer), isNav(it) ? 1 : 0);
+                      unsigned(it.layer), it.choice ? 1 : 0, isNav(it) ? 1 : 0);
         out += buf;
     }
     out += "],\"moves\":[";
@@ -663,10 +763,13 @@ Output apply(int chan, const Input& in) {
         st.choicePlaced = false;
         st.beforeSel = 0;
     };
-    if (in.mode == Mode::Off || (in.mode == Mode::Auto && in.mouseDrives)) {
+    if (in.mode == Mode::Off) {
         reset();
         return out;
     }
+    // Auto while the mouse placed the pointer last: mouse play, no snapping (below), except that a
+    // choice box that appears still gets the pointer.
+    const bool mouseMode = in.mode == Mode::Auto && in.mouseDrives;
 
     std::vector<Item> published;
     u32 publishedFrame = 0;
@@ -725,6 +828,39 @@ Output apply(int chan, const Input& in) {
         st.cursorFrames = 0;
         st.choiceTested = 0;
         if (sLog) log("[nav] remote %d: choice box up (%zu rows) at frame %u", chan + 1, rows.size(), publishedFrame);
+    }
+    if (mouseMode) {
+        // The mouse played last (Auto): the D-pad and the stick reach the game, nothing is held,
+        // as with the original. A choice box that appears is the exception: it gets the pointer
+        // like with a pad (the placement below), unless the mouse is being moved right now. The
+        // mouse placing the pointer last says little about who plays: any touch of the mouse, or
+        // the pointer having been there since, kept every later box snap-less (user report: "if
+        // the cursor is already on screen, it doesn't instantly snap to a choice"). After the
+        // placement the pointer is the snap's (wiimote.cpp), so the D-pad works on the box, until
+        // the mouse moves again.
+        // A D-pad / left stick press (or Recenter) on a menu while the mouse rests takes the
+        // pointer back for the pad as well: a mouse touched once no longer keeps the snap off
+        // until the right stick moves the pointer (the pointer is the snap's from then on).
+        const bool place = st.choiceUp && !st.choicePlaced && !in.mouseActive;
+        constexpr u32 kNav = wiimote::kBtnUp | wiimote::kBtnDown | wiimote::kBtnLeft | wiimote::kBtnRight;
+        const bool padPress = menu && !in.mouseActive &&
+                              ((pressed & (kNav | wiimote::kBtnRecenter)) ||
+                               std::sqrt(in.stickX * in.stickX + in.stickY * in.stickY) > 0.55f);
+        if (padPress && !place && sLog) log("[nav] remote %d: the pad takes the pointer from the mouse", chan + 1);
+        if (!place && !padPress) {
+            if (st.choiceUp && !st.choicePlaced) {
+                st.choicePlaced = true;
+                if (sLog) log("[nav] remote %d: choice box left to the mouse (being moved)", chan + 1);
+            }
+            st.selected = 0;
+            st.toolbar = false;
+            st.haveSaved = false;
+            st.haveMem = false;
+            st.dirX = st.dirY = 0;
+            st.stickHeld = false;
+            st.wasActive = false;
+            return out;
+        }
     }
     if (menu) st.toolbar = false;
     if (in.pointerMoved) {
@@ -788,7 +924,7 @@ Output apply(int chan, const Input& in) {
     out.stickX = out.stickY = 0;
 
     // A choice box that is up but not placed yet: count frames and the box's own cursor (once per
-    // guest frame), and give up when the pointer is moved freely (it is the player's then). The
+    // guest frame), and give up only while the mouse is being moved (the player is aiming with it). The
     // box opens for about 7 frames without a cursor and without hit-testing; then, with the pointer
     // off the screen, csr_00 shows its highlight (the top row), or, with the pointer on the screen,
     // the game hit-tests the rows (csr_00 is then only the row under the pointer: ignored). The
@@ -796,9 +932,9 @@ Output apply(int chan, const Input& in) {
     // there on the box's first frame and rides the opening animation (CF_CHOICE_PLACE=wait: once
     // it has opened, onto csr_00's row).
     if (st.choiceUp && !st.choicePlaced) {
-        if (in.pointerMoved) {
+        if (in.mouseActive) {
             st.choicePlaced = true;
-            if (sLog) log("[nav] remote %d: choice box left to the pointer (moved freely)", chan + 1);
+            if (sLog) log("[nav] remote %d: choice box left to the mouse (being moved)", chan + 1);
         } else if (publishedFrame != st.choiceFrame) {
             st.choiceFrame = publishedFrame;
             st.choiceSeen++;
@@ -958,6 +1094,7 @@ const Item* move(const std::vector<Item>& items, const Item& cur, float dx, floa
 }
 bool container(const std::vector<Item>& items, size_t i) { return geometry(items, false)[i].container; }
 void setOld(bool on) { sOld = on; }
+void setModalWhole(bool on) { sModalWhole = on; }
 // The navigable items of a frame's set, as apply() takes them (toolbar mode: HUD items only).
 std::vector<Item> nav(const std::vector<Item>& all, bool& hudOnly) {
     bool menu, hud;

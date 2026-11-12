@@ -69,8 +69,13 @@ inline void pointerToLayout(const Scale& s, float px, float py, float& lx, float
 enum class Mode : u8 { Off, Auto, On };
 struct Input {
     Mode mode = Mode::Auto;
-    bool mouseDrives = false;   // the mouse placed the pointer last (Auto: no snapping)
-    bool pointerMoved = false;  // a free pointer device moved the pointer this sample
+    bool mouseDrives = false;   // the mouse placed the pointer last (Auto: no snapping, but a
+                                // choice box that appears still gets the pointer, and a D-pad /
+                                // stick press on a menu takes the pointer back for the pad)
+    bool mouseActive = false;   // ... and is being moved right now (wiimote.cpp kMouseUse: a
+                                // choice box is left to it, the pad does not take the pointer)
+    bool pointerMoved = false;  // a free pointer device moved the pointer this sample (beyond
+                                // stick noise / gyro jitter)
     u32 buttons = 0;            // wiimote.h kBtn* incl. port-only bits (kBtnRecenter)
     float stickX = 0, stickY = 0;
     float px = 0, py = 0;       // the pointer before snapping

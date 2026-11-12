@@ -1,0 +1,35 @@
+# Town Hall recycle bin with the D-pad (docs/CONTROLS.md "Two panels over the pockets"; user report
+# "cursor wont move to the yellow menu with dpad or control stick controls while using the recycle
+# bin"): warp, TP west of the bin (module 91 d_a_rmobj_recycleboxNP), face it, A through its text
+# with the pointer away; on the screen (d_menu_item05NP) DOWN (first press: the pocket slot nearest
+# the pointer), UP onto the leaf, LEFT onto the shirt, A held while UP, UP: the shirt is dragged into
+# the bin's top-left slot; then DOWN, DOWN to the pockets, A, UP, UP, A, DOWN, DOWN, LEFT, A
+# (Close). Env CF_FIXTURE=user-town-clean;CF_FF=1-4400;CF_NAV_LOG=1. Verified 2026-11-11 (branch
+# choice-snap round 2): moves between bin slots, Close and every pocket row, shirt moved into the bin.
+include warp.txt
++1600:WARP=town_hall
+after link d_bgi_drawNP 2
++300:TP=mod91:-40/0
++40:STICKRIGHT*12
++40:@off
++30:A
++250:A
++80:A
++80:A
+after link d_menu_item05NP 1
++300:DOWN
++50:UP
++50:LEFT
++60:A*150
++50:UP
++50:UP
++150:DOWN
++60:DOWN
++60:A
++80:UP
++60:UP
++60:A
++100:DOWN
++60:DOWN
++60:LEFT
++60:A
