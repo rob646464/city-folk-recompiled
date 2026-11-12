@@ -1,0 +1,78 @@
+diff --git a/include/aurora/enhanced.h b/include/aurora/enhanced.h
+--- a/include/aurora/enhanced.h
++++ b/include/aurora/enhanced.h
+@@ -131,6 +131,15 @@ typedef struct {
+   bool shafts;
+   float shaftIntensity;
+   uint32_t shaftSteps; // 8..48
++
++  // 0540: floor, in world units, of the receiver offset of the extra lights' shadow maps (the
++  // normal / toward-the-light offset is otherwise one cube texel at the receiver, scaled up at
++  // grazing angles). Near a light the texels get tiny (0.03 units at 15 units from a light with
++  // 1024 faces) while the receiver's tangent-plane filter taps still span the light's PCSS search
++  // region: on a low-poly character next to a shadowed point light (a player at a lit doorway) the
++  // taps dipped under its own neighbouring facets and blotches of self-shadow jumped with every
++  // pose. 0 = texel-based only (as before 0540). Pick about 1% of a character's height.
++  float extraShadowOffsetFloor;
+ } AuroraEnhancedConfig;
+ 
+ // 0196: an ExtraLight with this flag is no light: three of them (ids BeamAnchorId + 0..2) carry
+diff --git a/lib/gfx/enhanced.cpp b/lib/gfx/enhanced.cpp
+--- a/lib/gfx/enhanced.cpp
++++ b/lib/gfx/enhanced.cpp
+@@ -55,7 +55,8 @@ bool same(const AuroraEnhancedConfig& a, const AuroraEnhancedConfig& b) {
+          EQ(extraShadowMapSize) && EQ(extraShadowSoftness) && EQ(shadowDarkness) && EQ(shadowAmbientKeep) &&
+          EQ(realisticFlashlight) && EQ(beamDensity) && EQ(beamDust) && EQ(lightReceivers) &&
+          EQ(grade) && EQ(gradeGain[0]) && EQ(gradeGain[1]) && EQ(gradeGain[2]) && EQ(gradeLift[0]) && EQ(gradeLift[1]) &&
+-         EQ(gradeLift[2]) && EQ(gradeSaturation) && EQ(gradeContrast) && EQ(gradeKeepLights) && EQ(shafts) && EQ(shaftIntensity) && EQ(shaftSteps);
++         EQ(gradeLift[2]) && EQ(gradeSaturation) && EQ(gradeContrast) && EQ(gradeKeepLights) && EQ(shafts) && EQ(shaftIntensity) && EQ(shaftSteps) &&
++         EQ(extraShadowOffsetFloor);
+ #undef EQ
+ }
+ 
+@@ -121,6 +122,12 @@ const float g_focusBias = [] {
+   const char* v = std::getenv("AURORA_ENH_FOCUS_BIAS");
+   return v != nullptr ? std::max(float(std::atof(v)), 0.f) : 0.3f;
+ }();
++// 0540: AURORA_ENH_XL_SHADOW_FLOOR=<world units>: the extra lights' shadow receiver offset floor
++// instead of the app's (AuroraEnhancedConfig::extraShadowOffsetFloor; test aid).
++const float g_xlFloorOverride = [] {
++  const char* v = std::getenv("AURORA_ENH_XL_SHADOW_FLOOR");
++  return v != nullptr ? std::max(float(std::atof(v)), 0.f) : -1.f;
++}();
+ // Flash / flare detection: the flashlight's brightness relative to its recent steady level.
+ float g_flashLevel = 0.f;
+ float g_flare = 0.f;
+@@ -504,7 +511,8 @@ fn fs_xlshadow(in: VsOut) -> @location(0) vec4f {
+ // x1, y1) and in atlas pixels.
+ // fx.xl[s] = view position + reach, fx.xl[16 + s] = near, tan(half fov), face size, 0;
+ // fx.xl[32] = atlas w, h, filter taps, base filter radius (texels);
+-// fx.xl[33] = light size (PCSS, world units), reversed z, 0, 0. (0187: 16 lights; was 8/16/17.)
++// fx.xl[33] = light size (PCSS, world units), reversed z, focus offset floor (0530), extra-light
++// offset floor (0540). (0187: 16 lights; was 8/16/17.)
+ @group(0) @binding(6) var tatlas: texture_depth_2d;
+ @group(0) @binding(7) var tcmp: sampler_comparison;
+ @group(0) @binding(8) var<storage, read> xrec: array<f32>;
+@@ -677,7 +685,12 @@ fn cube_occlusion(s: u32, p: vec3f, nr: vec4f, mp: vec2f) -> f32 {
+   // World size of one shadow-map texel at the receiver; offset along the normal (more at grazing
+   // angles) and toward the light against acne.
+   let texel = 2.0 * axis0 * lq.y / lq.z;
+-  let q = p + n * texel * (0.8 + 1.6 * (1.0 - clamp(ndl, 0.0, 1.0))) + l * texel * 0.6;
++  // 0540: with a floor in world units (fx.xl[33].w): close to the light the texel is a few
++  // hundredths of a unit, far less than how much a low-poly surface bends under the filter taps
++  // spread on its tangent plane (the PCSS search region), so a character standing next to a
++  // shadowed light shadowed itself in facet-shaped blotches that changed with every pose.
++  let ob = max(texel, fx.xl[33].w);
++  let q = p + n * ob * (0.8 + 1.6 * (1.0 - clamp(ndl, 0.0, 1.0))) + l * ob * 0.6;
+   let d = q - lp.xyz;
+   let f = cube_face(d);
+   let b = (s * 6u + f) * 24u;
+@@ -4572,6 +4585,8 @@ bool flush_mask() noexcept {
+     u.xl[33][0] = std::max(g_cfg.extraShadowSoftness, 0.f);
+     u.xl[33][1] = gx::UseReversedZ ? 1.f : 0.f;
+     u.xl[33][2] = g_focusBias; // 0530: the focus cascade's receiver offset floor (world units)
++    // 0540: the extra lights' shadow receiver offset floor (world units).
++    u.xl[33][3] = g_xlFloorOverride >= 0.f ? g_xlFloorOverride : std::max(g_cfg.extraShadowOffsetFloor, 0.f);
+   }
+   if (g_log) {
+     Log.info("  mask uniform: size {} {} vp {} {} {} {} proj {} {} {} {} projz {} {} {} {} dr {} {} pass {} {} {}", u.size[0],

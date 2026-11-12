@@ -957,6 +957,67 @@ moonlit grade (cool gain, less saturation) turned warm windows grey-green; brigh
 both: (181,183,121), the plain game's look. Off (master off) nothing changes: the hooks only read
 guest memory and call the original.
 
+#### The player at a lit house door (branch player-shadow, Aurora 0540)
+
+User report (test build 2026-11-10, 4K at ~90 fps, Enhanced lighting Ultra, real clock): "shadows
+on player freaking out when leaving a room at certain times of day". The clip: out of the house at
+18:05 on 11 November, standing in front of the door, dark-blue blotches with hard, straight edges
+jumping on the face (and around it) from one frame to the next, next to warm, pink-lit patches.
+
+- **Not** the sun / moon: at 18:05 the sun is 12 degrees below the horizon and the moon rises in
+  the east, held at the 12-degree floor; the whole yard and the player's face lie steadily in its
+  shadow (`AURORA_ENH_GLOWDBG=8`: slot 0 red everywhere but the cap tip). Not interpolation (game
+  frame shots show it), not the room -> town transition (it lasts as long as the player stands
+  there), not the falling leaves (they cast nothing).
+- **Cause**: the lit window light of the player's house (`kNightKinds` obj_myhome: 75 units in
+  front of the model's origin, 22 up, radius 220, shadows). The house's front is at z 48 (MDL0
+  box), a player stepping out of the door stands at ~57: the light is ~18 units in front of the
+  player and ~12 from the face, at chin height. That close, one cube texel at the face is ~0.03
+  units (1024 faces), so the receiver offset (one texel along the normal, x 0.8-2.4, and 0.6
+  toward the light) was a few hundredths of a unit, while the PCSS blocker search spreads its
+  taps over 1.2 units (40 texels, the "Light size" 14) of the receiver's tangent plane (the mask
+  normal comes from the depth: the facet's). On the low-poly head (cheeks, mouth, under the nose)
+  those taps went under the neighbouring facets; all blocked = full shadow (the search's early
+  exit), so facet-shaped blotches that re-rolled with every pose of the idle animation and every
+  blink. The pink patches are the lamp's own light where the test came out lit. "Certain times":
+  night lights burn from dusk to dawn, and a house's only while the game lights it (the daSTR_c
+  light amount, "Follow the game's lights"); the user had just come out of the lit house. With
+  "Night light shadows" off the blotches are gone (`CF_SETTINGS_AT=8650:enhanced_lighting.night_light_shadows=0`).
+  The same happens to any character close to a shadowed point light (a villager at a lit door,
+  someone under a lamp, a candle on a table next to the player).
+- **Fix** (Aurora 0540, `AuroraEnhancedConfig::extraShadowOffsetFloor`; enhanced_lighting.cpp
+  sets 0.3 units, ~1% of the player's height, the same floor as the focus cascade's 0530): the
+  extra lights' shadow receiver offset is at least that many world units. Nothing changes where a
+  texel is larger (beyond ~150 units from a light at 1024 per face, ~300 at 2048); close to a
+  light contact shadows move by under 0.72 units. 0.5 gave the same faces. The lamp's real
+  shadows stay: the player's shadow on the door behind (with "Night light shadows" off the door
+  is clearly brighter) and on the ground at the feet have the same mean colour within 1-2 levels
+  in the A/B blocks; only the blotches on the face are gone.
+- The light stays where it is: with the floor the face it lights from the front is smooth; at the
+  door plane it would sit inside a player standing at the door.
+- Left: in about 1 of 26 frames a one-pixel dashed line along the top of the mouth (the same with
+  a 0.5 floor; sharp single pixels, not the mask's tent: a crack between parts of the face mesh
+  that shows the shadowed inside of the head).
+- Test aids: `AURORA_ENH_XL_SHADOW_FLOOR=<units>` (0 = before), `CF_XL_FLOOR_AB=<n>` (no floor in
+  every other block of n game frames: same-run A/B), route `tools/routes/player_shadow_exit.txt`
+  (wizard's cap, into the house, out of the door, standing) with `CF_CLOCK_START="2026-11-11
+  18:05"` and `[enhanced_lighting] night_lights_game_state=false` (in the user-town fixture the
+  game keeps the house dark after the player leaves it, so the light is forced on); `CF_MODEL_LOG=1`
+  now also prints each model's MDL0 box.
+- **Verified** (user's settings copy: Ultra, Enhanced world, 4K = `CF_RENDER_SCALE=4.7369`;
+  user-town-clean, wizard's cap, house light forced on): 18:05 same-run A/B (`CF_XL_FLOOR_AB=60`,
+  41 shots): every frame of the no-floor blocks has blotches (as main and the user's clip), the
+  floor blocks none (apart from the first frame after each switch, which still shows the previous
+  setting); 48 consecutive presents at 4K with interpolation (`CF_SHOT_RUN`, in-betweens): no
+  blotch. 17:00 (night lights only at 8 %: no blotches either way), 21:00 and 05:30 (moon from the
+  west): the same A/B result; 10:00: no night light is submitted (no `[night]` line), so nothing
+  can differ. Indoors at 21:00 by the candle (indoor_light_house.txt, A/B): no visible change,
+  frame differences across a switch as large as between two frames of one block (candle flicker).
+  Judge (`CF_MATCH_JUDGE`, exit route, 1280x720): 0 visible defects in every window (the PC's
+  display chain held the presents at ~60 for 60 game frames per second during these runs, all of
+  them in-betweens; shading does not move draws).
+  Enhanced lighting off: the mask pass, the only user of the floor, does not run.
+
 ### Fireflies and fireworks (effect lights)
 
 F1 "Fireflies and fireworks" (under Night lights, on). Both are `nw4r::ef` effects, so the lights

@@ -1508,10 +1508,13 @@ bool onModel(Ctx& c, u32 obj) {
     }
     if (sModelLog) {
         static std::unordered_map<std::string, u32> sSeen;
-        if (sSeen[mi.name]++ < 2)
-            log("[model] f%u obj %08X task %u mdl %08X '%s' m3c t %.1f %.1f %.1f  m0c t %.1f %.1f %.1f", copyDispCount(), obj, task,
+        if (sSeen[mi.name]++ < 2) {
+            float lo[3] = {}, hi[3] = {};
+            const bool box = mdlBox(mi.mdl, lo, hi);
+            log("[model] f%u obj %08X task %u mdl %08X '%s' m3c t %.1f %.1f %.1f  m0c t %.1f %.1f %.1f box%s %.1f %.1f %.1f .. %.1f %.1f %.1f", copyDispCount(), obj, task,
                 mi.mdl, mi.name.c_str(), rdf32(obj + 0x48), rdf32(obj + 0x58), rdf32(obj + 0x68), rdf32(obj + 0x18), rdf32(obj + 0x28),
-                rdf32(obj + 0x38));
+                rdf32(obj + 0x38), box ? "" : "(none)", lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+        }
         if (copyDispCount() % 600 == 0 && task == 0x10002 && mi.name == "obj_myhome0") {
             for (u32 base : {0x0Cu, 0x3Cu, 0x6Cu})
                 log("[model] f%u %s +%02X: %.3f %.3f %.3f %.1f / %.3f %.3f %.3f %.1f / %.3f %.3f %.3f %.1f", copyDispCount(), mi.name.c_str(),

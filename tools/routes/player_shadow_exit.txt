@@ -1,0 +1,16 @@
+# Leaving the house at a low sun / moon (branch player-shadow; docs/RENDERING.md "The player's
+# shadow at a grazing light"): CF_FIXTURE=user-town-clean, Env CF_FF=1-4400;CF_GIVE_ITEM=5600:AC9C
+# (the wizard's cap, as in the user's clip) + CF_CLOCK_START (the user's "2026-11-11 18:05"). The cap
+# on (face_shadow_hat.txt), into the house's main room, out through the door (the town loads:
+# d_bgo_drawNP #3), then the player stands in front of the house facing the camera (+300 .. +900),
+# turns left / right a little and stands again.
+include face_shadow_hat.txt
++300:WARP=house1
+after link d_bgi_drawNP 2
++300:TP=256/0/360
++40:STICKDOWN*200
+after link d_bgo_drawNP 3
++60:STICKDOWN*8
++900:STICKLEFT*4
++300:STICKRIGHT*4
++300:STICKDOWN*4
