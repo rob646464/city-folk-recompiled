@@ -1,6 +1,8 @@
 // Enhanced lighting, port side (enhanced_lighting.h, docs/RENDERING.md "Enhanced lighting").
 #include "recomp/enhanced_lighting.h"
 #include "recomp/game.h"
+#include "recomp/gx_bridge.h"
+#include "recomp/precache.h"
 
 #include "port/settings.h"
 #include "recomp/hle.h"
@@ -442,7 +444,8 @@ bool configuredOn() {
 }
 int perfPhase() { return sPerfPhase; }
 
-void applySettings() {
+// The configuration the F1 settings give (presets filled into the settings first).
+static void buildConfig(AuroraEnhancedConfig& c) {
     auto& l = port::settings().enhancedLighting;
     // Presets fill in the quality fields (Custom keeps whatever was set).
     // City Folk presets (docs/RENDERING.md "Enhanced lighting (City Folk)", "Presets"): the sun's
@@ -471,7 +474,7 @@ void applySettings() {
         const char* v = std::getenv("CF_ENHANCED");  // test override: 0 off, 1 on
         return v ? std::atoi(v) : -1;
     }();
-    AuroraEnhancedConfig c{};
+    c = AuroraEnhancedConfig{};
     c.enabled = sForce >= 0 ? sForce != 0 : l.enabled;
     c.perPixelLighting = l.perPixelLighting;
     c.flashlightQuality = l.flashlightQuality;
@@ -598,7 +601,20 @@ void applySettings() {
     }
     static constexpr u32 kShaftSteps[3] = {12, 20, 32};
     c.shaftSteps = kShaftSteps[std::clamp(l.sunShaftQuality, 0, 2)];
-    aurora_enhanced_set_config(&c);
+}
+
+void applySettings() {
+    AuroraEnhancedConfig c;
+    buildConfig(c);
+    // Branch precache-enh (docs/RENDERING.md "Enhanced lighting precached at launch"): the other
+    // state of the master switch, everything else as configured, is Aurora's standby set: its
+    // pipelines are built in the background, so switching enhanced lighting on (or off) later
+    // needs no compile hold. Pushes the accuracy flags (gx::applyAccuracySettings ran just before)
+    // and the configuration; while online a change that still needs pipelines is deferred until
+    // they are built (c then holds what was pushed).
+    AuroraEnhancedConfig other = c;
+    other.enabled = !c.enabled;
+    precache::applyGraphics(gx::requestedAccuracy(), c, gx::accuracyFlagsFor(other.enabled), other);
     // CF_XL_SHADOW_LOG=1: shadow-map statistics every 120 host frames (lights, caster draws,
     // casters skipped while their pipeline compiles).
     static const int sXlLog = [] {

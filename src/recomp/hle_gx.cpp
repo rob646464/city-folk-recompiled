@@ -670,7 +670,10 @@ int gx::smoothBandingLevel() {
 // (alternate between the configured options and all off every <seconds>, for A/B screenshots of one run).
 bool gx::enhancedOverridesEfbDepth() { return enh::configuredOn(); }
 
-void gx::applyAccuracySettings() {
+// The flags of the F1 options with enhanced lighting on or off (enhancedOn: what
+// enhancedOverridesEfbDepth would say). Branch precache-enh: also for the standby set (the other
+// state of the master switch, precache.cpp).
+u32 gx::accuracyFlagsFor(bool enhancedOn) {
     const auto& r = port::settings().rendering;
     u32 flags = (r.integerTev ? GX_AURORA_ACCURACY_INT_TEV : 0) | (r.efbColorDepth ? GX_AURORA_ACCURACY_EFB_DEPTH : 0) |
                 (r.efbColorDepth && r.efbBlend6 ? GX_AURORA_ACCURACY_EFB_BLEND : 0) |
@@ -687,7 +690,7 @@ void gx::applyAccuracySettings() {
     // smoothing of 0190) off: its smooth per-pixel and colored-light gradients went through the
     // 6-bit framebuffer and the game's RGB565 scene copy, which banded them into visible steps
     // (docs/RENDERING.md "Enhanced lighting fixes"; the F1 toggles are greyed out while it is on).
-    const bool efbDepth = r.efbColorDepth && !enhancedOverridesEfbDepth();
+    const bool efbDepth = r.efbColorDepth && !enhancedOn;
     if (!efbDepth) flags &= ~(GX_AURORA_ACCURACY_EFB_DEPTH | GX_AURORA_ACCURACY_EFB_BLEND);
     // Smooth color banding (Aurora 0190): an enhancement on top of the EFB color depth
     // (docs/RENDERING.md "Smooth color banding").
@@ -696,6 +699,16 @@ void gx::applyAccuracySettings() {
         flags |= GX_AURORA_ACCURACY_EFB_SMOOTH | (smooth == 1 ? GX_AURORA_ACCURACY_EFB_SMOOTH_NOISE : 0);
     static const char* sMask = std::getenv("CF_ACCURACY");
     if (sMask) flags = u32(std::strtoul(sMask, nullptr, 0));
+    return flags;
+}
+
+namespace {
+u32 sRequestedAccuracy = 0;
+}  // namespace
+u32 gx::requestedAccuracy() { return sRequestedAccuracy; }
+
+void gx::applyAccuracySettings() {
+    u32 flags = accuracyFlagsFor(enhancedOverridesEfbDepth());
     static const double sAb = [] {
         const char* e = std::getenv("CF_ACCURACY_AB");
         return e ? std::atof(e) : 0.0;
@@ -719,7 +732,11 @@ void gx::applyAccuracySettings() {
         if (off) flags = 0;
         port::settings().rendering.displayCopyFilterMode = off ? 2 : sFilter;
     }
-    if (flags != GXGetAuroraAccuracy()) GXSetAuroraAccuracy(flags);
+    // Branch precache-enh: pushed to Aurora together with the enhanced-lighting configuration
+    // (precache::applyGraphics, called by enh::applySettings right after this): while online, a
+    // change that needs new pipelines waits until they are built (docs/RENDERING.md "Graphics
+    // changes while online").
+    sRequestedAccuracy = flags;
     // CF_TEXGEN_BEYOND=0|1|2 (test aid): what a stage reads from a texcoord beyond GXSetNumTexGens
     // ((0,0) / generated from its texgen (default, the console's behaviour) / texcoord 0).
     static const int sBeyond = [] {

@@ -5,11 +5,14 @@
 #include "recomp/enhanced_lighting.h"
 #include "recomp/gx_bridge.h"
 #include "recomp/hle.h"
+#include "recomp/online.h"
 #include "recomp/ui_scale.h"
 
 #include <SDL3/SDL_video.h>
 #include <aurora/aurora.h>
+#include <aurora/enhanced.h>
 #include <aurora/pipeline_cache.h>
+#include <dolphin/gx/GXAurora.h>
 #include <imgui.h>
 
 #include <algorithm>
@@ -159,6 +162,86 @@ void logCacheStats(const char* when, const AuroraPipelineStats& s) {
 }
 }  // namespace
 
+// ---- Graphics changes, the standby set, deferral while online (branch precache-enh) ----
+namespace {
+struct Applied {
+    bool valid = false;
+    uint32_t accuracy = 0;
+    AuroraEnhancedConfig cfg{};
+};
+Applied sApplied;
+bool sDeferring = false;
+Clock::time_point sDeferStart{};
+
+// CF_ONLINE_DEFER: 0 never (the old hold), 1 in an online room (default), "always" also offline.
+int deferMode() {
+    static const int sMode = [] {
+        const char* v = std::getenv("CF_ONLINE_DEFER");
+        if (!v) return 1;
+        if (*v == 'a') return 2;
+        return std::atoi(v) != 0 ? 1 : 0;
+    }();
+    return sMode;
+}
+bool standbyAllowed() {
+    static const bool sOn = [] {
+        const char* v = std::getenv("CF_STANDBY");
+        return !(v && std::atoi(v) == 0);
+    }();
+    return sOn;
+}
+// The per-frame look (time of day, sun shafts) and test A/B fields: follow the request even while a
+// change is deferred (they select no pipelines).
+void copyDynamic(AuroraEnhancedConfig& to, const AuroraEnhancedConfig& from) {
+    to.grade = from.grade;
+    for (int k = 0; k < 3; k++) to.gradeGain[k] = from.gradeGain[k], to.gradeLift[k] = from.gradeLift[k];
+    to.gradeSaturation = from.gradeSaturation;
+    to.gradeContrast = from.gradeContrast;
+    to.gradeKeepLights = from.gradeKeepLights;
+    to.shafts = from.shafts;
+    to.shaftIntensity = from.shaftIntensity;
+    to.extraShadowOffsetFloor = from.extraShadowOffsetFloor;
+}
+}  // namespace
+
+void applyGraphics(uint32_t accuracy, AuroraEnhancedConfig& cfg, uint32_t otherAccuracy, const AuroraEnhancedConfig& other) {
+    const int mode = deferMode();
+    bool apply = true;
+    if (sApplied.valid && sStartupDone && (mode == 2 || (mode == 1 && online::active()))) {
+        const bool samePipelines = accuracy == sApplied.accuracy &&
+                                   aurora_pipeline_cache_variant_bits(&cfg) == aurora_pipeline_cache_variant_bits(&sApplied.cfg);
+        // (the standby set is the requested combination: built = the switch needs no new pipeline)
+        apply = samePipelines || aurora_pipeline_cache_standby_ready(accuracy, &cfg);
+    }
+    if (apply) {
+        if (sDeferring) {
+            log("[precache] deferred graphics change applied after %.2f s (its pipelines are built)",
+                std::chrono::duration<double>(Clock::now() - sDeferStart).count());
+            sDeferring = false;
+        }
+        if (accuracy != GXGetAuroraAccuracy()) GXSetAuroraAccuracy(accuracy);
+        aurora_enhanced_set_config(&cfg);
+        sApplied = {true, accuracy, cfg};
+        aurora_pipeline_cache_set_standby(standbyAllowed(), otherAccuracy, &other);
+        return;
+    }
+    if (!sDeferring) {
+        AuroraPipelineStats s{};
+        aurora_pipeline_cache_get_stats(&s);
+        log("[precache] online: graphics change deferred until its pipelines are built (accuracy %#x -> %#x, "
+            "enhanced lighting %s -> %s, variant bits %#x -> %#x); the game keeps running",
+            sApplied.accuracy, accuracy, sApplied.cfg.enabled ? "on" : "off", cfg.enabled ? "on" : "off",
+            aurora_pipeline_cache_variant_bits(&sApplied.cfg), aurora_pipeline_cache_variant_bits(&cfg));
+        sDeferring = true;
+        sDeferStart = Clock::now();
+    }
+    // Keep what is applied (its per-frame look follows the request); build the request meanwhile.
+    copyDynamic(sApplied.cfg, cfg);
+    aurora_enhanced_set_config(&sApplied.cfg);
+    aurora_pipeline_cache_set_standby(true, accuracy, &cfg);
+    cfg = sApplied.cfg;
+}
+
 bool holdGame() {
     static const bool sNoWait = [] {
         const char* v = std::getenv("CF_PRECACHE_WAIT");
@@ -221,6 +304,29 @@ bool holdGame() {
         }
     } else {
         hold = !sNoWait && shadersPending;
+        // Branch precache-enh: no hold in an online room (docs/RENDERING.md "Graphics changes while
+        // online"): a frozen game stops answering the other players' games. Changes that need new
+        // pipelines are normally deferred until their pipelines are built (applyGraphics); what is
+        // left (a render target layout change such as MSAA, Enhanced world's mask) compiles while
+        // the game runs, and draws whose pipeline is not built yet are skipped until it is.
+        static const bool sOnlineHold = std::getenv("CF_ONLINE_HOLD") != nullptr;
+        static const bool sWaitOff = [] {
+            const char* w = std::getenv("CF_PIPELINE_WAIT");
+            return w && std::atoi(w) == 0;
+        }();
+        static bool sOnlineSkip = false;
+        const bool skip = shadersPending && !sOnlineHold && online::active();
+        if (skip != sOnlineSkip) {
+            sOnlineSkip = skip;
+            aurora_pipeline_cache_set_wait(!skip && !sWaitOff);
+            if (skip)
+                log("[precache] online: not holding the game for %u pipelines (draws without one are skipped until it "
+                    "is built)",
+                    s.rebuildPending);
+            else
+                log("[precache] online: the pipelines of the last batch are built (draws wait for theirs again)");
+        }
+        if (skip) hold = false;
     }
     // Aurora 0233 (issue #14): a hold never waits silently forever. Without a single pipeline done for
     // 20 s, say so (and which creations are stuck in the driver), every 20 s; after kStallGiveUp s the
@@ -436,6 +542,26 @@ void frame() {
 
     AuroraPipelineStats s{};
     aurora_pipeline_cache_get_stats(&s);
+    // Branch precache-enh: each standby batch (Aurora 0550), logged when built, with the worst frame
+    // while it was built in the background and how many of its pipelines were compiled (not loaded).
+    {
+        static bool sBusy = false;
+        static Clock::time_point sStart{};
+        static uint32_t sDone0 = 0, sStores0 = 0, sFrames = 0;
+        static float sWorst = 0.0f;
+        if (!sBusy && s.standbyPending > 0) {
+            sBusy = true, sStart = now, sDone0 = s.standbyDone, sStores0 = s.blobStores, sFrames = 0, sWorst = 0.0f;
+        } else if (sBusy) {
+            if (!sHolding) sWorst = std::max(sWorst, frameMs), sFrames++;
+            if (s.standbyPending == 0) {
+                sBusy = false;
+                log("[precache] standby set built in the background: %u pipelines in %.2f s (%u compiled = shader cache "
+                    "entries written, 0 = all from the cache; %u game frames meanwhile, worst %.1f ms)",
+                    s.standbyDone - sDone0, std::chrono::duration<double>(now - sStart).count(), s.blobStores - sStores0,
+                    sFrames, sWorst);
+            }
+        }
+    }
     // The startup precompile time (fresh cache: the whole shipped list), logged once.
     static bool sReported = false;
     if (sLog && !sReported && s.precacheTotal > 0 && s.precacheDone >= s.precacheTotal) {
@@ -445,10 +571,10 @@ void frame() {
     }
     if (sLog && now - window >= std::chrono::seconds(5)) {
         log("[precache] %.0fs: precache %u/%u, pending %u, demand-created %u, stalled draws %u (%.1f ms total, "
-            "max %.1f ms), dropped draws %u, worst frame %.1f ms over %u frames, %u threads",
+            "max %.1f ms), dropped draws %u, worst frame %.1f ms over %u frames, %u threads; standby %u/%u",
             std::chrono::duration<double>(now - start).count(), s.precacheDone, s.precacheTotal, s.pending,
             s.demandCreated, s.stalledDraws, s.stallNs / 1e6, s.maxStallNs / 1e6, s.droppedDraws, worstMs, frames,
-            s.workerThreads);
+            s.workerThreads, s.standbyDone, s.standbyQueued);
         window = now;
         worstMs = 0.0f;
         frames = 0;
@@ -456,7 +582,19 @@ void frame() {
 
     // Small corner note while shaders are compiled in the background (CF_PRECACHE_WAIT=0, or the
     // few misses a batch continued in the background may have; loading from the cache shows nothing).
-    if (!sHolding && s.rebuildPending > 0 && batchCompiling(s) && now - start > std::chrono::seconds(4)) {
+    // Branch precache-enh: a graphics change deferred while online (applyGraphics).
+    if (sDeferring) {
+        const ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x - 8, vp->WorkPos.y + vp->WorkSize.y - 8),
+                                ImGuiCond_Always, ImVec2(1, 1));
+        ImGui::SetNextWindowBgAlpha(0.4f);
+        ImGui::Begin("##precache_defer", nullptr,
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                         ImGuiWindowFlags_NoNav);
+        ImGui::Text("Preparing shaders for the new graphics settings: %u left", s.standbyPending);
+        ImGui::End();
+    } else if (!sHolding && s.rebuildPending > 0 && batchCompiling(s) && now - start > std::chrono::seconds(4)) {
         const ImGuiViewport* vp = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x - 8, vp->WorkPos.y + vp->WorkSize.y - 8),
                                 ImGuiCond_Always, ImVec2(1, 1));

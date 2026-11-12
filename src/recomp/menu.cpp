@@ -949,7 +949,9 @@ void enhancedLightingTab() {
     sDirty |= recomp::menu::Checkbox("Enhanced lighting", &l.enabled);
     ImGui::SetItemTooltip(
         "Master switch for everything on this page. Off: the game renders exactly as the accurate\n"
-        "renderer does (no extra cost). Turning it on builds extra shader variants once (brief hitch).");
+        "renderer does (no extra GPU cost). Its shaders are prepared in the background from the start\n"
+        "(whichever way it is set), so switching it later takes effect at once. In an online room a\n"
+        "switch made before they are ready takes effect when they are, without stopping the game.");
     if (!l.enabled) pending("turn on to use the options below");
     ImGui::BeginDisabled(!l.enabled);
     static const char* kPresets[] = {"Low", "Medium", "High", "Ultra", "Custom"};

@@ -503,6 +503,18 @@ with the roster menu's own delete (`cf_RosterDeleteOffline`, fn_8017C3C0: later 
 Verified with `CF_ONLINE_TEST=24000:removefriends` after a visit: `profile id ... removed from
 the game roster (slot 0): done`.
 
+**Graphics settings in a room (branch precache-enh, docs/RENDERING.md "Enhanced lighting precached at
+launch")**: the game must never stop while others are connected. A settings change that needed new
+shader pipelines used to hold the game ("Preparing shaders"); a hold of about a minute while visiting
+made the host's game drop the visit (its own timeout, ~3600 frames without the visitor's messages:
+"You've been disconnected from Nintendo WFC"), although our room link itself survives (its net thread
+pings on its own, 15 s silence limit). Now, while in a room: Enhanced lighting's other state is
+prebuilt from the start (switching is instant), any other change that needs pipelines is deferred until
+they are built in the background (the old look stays meanwhile, corner note "Preparing shaders for the
+new graphics settings"), and the settings hold is never used (what is left compiles while the game
+runs; draws without a pipeline are skipped until it is built). Test aids `CF_ONLINE_DEFER=0|always`,
+`CF_ONLINE_HOLD=1`.
+
 ## 10d. Hole punching (no server of ours)
 
 For a host that is not reachable (no UPnP / NAT-PMP, no port forward) and a joiner behind an
