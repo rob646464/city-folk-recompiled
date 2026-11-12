@@ -216,11 +216,7 @@ an empty folder for a fresh install, `CF_CACHE_DIR`/`CF_NAND_DIR`/`CF_CARD_DIR` 
 **rob646464/city-folk-recompiled**, tags `v<version>`, assets
 `CityFolkRecompiled-<version>-windows-x64.zip` / `-linux-x86_64.tar.gz` / `-macos-arm64.tar.gz`
 (the `cmake --install` layout), SHA-256 from the API's asset digest or the release notes' table.
-The repository is private for now: the unauthenticated check gets HTTP 404 (also what a public
-repository without a release answers), reported as "No published release was found yet (none is
-public)." in F1 > Game and as an `[update] check failed` log line; nothing else happens and the game
-runs normally. Without a network: "Could not reach GitHub: could not connect (offline or
-blocked?)." (checked 2026-11-09 from an installed copy, startup check and the F1 button). The startup
+Public since 1.0.0 (2026-11-12); checked from the released Windows package: 1.0.0 logs `[update] up to date (1.0.0)`, `CF_UPDATE_VERSION=0.9.0` logs `[update] update available: v1.0.0`. Before a release exists the check gets HTTP 404, reported as "No published release was found yet (none is public)." in F1 > Game and as an `[update] check failed` log line; without a network: "Could not reach GitHub: could not connect (offline or blocked?)."; the game runs normally either way. The startup
 check runs only in a release folder (`llvm/bin/clang` next to the program; `pipelines.bin` is not
 required) and not with `CF_UPDATE_CHECK=0`. Staging in `<install>/upd`,
 `.old` renames, rollback, cleanup and the portable-mode rules are LM's (LM docs/SETUP.md
