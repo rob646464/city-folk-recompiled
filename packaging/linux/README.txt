@@ -1,6 +1,8 @@
 Animal Crossing: City Folk Recompiled - Linux x86_64
 ===================================================
 
+Discord: news, help and bug reports for all my projects: https://discord.gg/cM4chZtgh7
+
 A native PC port of Animal Crossing: City Folk (Wii). No game data is included: the game is
 built on your computer from your own disc the first time you start it.
 

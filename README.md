@@ -1,10 +1,10 @@
 # Animal Crossing: City Folk Recompiled
 
+**Discord:** news, help and bug reports for all my projects: https://discord.gg/cM4chZtgh7
+
 A native PC port of **Animal Crossing: City Folk** (Wii; *Let's Go to the City* in Europe and Australia) for Windows, Linux and macOS. The game's PowerPC code is translated into C++ by a build-time recompiler and compiled for your computer, so it runs natively with no emulator. Wii system libraries are reimplemented (HLE), and graphics, audio and input run on the [Aurora](https://github.com/encounter/aurora) engine (WebGPU/Dawn + SDL3).
 
 **No game files are included, and none are downloaded.** You need your own City Folk disc. On first start the program asks for a Wii disc image (ISO, WBFS, RVZ, WIA, CISO, GCZ) or a Dolphin "Extract Entire Disc" folder, revision 1 of the USA (RUUE01), European (RUUP01), Japanese (RUUJ01) or Korean (RUUK01) release, and builds the game for your PC with the bundled compiler (about a minute). Nothing derived from the game is stored in this repository or in the release packages.
-
-**Discord:** news, help and bug reports for all my projects: https://discord.gg/cM4chZtgh7
 
 ## Download
 Packages for Windows, Linux and macOS are on the [Releases](https://github.com/rob646464/city-folk-recompiled/releases) page. Unpack, start `CityFolkRecomp.exe` (Linux: `CityFolkRecompiled.sh`, macOS: `CityFolkRecomp`), pick your disc and click "Install". The README.txt in each package covers requirements and where files go. The game updates itself from the same page (F1 > Game > Updates).
