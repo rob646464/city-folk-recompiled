@@ -809,6 +809,7 @@ void gameTab() {
     // The Wii's own settings as the game reads them (SYSCONF; src/recomp/sysconf.cpp, docs/NAND.md).
     ImGui::SeparatorText("Console");
     sDirty |= recomp::sys::drawMenu();
+    recomp::cf::sdCardMenu(sDirty);  // photos to the screenshots folder (src/game/cf_sd_card.cpp)
     recomp::cf::saveimport::menuSection();  // import / export / backups (src/game/cf_save_import.cpp)
     dataSection();
     updatesSection();

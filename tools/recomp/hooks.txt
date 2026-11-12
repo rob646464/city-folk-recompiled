@@ -59,6 +59,26 @@ fn_802AA1A0 all
 # Random::next (LCG x*0x19660D+0x3C6EF35F): CF_RNG_SEED keeps other threads off the main stream.
 fn_802AA1A8 all
 
+# Photos to the screenshots folder (src/game/cf_sd_card.cpp, docs/FEATURES.md "Photos to the
+# screenshots folder"): the PrFILE2 wrappers only the photo code calls (attach, detach, mount,
+# unmount, errnum, fsfirst, fsnext, mkdir, create, write, close, remove, rmdir) are an SD card host
+# over the screenshots folder; Erase All's photo check and erase see no photos.
+fn_8021C600 all
+fn_8021C820 all
+fn_8021CA84 all
+fn_8021CC38 all
+fn_8021C8C8 all
+fn_8021C934 all
+fn_8021C960 all
+fn_8021CA58 all
+fn_8021C7F4 all
+fn_8021C98C all
+fn_8021C908 all
+fn_8021CBE0 all
+fn_8021CC0C all
+fn_8008F950 all
+fn_8008FB48 all
+
 # Save diagnosis (temporary, src/recomp/hle_ios.cpp): the save/check thread start and the
 # WiiConnect24 task start the save path waits on (auto names are only hookable when listed).
 fn_800D284C all

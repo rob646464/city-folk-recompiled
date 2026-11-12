@@ -141,7 +141,7 @@ French.
 | `/dev/es` | GetTitleID (0x20) = 00010000-52555545 (PAL 52555550), GetDataDir (0x1D), GetDeviceID (0x07, fixed), GetTitlesCount/GetTitles and owned titles (System Menu + this game), GetTicketViewsCount/GetTicketViews (one view), GetConsumption (no limits). LaunchTitle (0x08, leaving to the Wii Menu) ends the program like "Quit game". Others: logged, `-4`. |
 | `/dev/stm/immediate`, `/dev/stm/eventhook` | hot reset / power off / standby end the program; LED and dimming accepted. The OS's own event hook is HLE'd (os/OSStateTM.c): `ios::stmEvent(0x800 power / 0x20000 reset)` calls the game's OSSetPowerCallback / OSSetResetCallback callback as the OS handler does (City Folk registers a reset callback, 0x80107870, which checks the disc with DVDCheckDiskAsync). |
 | `/dev/di` | accepted (disc reads are HLE'd at the DVD library). |
-| `/dev/sdio/slot0`, `slot1` | **SD slot with no card**: GetStatus (0x0B) = 0, card commands fail. Photos to SD: later (see "Not done"). |
+| `/dev/sdio/slot0`, `slot1` | **SD slot with no card**: GetStatus (0x0B) = 0, card commands fail. The photo code's SD access never gets here while F1 > Game > SD Card "Save photos to the screenshots folder" is on (default): its PrFILE2 wrappers are a file-level card over the screenshots folder (docs/FEATURES.md "Photos to the screenshots folder"); off, the game finds this empty slot ("There is no SD Card inserted"). |
 | `/dev/usb/kbd` | the USB keyboard module, always there (the game opens it once at boot): no keyboard attached (the event request waits), or the PC keyboard while F1 > Controls "Type with the PC keyboard" is on (docs/CONTROLS.md "Typing with the PC keyboard", docs/ONLINE.md 10b). Writes (LEDs) answer `-4`. |
 | `/dev/usb/oh0` | USB host with no devices (Wii Speak absent); not opened by the game so far. |
 | `/dev/net/*` (KD = WiiConnect24, NCD, IP, SSL, WD = DS wireless) | **not running** (open fails, `-6`): the game is offline. NWC24 retries `/dev/net/kd/request` every ~2 s at the title (logged once). Online play: docs/ONLINE.md. WD is never opened: the MP/MPDL libraries above it are HLE'd (docs/MOVE_IN.md). |
@@ -461,11 +461,12 @@ Restore button is only for the port's own). Close Dolphin first.
 
 - **First save through the HUD** (house from Tom Nook, Save icon, "Save and quit") played by a
   script end to end, and the bed save; "Saving..." duration against a console.
-- **SD card**: the game reaches the card through `/dev/sdio/slot0` with its own FAT code (VF has
-  no SD driver linked). Plan: an SD host (ioctls ResetCard 4, SetClock 6, SendCommand 7 with
-  CMD17/18/24/25 block reads/writes, GetStatus 0x0B, GetOCR 0x0C) over a FAT image in
-  `%APPDATA%\...\sd\sd.img` (2 GB, FAT16 like the game expects: no SDHC), with F1 buttons to
-  open the photo folder (copy JPEGs out of the image). Until then: slot empty.
+- **SD card at the block level**: photos are done at the file level (docs/FEATURES.md "Photos to
+  the screenshots folder": the PrFILE2 wrappers of the photo code over the screenshots folder).
+  A block-level host (`/dev/sdio/slot0` ioctls ResetCard 4, SetClock 6, SendCommand 7 with
+  CMD17/18/24/25, GetStatus 0x0B, GetOCR 0x0C over a FAT16 image) would only be needed for other
+  SD users (the System Menu's data management, the save's data.bin export), none of which the game
+  reaches.
 - **USB keyboard**: a real keyboard for letters through `/dev/usb/kbd` events (attach, key
   reports) from SDL keyboard input.
 - **WiiConnect24 / network**: `/dev/net/kd/*` as "WiiConnect24 off" (requests answered with the

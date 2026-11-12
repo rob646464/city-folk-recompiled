@@ -85,6 +85,7 @@ std::vector<Field> fields() {
         num("interface", "menu_scale", sSettings.ui.menuScale),
         flag("interface", "start_hint", sSettings.ui.startHint),
         flag("keyboard", "type_with_pc_keyboard", sSettings.keyboard.typing),
+        flag("sd_card", "photos_to_folder", sSettings.sdCard.photosToFolder),
         num("video", "target_fps", v.targetFps),
         flag("video", "unlimited_fps", v.unlimitedFps),
         flag("video", "match_display_refresh", v.matchDisplay),

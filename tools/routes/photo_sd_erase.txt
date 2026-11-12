@@ -1,0 +1,24 @@
+# Photos > SD Card > Erase All, then SD Card > Quit (docs/FEATURES.md "Photos to the screenshots
+# folder"): the port's card shows no photo data while Erase All looks, so the game says so and
+# nothing is deleted. Fixture user-town-clean, -Env "CF_SD_PHOTO_DIR=<dir with photos>".
+include continue_any.txt
+after link d_bgo_drawNP 2
+
++1400:1*6
++200:2*6
+# SD Card > Erase All (second choice).
++200:@0/0.57
++40:A
++80:@0.33/0.10
++40:A
+# "If you select Erase, you will lose all of your ... photos. Erase all ...?" -> the right button.
++150:@0.29/0.50
++40:A
+# The game's answer (OK in the middle).
++150:@0/0.40
++60:A ~4
+# SD Card > Quit (third choice).
++100:@0/0.57
++40:A
++80:@0.33/0.27
++40:A

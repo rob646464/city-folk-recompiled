@@ -1,0 +1,33 @@
+# Three photos in a row saved through Photos > SD Card > Save Photo, each from another place in
+# the town (docs/FEATURES.md "Photos to the screenshots folder"). Fixture user-town-clean,
+# CF_INPUT_CLOCK=frames, -Env "CF_SD_PHOTO_DIR=<scratch dir>".
+include photo_sd.txt
+
+# Close the Photos window, walk a bit, the next photo, save it.
++200:B*6
++60:@off
++20:STICKRIGHT*60
++100:1*6
++200:2*6
++200:@0/0.57
++40:A
++80:@0.33/-0.08
++40:A
++100:@0.29/0.29
++40:A
++100:@0/0.29
++60:A ~10
+# And a third.
++200:B*6
++60:@off
++20:STICKDOWN*60
++100:1*6
++200:2*6
++200:@0/0.57
++40:A
++80:@0.33/-0.08
++40:A
++100:@0.29/0.29
++40:A
++100:@0/0.29
++60:A ~10

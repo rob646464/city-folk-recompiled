@@ -109,6 +109,7 @@ in depth (named), here only sweep / persistence / tooltip.
 | Console: language, sensor bar, pointer sensitivity, EuRGB60, clock offset | Default, below, 3, on, 0 | persistence | **fixed**: sensor bar and clock offset (days) had no tooltip. Owner nand-sys |
 | Data folder: make portable / move back | system folder | clicked both ways in an installed copy (move, restart, game runs): everything moved, the old place emptied | OK |
 | Updates: check at startup, Check for updates | on | installed copy: startup check and the F1 button against api.github.com (HTTP 404) and with no network | OK. **fixed** message: "No published release was found yet (none is public)" (the old "not public yet" would be wrong for a public repository without a release) |
+| SD Card: Save photos to the screenshots folder, Open screenshots folder | on | `CF_SD_PHOTOS=0/1` routes tools/routes/photo_sd*.txt (save, three in a row, restart, indoors, Erase All, fallback, installed copy); ID sweep | OK (docs/FEATURES.md "Photos to the screenshots folder"). Owner photo-export |
 | Save data (import / export) | - | sweep only (merged from main during the audit) | owner save-import |
 | Restore all defaults | - | clicked in town after changing aspect, FOV, HUD, CRT, Enhanced world, FPS: aspect back to Match window at once, settings.ini written | OK |
 | Quit game | - | text | **fixed**: asked "Quit Luigi's Mansion?" |

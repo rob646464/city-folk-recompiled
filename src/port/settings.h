@@ -346,9 +346,17 @@ struct KeyboardSettings {
     bool typing = false;
 };
 
+// F1 > Game > SD Card (src/game/cf_sd_card.cpp, docs/FEATURES.md "Photos to the screenshots
+// folder"): Photos > SD Card > Save Photo writes the game's JPEG into <program folder>/screenshots
+// (fallback <data folder>/screenshots). Off: no SD card in the slot (the game says so).
+struct SdCardSettings {
+    bool photosToFolder = true;
+};
+
 struct Settings {
     InterfaceSettings ui;  // (not "interface": a macro in the Windows headers)
     KeyboardSettings keyboard;
+    SdCardSettings sdCard;
     MoveInSettings moveIn;
     UnusedContentSettings unusedContent;
     VideoSettings video;

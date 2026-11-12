@@ -28,6 +28,10 @@ void skinSetRemote(const std::map<std::string, int>& tones);
 void unusedItemsOnFrame(Ctx& c);
 bool unusedItemsMenu();  // true when the setting changed
 
+// cf_sd_card.cpp: F1 > Game "SD Card": photos saved through Photos > SD Card go to the screenshots
+// folder (docs/FEATURES.md "Photos to the screenshots folder").
+void sdCardMenu(bool& dirty);
+
 // cf_menu_nav.cpp: a layout's root pane is drawn (cf_hud.cpp): its Bounding panes become items
 // for "Snap pointer to menu items" (screens that hit-test with positions they stored, e.g. pockets).
 void navLayoutDrawn(Ctx& c, u32 rootPane);
