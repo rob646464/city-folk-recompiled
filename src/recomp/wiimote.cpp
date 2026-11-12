@@ -857,7 +857,7 @@ void handleEvent(const SDL_Event& ev) {
         std::lock_guard lk(sMouseMutex);
         if (std::fabs(ev.motion.x - sMouse.x) >= 1.0f || std::fabs(ev.motion.y - sMouse.y) >= 1.0f) {
             sMouse.moves++;
-            sMouse.travel += std::hypot(double(ev.motion.x - sMouse.x), double(ev.motion.y - sMouse.y));
+            sMouse.travel += std::sqrt(double(ev.motion.x - sMouse.x) * (ev.motion.x - sMouse.x) + double(ev.motion.y - sMouse.y) * (ev.motion.y - sMouse.y));  // not std::hypot(double): hypot@GLIBC_2.35 (Linux package floor 2.34)
         }
         sMouse.x = ev.motion.x;
         sMouse.y = ev.motion.y;
