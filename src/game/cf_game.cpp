@@ -1,6 +1,7 @@
 // Animal Crossing: City Folk: the game side of recomp/game.h. Nothing game-specific is hooked
 // yet (boot work, docs/WII.md "Order of work"); these defaults leave the game untouched.
 #include "recomp/game.h"
+#include "recomp/guest_util.h"
 #include "recomp/online.h"
 #include "recomp/hle.h"
 #include "recomp/runtime.h"
@@ -110,6 +111,26 @@ bool onGuestFrame(Ctx& c) {
     forceWc24OnFrame(c, frame);
     movein::onGuestFrame(c, frame);  // cf_move_in.cpp: CF_OPEN_MENU
     region::onGuestFrame(frame);  // cf_region.cpp test aids
+    // Test aid CF_NO_MII_MASK=1 (USA; from branch trailer): the player's worn Mii mask is not shown.
+    // The game finds the worn mask's Mii by the create ID kept in the save at +0x83ED (fn_8008B2E4:
+    // RFL lookup fn_802C4528); that ID is cleared in the loaded save in memory (the NAND file
+    // changes only if the game saves), so from the next scene load on the player has their own face.
+    static const bool sNoMask = [] {
+        const char* v = std::getenv("CF_NO_MII_MASK");
+        return v && *v == '1';
+    }();
+    if (sNoMask && ver::usa() && frame % 4 == 0) {
+        const u32 save = gu::call(c, 0x80101894u);
+        if (save >= 0x80000000u && save < 0x93000000u) {
+            const u32 key = save + 0x83EDu;
+            bool any = false;
+            for (u32 i = 0; i < 8; i++) any |= rd8(key + i) != 0;
+            if (any) {
+                log("[mask] f%u save %08X: worn Mii mask cleared", frame, save);
+                for (u32 i = 0; i < 8; i++) wr8(key + i, 0);
+            }
+        }
+    }
 #ifdef CF_DEV_TOOLS
     warp::onGuestFrame(c, frame);  // cf_warp.cpp: warps (docs/WARPS.md), developer builds only
 #endif

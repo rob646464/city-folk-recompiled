@@ -29,6 +29,8 @@
 namespace recomp {
 namespace world {
 void onScnRoot(u32 root, bool xlu, bool begin);  // cf_world.cpp (F1 > Visuals > Enhanced world)
+bool characterBegin(u32 obj);  // cf_world.cpp: planar reflections of characters (Aurora 0570)
+void characterEnd();
 }
 namespace {
 u32 sViewSrc = 0;
@@ -97,7 +99,9 @@ void objectScope(Ctx& c, const char* name, bool proc = false) {
     const int rim = cflight::rimKind(obj);
     const int rimBefore = enh::rimMaterial();
     if (rim != rimBefore) gx::endPendingDraw(), enh::setRimMaterial(rim);
+    const bool character = cast == 0 && world::characterBegin(obj);
     callOriginal(c, name);
+    if (character) world::characterEnd();
     if (rim != rimBefore) gx::endPendingDraw(), enh::setRimMaterial(rimBefore);
     if (shell) gx::endPendingDraw(), enh::setNoCast(true);
     if (cast == 1) cfcast::shadowOnlyEnd();
@@ -211,5 +215,16 @@ void efEnd() { interp::setEffectParticles({}); }
 HLE(G3dProc__Q34nw4r3g3d12ScnMdlSimpleFUlUlPv) { objectScope(c, "G3dProc__Q34nw4r3g3d12ScnMdlSimpleFUlUlPv"); }
 HLE(G3dProc__Q34nw4r3g3d6ScnMdlFUlUlPv) { objectScope(c, "G3dProc__Q34nw4r3g3d6ScnMdlFUlUlPv"); }
 HLE(G3dProc__Q34nw4r3g3d7ScnProcFUlUlPv) { objectScope(c, "G3dProc__Q34nw4r3g3d7ScnProcFUlUlPv", true); }
+
+
+// The worn Mii mask: the RFL head's opaque / translucent draws (USA: the ScnRfl-style wrappers of
+// RFLDrawOpaCore / RFLDrawXluCore, docs/MIIS.md) belong to the player for its planar reflection.
+static void rflDraw(Ctx& c, const char* name) {
+    const bool character = ver::usa() && world::characterBegin(0);
+    callOriginal(c, name);
+    if (character) world::characterEnd();
+}
+HLE(fn_802B3950) { rflDraw(c, "fn_802B3950"); }
+HLE(fn_802B39B0) { rflDraw(c, "fn_802B39B0"); }
 
 }  // namespace recomp

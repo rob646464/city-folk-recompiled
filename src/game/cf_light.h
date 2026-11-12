@@ -46,6 +46,8 @@ bool logAxis(float& cy, float& cz, float& radius);
 bool mainView(float view[12]);
 // A g3d scene object's model name ("" if none / not a model).
 std::string modelName(u32 scnObj);
+// The same, checked against the object first (a stale cache entry is refreshed).
+std::string modelNameChecked(u32 scnObj);
 // Test aid CF_MODEL_TRACK=<prefix> (route action TP=mdl<prefix>, cf_region.cpp): the drawn scene
 // object whose model name starts with `prefix` nearest the player's model ('boy' / 'girl'): its
 // world x, its angle about the log's axis from the player (south positive) and the player's radius

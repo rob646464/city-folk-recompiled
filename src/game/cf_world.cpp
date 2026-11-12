@@ -78,6 +78,8 @@ const float kParticleTop = [] {
 }();
 void endWorld();
 void onLayoutDraw();
+bool characterBegin(u32 obj);
+void characterEnd();
 
 // ---- settings ([enhanced_world]) --------------------------------------------------------------
 struct Settings {
@@ -193,6 +195,8 @@ bool sPendingEnd = false;
 bool sOn = false;       // effects on this frame (sampled at the first pass)
 u32 sMainRoot = 0;      // the main pass's ScnRoot
 u8 sKind = 0xFF;        // surface kind last emitted
+bool sReflOn = false;   // water reflections on this frame (planar character reflections, Aurora 0570)
+int sCharDepth = 0;     // inside a character's draws (characterScope)
 u32 sWaterDraws = 0, sGroundDraws = 0;  // this frame's main pass
 u32 sLastOutdoor = 0;   // guest frame of the last frame with ground or water
 
@@ -306,6 +310,22 @@ void emitKind(u8 k) {
     gx::endPendingDraw();  // (the game's last immediate-mode draw is closed lazily: not inside it)
     GXSetSurfaceAurora(k);
     sKind = k;
+}
+
+// ---- characters (branch reflection-face; Aurora 0570, docs/RENDERING.md "Planar reflections of
+// characters") ----
+// The player, villagers and the other NPCs are drawn a second time, mirrored through the water
+// under them: their draws are AURORA_SURFACE_CHARACTER, one group per object (a transition into
+// the kind starts a group, so two characters drawn back to back get a WORLD in between).
+// Characters: the players' 'boy' / 'girl' models and their heads ('boy01a', ...), the villagers' and NPCs' three-letter species
+// models ('kal', 'cbr', 'squ', ...), and the worn Mii mask (RFL head, its own draw: cf_tags.cpp).
+bool isCharacterModel(const std::string& n) {
+    // ('boy01a' etc.: the player's own head when no Mii mask is worn)
+    if (n.compare(0, 3, "boy") == 0 || n.compare(0, 4, "girl") == 0) return true;
+    if (n.size() != 3) return false;
+    for (char ch : n)
+        if (ch < 'a' || ch > 'z') return false;
+    return true;
 }
 
 // ---- camera ----------------------------------------------------------------------------------
@@ -515,6 +535,8 @@ void onScnRoot(u32 root, bool xlu, bool begin) {
         static const bool sAb = envFlag("CF_WFX_AB");
         static bool sApplied = false;  // the effects' configuration was last sent on
         sOn = s.enabled && (!sAb || (f & 1u));
+        sReflOn = sOn && s.reflections;
+        sCharDepth = 0;
         if (!s.enabled && sApplied) {
             applyConfig(s, false, false);
             sApplied = false;
@@ -825,9 +847,28 @@ HLE(Draw1Mat1ShpDirectly__Q24nw4r3g3dFQ34nw4r3g3d6ResMatQ34nw4r3g3d6ResShpPCQ34n
         const u8 k = world::kindFor(c.r[3]);
         if (k == AURORA_SURFACE_WATER) world::sWaterDraws++;
         else if (k == AURORA_SURFACE_GROUND) world::sGroundDraws++;
-        world::emitKind(k);
+        if (world::sCharDepth == 0) world::emitKind(k);  // (a character's materials stay CHARACTER)
     }
     callOriginal(c, "Draw1Mat1ShpDirectly__Q24nw4r3g3dFQ34nw4r3g3d6ResMatQ34nw4r3g3d6ResShpPCQ34nw4r4math5MTX34PCQ34nw4r4math5MTX34UlPQ34nw4r3g3d16Draw1Mat1ShpSwapPQ44nw4r3g3d8G3DState8IndMtxOp");
+}
+
+// cf_tags.cpp: a scene object (`obj`, 0 = the worn Mii mask's RFL head) begins / ends its draws.
+bool world::characterBegin(u32 obj) {
+    // Test aid CF_WFX_CHAR_LOG=1: the objects tested (every 300 frames).
+    static const bool sCharLog = envFlag("CF_WFX_CHAR_LOG");
+    if (sCharLog && game::guestFrames() % 300 == 0)
+        log("[wfx] f%u character? obj %08X '%s' refl %d main %d", game::guestFrames(), obj, obj ? cflight::modelNameChecked(obj).c_str() : "(RFL head)",
+            sReflOn ? 1 : 0, sMain ? 1 : 0);
+    if (!sReflOn || !sMain) return false;
+    if (obj && !isCharacterModel(cflight::modelNameChecked(obj))) return false;
+    if (sCharDepth++ == 0) {
+        if (sKind == AURORA_SURFACE_CHARACTER) emitKind(AURORA_SURFACE_WORLD);
+        emitKind(AURORA_SURFACE_CHARACTER);
+    }
+    return true;
+}
+void world::characterEnd() {
+    if (sCharDepth > 0 && --sCharDepth == 0) emitKind(AURORA_SURFACE_WORLD);
 }
 
 // cf_hud.cpp: a layout's root pane is drawn (the 2D starts): the first one after the main pass ends
