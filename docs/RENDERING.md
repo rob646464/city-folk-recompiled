@@ -852,6 +852,36 @@ differently from pixel to pixel, which tore the thin lines apart. The planar pic
 now limited to 0.2 % of the viewport height (4 pixels at 2160); at the beach it was below that
 anyway.
 
+**The bridge, mirrored as a model** (user: "it looks like it kinda has that floating pieces problem
+like the face did before"). Same cause as the face: the screen-space march only has what the camera
+sees of the bridge (the deck top and its near side), so its mirror was a fragment with a ragged
+edge however the march was tuned. The bridge now goes through the planar pass like a character:
+
+- *Which draws*: the town's bridges are no objects of their own but a material inside the river
+  acres' terrain models (`grd_Rws_B_3`, `grd_M_Rs_B_1`, ...: `m_bridgeA`; every `m_bridge*`
+  material). `cf_world.cpp` gives their draws their usual kind with `AURORA_SURFACE_MIRROR` (0x80)
+  OR'ed on; a run of flagged draws is one group (one water plane for the whole bridge), and the
+  kind inside it is kept for the other effects.
+- *Anchor*: an acre's matrices place the acre's corner and bend its vertices along the curved
+  world (a matrix per vertex), so neither a matrix nor the model's bounding box through the
+  acre object's own matrices placed the bridge (both put it hundreds of units off). Aurora takes
+  the view-space centre of the group's first draw's vertices instead, each through its own
+  position matrix (`mirror_anchor_from`, the draw probe's vertex decoder), and the plane pass finds
+  the river under that point as for a character.
+- *Composite*: the bridge is in the character mask, so march hits on it are dropped and the planar
+  bridge takes their place; the player standing on it and the bridge are drawn mirrored into the
+  same target with depth, so the mirrored deck hides the mirrored player as the real one would.
+  Character parts never attach to a bridge's plane.
+- Views checked: on the bridge, the downstream bank looking at it, the upstream bank looking over
+  it, its north edge, and the survey route's two positions; `CF_WFX_MIRROR_BRIDGES=0` turns it off
+  (A/B). GPU (RTX 3090 Ti, 4K, standing on the river-mouth bridge, warm runs): busy 6.82 -> 7.11 ms per frame (+0.29 ms; "World FX planar characters" 0.54 -> 0.66, "World FX surfaces" 0.31 -> 0.38, "World FX plane" 0.14 -> 0.17); the planar target needs no more room: it only has to hold what lands on visible water, the screen-shaped image already does.
+- Not done: other big structures by the water. The cliffs and banks along a pond or the river are
+  terrain that reaches below the water line: mirrored without a clip plane, their underwater part
+  would come up above the water in the mirror (the planar draws use the scene's pipelines, which
+  have no clip distance), so they stay with the march and its near-miss fringe. The waterfalls
+  (`m_fall*`) are translucent animated water, not reflected. No pier or dock was found in the
+  town's materials.
+
 Other versions and cost (this branch's final state): PAL and Japanese dev builds (`toolsuild.ps1
 -Game RUUP01 / RUUJ01 -Disc ...`) with renamed copies of the user's town, Mii mask on: the player
 has the same three groups (body, Mii opaque and translucent halves on the body's plane), the

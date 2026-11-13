@@ -1,7 +1,7 @@
 diff --git a/include/aurora/world_fx.h b/include/aurora/world_fx.h
 --- a/include/aurora/world_fx.h
 +++ b/include/aurora/world_fx.h
-@@ -39,6 +39,10 @@ extern "C" {
+@@ -39,6 +39,16 @@ extern "C" {
  // the water where it lies. One character per run of the kind: switch to another kind (WORLD)
  // between two characters drawn back to back.
  #define AURORA_SURFACE_CHARACTER 4
@@ -9,21 +9,30 @@ diff --git a/include/aurora/world_fx.h b/include/aurora/world_fx.h
 +// its own object): drawn again like a character, but mirrored through that character's water plane
 +// (found from the character's own anchor), so the whole figure is mirrored or none of it.
 +#define AURORA_SURFACE_CHARACTER_PART 5
++// 0580: OR'ed onto a kind (WORLD / GROUND): a big static model by the water (a bridge) drawn again
++// mirrored like a character, keeping its own kind; one run of flagged draws = one group (one plane).
++// Screen-space reflection only has the camera's view of it (the deck top and near side): the mirrored
++// bridge came out as a fragment with a ragged edge. The group's anchor (for the water lookup) is the
++// view-space centre of its first draw's vertices, each through its own position matrix.
++#define AURORA_SURFACE_MIRROR 0x80
  
  #define AURORA_WORLD_FX_XF_VIEW 0x0700u
  // 0440 (optional): the point the effects centre on, as a 3x4 model -> view matrix whose
 diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
 --- a/lib/gfx/world_fx.cpp
 +++ b/lib/gfx/world_fx.cpp
-@@ -91,6 +91,7 @@ struct CharGroup {
+@@ -91,6 +91,10 @@ struct CharGroup {
    float anchor[3]{};
    float proj[16]{};
    bool anchored = false;
 +  bool part = false; // 0580: AURORA_SURFACE_CHARACTER_PART (uses the nearest character's plane)
++  bool mirror = false;   // 0580: AURORA_SURFACE_MIRROR (a static model; parts never attach to it)
++  bool hasLocal = false; // 0580: anchor given in view space (a mirrored static model: its first draw's vertices)
++  float local[3]{};
  };
  constexpr size_t MaxCharGroups = 16;
  constexpr size_t MaxMirrorDraws = 1024;
-@@ -347,15 +348,26 @@ fn sky_color(rv: vec3f, clouds: bool) -> vec3f {
+@@ -347,15 +351,26 @@ fn sky_color(rv: vec3f, clouds: bool) -> vec3f {
  var<private> g_ssrT: f32 = 1e9;
  var<private> g_ssrHit: vec3f = vec3f(0.0);
  var<private> g_ssrHitPx: vec2f = vec2f(0.0);
@@ -52,7 +61,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
      let q = p + r * t;
      if (q.z > -1.0) { break; }
      let s = project(q);
-@@ -363,11 +375,18 @@ fn ssr(p: vec3f, r: vec3f, steps: i32, jitter: f32) -> vec4f {
+@@ -363,11 +378,18 @@ fn ssr(p: vec3f, r: vec3f, steps: i32, jitter: f32) -> vec4f {
      let sp = view_pos(s.xy, load_depth(s.xy));
      let diff = sp.z - q.z;
      let thick = max(stepLen * 1.5, 0.04 * dist);
@@ -74,7 +83,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
          let mid = 0.5 * (lo + hi);
          let qm = p + r * mid;
          let sm = project(qm);
-@@ -376,31 +395,67 @@ fn ssr(p: vec3f, r: vec3f, steps: i32, jitter: f32) -> vec4f {
+@@ -376,31 +398,67 @@ fn ssr(p: vec3f, r: vec3f, steps: i32, jitter: f32) -> vec4f {
        }
        let qh = p + r * hi;
        let sh = project(qh);
@@ -159,7 +168,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
    }
    return vec4f(0.0);
  }
-@@ -490,9 +545,12 @@ fn tangent_bend(n: vec3f, gw: vec2f) -> vec3f {
+@@ -490,9 +548,12 @@ fn tangent_bend(n: vec3f, gw: vec2f) -> vec3f {
    let rad = 0.14 * u.vp.w;
    var hs = 0.0;
    var wsum = 0.0;
@@ -174,7 +183,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
        if (q.x < u.vp.x || q.y < u.vp.y || q.x >= u.vp.x + u.vp.z || q.y >= u.vp.y + u.vp.w) { continue; }
        if (textureLoad(tmask, vec2i(q), 0).a < 0.75) { continue; }
        let pw = view_pos(q, load_mdepth(q));
-@@ -583,7 +641,6 @@ fn refl_covered(d: f32) -> bool {
+@@ -583,7 +644,6 @@ fn refl_covered(d: f32) -> bool {
        if ((en & 1u) != 0u) {
          let rh = reflection(pw, n, steps, jitter, true);
          var refl = rh.rgb;
@@ -182,7 +191,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
          // (0570) planar reflection of the characters: where one is mirrored over this water pixel
          // it replaces the screen-space march (which can only put the camera's view of a character
          // back upside down, in pieces), unless the march hit the world in front of it. The water's
-@@ -606,31 +663,51 @@ fn refl_covered(d: f32) -> bool {
+@@ -606,31 +666,51 @@ fn refl_covered(d: f32) -> bool {
              let vd = normalize(pw);
              let dl = (reflect(vd, n) - reflect(vd, up)) * pathLen;
              let sp = project(mp + dl - 2.0 * dot(dl, up) * up).xy;
@@ -241,7 +250,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
              }
            }
            if (u.pp.y > 8.5 && u.pp.y < 9.5) { // debug view 9: planar here, march hit dropped as a character, march hit
-@@ -645,11 +722,21 @@ fn refl_covered(d: f32) -> bool {
+@@ -645,11 +725,21 @@ fn refl_covered(d: f32) -> bool {
          // depth = surface, scene depth = bed): full from 1.5 "metres", a trace at the waterline.
          let bedDepth = max(pw.z - p.z, 0.0);
          let deep = smoothstep(0.0, 1.5 * ws, bedDepth);
@@ -268,7 +277,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
          if (u.pp.y > 4.5) { // debug view 5: scene hit share of the reflection, its weight, normal tilt
            if (u.pp.y > 7.5) { // 8: why the march ends (r: 0.25 behind camera, 0.5 off screen, 0.75 no hit, 1 hit; g: step; b: closest miss)
              return ssr_why(pw + n * (0.002 * max(-pw.z, 1.0)), reflect(-v, n), steps);
-@@ -1092,6 +1179,12 @@ struct SceneJob {
+@@ -1092,6 +1182,12 @@ struct SceneJob {
    std::vector<SurfaceDraw> draws;
    std::vector<MirrorDraw> mirror; // 0570
    Range planeU{};
@@ -281,7 +290,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
    RenderTargetLayout layout{};
    Range base{}, tiltH{}, finalU{};
    bool mask = false, surfaces = false, tilt = false;
-@@ -1112,7 +1205,99 @@ void run_full(const wgpu::CommandEncoder& cmd, const char* label, const wgpu::Te
+@@ -1112,7 +1208,99 @@ void run_full(const wgpu::CommandEncoder& cmd, const char* label, const wgpu::Te
    g_statPasses.fetch_add(1, std::memory_order_relaxed);
  }
  
@@ -381,7 +390,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
    if (!init_gpu() || !t.colorSource) {
      return;
    }
-@@ -1210,6 +1395,9 @@ void encode(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, const Sc
+@@ -1210,6 +1398,9 @@ void encode(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, const Sc
        for (const auto& m : job.mirror) {
          cmd.CopyBufferToBuffer(g_gpu.planeBuf, uint64_t(m.group) * 64, detail::resources().uniformBuffer, m.data.uniformRange.offset + 32, 64);
        }
@@ -391,34 +400,73 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
      }
      const auto ra = wgpu::TextureUsage::RenderAttachment;
      const auto rs = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
-@@ -1385,7 +1573,7 @@ void note_draw(const gx::PipelineConfig& config, uint8_t kind, const gx::DrawDat
+@@ -1385,18 +1576,29 @@ void note_draw(const gx::PipelineConfig& config, uint8_t kind, const gx::DrawDat
    if (st.projType != GX_PERSPECTIVE) {
      return;
    }
 -  if (kind == AURORA_SURFACE_CHARACTER) { // 0570: the character's anchor and projection
-+  if (kind == AURORA_SURFACE_CHARACTER || kind == AURORA_SURFACE_CHARACTER_PART) { // 0570: the character's anchor and projection
++  const bool mirrorFlag = (kind & AURORA_SURFACE_MIRROR) != 0;
++  kind &= uint8_t(~AURORA_SURFACE_MIRROR);
++  if (kind == AURORA_SURFACE_CHARACTER || kind == AURORA_SURFACE_CHARACTER_PART || mirrorFlag) { // 0570: the character's anchor and projection
      if (!g_chars.empty() && !g_chars.back().anchored && g_chars.back().end == UINT32_MAX) {
        // the draw's current position matrix, else (skinned shapes index theirs per vertex) the first
        // loaded one that places something in front of the camera
-@@ -1467,7 +1655,7 @@ void note_draw(const gx::PipelineConfig& config, uint8_t kind, const gx::DrawDat
+       const float* m = reinterpret_cast<const float*>(&st.pnMtx[st.currentPnMtx % gx::MaxPnMtx].pos);
+       const auto placed = [](const float* x) { return std::isfinite(x[3]) && std::isfinite(x[7]) && std::isfinite(x[11]) && x[11] < -1.f; };
+-      for (uint32_t k = 0; k < gx::MaxPnMtx && !placed(m); ++k) {
++      auto& g0 = g_chars.back();
++      // (0580) a mirrored static model: the view-space centre of its first draw's vertices (a town
++      // acre's matrices place the acre's corner and bend it along the curved world)
++      const float* la = g0.local;
++      const bool localOk = g0.hasLocal && std::isfinite(la[0]) && std::isfinite(la[1]) && std::isfinite(la[2]) && la[2] < -1.f;
++      for (uint32_t k = 0; k < gx::MaxPnMtx && !localOk && !placed(m); ++k) {
+         m = reinterpret_cast<const float*>(&st.pnMtx[k].pos);
+       }
+-      if (placed(m)) {
++      if (localOk || placed(m)) {
+         auto& g = g_chars.back();
+-        g.anchor[0] = m[3], g.anchor[1] = m[7], g.anchor[2] = m[11];
++        if (localOk) {
++          g.anchor[0] = la[0], g.anchor[1] = la[1], g.anchor[2] = la[2];
++        } else {
++          g.anchor[0] = m[3], g.anchor[1] = m[7], g.anchor[2] = m[11];
++        }
+         auto pr = st.proj; // as fill_uniform writes it
+         if constexpr (gx::UseReversedZ) {
+           pr.m2 = pr.m2 * Vec4<float>{-1.f, -1.f, -1.f, -1.f};
+@@ -1467,7 +1669,21 @@ void note_draw(const gx::PipelineConfig& config, uint8_t kind, const gx::DrawDat
  }
  
  // 0570: GX_AURORA_SET_SURFACE into / out of AURORA_SURFACE_CHARACTER.
 -void character_scope(bool begin) noexcept {
-+void character_scope(bool begin, bool part) noexcept {
++bool wants_anchor() noexcept {
++  return !g_chars.empty() && g_chars.back().end == UINT32_MAX && g_chars.back().mirror && !g_chars.back().anchored &&
++         !g_chars.back().hasLocal;
++}
++
++void group_local_anchor(float x, float y, float z) noexcept {
++  sync();
++  if (!g_chars.empty() && g_chars.back().end == UINT32_MAX && !g_chars.back().anchored) {
++    auto& g = g_chars.back();
++    g.local[0] = x, g.local[1] = y, g.local[2] = z;
++    g.hasLocal = true;
++  }
++}
++
++void character_scope(bool begin, bool part, bool mirror) noexcept {
    sync();
    if (!g_cfg.enabled || !g_cfg.reflections || !planar_on()) {
      return;
-@@ -1475,7 +1663,7 @@ void character_scope(bool begin) noexcept {
+@@ -1475,7 +1691,7 @@ void character_scope(bool begin) noexcept {
    const auto [pass, command] = next_command_position();
    if (begin) {
      if (g_chars.size() < MaxCharGroups) {
 -      g_chars.push_back({.pass = pass, .begin = command});
-+      g_chars.push_back({.pass = pass, .begin = command, .part = part});
++      g_chars.push_back({.pass = pass, .begin = command, .part = part, .mirror = mirror});
      }
    } else if (!g_chars.empty() && g_chars.back().end == UINT32_MAX) {
      if (pass == g_chars.back().pass) {
-@@ -1612,10 +1800,54 @@ void scene_end() noexcept {
+@@ -1612,10 +1828,54 @@ void scene_end() noexcept {
      PlaneUniform pu{};
      uint32_t groups = 0;
      const auto [curPass, curCommand] = next_command_position();
@@ -444,7 +492,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
 +      float best = 64.f * 64.f;
 +      for (size_t ci = 0; ci < g_chars.size(); ++ci) {
 +        const auto& o = g_chars[ci];
-+        if (o.part || !o.anchored) {
++        if (o.part || o.mirror || !o.anchored) {
 +          continue;
 +        }
 +        const float dx = o.anchor[0] - g.anchor[0], dy = o.anchor[1] - g.anchor[1], dz = o.anchor[2] - g.anchor[2];
@@ -475,7 +523,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
        const uint32_t end = g.end != UINT32_MAX ? g.end : (g.pass == curPass ? curCommand : g.begin);
        bool any = false;
        for (uint32_t i = g.begin; i < end && job.mirror.size() < MaxMirrorDraws; ++i) {
-@@ -1629,14 +1861,15 @@ void scene_end() noexcept {
+@@ -1629,14 +1889,15 @@ void scene_end() noexcept {
          if (src == nullptr) {
            continue;
          }
@@ -493,7 +541,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
        pu.anchors[groups][0] = g.anchor[0], pu.anchors[groups][1] = g.anchor[1], pu.anchors[groups][2] = g.anchor[2];
        pu.anchors[groups][3] = 1.f;
        std::memcpy(pu.rows[groups], g.proj, sizeof(g.proj));
-@@ -1645,6 +1878,18 @@ void scene_end() noexcept {
+@@ -1645,6 +1906,18 @@ void scene_end() noexcept {
      if (!job.mirror.empty()) {
        pu.info[0] = float(groups);
        job.planeU = push_uniform(reinterpret_cast<const uint8_t*>(&pu), sizeof(pu));
@@ -515,24 +563,82 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
 diff --git a/lib/gfx/world_fx.hpp b/lib/gfx/world_fx.hpp
 --- a/lib/gfx/world_fx.hpp
 +++ b/lib/gfx/world_fx.hpp
-@@ -24,7 +24,7 @@ void note_draw(const gx::PipelineConfig& config, uint8_t kind, const gx::DrawDat
+@@ -24,7 +24,11 @@ void note_draw(const gx::PipelineConfig& config, uint8_t kind, const gx::DrawDat
  // GX_AURORA_WORLD_FX_END.
  void scene_end() noexcept;
  // 0570: GX_AURORA_SET_SURFACE into (begin) or out of AURORA_SURFACE_CHARACTER.
 -void character_scope(bool begin) noexcept;
-+void character_scope(bool begin, bool part = false) noexcept;
++void character_scope(bool begin, bool part = false, bool mirror = false) noexcept;
++// 0580: the open group's anchor in view space (a mirrored static model: its first draw's vertices)
++void group_local_anchor(float x, float y, float z) noexcept;
++// 0580: the open group is a mirrored static model still without an anchor
++bool wants_anchor() noexcept;
  // New frame recording (drops what the last frame noted without a scene end).
  void begin_frame() noexcept;
  
 diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
 --- a/lib/gx/command_processor.cpp
 +++ b/lib/gx/command_processor.cpp
-@@ -1848,10 +1848,17 @@ void handle_aurora(ByteReader& reader) noexcept {
+@@ -1570,6 +1570,39 @@ static void probe_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, const u8* v
+   fn(&pr);
+ }
+ 
++// 0580: the view-space centre of a draw's vertices (each through its own position matrix): the
++// anchor of a mirrored static model's group (a town acre's bridge: its vertices use the acre's
++// curved-world matrices per vertex, so no single matrix places it).
++static void mirror_anchor_from(GXVtxFmt fmt, u16 vtxCount, const u8* vtx, u32 vtxSize) noexcept {
++  float lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
++  bool any = false;
++  const u32 n = std::min<u32>(vtxCount, 4096u);
++  for (u32 v = 0; v < n && vtxSize != 0; ++v) {
++    float p[3];
++    u32 mi = 0;
++    if (!probe_vertex(fmt, vtx + v * vtxSize, p, mi)) {
++      continue;
++    }
++    if (mi >= MaxPnMtx) {
++      mi = 0;
++    }
++    const auto& M = g_gxState.pnMtx[mi].pos;
++    const float e[3] = {M.m0[0] * p[0] + M.m0[1] * p[1] + M.m0[2] * p[2] + M.m0[3],
++                        M.m1[0] * p[0] + M.m1[1] * p[1] + M.m1[2] * p[2] + M.m1[3],
++                        M.m2[0] * p[0] + M.m2[1] * p[1] + M.m2[2] * p[2] + M.m2[3]};
++    if (!std::isfinite(e[0]) || !std::isfinite(e[1]) || !std::isfinite(e[2])) {
++      continue;
++    }
++    for (int k = 0; k < 3; ++k) {
++      lo[k] = std::min(lo[k], e[k]), hi[k] = std::max(hi[k], e[k]);
++    }
++    any = true;
++  }
++  if (any) {
++    gfx::world_fx::group_local_anchor(0.5f * (lo[0] + hi[0]), 0.5f * (lo[1] + hi[1]), 0.5f * (lo[2] + hi[2]));
++  }
++}
++
+ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& reader) noexcept {
+   ZoneScoped;
+   u32 vtxSize;
+@@ -1585,6 +1618,9 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader&
+     UNLIKELY { probe_draw(prim, fmt, vtxCount, reader.data() + reader.offset(), vtxSize); }
+ 
+   size_dynamic_arrays(fmt, reader.data() + reader.offset(), vtxCount, vtxSize);
++  if ((g_gxState.surfaceKind & AURORA_SURFACE_MIRROR) != 0 && gfx::world_fx::wants_anchor()) [[unlikely]] {
++    mirror_anchor_from(fmt, vtxCount, reader.data() + reader.offset(), vtxSize); // 0580
++  }
+ 
+   const bool cleanState = g_gxState.dirty == 0 && !g_gxState.wireframe && fmt == sDrawCache.lastDrawFmt &&
+                           sDrawCache.lineMode == 0 &&
+@@ -1848,10 +1884,21 @@ void handle_aurora(ByteReader& reader) noexcept {
    } else if (subCmd == GX_AURORA_SET_SURFACE) { // 0350
      const u8 kind = reader.read<u8>();
      const u8 was = g_gxState.surfaceKind;
 -    if (kind != was && (kind == AURORA_SURFACE_CHARACTER || was == AURORA_SURFACE_CHARACTER) && gfx::world_fx::active()) {
-+    const auto isChar = [](u8 k) { return k == AURORA_SURFACE_CHARACTER || k == AURORA_SURFACE_CHARACTER_PART; };
++    const auto isChar = [](u8 k) {
++      return k == AURORA_SURFACE_CHARACTER || k == AURORA_SURFACE_CHARACTER_PART || (k & AURORA_SURFACE_MIRROR) != 0;
++    };
++    // (0580: a mirrored static model keeps its own kind under the flag: WORLD -> GROUND inside it is
++    // no new group)
 +    if (kind != was && (isChar(kind) || isChar(was)) && gfx::world_fx::active()) {
        // 0570: a character's draws start / end here: none is merged across the boundary
 +      // (0580: a character straight into one of its parts ends the one and starts the other)
@@ -542,8 +648,18 @@ diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
 +        gfx::world_fx::character_scope(false);
 +      }
 +      if (isChar(kind)) {
-+        gfx::world_fx::character_scope(true, kind == AURORA_SURFACE_CHARACTER_PART);
++        gfx::world_fx::character_scope(true, kind == AURORA_SURFACE_CHARACTER_PART, (kind & AURORA_SURFACE_MIRROR) != 0);
 +      }
      }
      g_gxState.surfaceKind = kind;
    } else if (subCmd == GX_AURORA_WORLD_FX_END) { // 0350
+@@ -1987,6 +2034,9 @@ void handle_aurora(ByteReader& reader) noexcept {
+     const auto vertexData = reader.take(totalVtxBytes);
+     if (sDrawProbe.load(std::memory_order_relaxed) != nullptr)
+       UNLIKELY { probe_draw(prim, fmt, vtxCount, vertexData.data(), vtxSize); }
++    if ((g_gxState.surfaceKind & AURORA_SURFACE_MIRROR) != 0 && gfx::world_fx::wants_anchor()) [[unlikely]] {
++      mirror_anchor_from(fmt, vtxCount, vertexData.data(), vtxSize); // 0580
++    }
+     const gfx::Range vertRange = gfx::push_verts(vertexData.data(), vertexData.size(), 4);
+     if (drawIndexCount != 0) {
+       push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, drawIndexCount);
