@@ -852,6 +852,13 @@ differently from pixel to pixel, which tore the thin lines apart. The planar pic
 now limited to 0.2 % of the viewport height (4 pixels at 2160); at the beach it was below that
 anyway.
 
+Other versions and cost (this branch's final state): PAL and Japanese dev builds (`toolsuild.ps1
+-Game RUUP01 / RUUJ01 -Disc ...`) with renamed copies of the user's town, Mii mask on: the player
+has the same three groups (body, Mii opaque and translucent halves on the body's plane), the
+reflected face is clean at the cliff pond and at the beach's trailer spot; Korea builds (not run:
+no Korean town copy). GPU at 4K on the beach (RTX 3090 Ti): "World FX surfaces" 0.44 -> 0.60 ms,
+"World FX plane" 0.11 -> 0.20 ms, about +0.3 ms per frame over 1.0.1 in all.
+
 Checked (3840x2160, the user's settings, scratch copy of the user's town): the cliff-top pond at
 four distances from the edge, plain head and Mii mask; the beach by `TP=1283/14/<z>` from back on
 the dry sand to the trailer's spot at the water's edge (1283,14,3016; the surf moves between
