@@ -1,0 +1,386 @@
+diff --git a/include/aurora/world_fx.h b/include/aurora/world_fx.h
+--- a/include/aurora/world_fx.h
++++ b/include/aurora/world_fx.h
+@@ -39,6 +39,10 @@ extern "C" {
+ // the water where it lies. One character per run of the kind: switch to another kind (WORLD)
+ // between two characters drawn back to back.
+ #define AURORA_SURFACE_CHARACTER 4
++// 0580: a part of the character before it (its own head model, a worn Mii head, a held item drawn as
++// its own object): drawn again like a character, but mirrored through that character's water plane
++// (found from the character's own anchor), so the whole figure is mirrored or none of it.
++#define AURORA_SURFACE_CHARACTER_PART 5
+ 
+ #define AURORA_WORLD_FX_XF_VIEW 0x0700u
+ // 0440 (optional): the point the effects centre on, as a 3x4 model -> view matrix whose
+diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
+--- a/lib/gfx/world_fx.cpp
++++ b/lib/gfx/world_fx.cpp
+@@ -91,6 +91,7 @@ struct CharGroup {
+   float anchor[3]{};
+   float proj[16]{};
+   bool anchored = false;
++  bool part = false; // 0580: AURORA_SURFACE_CHARACTER_PART (uses the nearest character's plane)
+ };
+ constexpr size_t MaxCharGroups = 16;
+ constexpr size_t MaxMirrorDraws = 1024;
+@@ -490,9 +491,12 @@ fn tangent_bend(n: vec3f, gw: vec2f) -> vec3f {
+   let rad = 0.14 * u.vp.w;
+   var hs = 0.0;
+   var wsum = 0.0;
+-  for (var j = 0; j < 12; j++) {
++  // (0580: down to 3.6 x rad below the anchor, was 1.6: a player standing back from the edge of a
++  // cliff above the water has the water further down the screen, and the head's own window found
++  // none while the body's did)
++  for (var j = 0; j < 24; j++) {
+     for (var i = 0; i < 12; i++) {
+-      let q = s + vec2f(mix(-rad, rad, f32(i) / 11.0), mix(-0.4 * rad, 1.6 * rad, f32(j) / 11.0));
++      let q = s + vec2f(mix(-rad, rad, f32(i) / 11.0), mix(-0.4 * rad, 3.6 * rad, f32(j) / 23.0));
+       if (q.x < u.vp.x || q.y < u.vp.y || q.x >= u.vp.x + u.vp.z || q.y >= u.vp.y + u.vp.w) { continue; }
+       if (textureLoad(tmask, vec2i(q), 0).a < 0.75) { continue; }
+       let pw = view_pos(q, load_mdepth(q));
+@@ -583,7 +587,6 @@ fn refl_covered(d: f32) -> bool {
+       if ((en & 1u) != 0u) {
+         let rh = reflection(pw, n, steps, jitter, true);
+         var refl = rh.rgb;
+-        var planar = 0.0;
+         // (0570) planar reflection of the characters: where one is mirrored over this water pixel
+         // it replaces the screen-space march (which can only put the camera's view of a character
+         // back upside down, in pieces), unless the march hit the world in front of it. The water's
+@@ -614,14 +617,20 @@ fn refl_covered(d: f32) -> bool {
+               // finds it and shows that instead of the character (it would hide it in a mirror).
+               let pc = mp - 2.0 * dot(mp - pw, up) * up;
+               let dist = max(-pw.z, 1.0);
+-              for (var k = 1; k < 9; k++) {
+-                let qk = mix(pw, pc, f32(k) / 9.0);
++              for (var k = 1; k < 13; k++) {
++                let qk = mix(pw, pc, f32(k) / 13.0);
+                 if (qk.z > -1.0) { break; }
+                 let sk = project(qk).xy;
+                 if (sk.x < u.vp.x || sk.y < u.vp.y || sk.x >= u.vp.x + u.vp.z || sk.y >= u.vp.y + u.vp.w) { break; }
+                 let spk = view_pos(sk, load_depth(sk));
+                 let dk = spk.z - qk.z;
+-                if (dk > 0.0 && dk < 0.04 * dist && dot(spk - pw, up) > 0.01 * dist && !char_at(sk)) {
++                // (0580) ...or the ground the character stands on: a player on a cliff top above the
++                // water, back from the edge, has the path to its feet run through the cliff, often
++                // further behind the visible cliff top / face than the thin-occluder slack; a point
++                // behind a surface that also lies below it is inside the ground (the mirrored cliff
++                // hides the mirrored feet, and only the head shows, further out).
++                let behind = dk > 0.0 && (dk < 0.04 * dist || (dk < 0.3 * dist && dot(qk - spk, up) < 0.0));
++                if (behind && dot(spk - pw, up) > 0.01 * dist && !char_at(sk)) {
+                   refl = textureSampleLevel(tcolor, samp, sk * u.size.zw, 0.0).rgb;
+                   world = true;
+                   break;
+@@ -630,7 +639,6 @@ fn refl_covered(d: f32) -> bool {
+             }
+             if (!world && refl_covered(refl_depth(tq))) {
+               refl = textureSampleLevel(twork, samp, tq / vec2f(textureDimensions(twork)), 0.0).rgb;
+-              planar = 1.0;
+             }
+           }
+           if (u.pp.y > 8.5 && u.pp.y < 9.5) { // debug view 9: planar here, march hit dropped as a character, march hit
+@@ -645,11 +653,21 @@ fn refl_covered(d: f32) -> bool {
+         // depth = surface, scene depth = bed): full from 1.5 "metres", a trace at the waterline.
+         let bedDepth = max(pw.z - p.z, 0.0);
+         let deep = smoothstep(0.0, 1.5 * ws, bedDepth);
+-        // (0570) ...for the sky and the world. A character standing at the water's edge is
+-        // reflected right where the water is shallowest: 0391's trace drew its legs and body at
+-        // 15 % and its head, further out over deeper water, at up to 100 %. The planar character
+-        // keeps 60 % at the waterline.
+-        let k = u.refl.x * (0.35 + 0.65 * f) * mix(mix(0.15, 0.6, planar), 1.0, deep);
++        // (0580) ...or by how blue the water pixel is: a pond drawn over a bed right behind its
++        // surface is still opaque blue water, while the sea's surf over the sand shows the sand
++        // (blue share of the scene colour: surf 0.34-0.45, pond 0.59-0.73, open sea 0.54-0.61, from
++        // noon to night at the beach and the pond by the player's house). Blue shallow water is
++        // lifted to 60 % (0570's planar character there): at full strength the sky washed the
++        // ponds out.
++        let bs = col.b / max(col.r + col.g + col.b, 0.02);
++        let water = max(deep, 0.6 * smoothstep(0.44, 0.56, bs));
++        // One ramp for the world and the planar characters (0570 kept a character at 60 % at the
++        // waterline, so it lay over the sand-coloured surf at the beach while the bank beside it
++        // faded): faint over the surf, full over deep or opaque water, no line where it changes.
++        let k = u.refl.x * (0.35 + 0.65 * f) * mix(0.1, 1.0, water);
++        if (u.pp.y > 10.5 && u.pp.y < 11.5) { // debug view 11: blue share, depth ramp, water weight
++          return vec4f(bs, deep, water, 1.0);
++        }
+         if (u.pp.y > 4.5) { // debug view 5: scene hit share of the reflection, its weight, normal tilt
+           if (u.pp.y > 7.5) { // 8: why the march ends (r: 0.25 behind camera, 0.5 off screen, 0.75 no hit, 1 hit; g: step; b: closest miss)
+             return ssr_why(pw + n * (0.002 * max(-pw.z, 1.0)), reflect(-v, n), steps);
+@@ -1092,6 +1110,12 @@ struct SceneJob {
+   std::vector<SurfaceDraw> draws;
+   std::vector<MirrorDraw> mirror; // 0570
+   Range planeU{};
++  // 0580: AURORA_WORLD_FX_PLANAR_LOG (the plane pass's result read back and logged)
++  PlaneUniform planeCpu{};
++  uint32_t planeGroups = 0, charGroups = 0;
++  std::array<int, MaxCharGroups> partOf{}, planeUsed{};
++  float up[3]{};
++  uint32_t frameNo = 0;
+   RenderTargetLayout layout{};
+   Range base{}, tiltH{}, finalU{};
+   bool mask = false, surfaces = false, tilt = false;
+@@ -1112,7 +1136,99 @@ void run_full(const wgpu::CommandEncoder& cmd, const char* label, const wgpu::Te
+   g_statPasses.fetch_add(1, std::memory_order_relaxed);
+ }
+ 
++// 0580: AURORA_WORLD_FX_PLANAR_LOG=1: each frame's plane pass result read back (a ring of map
++// buffers: copied in one frame's commands, mapped two frames later, logged when the map is done; the
++// map callback only sets a flag) and logged per character group: mirrored or not, the plane height
++// and the anchor's height above it, so a group left out in some frames is caught.
++namespace planelog {
++constexpr size_t Slots = 6;
++struct Slot {
++  wgpu::Buffer buf;
++  std::atomic<int> state{0}; // 0 free, 1 copied, 2 map requested, 3 mapped, 4 map failed
++  uint32_t age = 0, frame = 0, groups = 0, chars = 0;
++  PlaneUniform pu{};
++  std::array<int, MaxCharGroups> partOf{}, planeUsed{};
++  float up[3]{};
++};
++std::array<Slot, Slots> g_slots;
++uint32_t g_frame = 0;
++bool on() noexcept {
++  static const bool v = [] {
++    const char* e = std::getenv("AURORA_WORLD_FX_PLANAR_LOG");
++    return e != nullptr && *e != '0';
++  }();
++  return v;
++}
++void report(Slot& s) noexcept {
++  const auto* rows = static_cast<const float*>(s.buf.GetConstMappedRange(0, MaxCharGroups * 64));
++  std::string line = fmt::format("[planar] frame {} groups {}:", s.frame, s.chars);
++  for (uint32_t gi = 0; gi < s.chars && gi < MaxCharGroups; ++gi) {
++    const int pl = s.planeUsed[gi];
++    line += fmt::format(" | g{}{}", gi, s.partOf[gi] >= 0 ? fmt::format(" part of g{}", s.partOf[gi]) : s.partOf[gi] == -2 ? std::string(" part (alone)") : std::string{});
++    if (pl < 0 || rows == nullptr) {
++      line += " not drawn";
++      continue;
++    }
++    const float* r3 = rows + size_t(pl) * 16 + 12; // mirrored projection row 3
++    const float* m3 = &s.pu.rows[pl][3][0];
++    if (r3[3] < -0.5f && r3[0] == 0.f && r3[1] == 0.f && r3[2] == 0.f) {
++      line += fmt::format(" plane {} none", pl);
++      continue;
++    }
++    // row3' = row3 M with M the reflection about n.p = h: row3'.w = m3.w + 2 h (m3.xyz . n)
++    const float dn = m3[0] * s.up[0] + m3[1] * s.up[1] + m3[2] * s.up[2];
++    const float h = std::abs(dn) > 1e-6f ? (r3[3] - m3[3]) / (2.f * dn) : 0.f;
++    const float* a = s.pu.anchors[pl];
++    const float above = a[0] * s.up[0] + a[1] * s.up[1] + a[2] * s.up[2] - h;
++    line += fmt::format(" plane {} h {:.1f} anchor {:.1f} above", pl, h, above);
++  }
++  Log.info("{}", line);
++}
++// before a frame's commands: report finished maps, request maps of slots copied >= 2 frames ago
++void poll() noexcept {
++  ++g_frame;
++  for (auto& s : g_slots) {
++    const int st = s.state.load();
++    if (st == 3) {
++      report(s);
++      s.buf.Unmap();
++      s.state = 0;
++    } else if (st == 4) {
++      s.state = 0;
++    } else if (st == 1 && g_frame - s.age >= 2) {
++      s.state = 2;
++      s.buf.MapAsync(wgpu::MapMode::Read, 0, MaxCharGroups * 64, wgpu::CallbackMode::AllowSpontaneous,
++                     [&s](wgpu::MapAsyncStatus status, wgpu::StringView) {
++                       s.state = status == wgpu::MapAsyncStatus::Success ? 3 : 4; // no Dawn call here
++                     });
++    }
++  }
++}
++void copy(const wgpu::CommandEncoder& cmd, const SceneJob& job, const wgpu::Buffer& planes) noexcept {
++  for (auto& s : g_slots) {
++    if (s.state.load() != 0) {
++      continue;
++    }
++    if (!s.buf) {
++      const wgpu::BufferDescriptor bd{.label = "World FX plane log",
++                                      .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst,
++                                      .size = MaxCharGroups * 64};
++      s.buf = webgpu::g_device.CreateBuffer(&bd);
++    }
++    cmd.CopyBufferToBuffer(planes, 0, s.buf, 0, MaxCharGroups * 64);
++    s.age = g_frame, s.frame = job.frameNo, s.groups = job.planeGroups, s.chars = job.charGroups;
++    s.pu = job.planeCpu, s.partOf = job.partOf, s.planeUsed = job.planeUsed;
++    std::memcpy(s.up, job.up, sizeof(s.up));
++    s.state = 1;
++    return;
++  }
++}
++} // namespace planelog
++
+ void encode(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, const SceneJob& job) {
++  if (planelog::on()) {
++    planelog::poll();
++  }
+   if (!init_gpu() || !t.colorSource) {
+     return;
+   }
+@@ -1210,6 +1326,9 @@ void encode(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, const Sc
+       for (const auto& m : job.mirror) {
+         cmd.CopyBufferToBuffer(g_gpu.planeBuf, uint64_t(m.group) * 64, detail::resources().uniformBuffer, m.data.uniformRange.offset + 32, 64);
+       }
++      if (planelog::on()) {
++        planelog::copy(cmd, job, g_gpu.planeBuf);
++      }
+     }
+     const auto ra = wgpu::TextureUsage::RenderAttachment;
+     const auto rs = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
+@@ -1385,7 +1504,7 @@ void note_draw(const gx::PipelineConfig& config, uint8_t kind, const gx::DrawDat
+   if (st.projType != GX_PERSPECTIVE) {
+     return;
+   }
+-  if (kind == AURORA_SURFACE_CHARACTER) { // 0570: the character's anchor and projection
++  if (kind == AURORA_SURFACE_CHARACTER || kind == AURORA_SURFACE_CHARACTER_PART) { // 0570: the character's anchor and projection
+     if (!g_chars.empty() && !g_chars.back().anchored && g_chars.back().end == UINT32_MAX) {
+       // the draw's current position matrix, else (skinned shapes index theirs per vertex) the first
+       // loaded one that places something in front of the camera
+@@ -1467,7 +1586,7 @@ void note_draw(const gx::PipelineConfig& config, uint8_t kind, const gx::DrawDat
+ }
+ 
+ // 0570: GX_AURORA_SET_SURFACE into / out of AURORA_SURFACE_CHARACTER.
+-void character_scope(bool begin) noexcept {
++void character_scope(bool begin, bool part) noexcept {
+   sync();
+   if (!g_cfg.enabled || !g_cfg.reflections || !planar_on()) {
+     return;
+@@ -1475,7 +1594,7 @@ void character_scope(bool begin) noexcept {
+   const auto [pass, command] = next_command_position();
+   if (begin) {
+     if (g_chars.size() < MaxCharGroups) {
+-      g_chars.push_back({.pass = pass, .begin = command});
++      g_chars.push_back({.pass = pass, .begin = command, .part = part});
+     }
+   } else if (!g_chars.empty() && g_chars.back().end == UINT32_MAX) {
+     if (pass == g_chars.back().pass) {
+@@ -1612,10 +1731,54 @@ void scene_end() noexcept {
+     PlaneUniform pu{};
+     uint32_t groups = 0;
+     const auto [curPass, curCommand] = next_command_position();
+-    for (const auto& g : g_chars) {
+-      if (!g.anchored || groups >= MaxCharGroups) {
++    std::array<int, MaxCharGroups> planeOf{}; // g_chars index -> plane (-1: none)
++    planeOf.fill(-1);
++    static const bool sOwnPlanes = [] { // A/B: AURORA_WORLD_FX_PART_PLANES=own (a plane per part, as 0570)
++      const char* v = std::getenv("AURORA_WORLD_FX_PART_PLANES");
++      return v && std::strcmp(v, "own") == 0;
++    }();
++    // 0580: a part (a player's head model, the worn Mii head) belongs to the nearest whole
++    // character (anchors within 64 units; a head may be drawn after other objects, the Mii head in
++    // the translucent pass) and uses its plane: the water under the character, not under the
++    // part's own point, so the figure is mirrored as a whole or not at all. Characters first.
++    std::array<int, MaxCharGroups> parentOf{};
++    parentOf.fill(-1);
++    for (size_t gi = 0; gi < g_chars.size(); ++gi) {
++      const auto& g = g_chars[gi];
++      if (!g.part || !g.anchored || sOwnPlanes) {
+         continue;
+       }
++      float best = 64.f * 64.f;
++      for (size_t ci = 0; ci < g_chars.size(); ++ci) {
++        const auto& o = g_chars[ci];
++        if (o.part || !o.anchored) {
++          continue;
++        }
++        const float dx = o.anchor[0] - g.anchor[0], dy = o.anchor[1] - g.anchor[1], dz = o.anchor[2] - g.anchor[2];
++        const float d2 = dx * dx + dy * dy + dz * dz;
++        if (d2 < best) {
++          best = d2, parentOf[gi] = int(ci);
++        }
++      }
++    }
++    std::array<size_t, MaxCharGroups> order{};
++    size_t orderN = 0;
++    for (int partPass = 0; partPass < 2; ++partPass) {
++      for (size_t gi = 0; gi < g_chars.size(); ++gi) {
++        if ((parentOf[gi] >= 0) == (partPass == 1)) {
++          order[orderN++] = gi;
++        }
++      }
++    }
++    for (size_t oi = 0; oi < orderN; ++oi) {
++      const size_t gi = order[oi];
++      const auto& g = g_chars[gi];
++      // (a part whose character drew nothing mirrored gets its own plane)
++      const int shared = parentOf[gi] >= 0 ? planeOf[size_t(parentOf[gi])] : -1;
++      if ((!g.anchored && shared < 0) || (shared < 0 && groups >= MaxCharGroups)) {
++        continue;
++      }
++      const uint32_t plane = shared >= 0 ? uint32_t(shared) : groups;
+       const uint32_t end = g.end != UINT32_MAX ? g.end : (g.pass == curPass ? curCommand : g.begin);
+       bool any = false;
+       for (uint32_t i = g.begin; i < end && job.mirror.size() < MaxMirrorDraws; ++i) {
+@@ -1629,14 +1792,15 @@ void scene_end() noexcept {
+         if (src == nullptr) {
+           continue;
+         }
+-        MirrorDraw m{.data = *d, .original = d->uniformRange, .group = groups};
++        MirrorDraw m{.data = *d, .original = d->uniformRange, .group = plane};
+         m.data.uniformRange = push_uniform(src, d->uniformRange.size);
+         job.mirror.push_back(m);
+         any = true;
+       }
+-      if (!any) {
++      if (!any || shared >= 0) {
+         continue;
+       }
++      planeOf[gi] = int(groups);
+       pu.anchors[groups][0] = g.anchor[0], pu.anchors[groups][1] = g.anchor[1], pu.anchors[groups][2] = g.anchor[2];
+       pu.anchors[groups][3] = 1.f;
+       std::memcpy(pu.rows[groups], g.proj, sizeof(g.proj));
+@@ -1645,6 +1809,18 @@ void scene_end() noexcept {
+     if (!job.mirror.empty()) {
+       pu.info[0] = float(groups);
+       job.planeU = push_uniform(reinterpret_cast<const uint8_t*>(&pu), sizeof(pu));
++      job.planeCpu = pu;
++      job.planeGroups = groups;
++      for (size_t gi = 0; gi < g_chars.size(); ++gi) {
++        job.partOf[gi] = parentOf[gi] >= 0 ? parentOf[gi] : (g_chars[gi].part ? -2 : -1);
++        job.planeUsed[gi] = planeOf[gi] >= 0 ? planeOf[gi] : (parentOf[gi] >= 0 ? planeOf[size_t(parentOf[gi])] : -1);
++      }
++      job.charGroups = uint32_t(g_chars.size());
++      static uint32_t sFrameNo = 0;
++      job.frameNo = ++sFrameNo;
++      job.up[0] = u.view[1]; // world up (+y) in view space: (view0.y, view1.y, view2.y)
++      job.up[1] = u.view[5];
++      job.up[2] = u.view[9];
+       job.layout = scene_render_target_layout();
+       u.pass[3] = 1.f;
+     }
+diff --git a/lib/gfx/world_fx.hpp b/lib/gfx/world_fx.hpp
+--- a/lib/gfx/world_fx.hpp
++++ b/lib/gfx/world_fx.hpp
+@@ -24,7 +24,7 @@ void note_draw(const gx::PipelineConfig& config, uint8_t kind, const gx::DrawDat
+ // GX_AURORA_WORLD_FX_END.
+ void scene_end() noexcept;
+ // 0570: GX_AURORA_SET_SURFACE into (begin) or out of AURORA_SURFACE_CHARACTER.
+-void character_scope(bool begin) noexcept;
++void character_scope(bool begin, bool part = false) noexcept;
+ // New frame recording (drops what the last frame noted without a scene end).
+ void begin_frame() noexcept;
+ 
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -1848,10 +1848,17 @@ void handle_aurora(ByteReader& reader) noexcept {
+   } else if (subCmd == GX_AURORA_SET_SURFACE) { // 0350
+     const u8 kind = reader.read<u8>();
+     const u8 was = g_gxState.surfaceKind;
+-    if (kind != was && (kind == AURORA_SURFACE_CHARACTER || was == AURORA_SURFACE_CHARACTER) && gfx::world_fx::active()) {
++    const auto isChar = [](u8 k) { return k == AURORA_SURFACE_CHARACTER || k == AURORA_SURFACE_CHARACTER_PART; };
++    if (kind != was && (isChar(kind) || isChar(was)) && gfx::world_fx::active()) {
+       // 0570: a character's draws start / end here: none is merged across the boundary
++      // (0580: a character straight into one of its parts ends the one and starts the other)
+       sDrawCache.lastDrawFmt = GX_MAX_VTXFMT;
+-      gfx::world_fx::character_scope(kind == AURORA_SURFACE_CHARACTER);
++      if (isChar(was)) {
++        gfx::world_fx::character_scope(false);
++      }
++      if (isChar(kind)) {
++        gfx::world_fx::character_scope(true, kind == AURORA_SURFACE_CHARACTER_PART);
++      }
+     }
+     g_gxState.surfaceKind = kind;
+   } else if (subCmd == GX_AURORA_WORLD_FX_END) { // 0350
