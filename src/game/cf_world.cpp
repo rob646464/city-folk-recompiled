@@ -280,6 +280,24 @@ u8 kindOf(const std::string& n) {
     return AURORA_SURFACE_WORLD;
 }
 
+// Bridges (branch reflection-head, Aurora 0580): materials mirrored like characters.
+bool isMirrorMaterial(u32 resMatPtr) {
+    // Test aid CF_WFX_MIRROR_BRIDGES=0: bridges by the screen-space march only (as before, A/B)
+    static const bool sOff = [] {
+        const char* v = std::getenv("CF_WFX_MIRROR_BRIDGES");
+        return v && *v == '0';
+    }();
+    if (sOff) return false;
+    static std::unordered_map<u32, bool> sCache;  // ResMatData -> bridge?
+    const u32 mat = rd32(resMatPtr);
+    if (mat < 0x80000000u || mat >= 0x94000000u) return false;
+    if (auto it = sCache.find(mat); it != sCache.end()) return it->second;
+    const std::string n = matName(resMatPtr);
+    const bool b = n.rfind("m_bridge", 0) == 0;
+    if (sCache.size() > 8192) sCache.clear();
+    sCache[mat] = b;
+    return b;
+}
 struct MatEntry {
     u32 nameWord = 0;
     u8 kind = 0;
@@ -847,7 +865,18 @@ HLE(Draw1Mat1ShpDirectly__Q24nw4r3g3dFQ34nw4r3g3d6ResMatQ34nw4r3g3d6ResShpPCQ34n
         const u8 k = world::kindFor(c.r[3]);
         if (k == AURORA_SURFACE_WATER) world::sWaterDraws++;
         else if (k == AURORA_SURFACE_GROUND) world::sGroundDraws++;
-        if (world::sCharDepth == 0) world::emitKind(k);  // (a character's materials stay CHARACTER)
+        if (world::sCharDepth == 0) {
+            // (branch reflection-head, Aurora 0580) A bridge (its material inside the town acre's
+            // model) is drawn again mirrored through the river like a character: the screen-space
+            // march only had the deck top and near side and left a ragged fragment. Its draws keep
+            // their kind under AURORA_SURFACE_MIRROR; a run of them is one group (one plane, found
+            // from the centre of its first draw's vertices).
+            if (world::sReflOn && world::isMirrorMaterial(c.r[3])) {
+                world::emitKind(u8(k | AURORA_SURFACE_MIRROR));
+            } else {
+                world::emitKind(k);
+            }
+        }  // (a character's materials stay CHARACTER)
     }
     callOriginal(c, "Draw1Mat1ShpDirectly__Q24nw4r3g3dFQ34nw4r3g3d6ResMatQ34nw4r3g3d6ResShpPCQ34nw4r4math5MTX34PCQ34nw4r4math5MTX34UlPQ34nw4r3g3d16Draw1Mat1ShpSwapPQ44nw4r3g3d8G3DState8IndMtxOp");
 }
@@ -860,10 +889,17 @@ bool world::characterBegin(u32 obj) {
         log("[wfx] f%u character? obj %08X '%s' refl %d main %d", game::guestFrames(), obj, obj ? cflight::modelNameChecked(obj).c_str() : "(RFL head)",
             sReflOn ? 1 : 0, sMain ? 1 : 0);
     if (!sReflOn || !sMain) return false;
-    if (obj && !isCharacterModel(cflight::modelNameChecked(obj))) return false;
+    const std::string name = obj ? cflight::modelNameChecked(obj) : std::string();
+    if (obj && !isCharacterModel(name)) return false;
     if (sCharDepth++ == 0) {
-        if (sKind == AURORA_SURFACE_CHARACTER) emitKind(AURORA_SURFACE_WORLD);
-        emitKind(AURORA_SURFACE_CHARACTER);
+        // A part of a character (branch reflection-head, Aurora 0580): the player's own head model
+        // ('boy01a', ...: its own object, drawn before the body) and the worn Mii head are mirrored
+        // through the plane of the character they belong to; with a plane of their own the head's
+        // water lookup could fail while the body's found water (a reflection without its head).
+        const bool part = obj == 0 || ((name.compare(0, 3, "boy") == 0 || name.compare(0, 4, "girl") == 0) && name != "boy" && name != "girl");
+        const u8 kind = part ? AURORA_SURFACE_CHARACTER_PART : AURORA_SURFACE_CHARACTER;
+        if (sKind == AURORA_SURFACE_CHARACTER || sKind == AURORA_SURFACE_CHARACTER_PART) emitKind(AURORA_SURFACE_WORLD);
+        emitKind(kind);
     }
     return true;
 }

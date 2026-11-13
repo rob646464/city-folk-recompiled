@@ -690,9 +690,9 @@ mirrored through the water under them; screen-space reflection stays for the wor
   non-character surface on the way (the deck of the bridge a player stands on: the march's long
   steps skip it, and the player's shoe used to show through the bridge's reflection as a blue
   shard). Same weight as the march, except that 0391's shallow-water trace (15 % at the waterline)
-  becomes 60 % for a planar character: a character at the water's edge is reflected right over
-  the shallowest water, and its legs and body vanished while its head, further out, got up to
-  100 %.
+  became 60 % for a planar character (0570; one ramp for both since 0580, below): a character at
+  the water's edge is reflected right over the shallowest water, and its legs and body vanished
+  while its head, further out, got up to 100 %.
 - *Not done*: geometry below the water plane is not clipped (a character wading would show its
   submerged part mirrored; City Folk's characters do not wade); shadows and AO in the planar copy
   are looked up at the mirrored pixel (usually water: next to none).
@@ -734,6 +734,166 @@ plane" 0.11 ms, "World FX surfaces" 0.40 -> 0.45 ms. The two passes run whenever
 drawn in a frame with a surface mask (water or ground drawn); whether there is water near it is
 only known on the GPU, so a character far from any water costs the same (its rows clip
 everything). The plane pass is one serial loop per texel and could be trimmed.
+
+### The whole figure, and faint over the surf (branch reflection-head, Aurora 0580)
+
+Two user reports on 1.0.1 (4K, Enhanced lighting Ultra, reflection strength 1.5, autumn dusk,
+plain villager head):
+
+1. "The player's head disappears sometimes": the player on the cobbles at the top of a cliff above
+   a pond; in the water only the shoes, shorts and the bottom of the shirt, no head.
+2. "Don't really like how the reflections begin on the sand on the beach, I would like for it to
+   only show on the water" (refined: keep it on the sand-coloured surf, but faint, getting
+   stronger toward the blue water, with no visible line where it changes).
+
+**Report 1, reproduced** with a copy of the user's town at the pond by the player's house (a cliff
+top with the water below it in front of the player; `TP=1360/84/<z>` for z 546-570 = 2-26 units
+back from the edge, `CF_NO_MII_MASK=1`, 17:30). At 2-18 units back the old build showed the
+shoes, shorts and shirt hem and no head, as in the report; the planar target itself
+(`AURORA_WORLD_FX_SHOW=10`) held the body and no head, so the head was never drawn. Two causes,
+both physically wrong (seen from above, the mirrored cliff hides the mirrored feet first; the
+head, highest above the water, is the part that shows furthest out):
+
+- *Each group looked for its own water.* The player's body (`boy`) and his own head model
+  (`boy01a`, its own object, drawn before the body) were separate groups, each with its own plane
+  pass lookup: a 12 x 12 window from 0.4 r above to 1.6 r below the group's anchor on the screen
+  (r = 0.14 x the viewport height). Standing back from a cliff edge the water lies further down
+  the screen; the head's anchor is higher on the screen than the body's, so its window ended above
+  the water and found none ("no water near": rows that clip everything), while the body's window
+  just reached it. Now a **part** of a character (`AURORA_SURFACE_CHARACTER_PART`, a new kind: the
+  player's own head model and the worn Mii head; `cf_world.cpp` emits it for `boy*` / `girl*`
+  names other than exactly `boy` / `girl` and for the RFL head) uses the plane of the nearest
+  whole character (anchors within 64 units; parts are drawn before or after the body, the Mii head
+  in the translucent pass), so the figure is mirrored as a whole or not at all (a part with no
+  mirrored character near it keeps its own plane). The window also reaches 3.6 r below the anchor
+  (24 rows): from about 20 units back the body's window found no water either.
+- *The cliff did not hide the feet.* The short occluder march from the water pixel toward the
+  character's point (0570, for a bridge deck) only counted a surface within 4 % of the distance in
+  front of a sample (thin occluders). The path to the feet of a player on a cliff runs through the
+  cliff, often further behind the visible cliff top or face than that, and its last samples land
+  on the player himself (skipped), so the feet and shorts showed at the waterline. Now a sample
+  also counts as blocked when it lies behind a surface (up to 30 % of the distance) and below it
+  (inside the ground), with 12 samples instead of 8. The thin rule is unchanged, so the bridge
+  deck still hides the player standing on it.
+
+**The Mii mask's face** (user, after the fix above: "mii masks facial features are not
+reflecting"): the mirrored Mii head had skin, hair and nose but no eyes, brows, mouth or glasses.
+The worn Mii head draws its opaque half through the wrapper fn_802B3950 (scoped since 0570), but
+its translucent half (the mask texture with the facial features, the glasses) by calling
+`RFLDrawXluCore` straight from d_a_playerNP (fn_80_2BEDC), not through the wrapper fn_802B39B0,
+so those draws were never part of a character. `cf_tags.cpp` now also scopes `RFLDrawOpaCore` /
+`RFLDrawXluCore` themselves (SDK names, every version; inside a wrapper they only nest): the
+player has three groups (body, Mii opaque, Mii translucent, both parts on the body's plane) and the
+reflected face shows the chin and mouth nearest the waterline, as a mirror below shows it.
+
+Per-frame check, `AURORA_WORLD_FX_PLANAR_LOG=1`: the plane pass's result is read back (a ring of
+map buffers: copied in one frame's commands, mapped two frames later, the callback only sets a
+flag, logged at a later frame) and every scene end logs `[planar] frame N groups K: | g0 plane 0
+h <water height> anchor <height above it> above | g1 part of g0 plane 0 ...` (or `none`, `not
+drawn`). `AURORA_WORLD_FX_PART_PLANES=own` gives every part its own plane again (A/B). Over the
+cliff and bank routes (about 12 000 logged frames, walking along the edge and stepping back from
+it) the head and the body are mirrored or not together in every frame, with the same plane.
+
+**Report 2.** 0391 weighs the reflection by the water's depth along the view (mask depth = the
+surface, scene depth = the bed): full from 1.5 "metres", 15 % at the waterline; 0570 kept planar
+characters at 60 % there. At the beach the sea's translucent surf over the sand counts as shallow,
+so the character lay over the sand-coloured band at 60 % while the bank's own reflection beside
+it faded to 15 %. Now one ramp serves both, `mix(0.1, 1, max(deep, 0.6 * blue))`: `deep` is
+0391's depth ramp, `blue` a smoothstep of the blue share of the water pixel's scene colour,
+b / (r + g + b), from 0.44 to 0.56 (measured at noon, 17:30 and 22:00: surf over sand 0.34-0.45,
+the pond 0.59-0.73, the open sea 0.54-0.61; debug view `AURORA_WORLD_FX_SHOW=11`: blue share,
+depth ramp, weight). Both terms are smooth, so there is no line: faint over the surf, stronger
+toward the blue water, full over deep water. The blue term is there for ponds and river edges:
+a pond's bed lies right behind its surface (`deep` near 0 over the whole pond), so the depth ramp
+alone left a pond character at 10 % (nearly invisible), and at 100 % the sky washed the ponds
+out, so blue shallow water gets 60 % (0570's character value). A first try compared the scene
+colour with the surface mask's water colour instead (how opaque the water is): the mask's colour
+differs from the visible water everywhere (chromaticity too), so it could not tell a pond from
+the surf. The world's reflections take the same weight: over ponds and the shallow river edge
+they are stronger than before (15 % -> 60 %: the sky and the bank show more in a pond), over the
+surf a little fainter (15 % -> 10 %), over deep water unchanged.
+
+**The world reflection's outline** (user, on the stronger pond / river weight: "I actually like
+how the reflection is more visible now, if you can just make it look better"): at 60 % the
+mirrored bridge deck showed a ragged, stair-stepped edge and jagged pieces where the march gave
+up. Two march faults, both now fixed in `ssr()` (the weight is unchanged):
+
+- *Thin things seen edge-on fell between two steps.* A band of rays stepped over the side of the
+  deck (a sample in front of it, the next one already past it), and the band's edge followed the
+  step positions: the stair-stepped outline. The march now takes twice as many steps of half the
+  length (the same reach; growth 1.0296 per half step = 1.06 per old step). A per-pixel jitter of
+  the start (interleaved gradient noise) also closed the gaps, but left a fine dither over the
+  whole mirrored deck; it was dropped.
+- *Yes / no hits at outlines.* A crossing counted as a hit when the sample after it lay within the
+  thickness behind the surface. Every front-to-behind crossing is now refined (6 bisections) and
+  the refined point decides: on a surface it lies on it (a residual of a fraction of a step, plus
+  up to two depth-buffer pixels' depth step on surfaces seen at a grazing angle); a ray that
+  passed behind an object's outline ends up far behind it and marches on (to what lies behind, or
+  the sky). Near an outline the residual grows smoothly and the hit fades with it (`sure` in the
+  hit share), and over a planar character a hit in front fades to the character, not to the sky.
+
+- *Near misses at outlines.* A ray that misses everything but passed just in front of an
+  object's outline (within 1.5 x the thickness, where the depth jumps by more than the thickness
+  within two pixels) shows a little of it, fading with the gap (at most 60 %). The mirrored cliff
+  along a pond's waterline now ends in a soft band instead of ragged pieces. Without the outline
+  test the rays skimming the smooth ground beyond a pond smeared it over the whole pond; fading
+  hits that land on an outline was also tried and dropped (it let the sky through as a light
+  streak along the deck).
+
+The player standing on the bridge: the mirrored deck hides his mirrored body; his head shows
+below the deck's mirror, as before.
+
+**The Mii face at the cliff** came out as wavy, half-toned smears (eyes, glasses, mouth) while the
+beach's was clean. Not depth fighting: the planar target itself (`AURORA_WORLD_FX_SHOW=10`) held a
+clean face. The composite reads the planar picture through the water's bend (the water pattern's
+gradient and ripples), and that offset grows with the path below the surface: a player on a
+cliff is mirrored far below the water, so the bend moved the picture by up to tens of pixels,
+differently from pixel to pixel, which tore the thin lines apart. The planar picture's offset is
+now limited to 0.2 % of the viewport height (4 pixels at 2160); at the beach it was below that
+anyway.
+
+**The bridge, mirrored as a model** (user: "it looks like it kinda has that floating pieces problem
+like the face did before"). Same cause as the face: the screen-space march only has what the camera
+sees of the bridge (the deck top and its near side), so its mirror was a fragment with a ragged
+edge however the march was tuned. The bridge now goes through the planar pass like a character:
+
+- *Which draws*: the town's bridges are no objects of their own but a material inside the river
+  acres' terrain models (`grd_Rws_B_3`, `grd_M_Rs_B_1`, ...: `m_bridgeA`; every `m_bridge*`
+  material). `cf_world.cpp` gives their draws their usual kind with `AURORA_SURFACE_MIRROR` (0x80)
+  OR'ed on; a run of flagged draws is one group (one water plane for the whole bridge), and the
+  kind inside it is kept for the other effects.
+- *Anchor*: an acre's matrices place the acre's corner and bend its vertices along the curved
+  world (a matrix per vertex), so neither a matrix nor the model's bounding box through the
+  acre object's own matrices placed the bridge (both put it hundreds of units off). Aurora takes
+  the view-space centre of the group's first draw's vertices instead, each through its own
+  position matrix (`mirror_anchor_from`, the draw probe's vertex decoder), and the plane pass finds
+  the river under that point as for a character.
+- *Composite*: the bridge is in the character mask, so march hits on it are dropped and the planar
+  bridge takes their place; the player standing on it and the bridge are drawn mirrored into the
+  same target with depth, so the mirrored deck hides the mirrored player as the real one would.
+  Character parts never attach to a bridge's plane.
+- Views checked: on the bridge, the downstream bank looking at it, the upstream bank looking over
+  it, its north edge, and the survey route's two positions; `CF_WFX_MIRROR_BRIDGES=0` turns it off
+  (A/B). GPU (RTX 3090 Ti, 4K, standing on the river-mouth bridge, warm runs): busy 6.82 -> 7.11 ms per frame (+0.29 ms; "World FX planar characters" 0.54 -> 0.66, "World FX surfaces" 0.31 -> 0.38, "World FX plane" 0.14 -> 0.17); the planar target needs no more room: it only has to hold what lands on visible water, the screen-shaped image already does.
+- Not done: other big structures by the water. The cliffs and banks along a pond or the river are
+  terrain that reaches below the water line: mirrored without a clip plane, their underwater part
+  would come up above the water in the mirror (the planar draws use the scene's pipelines, which
+  have no clip distance), so they stay with the march and its near-miss fringe. The waterfalls
+  (`m_fall*`) are translucent animated water, not reflected. No pier or dock was found in the
+  town's materials.
+
+Other versions and cost (this branch's final state): PAL and Japanese dev builds (`toolsuild.ps1
+-Game RUUP01 / RUUJ01 -Disc ...`) with renamed copies of the user's town, Mii mask on: the player
+has the same three groups (body, Mii opaque and translucent halves on the body's plane), the
+reflected face is clean at the cliff pond and at the beach's trailer spot; Korea builds (not run:
+no Korean town copy). GPU at 4K on the beach (RTX 3090 Ti): "World FX surfaces" 0.44 -> 0.60 ms,
+"World FX plane" 0.11 -> 0.20 ms, about +0.3 ms per frame over 1.0.1 in all.
+
+Checked (3840x2160, the user's settings, scratch copy of the user's town): the cliff-top pond at
+four distances from the edge, plain head and Mii mask; the beach by `TP=1283/14/<z>` from back on
+the dry sand to the trailer's spot at the water's edge (1283,14,3016; the surf moves between
+runs, so the band under the reflection differs a little between before and after); the bank and
+the river-mouth bridge (survey route).
 
 ### Cost (RTX 3090 Ti, rain in the town with every option on incl. tilt-shift; other agents' game
 instances were running on the same GPU, so these are upper bounds)
@@ -778,7 +938,7 @@ wet ground, puddles, ripples, haze, leaves), snow (Jan 15 11:00: sparkle, snowfl
 (camera / projection / draws at the scene end), `AURORA_WORLD_FX_MTX_LOG=1` (a surface draw's
 matrix), `AURORA_WORLD_FX_SHOW=<n>` debug views: 1 surface mask, 2 depth / focus row, 3 mask alpha +
 wetness, 4 ground branch, 5 reflection hit share / weight, 6 focus distance / scale, 7 raw depth,
-8 why each water ray's march ends, 9 planar character here / march hit dropped as a character / march hit, 10 the planar character target as drawn (0570). `AURORA_WORLD_FX_PLANAR=0` turns the planar characters off (A/B), `CF_WFX_CHAR_LOG=1` (objects tested as characters), `CF_NO_MII_MASK=1` (USA: the worn Mii mask is not shown from the next scene load on; the plain villager head). `CF_WFX_SET` takes `;` or `,` between keys (`,` inside
+8 why each water ray's march ends, 9 planar character here / march hit dropped as a character / march hit, 10 the planar character target as drawn (0570), 11 blue share / depth ramp / reflection weight over water (0580). `AURORA_WORLD_FX_PLANAR=0` turns the planar characters off (A/B), `AURORA_WORLD_FX_PLANAR_LOG=1` (per frame: each character group mirrored or not and its plane height; 0580), `AURORA_WORLD_FX_PART_PLANES=own` (heads get their own plane again, A/B), `CF_WFX_CHAR_LOG=1` (objects tested as characters), `CF_NO_MII_MASK=1` (USA: the worn Mii mask is not shown from the next scene load on; the plain villager head). `CF_WFX_SET` takes `;` or `,` between keys (`,` inside
 run.ps1's -Env).
 Weather and season: `CF_WEATHER_FAKE=rain|heavyrain|snow|clear`, `CF_CLOCK_START` (docs/CALENDAR.md,
 tools/routes/run.ps1).

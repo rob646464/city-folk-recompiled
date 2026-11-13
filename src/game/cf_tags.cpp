@@ -258,5 +258,11 @@ static void rflDraw(Ctx& c, const char* name) {
 }
 HLE(fn_802B3950) { rflDraw(c, "fn_802B3950"); }
 HLE(fn_802B39B0) { rflDraw(c, "fn_802B39B0"); }
+// The player's own Mii head draws its translucent half (the mask: eyes, brows, mouth; the
+// glasses) by calling RFLDrawXluCore straight from d_a_playerNP (fn_80_2BEDC), not through the
+// wrapper above: without this scope the reflected Mii head had a blank face (branch
+// reflection-head). The SDK cores are named in every version; inside a wrapper they only nest.
+HLE(RFLDrawOpaCore) { rflDraw(c, "RFLDrawOpaCore"); }
+HLE(RFLDrawXluCore) { rflDraw(c, "RFLDrawXluCore"); }
 
 }  // namespace recomp
