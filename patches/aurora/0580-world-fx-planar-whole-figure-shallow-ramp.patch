@@ -23,7 +23,108 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
  };
  constexpr size_t MaxCharGroups = 16;
  constexpr size_t MaxMirrorDraws = 1024;
-@@ -490,9 +491,12 @@ fn tangent_bend(n: vec3f, gw: vec2f) -> vec3f {
+@@ -347,15 +348,21 @@ fn sky_color(rv: vec3f, clouds: bool) -> vec3f {
+ var<private> g_ssrT: f32 = 1e9;
+ var<private> g_ssrHit: vec3f = vec3f(0.0);
+ var<private> g_ssrHitPx: vec2f = vec2f(0.0);
++var<private> g_ssrCol: vec3f = vec3f(0.0); // (0580) the last hit's scene colour
+ // Screen-space reflection of view ray `r` from `p`: rgb, a = how much of it is a scene hit.
+ fn ssr(p: vec3f, r: vec3f, steps: i32, jitter: f32) -> vec4f {
+   let dist = max(-p.z, 1.0);
+   let maxLen = dist * 1.6;
+-  var stepLen = maxLen / f32(steps);
++  // (0580) twice as many, half as long steps as 0570 (the same reach): a thin thing seen edge-on
++  // (the side of the bridge deck) fell between two steps for a band of rays, whose edge was the
++  // stair-stepped outline of the mirrored deck
++  let n = steps * 2;
++  var stepLen = maxLen / f32(steps) * 0.5;
+   var t = stepLen * (0.3 + 0.7 * jitter);
+   var prevT = 0.0;
++  var prevDiff = -1.0;
+   g_ssrT = 1e9;
+-  for (var i = 0; i < steps; i++) {
++  for (var i = 0; i < n; i++) {
+     let q = p + r * t;
+     if (q.z > -1.0) { break; }
+     let s = project(q);
+@@ -363,11 +370,18 @@ fn ssr(p: vec3f, r: vec3f, steps: i32, jitter: f32) -> vec4f {
+     let sp = view_pos(s.xy, load_depth(s.xy));
+     let diff = sp.z - q.z;
+     let thick = max(stepLen * 1.5, 0.04 * dist);
+-    if (diff > 0.0 && diff < thick) {
+-      // refine between prevT and t
++    // (0580) The ray went behind the scene between the last step and this one. 0570 took that as
++    // a hit when this step lay within `thick` behind the surface, which made every outline a
++    // per-pixel yes / no that flipped with the step positions (the stair-stepped edge of the
++    // mirrored bridge deck, jagged fragments along a reflection's edges). Now every crossing is
++    // refined, and the refined point decides: on a surface it lies on it (a small residual); a
++    // ray passing behind an object's outline ends up far behind it, so it marches on (to what
++    // lies behind, or the sky). Near the outline the residual grows smoothly, and the hit fades
++    // with it: a clean, soft outline instead of steps.
++    if (diff > 0.0 && (prevDiff <= 0.0 || diff < thick)) {
+       var lo = prevT;
+       var hi = t;
+-      for (var k = 0; k < 5; k++) {
++      for (var k = 0; k < 6; k++) {
+         let mid = 0.5 * (lo + hi);
+         let qm = p + r * mid;
+         let sm = project(qm);
+@@ -376,31 +390,37 @@ fn ssr(p: vec3f, r: vec3f, steps: i32, jitter: f32) -> vec4f {
+       }
+       let qh = p + r * hi;
+       let sh = project(qh);
++      let hp = view_pos(sh.xy, load_depth(sh.xy));
++      let res = max(hp.z - qh.z, 0.0);
++      // (the depth buffer holds one depth per pixel: on a surface seen at a grazing angle the
++      // next pixel is far deeper, so the residual of a real hit is up to that step; without this
++      // slack those hits failed in pixel-sized stairs along the mirrored bridge's side)
++      let gx = abs(view_pos(sh.xy + vec2f(1.0, 0.0), load_depth(sh.xy + vec2f(1.0, 0.0))).z - hp.z);
++      let gy = abs(view_pos(sh.xy + vec2f(0.0, 1.0), load_depth(sh.xy + vec2f(0.0, 1.0))).z - hp.z);
++      let tol = thick + 2.0 * min(max(gx, gy), thick * 4.0);
+       // (0391) a reflection only shows what is above the reflecting plane. Under translucent
+       // water the scene depth is the bed (the sea floor, the terraces' sides below the water
+       // line), so rays from the surface "hit" those underwater faces: the striped terrace sides
+       // came back as long vertical bands. Hits below the ray's origin plane: march on.
+-      let hp = view_pos(sh.xy, load_depth(sh.xy));
+-      if (dot(hp - p, up_view()) < -0.01 * dist) {
+-        prevT = t;
+-        t += stepLen;
+-        stepLen *= 1.06;
+-        continue;
++      if (res < tol && dot(hp - p, up_view()) >= -0.01 * dist) {
++        g_ssrT = hi;
++        g_ssrHit = hp;
++        g_ssrHitPx = sh.xy;
++        let uv = sh.xy * u.size.zw;
++        let col = textureSampleLevel(tcolor, samp, uv, 0.0).rgb;
++        // fade near the picture edges, with distance along the ray, and by how sure the hit is
++        let e = min(min(sh.x - u.vp.x, u.vp.x + u.vp.z - sh.x), min(sh.y - u.vp.y, u.vp.y + u.vp.w - sh.y));
++        let edge = smoothstep(0.0, 0.08 * u.vp.w, e);
++        let along = 1.0 - smoothstep(0.6, 1.0, hi / maxLen);
++        let sure = 1.0 - smoothstep(0.2 * tol, tol, res);
++        g_ssrCol = col;
++        return vec4f(col, edge * along * sure);
+       }
+-      g_ssrT = hi;
+-      g_ssrHit = hp;
+-      g_ssrHitPx = sh.xy;
+-      let uv = sh.xy * u.size.zw;
+-      let col = textureSampleLevel(tcolor, samp, uv, 0.0).rgb;
+-      // fade near the picture edges and with distance along the ray
+-      let e = min(min(sh.x - u.vp.x, u.vp.x + u.vp.z - sh.x), min(sh.y - u.vp.y, u.vp.y + u.vp.w - sh.y));
+-      let edge = smoothstep(0.0, 0.08 * u.vp.w, e);
+-      let along = 1.0 - smoothstep(0.6, 1.0, hi / maxLen);
+-      return vec4f(col, edge * along);
+     }
++    prevDiff = diff;
+     prevT = t;
+     t += stepLen;
+-    stepLen *= 1.06;
++    stepLen *= 1.0296;
+   }
+   return vec4f(0.0);
+ }
+@@ -490,9 +510,12 @@ fn tangent_bend(n: vec3f, gw: vec2f) -> vec3f {
    let rad = 0.14 * u.vp.w;
    var hs = 0.0;
    var wsum = 0.0;
@@ -38,7 +139,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
        if (q.x < u.vp.x || q.y < u.vp.y || q.x >= u.vp.x + u.vp.z || q.y >= u.vp.y + u.vp.w) { continue; }
        if (textureLoad(tmask, vec2i(q), 0).a < 0.75) { continue; }
        let pw = view_pos(q, load_mdepth(q));
-@@ -583,7 +587,6 @@ fn refl_covered(d: f32) -> bool {
+@@ -583,7 +606,6 @@ fn refl_covered(d: f32) -> bool {
        if ((en & 1u) != 0u) {
          let rh = reflection(pw, n, steps, jitter, true);
          var refl = rh.rgb;
@@ -46,7 +147,14 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
          // (0570) planar reflection of the characters: where one is mirrored over this water pixel
          // it replaces the screen-space march (which can only put the camera's view of a character
          // back upside down, in pieces), unless the march hit the world in front of it. The water's
-@@ -614,14 +617,20 @@ fn refl_covered(d: f32) -> bool {
+@@ -608,29 +630,42 @@ fn refl_covered(d: f32) -> bool {
+             let sp = project(mp + dl - 2.0 * dot(dl, up) * up).xy;
+             let tq = vec2f(sp.x, fy - sp.y);
+             var world = ssrWorld && g_ssrT < pathLen * 0.9;
++            let ssrFront = world;
+             if (!world) {
+               // The march may step over a thin thing between the water and the character (the deck
+               // of a bridge the player stands on): a short march toward the character's own point
                // finds it and shows that instead of the character (it would hide it in a mirror).
                let pc = mp - 2.0 * dot(mp - pw, up) * up;
                let dist = max(-pw.z, 1.0);
@@ -70,15 +178,25 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
                    refl = textureSampleLevel(tcolor, samp, sk * u.size.zw, 0.0).rgb;
                    world = true;
                    break;
-@@ -630,7 +639,6 @@ fn refl_covered(d: f32) -> bool {
+                 }
+               }
              }
-             if (!world && refl_covered(refl_depth(tq))) {
-               refl = textureSampleLevel(twork, samp, tq / vec2f(textureDimensions(twork)), 0.0).rgb;
+-            if (!world && refl_covered(refl_depth(tq))) {
+-              refl = textureSampleLevel(twork, samp, tq / vec2f(textureDimensions(twork)), 0.0).rgb;
 -              planar = 1.0;
++            if (refl_covered(refl_depth(tq))) {
++              let pcol = textureSampleLevel(twork, samp, tq / vec2f(textureDimensions(twork)), 0.0).rgb;
++              if (!world) {
++                refl = pcol;
++              } else if (ssrFront) {
++                // (0580) a march hit in front fades by how sure it is (its outline): over the
++                // character, not over the sky
++                refl = mix(pcol, g_ssrCol, rh.a);
++              }
              }
            }
            if (u.pp.y > 8.5 && u.pp.y < 9.5) { // debug view 9: planar here, march hit dropped as a character, march hit
-@@ -645,11 +653,21 @@ fn refl_covered(d: f32) -> bool {
+@@ -645,11 +680,21 @@ fn refl_covered(d: f32) -> bool {
          // depth = surface, scene depth = bed): full from 1.5 "metres", a trace at the waterline.
          let bedDepth = max(pw.z - p.z, 0.0);
          let deep = smoothstep(0.0, 1.5 * ws, bedDepth);
@@ -105,7 +223,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
          if (u.pp.y > 4.5) { // debug view 5: scene hit share of the reflection, its weight, normal tilt
            if (u.pp.y > 7.5) { // 8: why the march ends (r: 0.25 behind camera, 0.5 off screen, 0.75 no hit, 1 hit; g: step; b: closest miss)
              return ssr_why(pw + n * (0.002 * max(-pw.z, 1.0)), reflect(-v, n), steps);
-@@ -1092,6 +1110,12 @@ struct SceneJob {
+@@ -1092,6 +1137,12 @@ struct SceneJob {
    std::vector<SurfaceDraw> draws;
    std::vector<MirrorDraw> mirror; // 0570
    Range planeU{};
@@ -118,7 +236,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
    RenderTargetLayout layout{};
    Range base{}, tiltH{}, finalU{};
    bool mask = false, surfaces = false, tilt = false;
-@@ -1112,7 +1136,99 @@ void run_full(const wgpu::CommandEncoder& cmd, const char* label, const wgpu::Te
+@@ -1112,7 +1163,99 @@ void run_full(const wgpu::CommandEncoder& cmd, const char* label, const wgpu::Te
    g_statPasses.fetch_add(1, std::memory_order_relaxed);
  }
  
@@ -218,7 +336,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
    if (!init_gpu() || !t.colorSource) {
      return;
    }
-@@ -1210,6 +1326,9 @@ void encode(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, const Sc
+@@ -1210,6 +1353,9 @@ void encode(const wgpu::CommandEncoder& cmd, const ScenePassTargets& t, const Sc
        for (const auto& m : job.mirror) {
          cmd.CopyBufferToBuffer(g_gpu.planeBuf, uint64_t(m.group) * 64, detail::resources().uniformBuffer, m.data.uniformRange.offset + 32, 64);
        }
@@ -228,7 +346,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
      }
      const auto ra = wgpu::TextureUsage::RenderAttachment;
      const auto rs = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
-@@ -1385,7 +1504,7 @@ void note_draw(const gx::PipelineConfig& config, uint8_t kind, const gx::DrawDat
+@@ -1385,7 +1531,7 @@ void note_draw(const gx::PipelineConfig& config, uint8_t kind, const gx::DrawDat
    if (st.projType != GX_PERSPECTIVE) {
      return;
    }
@@ -237,7 +355,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
      if (!g_chars.empty() && !g_chars.back().anchored && g_chars.back().end == UINT32_MAX) {
        // the draw's current position matrix, else (skinned shapes index theirs per vertex) the first
        // loaded one that places something in front of the camera
-@@ -1467,7 +1586,7 @@ void note_draw(const gx::PipelineConfig& config, uint8_t kind, const gx::DrawDat
+@@ -1467,7 +1613,7 @@ void note_draw(const gx::PipelineConfig& config, uint8_t kind, const gx::DrawDat
  }
  
  // 0570: GX_AURORA_SET_SURFACE into / out of AURORA_SURFACE_CHARACTER.
@@ -246,7 +364,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
    sync();
    if (!g_cfg.enabled || !g_cfg.reflections || !planar_on()) {
      return;
-@@ -1475,7 +1594,7 @@ void character_scope(bool begin) noexcept {
+@@ -1475,7 +1621,7 @@ void character_scope(bool begin) noexcept {
    const auto [pass, command] = next_command_position();
    if (begin) {
      if (g_chars.size() < MaxCharGroups) {
@@ -255,7 +373,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
      }
    } else if (!g_chars.empty() && g_chars.back().end == UINT32_MAX) {
      if (pass == g_chars.back().pass) {
-@@ -1612,10 +1731,54 @@ void scene_end() noexcept {
+@@ -1612,10 +1758,54 @@ void scene_end() noexcept {
      PlaneUniform pu{};
      uint32_t groups = 0;
      const auto [curPass, curCommand] = next_command_position();
@@ -276,8 +394,8 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
 +    for (size_t gi = 0; gi < g_chars.size(); ++gi) {
 +      const auto& g = g_chars[gi];
 +      if (!g.part || !g.anchored || sOwnPlanes) {
-         continue;
-       }
++        continue;
++      }
 +      float best = 64.f * 64.f;
 +      for (size_t ci = 0; ci < g_chars.size(); ++ci) {
 +        const auto& o = g_chars[ci];
@@ -306,13 +424,13 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
 +      // (a part whose character drew nothing mirrored gets its own plane)
 +      const int shared = parentOf[gi] >= 0 ? planeOf[size_t(parentOf[gi])] : -1;
 +      if ((!g.anchored && shared < 0) || (shared < 0 && groups >= MaxCharGroups)) {
-+        continue;
-+      }
+         continue;
+       }
 +      const uint32_t plane = shared >= 0 ? uint32_t(shared) : groups;
        const uint32_t end = g.end != UINT32_MAX ? g.end : (g.pass == curPass ? curCommand : g.begin);
        bool any = false;
        for (uint32_t i = g.begin; i < end && job.mirror.size() < MaxMirrorDraws; ++i) {
-@@ -1629,14 +1792,15 @@ void scene_end() noexcept {
+@@ -1629,14 +1819,15 @@ void scene_end() noexcept {
          if (src == nullptr) {
            continue;
          }
@@ -330,7 +448,7 @@ diff --git a/lib/gfx/world_fx.cpp b/lib/gfx/world_fx.cpp
        pu.anchors[groups][0] = g.anchor[0], pu.anchors[groups][1] = g.anchor[1], pu.anchors[groups][2] = g.anchor[2];
        pu.anchors[groups][3] = 1.f;
        std::memcpy(pu.rows[groups], g.proj, sizeof(g.proj));
-@@ -1645,6 +1809,18 @@ void scene_end() noexcept {
+@@ -1645,6 +1836,18 @@ void scene_end() noexcept {
      if (!job.mirror.empty()) {
        pu.info[0] = float(groups);
        job.planeU = push_uniform(reinterpret_cast<const uint8_t*>(&pu), sizeof(pu));

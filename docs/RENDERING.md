@@ -813,6 +813,28 @@ the surf. The world's reflections take the same weight: over ponds and the shall
 they are stronger than before (15 % -> 60 %: the sky and the bank show more in a pond), over the
 surf a little fainter (15 % -> 10 %), over deep water unchanged.
 
+**The world reflection's outline** (user, on the stronger pond / river weight: "I actually like
+how the reflection is more visible now, if you can just make it look better"): at 60 % the
+mirrored bridge deck showed a ragged, stair-stepped edge and jagged pieces where the march gave
+up. Two march faults, both now fixed in `ssr()` (the weight is unchanged):
+
+- *Thin things seen edge-on fell between two steps.* A band of rays stepped over the side of the
+  deck (a sample in front of it, the next one already past it), and the band's edge followed the
+  step positions: the stair-stepped outline. The march now takes twice as many steps of half the
+  length (the same reach; growth 1.0296 per half step = 1.06 per old step). A per-pixel jitter of
+  the start (interleaved gradient noise) also closed the gaps, but left a fine dither over the
+  whole mirrored deck; it was dropped.
+- *Yes / no hits at outlines.* A crossing counted as a hit when the sample after it lay within the
+  thickness behind the surface. Every front-to-behind crossing is now refined (6 bisections) and
+  the refined point decides: on a surface it lies on it (a residual of a fraction of a step, plus
+  up to two depth-buffer pixels' depth step on surfaces seen at a grazing angle); a ray that
+  passed behind an object's outline ends up far behind it and marches on (to what lies behind, or
+  the sky). Near an outline the residual grows smoothly and the hit fades with it (`sure` in the
+  hit share), and over a planar character a hit in front fades to the character, not to the sky.
+
+The player standing on the bridge: the mirrored deck hides his mirrored body; his head shows
+below the deck's mirror, as before.
+
 Checked (3840x2160, the user's settings, scratch copy of the user's town): the cliff-top pond at
 four distances from the edge, plain head and Mii mask; the beach by `TP=1283/14/<z>` from back on
 the dry sand to the trailer's spot at the water's edge (1283,14,3016; the surf moves between
