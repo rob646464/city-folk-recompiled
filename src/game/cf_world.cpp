@@ -864,7 +864,7 @@ bool world::characterBegin(u32 obj) {
     if (obj && !isCharacterModel(name)) return false;
     if (sCharDepth++ == 0) {
         // A part of a character (branch reflection-head, Aurora 0580): the player's own head model
-        // ('boy01a', ...: its own object, drawn after the body) and the worn Mii head are mirrored
+        // ('boy01a', ...: its own object, drawn before the body) and the worn Mii head are mirrored
         // through the plane of the character they belong to; with a plane of their own the head's
         // water lookup could fail while the body's found water (a reflection without its head).
         const bool part = obj == 0 || ((name.compare(0, 3, "boy") == 0 || name.compare(0, 4, "girl") == 0) && name != "boy" && name != "girl");
