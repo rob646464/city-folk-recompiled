@@ -832,8 +832,25 @@ up. Two march faults, both now fixed in `ssr()` (the weight is unchanged):
   the sky). Near an outline the residual grows smoothly and the hit fades with it (`sure` in the
   hit share), and over a planar character a hit in front fades to the character, not to the sky.
 
+- *Near misses at outlines.* A ray that misses everything but passed just in front of an
+  object's outline (within 1.5 x the thickness, where the depth jumps by more than the thickness
+  within two pixels) shows a little of it, fading with the gap (at most 60 %). The mirrored cliff
+  along a pond's waterline now ends in a soft band instead of ragged pieces. Without the outline
+  test the rays skimming the smooth ground beyond a pond smeared it over the whole pond; fading
+  hits that land on an outline was also tried and dropped (it let the sky through as a light
+  streak along the deck).
+
 The player standing on the bridge: the mirrored deck hides his mirrored body; his head shows
 below the deck's mirror, as before.
+
+**The Mii face at the cliff** came out as wavy, half-toned smears (eyes, glasses, mouth) while the
+beach's was clean. Not depth fighting: the planar target itself (`AURORA_WORLD_FX_SHOW=10`) held a
+clean face. The composite reads the planar picture through the water's bend (the water pattern's
+gradient and ripples), and that offset grows with the path below the surface: a player on a
+cliff is mirrored far below the water, so the bend moved the picture by up to tens of pixels,
+differently from pixel to pixel, which tore the thin lines apart. The planar picture's offset is
+now limited to 0.2 % of the viewport height (4 pixels at 2160); at the beach it was below that
+anyway.
 
 Checked (3840x2160, the user's settings, scratch copy of the user's town): the cliff-top pond at
 four distances from the edge, plain head and Mii mask; the beach by `TP=1283/14/<z>` from back on
