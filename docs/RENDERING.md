@@ -776,6 +776,16 @@ head, highest above the water, is the part that shows furthest out):
   (inside the ground), with 12 samples instead of 8. The thin rule is unchanged, so the bridge
   deck still hides the player standing on it.
 
+**The Mii mask's face** (user, after the fix above: "mii masks facial features are not
+reflecting"): the mirrored Mii head had skin, hair and nose but no eyes, brows, mouth or glasses.
+The worn Mii head draws its opaque half through the wrapper fn_802B3950 (scoped since 0570), but
+its translucent half (the mask texture with the facial features, the glasses) by calling
+`RFLDrawXluCore` straight from d_a_playerNP (fn_80_2BEDC), not through the wrapper fn_802B39B0,
+so those draws were never part of a character. `cf_tags.cpp` now also scopes `RFLDrawOpaCore` /
+`RFLDrawXluCore` themselves (SDK names, every version; inside a wrapper they only nest): the
+player has three groups (body, Mii opaque, Mii translucent, both parts on the body's plane) and the
+reflected face shows the chin and mouth nearest the waterline, as a mirror below shows it.
+
 Per-frame check, `AURORA_WORLD_FX_PLANAR_LOG=1`: the plane pass's result is read back (a ring of
 map buffers: copied in one frame's commands, mapped two frames later, the callback only sets a
 flag, logged at a later frame) and every scene end logs `[planar] frame N groups K: | g0 plane 0
